@@ -6,7 +6,7 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Embedding, RMSNorm, RoPE
+from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
@@ -20,7 +20,6 @@ __all__ = [
     "gptoss_configs",
 ]
 
-
 gptoss_configs = {
     "debugmodel": GptOssModel.Config(
         vocab_size=2048,
@@ -28,6 +27,7 @@ gptoss_configs = {
         n_layers=4,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=GptOssTransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -44,7 +44,12 @@ gptoss_configs = {
                 use_grouped_mm=True,
                 load_balance_coeff=1e-3,
             ),
-            attention=Attention.Config(),
+            attention=Attention.Config(
+                wq=Linear.Config(bias=True),
+                wk=Linear.Config(bias=True),
+                wv=Linear.Config(bias=True),
+                wo=Linear.Config(bias=True),
+            ),
         ),
         rope=RoPE.Config(
             dim=64,
@@ -62,6 +67,7 @@ gptoss_configs = {
         n_layers=24,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=GptOssTransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -78,7 +84,12 @@ gptoss_configs = {
                 use_grouped_mm=True,
                 load_balance_coeff=1e-3,
             ),
-            attention=Attention.Config(),
+            attention=Attention.Config(
+                wq=Linear.Config(bias=True),
+                wk=Linear.Config(bias=True),
+                wv=Linear.Config(bias=True),
+                wo=Linear.Config(bias=True),
+            ),
         ),
         rope=RoPE.Config(
             dim=64,
@@ -96,6 +107,7 @@ gptoss_configs = {
         n_layers=36,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=GptOssTransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -112,7 +124,12 @@ gptoss_configs = {
                 use_grouped_mm=True,
                 load_balance_coeff=1e-3,
             ),
-            attention=Attention.Config(),
+            attention=Attention.Config(
+                wq=Linear.Config(bias=True),
+                wk=Linear.Config(bias=True),
+                wv=Linear.Config(bias=True),
+                wo=Linear.Config(bias=True),
+            ),
         ),
         rope=RoPE.Config(
             dim=64,

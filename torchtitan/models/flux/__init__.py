@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_mse_loss
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
@@ -42,6 +43,8 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
+        img_in=Linear.Config(bias=True),
+        txt_in=Linear.Config(bias=True),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -54,23 +57,41 @@ flux_configs = {
             shift_factor=0.1159,
         ),
         pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
-        time_in_config=MLPEmbedder.Config(in_dim=256, hidden_dim=3072),
-        vector_in_config=MLPEmbedder.Config(in_dim=768, hidden_dim=3072),
+        time_in_config=MLPEmbedder.Config(
+            in_dim=256,
+            hidden_dim=3072,
+            in_layer=Linear.Config(bias=True),
+            out_layer=Linear.Config(bias=True),
+        ),
+        vector_in_config=MLPEmbedder.Config(
+            in_dim=768,
+            hidden_dim=3072,
+            in_layer=Linear.Config(bias=True),
+            out_layer=Linear.Config(bias=True),
+        ),
         double_block_config=DoubleStreamBlock.Config(
             hidden_size=3072,
             num_heads=24,
             mlp_ratio=4.0,
             qkv_bias=True,
+            img_mlp_in=Linear.Config(bias=True),
+            img_mlp_out=Linear.Config(bias=True),
+            txt_mlp_in=Linear.Config(bias=True),
+            txt_mlp_out=Linear.Config(bias=True),
         ),
         single_block_config=SingleStreamBlock.Config(
             hidden_size=3072,
             num_heads=24,
             mlp_ratio=4.0,
+            linear1=Linear.Config(bias=True),
+            linear2=Linear.Config(bias=True),
         ),
         final_layer_config=LastLayer.Config(
             hidden_size=3072,
             patch_size=1,
             out_channels=64,
+            linear=Linear.Config(bias=True),
+            adaln_linear=Linear.Config(bias=True),
         ),
     ),
     "flux-schnell": FluxModel.Config(
@@ -86,6 +107,8 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
+        img_in=Linear.Config(bias=True),
+        txt_in=Linear.Config(bias=True),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -98,23 +121,41 @@ flux_configs = {
             shift_factor=0.1159,
         ),
         pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
-        time_in_config=MLPEmbedder.Config(in_dim=256, hidden_dim=3072),
-        vector_in_config=MLPEmbedder.Config(in_dim=768, hidden_dim=3072),
+        time_in_config=MLPEmbedder.Config(
+            in_dim=256,
+            hidden_dim=3072,
+            in_layer=Linear.Config(bias=True),
+            out_layer=Linear.Config(bias=True),
+        ),
+        vector_in_config=MLPEmbedder.Config(
+            in_dim=768,
+            hidden_dim=3072,
+            in_layer=Linear.Config(bias=True),
+            out_layer=Linear.Config(bias=True),
+        ),
         double_block_config=DoubleStreamBlock.Config(
             hidden_size=3072,
             num_heads=24,
             mlp_ratio=4.0,
             qkv_bias=True,
+            img_mlp_in=Linear.Config(bias=True),
+            img_mlp_out=Linear.Config(bias=True),
+            txt_mlp_in=Linear.Config(bias=True),
+            txt_mlp_out=Linear.Config(bias=True),
         ),
         single_block_config=SingleStreamBlock.Config(
             hidden_size=3072,
             num_heads=24,
             mlp_ratio=4.0,
+            linear1=Linear.Config(bias=True),
+            linear2=Linear.Config(bias=True),
         ),
         final_layer_config=LastLayer.Config(
             hidden_size=3072,
             patch_size=1,
             out_channels=64,
+            linear=Linear.Config(bias=True),
+            adaln_linear=Linear.Config(bias=True),
         ),
     ),
     "flux-debug": FluxModel.Config(
@@ -130,6 +171,8 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
+        img_in=Linear.Config(bias=True),
+        txt_in=Linear.Config(bias=True),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -142,23 +185,41 @@ flux_configs = {
             shift_factor=0.1159,
         ),
         pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
-        time_in_config=MLPEmbedder.Config(in_dim=256, hidden_dim=1536),
-        vector_in_config=MLPEmbedder.Config(in_dim=768, hidden_dim=1536),
+        time_in_config=MLPEmbedder.Config(
+            in_dim=256,
+            hidden_dim=1536,
+            in_layer=Linear.Config(bias=True),
+            out_layer=Linear.Config(bias=True),
+        ),
+        vector_in_config=MLPEmbedder.Config(
+            in_dim=768,
+            hidden_dim=1536,
+            in_layer=Linear.Config(bias=True),
+            out_layer=Linear.Config(bias=True),
+        ),
         double_block_config=DoubleStreamBlock.Config(
             hidden_size=1536,
             num_heads=12,
             mlp_ratio=4.0,
             qkv_bias=True,
+            img_mlp_in=Linear.Config(bias=True),
+            img_mlp_out=Linear.Config(bias=True),
+            txt_mlp_in=Linear.Config(bias=True),
+            txt_mlp_out=Linear.Config(bias=True),
         ),
         single_block_config=SingleStreamBlock.Config(
             hidden_size=1536,
             num_heads=12,
             mlp_ratio=4.0,
+            linear1=Linear.Config(bias=True),
+            linear2=Linear.Config(bias=True),
         ),
         final_layer_config=LastLayer.Config(
             hidden_size=1536,
             patch_size=1,
             out_channels=64,
+            linear=Linear.Config(bias=True),
+            adaln_linear=Linear.Config(bias=True),
         ),
     ),
 }

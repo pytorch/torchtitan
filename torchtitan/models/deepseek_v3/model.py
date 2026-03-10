@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
@@ -37,6 +38,12 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        wq: Linear.Config | None
+        wq_a: Linear.Config | None
+        wq_b: Linear.Config | None
+        wkv_a: Linear.Config
+        wkv_b: Linear.Config
+        wo: Linear.Config
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
         q_norm: RMSNorm.Config
@@ -63,23 +70,34 @@ class Attention(BaseAttention):
         self.v_head_dim = config.v_head_dim
 
         if self.q_lora_rank == 0:
-            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
-        else:
-            self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
-            self.q_norm = config.q_norm.build(normalized_shape=self.q_lora_rank)
-            self.wq_b = nn.Linear(
-                self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
+            assert config.wq is not None, "wq is required when q_lora_rank == 0"
+            self.wq = config.wq.build(
+                in_features=self.dim, out_features=self.n_heads * self.qk_head_dim
             )
-        self.wkv_a = nn.Linear(
-            self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+        else:
+            assert (
+                config.wq_a is not None and config.wq_b is not None
+            ), "wq_a and wq_b are required when q_lora_rank > 0"
+            self.wq_a = config.wq_a.build(
+                in_features=self.dim, out_features=self.q_lora_rank
+            )
+            self.q_norm = config.q_norm.build(normalized_shape=self.q_lora_rank)
+            self.wq_b = config.wq_b.build(
+                in_features=self.q_lora_rank,
+                out_features=self.n_heads * self.qk_head_dim,
+            )
+        self.wkv_a = config.wkv_a.build(
+            in_features=self.dim,
+            out_features=self.kv_lora_rank + self.qk_rope_head_dim,
         )
         self.kv_norm = config.kv_norm.build(normalized_shape=self.kv_lora_rank)
-        self.wkv_b = nn.Linear(
-            self.kv_lora_rank,
-            self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
+        self.wkv_b = config.wkv_b.build(
+            in_features=self.kv_lora_rank,
+            out_features=self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
         )
-        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
+        self.wo = config.wo.build(
+            in_features=self.n_heads * self.v_head_dim, out_features=self.dim
+        )
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if config.rope_max_seq_len > config.rope_original_seq_len:
@@ -162,8 +180,8 @@ class Attention(BaseAttention):
             linear_list.append(self.wq)
 
         for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            linear.init_weights()
+        self.wo.init_weights(init_std=init_std)
 
         self.kv_norm.init_weights()
         if self.q_lora_rank > 0:

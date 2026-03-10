@@ -11,6 +11,7 @@ from torchtitan.models.common import (
     Embedding,
     FeedForward,
     GQAttention,
+    Linear,
     RMSNorm,
     RoPE,
 )
@@ -34,14 +35,24 @@ llama3_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
-                n_heads=16, attn_backend="sdpa", rope_backend="complex"
+                n_heads=16,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
+                attn_backend="sdpa",
+                rope_backend="complex",
             ),
         ),
         rope=RoPE.Config(
@@ -59,14 +70,22 @@ llama3_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
@@ -86,14 +105,22 @@ llama3_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
                 attn_backend="varlen",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
@@ -112,16 +139,27 @@ llama3_configs = {
         n_layers=32,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     4096, multiple_of=1024, ffn_dim_multiplier=1.3
-                )
+                ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
-                n_heads=32, n_kv_heads=8, attn_backend="sdpa", rope_backend="complex"
+                n_heads=32,
+                n_kv_heads=8,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
+                attn_backend="sdpa",
+                rope_backend="complex",
             ),
         ),
         rope=RoPE.Config(
@@ -137,17 +175,25 @@ llama3_configs = {
         n_layers=32,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     4096, multiple_of=1024, ffn_dim_multiplier=1.3
-                )
+                ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
@@ -166,17 +212,25 @@ llama3_configs = {
         n_layers=32,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     4096, multiple_of=1024, ffn_dim_multiplier=1.3
-                )
+                ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
                 attn_backend="varlen",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
@@ -195,16 +249,27 @@ llama3_configs = {
         n_layers=80,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     8192, multiple_of=4096, ffn_dim_multiplier=1.3
-                )
+                ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
-                n_heads=64, n_kv_heads=8, attn_backend="sdpa", rope_backend="complex"
+                n_heads=64,
+                n_kv_heads=8,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
+                attn_backend="sdpa",
+                rope_backend="complex",
             ),
         ),
         rope=RoPE.Config(
@@ -220,16 +285,27 @@ llama3_configs = {
         n_layers=126,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     16384, multiple_of=4096, ffn_dim_multiplier=1.2
-                )
+                ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
-                n_heads=128, n_kv_heads=8, attn_backend="sdpa", rope_backend="complex"
+                n_heads=128,
+                n_kv_heads=8,
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
+                attn_backend="sdpa",
+                rope_backend="complex",
             ),
         ),
         rope=RoPE.Config(

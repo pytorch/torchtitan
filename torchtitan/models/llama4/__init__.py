@@ -12,6 +12,7 @@ from torchtitan.models.common import (
     Embedding,
     FeedForward,
     GQAttention,
+    Linear,
     RMSNorm,
     RoPE,
 )
@@ -35,19 +36,27 @@ llama4_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             fixed_attn_block_size=256,
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
             ),
             moe=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
         ),
@@ -66,6 +75,7 @@ llama4_configs = {
         n_layers=48,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
@@ -85,6 +95,9 @@ llama4_configs = {
                 hidden_dim=compute_ffn_hidden_dim(
                     5120, multiple_of=2048, ffn_dim_multiplier=1.2
                 ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
@@ -92,6 +105,10 @@ llama4_configs = {
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -109,6 +126,7 @@ llama4_configs = {
         n_layers=48,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             attention_norm=RMSNorm.Config(),
@@ -127,6 +145,9 @@ llama4_configs = {
                 hidden_dim=compute_ffn_hidden_dim(
                     5120, multiple_of=2048, ffn_dim_multiplier=1.2
                 ),
+                w1=Linear.Config(),
+                w2=Linear.Config(),
+                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
@@ -134,6 +155,10 @@ llama4_configs = {
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
+                wq=Linear.Config(),
+                wk=Linear.Config(),
+                wv=Linear.Config(),
+                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
