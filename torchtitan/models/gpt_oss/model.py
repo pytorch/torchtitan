@@ -263,6 +263,14 @@ class GptOssModel(Decoder):
             )
 
     def __init__(self, config: Config):
+        # Theoretically, we can put the dtype assignment in the real config.
+        # However, this is risky in the sense that we may not set_device
+        # before importing configurations or someone may `set_default_dtype()`
+        # in the trainer.__init__().
+        config = dataclasses.replace(
+            config,
+            output=dataclasses.replace(config.output, dtype=torch.get_default_dtype()),
+        )
         super().__init__(config)
 
     def get_attention_masks(
