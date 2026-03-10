@@ -169,30 +169,6 @@ class Qwen3VLModel(Qwen3Model):
             range(len(config.encoder.deepstack_visual_indicies))
         )
 
-    @staticmethod
-    def _apply_interleaved_mrope(
-        freqs: torch.Tensor,
-        mrope_section: list[int],
-    ) -> torch.Tensor:
-        """Interleave T/H/W frequency dimensions for MRoPE.
-
-        Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-        interleaved [THWTHWTHW...TT], preserving frequency continuity.
-
-        Args:
-            freqs: (3, batch, seq_len, head_dim) — per-dimension frequencies.
-            mrope_section: [temporal, height, width] section sizes.
-
-        Returns:
-            (batch, seq_len, head_dim) with T/H/W interleaved.
-        """
-        freqs_t = freqs[0].clone()
-        for dim, offset in enumerate((1, 2), start=1):  # H, W
-            length = mrope_section[dim] * 3
-            idx = slice(offset, length, 3)
-            freqs_t[..., idx] = freqs[dim, ..., idx]
-        return freqs_t
-
     def _get_mrope_position_ids(
         self,
         input_ids: torch.Tensor,
@@ -237,6 +213,8 @@ class Qwen3VLModel(Qwen3Model):
         )
 
         image_index, video_index = 0, 0
+        # Find position ids for each sample in the batch
+        # Process each sample in the format of [text][vision][text][vision]...
         for i in range(batch_size):
             tokens = input_ids[i]
             vision_start_indices = torch.argwhere(
@@ -247,20 +225,21 @@ class Qwen3VLModel(Qwen3Model):
             video_nums = (vision_tokens == video_token_id).sum().item()
             input_tokens = tokens.tolist()
             llm_pos_ids_list: list = []
-            st = 0
+            # Iterate segment by segment
+            # seg_start: token index in the sequence (absolute position in input_tokens)
+            seg_start = 0
             remain_images, remain_videos = image_nums, video_nums
-
             for _ in range(image_nums + video_nums):
                 if image_token_id in input_tokens and remain_images > 0:
-                    ed_image = input_tokens.index(image_token_id, st)
+                    next_image_pos = input_tokens.index(image_token_id, seg_start)
                 else:
-                    ed_image = len(input_tokens) + 1
+                    next_image_pos = len(input_tokens) + 1
                 if video_token_id in input_tokens and remain_videos > 0:
-                    ed_video = input_tokens.index(video_token_id, st)
+                    next_video_pos = input_tokens.index(video_token_id, seg_start)
                 else:
-                    ed_video = len(input_tokens) + 1
+                    next_video_pos = len(input_tokens) + 1
 
-                if ed_image < ed_video:
+                if next_image_pos < next_video_pos:
                     t, h, w = (
                         grid_thw[image_index][0],
                         grid_thw[image_index][1],
@@ -268,7 +247,7 @@ class Qwen3VLModel(Qwen3Model):
                     )
                     image_index += 1
                     remain_images -= 1
-                    ed = ed_image
+                    next_vision_pos = next_image_pos
                 else:
                     t, h, w = (
                         grid_thw_videos[video_index][0],
@@ -277,22 +256,26 @@ class Qwen3VLModel(Qwen3Model):
                     )
                     video_index += 1
                     remain_videos -= 1
-                    ed = ed_video
+                    next_vision_pos = next_video_pos
 
                 llm_grid_t, llm_grid_h, llm_grid_w = (
                     t.item(),
                     h.item() // spatial_merge_size,
                     w.item() // spatial_merge_size,
                 )
-                text_len = ed - st
+                text_len = next_vision_pos - seg_start
 
-                st_idx = (
+                # Each segment's position IDs start at max(previous segment) + 1
+                # pos_id_offset: position ID for MRoPE (may differ from seg_start due
+                #   to compact spatial position IDs for vision tokens)
+                pos_id_offset = (
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
+                # Add position IDs for [text]
                 llm_pos_ids_list.append(
-                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
                 )
-
+                # Add position IDs for [vision]
                 t_index = (
                     torch.arange(llm_grid_t)
                     .view(-1, 1)
@@ -312,17 +295,18 @@ class Qwen3VLModel(Qwen3Model):
                     .flatten()
                 )
                 llm_pos_ids_list.append(
-                    torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+                    torch.stack([t_index, h_index, w_index]) + text_len + pos_id_offset
                 )
-                st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+                seg_start = next_vision_pos + llm_grid_t * llm_grid_h * llm_grid_w
 
-            if st < len(input_tokens):
-                st_idx = (
+            # After [text][vision] repetitions, if there remains a [text] segment
+            if seg_start < len(input_tokens):
+                pos_id_offset = (
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
-                text_len = len(input_tokens) - st
+                text_len = len(input_tokens) - seg_start
                 llm_pos_ids_list.append(
-                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
                 )
 
             llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
@@ -330,16 +314,22 @@ class Qwen3VLModel(Qwen3Model):
 
         return position_ids
 
+    @staticmethod
     def _compute_mrope_freqs(
-        self,
         position_ids_3d: torch.Tensor,
         freqs_cis: torch.Tensor,
+        mrope_section: list[int],
     ) -> torch.Tensor:
         """Compute interleaved MRoPE cos/sin from 3D position IDs.
+
+        Looks up cos/sin from a 1D RoPE table using T positions for all head dims,
+        then overwrites H/W-assigned dims with their own position lookups, gathering
+        only the specific columns each dimension needs.
 
         Args:
             position_ids_3d: (3, batch, seq_len) position IDs.
             freqs_cis: (max_seq_len, head_dim * 2) with cos and sin concatenated.
+            mrope_section: [temporal, height, width] section sizes.
 
         Returns:
             (batch, seq_len, 1, head_dim * 2) pre-computed MRoPE cos/sin.
@@ -349,14 +339,19 @@ class Qwen3VLModel(Qwen3Model):
         cos_cache = freqs_cis[:, :head_dim]  # (max_seq_len, head_dim)
         sin_cache = freqs_cis[:, head_dim:]  # (max_seq_len, head_dim)
 
-        # Gather cos/sin for each of the 3 dimensions
-        # position_ids_3d: (3, batch, seq_len)
-        cos_3d = cos_cache[position_ids_3d.long()]  # (3, batch, seq_len, head_dim)
-        sin_3d = sin_cache[position_ids_3d.long()]  # (3, batch, seq_len, head_dim)
+        # Start with T positions for all dims (T uses the most dims)
+        t_pos = position_ids_3d[0].long()  # (batch, seq_len)
+        mrope_cos = cos_cache[t_pos]  # (batch, seq_len, head_dim)
+        mrope_sin = sin_cache[t_pos]  # (batch, seq_len, head_dim)
 
-        # Interleave T/H/W dimensions
-        mrope_cos = self._apply_interleaved_mrope(cos_3d, self.mrope_section)
-        mrope_sin = self._apply_interleaved_mrope(sin_3d, self.mrope_section)
+        # Overwrite H and W slices with their own position lookups.
+        # Only gather the specific columns each dimension needs.
+        for dim, offset in enumerate((1, 2), start=1):  # H, W
+            length = mrope_section[dim] * 3
+            col_indices = torch.arange(offset, length, 3, device=freqs_cis.device)
+            dim_pos = position_ids_3d[dim].long()  # (batch, seq_len)
+            mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
+            mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
         # Concatenate and add n_heads dimension: (batch, seq_len, 1, head_dim*2)
         return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
@@ -635,7 +630,9 @@ class Qwen3VLModel(Qwen3Model):
             position_ids_3d = self._get_mrope_position_ids(
                 tokens, grid_thw, grid_thw_videos, special_tokens
             )
-            freqs_cis = self._compute_mrope_freqs(position_ids_3d, self.freqs_cis)
+            freqs_cis = self._compute_mrope_freqs(
+                position_ids_3d, self.freqs_cis, self.mrope_section
+            )
         else:
             freqs_cis = self.freqs_cis
 
