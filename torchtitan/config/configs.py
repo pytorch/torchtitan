@@ -129,6 +129,11 @@ class ParallelismConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
+    enable_sequence_parallel: bool = True
+    """Whether to use SequenceParallel for norm layers in tensor parallelism.
+    Enabled by default for training (saves activation memory). Disable for
+    inference where the allgather/reduce-scatter overhead dominates latency."""
+
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.

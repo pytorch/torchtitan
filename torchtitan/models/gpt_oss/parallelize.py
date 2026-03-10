@@ -106,12 +106,18 @@ def parallelize_gptoss(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        enable_sp = parallelism.enable_sequence_parallel
+        loss_parallel = not parallelism.disable_loss_parallel
+        if not enable_sp:
+            loss_parallel = False
+
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not parallelism.disable_loss_parallel,
+            loss_parallel=loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=False,
+            enable_sp=enable_sp,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -194,38 +200,53 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
+    enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
-            ),
-        },
-    )
+    if enable_sp:
+        parallelize_module(
+            model,
+            tp_mesh,
+            {
+                "tok_embeddings": RowwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Shard(1),
+                ),
+                "norm": SequenceParallel(),
+                "output": ColwiseParallel(
+                    input_layouts=Shard(1),
+                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                    use_local_output=not loss_parallel,
+                ),
+            },
+        )
+    else:
+        parallelize_module(
+            model,
+            tp_mesh,
+            {
+                "tok_embeddings": RowwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Replicate(),
+                    use_local_output=False,
+                ),
+                "norm": NoParallel(),
+                "output": ColwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                    use_local_output=not loss_parallel,
+                ),
+            },
+        )
 
     # Apply tensor + sequence parallelism to every transformer block
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
-            "attention_norm": SequenceParallel(),
-            "attention": PrepareModuleInput(
-                input_layouts=(Shard(1), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
-            ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
@@ -237,9 +258,45 @@ def apply_non_moe_tp(
                 desired_output_layouts=(Shard(1), Shard(1)),
                 use_local_output=False,
             ),
-            "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
         }
+        if enable_sp:
+            # pyrefly: ignore [no-matching-overload]
+            layer_plan.update(
+                {
+                    "attention_norm": SequenceParallel(),
+                    "attention": PrepareModuleInput(
+                        input_layouts=(Shard(1), Replicate(), None, None),
+                        desired_input_layouts=(
+                            Replicate(),
+                            Replicate(),
+                            None,
+                            None,
+                        ),
+                    ),
+                    "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
+                    "ffn_norm": SequenceParallel(),
+                }
+            )
+        else:
+            # pyrefly: ignore [no-matching-overload]
+            layer_plan.update(
+                {
+                    "attention_norm": NoParallel(),
+                    "attention": PrepareModuleInput(
+                        input_layouts=(Replicate(), Replicate(), None, None),
+                        desired_input_layouts=(
+                            Replicate(),
+                            Replicate(),
+                            None,
+                            None,
+                        ),
+                    ),
+                    "attention.wo": RowwiseParallel(
+                        output_layouts=Replicate(), use_local_output=False
+                    ),
+                    "ffn_norm": NoParallel(),
+                }
+            )
 
         # shard attention.sinks across heads
         # pyrefly: ignore [missing-attribute]
