@@ -183,7 +183,7 @@ class VLLMGenerator(Actor, Configurable):
         self.model_path = model_path
         self.max_new_tokens = config.sampling.max_tokens
         self.temperature = config.sampling.temperature
-        self.top_p = config.samling.top_p
+        self.top_p = config.sampling.top_p
         self.num_samples_per_prompt = config.num_samples_per_prompt
 
         # Build vLLM engine
