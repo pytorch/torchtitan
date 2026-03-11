@@ -28,6 +28,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
@@ -126,6 +127,20 @@ def parallelize_gptoss(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
+        )
+
+    if parallel_dims.cp_enabled:
+        if parallel_dims.tp_enabled:
+            raise NotImplementedError(
+                "Context Parallel with Tensor Parallel is not yet supported for gpt-oss. "
+                "See https://github.com/pytorch/torchtitan/issues/2446"
+            )
+        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            attn_backend,
         )
 
     if ac_config.mode != "none":
