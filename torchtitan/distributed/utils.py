@@ -33,20 +33,21 @@ from torchtitan.tools.utils import device_module, device_type
 
 
 class LocalMapWrapper(torch.nn.Module):
-    """Wraps a module with ``local_map`` to accept DTensor inputs.
+    """Wraps a module with ``local_map`` to convert between DTensor and local tensors.
 
     Uses ``local_map`` to convert DTensor positional args to local tensors
-    (with correct grad_placements for backward) before calling the wrapped
-    module, and wraps the output back to DTensor.
+    before calling the wrapped module, and wraps the outputs back to DTensor
+    according to ``out_placements``.
 
     Args:
         module: The module to wrap.
         device_mesh: Device mesh on which DTensor inputs are distributed.
-        in_placements: Placement for each positional DTensor arg.
-            Use ``None`` for non-DTensor args. Passed to ``local_map``.
-        out_placements: Placement for each output tensor.
-            Passed to ``local_map``.
-        in_grad_placements: Gradient placements for each input.
+        in_placements: A tuple of ``PlacementType`` (``Sequence[Placement] | None``),
+            one per positional arg. Use ``None`` for non-DTensor args.
+        out_placements: Placements for the output(s). A single ``PlacementType``
+            for a single output, or a tuple of ``PlacementType`` for multiple
+            flattened outputs. Use ``None`` for non-tensor outputs.
+        in_grad_placements: Gradient placements for each input during backward.
             Defaults to ``in_placements`` if not provided.
     """
 
