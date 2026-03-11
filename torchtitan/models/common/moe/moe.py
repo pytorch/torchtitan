@@ -10,10 +10,9 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
 from .utils import indices_padding_wrapper
@@ -126,9 +125,9 @@ class GroupedExperts(nn.Module):
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.w1, mean=0.0, std=0.02)
-        trunc_normal_(self.w2, mean=0.0, std=init_std)
-        trunc_normal_(self.w3, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -255,13 +254,16 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        # Compute gate in float32 to help stability of expert load balancing.
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            scores = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
+        # scored is already float32 from the autocast above.
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(scores, dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -301,7 +303,9 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        if self.gate.bias is not None:
+            nn.init.zeros_(self.gate.bias)
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -453,6 +457,29 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
+        # Convert DTensor to local tensor for MoE-internal computation.
+        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
+        # in backward, so gradient reduction (reduce-scatter from Partial to
+        # Shard(1)) happens once at the MoE boundary rather than being
+        # duplicated inside the MoE.
+        #
+        # Why grad(x) is Partial on the tp_mesh across all parallelism:
+        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
+        #   w1/w3, Rowwise on w2) produce Partial output gradients.
+        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
+        #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
+        #   each rank's token positions(Partial).
+        #
+        # This holds for all MoE components (router.gate, routed experts, shared
+        # experts) and regardless of score_before_experts.
+        if isinstance(x, DTensor):
+            assert (
+                x.device_mesh.ndim == 1
+            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
+            assert x.device_mesh.mesh_dim_names == (
+                "tp",
+            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
+            x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 

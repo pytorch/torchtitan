@@ -24,13 +24,13 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
-from torchtitan.models.llama3.parallelize import apply_ddp
+from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -42,6 +42,7 @@ from torchtitan.tools.logging import logger
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -79,14 +80,6 @@ def parallelize_deepseekv3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_backend='{attn_backend}'. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
 
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
@@ -155,6 +148,12 @@ def parallelize_deepseekv3(
         )
 
     if parallel_dims.cp_enabled:
+        if parallel_dims.tp_enabled:
+            raise NotImplementedError(
+                "Context Parallel with Tensor Parallel is not yet supported for DeepSeek-V3. "
+                "See https://github.com/pytorch/torchtitan/issues/2446"
+            )
+        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
@@ -216,13 +215,11 @@ def parallelize_deepseekv3(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -286,12 +283,12 @@ def apply_non_moe_tp(
                     positions_sharding,
                 ),
             ),
-            # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
-            # so that the intermedidate results k is generated as a DTensor and its gradient is
-            # correctly handled by the autograd engine.
-            "attention.wkv_a": NoParallel(use_local_output=False),
+            # NOTE: NoParallel() without local_output_grad_placements keeps the output as a
+            # DTensor so that the intermediate results k is generated as a DTensor and its
+            # gradient is correctly handled by the autograd engine.
+            "attention.wkv_a": NoParallel(),
             "attention.wkv_b": colwise_parallel(use_local_output=False),
-            "attention.kv_norm": NoParallel(use_local_output=False),
+            "attention.kv_norm": NoParallel(),
             # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
             "attention.inner_attention": attention_kernel_plan,
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
@@ -310,9 +307,9 @@ def apply_non_moe_tp(
         else:
             layer_plan.update(
                 {
-                    "attention.wq_a": NoParallel(use_local_output=False),
+                    "attention.wq_a": NoParallel(),
                     "attention.wq_b": colwise_parallel(use_local_output=False),
-                    "attention.q_norm": NoParallel(use_local_output=False),
+                    "attention.q_norm": NoParallel(),
                 }
             )
 

@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
-from typing import List, Protocol, Union
+from typing import Protocol
 
 import torch.nn as nn
 
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -26,7 +27,7 @@ class ModelConverter(Protocol):
         """Inplace conversion of the model."""
         ...
 
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
         ...
 
@@ -75,7 +76,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         if self.print_after_conversion:
             logger.info(f"Model definition after conversion:\n\n{model}\n\n")
 
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
 
@@ -83,13 +84,14 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 def _validate_quantization(converters: list[Configurable.Config]):
     """Validates that all quantization converters use the same quantization type.
 
-    Each quantization converter Config defines a `_quantization_type` ClassVar
-    (e.g. "float8" or "mx"). This function asserts they are all the same.
+    Each quantization converter Config inherits from QuantizationConverter.Config
+    and defines a `_quantization_type` ClassVar (e.g. "float8" or "mx").
+    This function asserts they are all the same.
     """
     existing_type: str | None = None
     for config in converters:
-        qt = getattr(config, "_quantization_type", None)
-        if qt is not None:
+        if isinstance(config, QuantizationConverter.Config):
+            qt = config._quantization_type
             if existing_type is None:
                 existing_type = qt
             else:

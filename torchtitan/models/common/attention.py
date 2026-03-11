@@ -22,11 +22,11 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
 )
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
 
@@ -127,7 +127,9 @@ class FlexAttentionWrapper(torch.nn.Module):
         flex_attention,
         # This options also encapsulate max-autotune-no-cudagraphs.
         options={
-            "wrap_inductor_compiled_regions": True,
+            # TODO: turn on this after PyTorch fix is landed again
+            # https://github.com/pytorch/pytorch/pull/175733.
+            "wrap_inductor_compiled_regions": False,
             "max_autotune": True,
             "coordinate_descent_tuning": True,
             "triton.cudagraphs": False,
@@ -406,13 +408,18 @@ class GQAttention(BaseAttention):
         n_heads: int
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        qk_norm: bool = False
-        norm_eps: float = 1e-5
+        q_norm: RMSNorm.Config | None = None
+        k_norm: RMSNorm.Config | None = None
         bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+
+        def __post_init__(self):
+            BaseAttention.Config.__post_init__(self)
+            if (self.q_norm is None) != (self.k_norm is None):
+                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
@@ -428,15 +435,11 @@ class GQAttention(BaseAttention):
         self.rope_backend = config.rope_backend
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm: nn.RMSNorm | None = None
-        self.k_norm: nn.RMSNorm | None = None
-        if config.qk_norm:
-            self.q_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
-            self.k_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
+        self.q_norm: RMSNorm | None = None
+        self.k_norm: RMSNorm | None = None
+        if config.q_norm is not None and config.k_norm is not None:
+            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
+            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
@@ -543,13 +546,13 @@ class GQAttention(BaseAttention):
 
     def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
         for linear in (self.wq, self.wk, self.wv):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
             if linear.bias is not None:
-                trunc_normal_(linear.bias, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+                nn.init.trunc_normal_(linear.bias, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.wo.bias is not None:
-            trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
         if self.q_norm is not None:
-            self.q_norm.reset_parameters()
+            self.q_norm.init_weights()
         if self.k_norm is not None:
-            self.k_norm.reset_parameters()
+            self.k_norm.init_weights()

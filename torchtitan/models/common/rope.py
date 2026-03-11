@@ -12,6 +12,13 @@ import torch
 
 from torchtitan.protocols.module import Module
 
+__all__ = [
+    "RoPE",
+    "apply_rotary_emb_complex",
+    "apply_rotary_emb_cos_sin",
+    "apply_rotary_emb_single_complex",
+]
+
 
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
@@ -50,8 +57,7 @@ class RoPE(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        # Buffer registered later in init_weights
-        self.register_buffer("cache", self._precompute(), persistent=False)
+        self.cache: torch.Tensor = self._precompute()
 
     def _precompute(self) -> torch.Tensor:
         cfg = self.config

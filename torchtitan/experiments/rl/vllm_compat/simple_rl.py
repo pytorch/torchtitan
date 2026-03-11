@@ -34,6 +34,7 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3Model
 from transformers import AutoConfig, AutoTokenizer
 
@@ -330,10 +331,9 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
             hf_config.hidden_size // hf_config.num_attention_heads,
         ),
         hidden_dim=hf_config.intermediate_size,
-        norm_eps=hf_config.rms_norm_eps,
+        norm=RMSNorm.Config(eps=hf_config.rms_norm_eps),
         rope_theta=hf_config.rope_theta,
         max_seq_len=getattr(hf_config, "max_position_embeddings", 32768),
-        qk_norm=True,
         depth_init=True,
         eos_id=getattr(hf_config, "eos_token_id", 151645),
     )
@@ -484,8 +484,7 @@ def load_gsm8k_dataset(split: str = "train", num_samples: int = 100):
 
 def trivial_reward_function(
     completions: list[str],
-    expected_answers: list[str] | None = None,
-    group_size: int = 4,
+    expected_answer: str = "",
 ) -> torch.Tensor:
     """
     Reward function based on correctness and lowercase preference.
@@ -494,18 +493,19 @@ def trivial_reward_function(
     Rewards correct answers to factual questions.
     Penalizes capital letters to encourage lowercase output.
 
+    Called per-episode: completions are the group of completions for a single
+    prompt, and expected_answer is that prompt's expected answer.
+
     Args:
-        completions: List of completion strings
-        expected_answers: List of expected answers (one per prompt, repeated for group_size)
-        group_size: Number of samples per prompt
+        completions: List of completion strings for one prompt (len=group_size)
+        expected_answer: Expected answer for this prompt
 
     Returns:
-        rewards: [batch]
+        rewards: [group_size]
     """
-    batch_size = len(completions)
     rewards = []
 
-    for idx, completion in enumerate(completions):
+    for completion in completions:
         # Start with base reward of 1.0
         reward = 1.0
 
@@ -533,14 +533,12 @@ def trivial_reward_function(
         reward *= uppercase_penalty
 
         # Bonus for correct answers
-        if expected_answers is not None:
-            # Map completion index to prompt index
-            prompt_idx = idx // group_size
-            expected_answer = expected_answers[prompt_idx].lower()
+        if expected_answer:
+            expected_lower = expected_answer.lower()
             completion_lower = completion.lower()
 
             # Check if answer is in completion
-            if expected_answer in completion_lower:
+            if expected_lower in completion_lower:
                 reward *= 2.0  # 2x bonus for correct answer
             else:
                 reward *= 0.5  # Penalty for wrong answer
