@@ -8,8 +8,8 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
+from collections.abc import Callable
 from functools import lru_cache, partial
-from typing import Callable
 
 import torch
 import torch._functorch.config
@@ -26,15 +26,15 @@ from torchtitan.tools.logging import logger
 
 _PolicyFn = Callable[..., CheckpointPolicy]
 
+
 def _sac_policy_fn(
     ctx,
     op,
     *args,
-    compute_intensive_ops: dict,
-    communication_intensive_ops: dict,
+    save_ops: dict,
     **kwargs,
 ) -> CheckpointPolicy:
-    if op in (compute_intensive_ops | communication_intensive_ops):
+    if op in save_ops:
         return CheckpointPolicy.MUST_SAVE
 
     return CheckpointPolicy.PREFER_RECOMPUTE
@@ -69,9 +69,14 @@ _COMPUTE_OPS = [
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
     torch.ops.aten._scaled_dot_product_attention_math.default,
     torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    # FlexAttention
-    torch.ops.higher_order.flex_attention,
+    # For low precision training, always save the absolute maximum used
+    # to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
     torch._higher_order_ops.flex_attention,
+    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
+    # instead of decomposing it into aten.mm, so include it explicitly.
+    torch.ops.aten.linear.default,
     # Inductor compiled code (available when torch.compile is used)
     (torch._higher_order_ops, "inductor_compiled_code"),
     # torch_attn custom backend
@@ -100,10 +105,12 @@ def default_activation_checkpoint_policy() -> _PolicyFn:
 
     communication_intensive_ops = _resolve_ops(_COMM_OPS)
 
+    # Pre-merge so the policy function does a single dict lookup per call.
+    save_ops = compute_intensive_ops | communication_intensive_ops
+
     policy_fn = partial(
         _sac_policy_fn,
-        compute_intensive_ops=compute_intensive_ops,
-        communication_intensive_ops=communication_intensive_ops,
+        save_ops=save_ops,
     )
     # pyrefly: ignore [missing-attribute]
     policy_fn.cache_hash = "default_activation_checkpoint_policy"
@@ -264,7 +271,6 @@ def _apply_ac_to_transformer_block(
     ac_config: ACConfig,
     *,
     base_fqn: str | None = None,
-    model_compile_enabled: bool = False,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
     if ac_config.mode not in valid_ac_modes:
@@ -326,7 +332,6 @@ def apply_ac(
                 transformer_block,
                 ac_config,
                 base_fqn=f"layers.{layer_id}",
-                model_compile_enabled=model_compile_enabled,
             )
             layers.register_module(layer_id, transformer_block)
 

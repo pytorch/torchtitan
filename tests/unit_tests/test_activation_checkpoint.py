@@ -281,6 +281,87 @@ class TestApplyAC(unittest.TestCase):
             torch.testing.assert_close(g_ref, g_f1)
             torch.testing.assert_close(g_ref, g_fl)
 
+    def test_skip_mm_fqns(self):
+        """Test that per_op_sac_skip_mm_fqns excludes matched linears from alternation."""
+
+        def get_bw_flops(model_fn):
+            x = torch.randn(512, 512, requires_grad=True)
+            out = model_fn(x)
+            out.backward()
+
+            x = torch.randn(512, 512, requires_grad=True)
+            out = model_fn(x)
+            with FlopCounterMode(display=False) as mode:
+                out.backward()
+            return mode.get_total_flops() / (512**3 * 2)
+
+        # Without skip: all 3 linears participate in the alternating counter.
+        model_no_skip = ToyModule()
+        apply_ac(
+            model_no_skip,
+            ACConfig(
+                mode="selective",
+                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
+                per_op_sac_skip_mm_fqns=[],
+                early_stop=False,
+            ),
+            model_compile_enabled=False,
+        )
+        flops_no_skip = get_bw_flops(model_no_skip)
+
+        # With skip on "moe": moe.router.gate is excluded from the alternating
+        # counter and always recomputed.
+        model_with_skip = ToyModule()
+        apply_ac(
+            model_with_skip,
+            ACConfig(
+                mode="selective",
+                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
+                per_op_sac_skip_mm_fqns=["moe"],
+                early_stop=False,
+            ),
+            model_compile_enabled=False,
+        )
+        flops_with_skip = get_bw_flops(model_with_skip)
+
+        self.assertNotEqual(flops_no_skip, flops_with_skip)
+
+    def test_skip_mm_fqns_correctness(self):
+        """Test that skip_mm_fqns produces correct gradients."""
+        model_ref = ToyModule()
+
+        model_skip = ToyModule()
+        model_skip.load_state_dict(model_ref.state_dict())
+        apply_ac(
+            model_skip,
+            ACConfig(
+                mode="selective",
+                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
+                per_op_sac_skip_mm_fqns=["moe"],
+            ),
+            model_compile_enabled=False,
+        )
+
+        batch = torch.randn(64, 512)
+
+        # Reference: no AC
+        model_ref.zero_grad(set_to_none=True)
+        x_ref = batch.clone().detach().requires_grad_(True)
+        out_ref = model_ref(x_ref)
+        out_ref.backward()
+
+        # With skip AC
+        model_skip.zero_grad(set_to_none=True)
+        x_skip = batch.clone().detach().requires_grad_(True)
+        out_skip = model_skip(x_skip)
+        out_skip.backward()
+
+        torch.testing.assert_close(out_ref.detach(), out_skip.detach())
+        torch.testing.assert_close(x_ref.grad, x_skip.grad)
+        for p_ref, p_skip in zip(model_ref.parameters(), model_skip.parameters()):
+            if p_ref.grad is not None and p_skip.grad is not None:
+                torch.testing.assert_close(p_ref.grad, p_skip.grad)
+
 
 if __name__ == "__main__":
     unittest.main()
