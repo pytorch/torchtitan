@@ -513,10 +513,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ImportError(
                     "torchcomms package is required for --comm.use_torchcomms. "
                 ) from err
-            os.environ["TORCH_DISTRIBUTED_USE_TORCHCOMMS"] = "1"
-            # torch.distributed.config reads the env var at import time, so
-            # setting os.environ alone is too late. We must also set the
-            # runtime config directly (user_override takes precedence).
             import torch.distributed.config as dist_config
 
             dist_config.use_torchcomms = True
