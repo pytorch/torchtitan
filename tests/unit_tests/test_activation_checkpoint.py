@@ -8,31 +8,11 @@ import unittest
 
 import torch
 
-# o/w putting torch.ops.torch_attn._varlen_attn.default in sac list will hit error
-from torch.nn.attention.varlen import varlen_attn  # noqa
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
-
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn.default,
-}
 
 
 class ToyModule(Module):
@@ -92,7 +72,6 @@ class TestApplyAC(unittest.TestCase):
             model_selective_ac,
             ac_config_no_force,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         flops_selective_ac = get_bw_flops(model_selective_ac)
 
@@ -109,7 +88,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_first,
             ac_config_with_force_first,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
@@ -125,7 +103,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_last,
             ac_config_with_force_last,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
@@ -139,7 +116,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_full_ac,
             ac_config_full_ac,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         flops_full_ac = get_bw_flops(model_with_full_ac)
 
@@ -181,7 +157,6 @@ class TestApplyAC(unittest.TestCase):
             model_selective_ac,
             ac_config_no_force,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         mem_selective_ac = get_act_mem(model_selective_ac)
 
@@ -197,7 +172,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_first,
             ac_config_with_force_first,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         mem_with_force_first = get_act_mem(model_with_force_first)
 
@@ -212,7 +186,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_last,
             ac_config_with_force_last,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         mem_with_force_last = get_act_mem(model_with_force_last)
 
@@ -225,7 +198,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_full_ac,
             ac_config_full_ac,
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         mem_full_ac = get_act_mem(model_with_full_ac)
 
@@ -251,7 +223,6 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=[],
             ),
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
         model_force_first = ToyModule()
         model_force_first.load_state_dict(model_no_ac.state_dict())
@@ -263,7 +234,6 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
             ),
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
 
         model_force_last = ToyModule()
@@ -276,7 +246,6 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
             ),
             model_compile_enabled=False,
-            op_sac_save_list=_op_sac_save_list,
         )
 
         def run_fwd_bwd(model, batch):
