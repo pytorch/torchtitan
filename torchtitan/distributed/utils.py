@@ -355,24 +355,22 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
-    if comm_config.mode == "torchcomms":
-        try:
-            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
-        except ImportError as err:
-            raise ImportError(
-                "torchcomms package is required for --comm.mode=torchcomms. "
-            ) from err
-        import torch.distributed.config as dist_config
-
-        dist_config.use_torchcomms = True
-
-    init_pg_kwargs = {
+    init_pg_kwargs: dict[str, object] = {
         "backend": _get_distributed_backend(enable_cpu_backend),
         "timeout": timedelta(seconds=comm_config.init_timeout_seconds),
         "_ranks": ranks if ranks is not None else [],
     }
     if comm_config.mode == "torchcomms":
-        init_pg_kwargs["device_id"] = torch.device(  # type: ignore[typeddict-item]
+        try:
+            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
+        except ImportError as err:
+            raise ImportError(
+                "torchcomms package is required for --comm.mode=torchcomms."
+            ) from err
+        import torch.distributed.config as dist_config
+
+        dist_config.use_torchcomms = True
+        init_pg_kwargs["device_id"] = torch.device(
             device_type, int(os.environ["LOCAL_RANK"])
         )
     torch.distributed.init_process_group(**init_pg_kwargs)
