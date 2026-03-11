@@ -10,6 +10,7 @@
 import torch
 import torch._inductor.config
 import torch.nn as nn
+from torch.backends.cuda import SDPBackend
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -40,6 +41,8 @@ from torchtitan.models.llama4.parallelize import (
 )
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+from torchtitan.models.common.attention import InnerAttentionWrapper
 from torchtitan.tools.logging import logger
 
 
@@ -139,6 +142,31 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
             attn_backend,
         )
+
+    # When both TP and CP are enabled, set up local_map on inner_attention
+    # to properly handle DTensor <-> local tensor conversion at the TP/CP
+    # boundary. TP's use_local_output=False produces DTensor q/k/v, but CP
+    # hooks expect plain tensors.
+    # TODO(pianpwk): change this once full DTensor lands
+    if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        # pyrefly: ignore [missing-attribute, not-callable]
+        for block in model.layers.values():
+            attn = block.attention  # pyrefly: ignore [missing-attribute]
+            # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+            # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
+            if attn_backend == "sdpa":
+                attn.inner_attention.sdpa_backends = (
+                    [  # pyrefly: ignore [missing-attribute]
+                        SDPBackend.FLASH_ATTENTION,
+                        SDPBackend.MATH,
+                    ]
+                )
+            attn.inner_attention = (
+                InnerAttentionWrapper(  # pyrefly: ignore [missing-attribute]
+                    attn.inner_attention, tp_mesh  # pyrefly: ignore [missing-attribute]
+                )
+            )
 
     if ac_config.mode != "none":
         apply_ac(
