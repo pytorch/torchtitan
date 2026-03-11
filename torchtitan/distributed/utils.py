@@ -20,11 +20,55 @@ import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
+from torch.distributed.tensor.experimental._func_map import (
+    InputPlacements,
+    OutputPlacements,
+)
 
 from torchtitan.config import CommConfig, DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+
+class LocalMapWrapper(torch.nn.Module):
+    """Wraps a module with ``local_map`` to accept DTensor inputs.
+
+    Uses ``local_map`` to convert DTensor positional args to local tensors
+    (with correct grad_placements for backward) before calling the wrapped
+    module, and wraps the output back to DTensor.
+
+    Args:
+        module: The module to wrap.
+        device_mesh: Device mesh on which DTensor inputs are distributed.
+        in_placements: Placement for each positional DTensor arg.
+            Use ``None`` for non-DTensor args. Passed to ``local_map``.
+        out_placements: Placement for each output tensor.
+            Passed to ``local_map``.
+        in_grad_placements: Gradient placements for each input.
+            Defaults to ``in_placements`` if not provided.
+    """
+
+    def __init__(
+        self,
+        module: torch.nn.Module,
+        device_mesh: DeviceMesh,
+        in_placements: InputPlacements,
+        out_placements: OutputPlacements,
+        in_grad_placements: InputPlacements = None,
+    ):
+        super().__init__()
+        self._local_map_fn = local_map(
+            module,
+            out_placements=out_placements,
+            in_placements=in_placements,
+            in_grad_placements=in_grad_placements or in_placements,
+            device_mesh=device_mesh,
+        )
+
+    def forward(self, *args, **kwargs):
+        return self._local_map_fn(*args, **kwargs)
 
 
 def _dist_reduce(
