@@ -33,6 +33,7 @@ from torchtitan.protocols.module import Module
 __all__ = [
     "FlexAttentionWrapper",
     "GQAttention",
+    "InnerAttentionWrapper",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
     "VarlenMetadata",
@@ -58,6 +59,36 @@ class VarlenMetadata(NamedTuple):
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+
+
+class InnerAttentionWrapper(torch.nn.Module):
+    """Wraps inner_attention with local_map to accept DTensor inputs.
+
+    When TP uses use_local_output=False, q/k/v arrive at inner_attention as
+    DTensors on the TP mesh (Shard on heads dim). This wrapper uses local_map
+    to convert DTensors to local tensors (with correct grad_placements for
+    backward) before calling the wrapped module, and wraps the output back
+    to DTensor.
+    """
+
+    def __init__(self, inner_attn: nn.Module, tp_mesh: "DeviceMesh"):
+        from torch.distributed.tensor import Shard
+        from torch.distributed.tensor.experimental import local_map
+
+        super().__init__()
+        self._inner = inner_attn
+        # q, k, v are sharded on heads dim (dim=1 after transpose in GQAttention)
+        heads_shard_placement = (Shard(1),)
+        self._local_map_fn = local_map(
+            inner_attn,
+            out_placements=(heads_shard_placement,),
+            in_placements=(heads_shard_placement,) * 3,
+            in_grad_placements=(heads_shard_placement,) * 3,
+            device_mesh=tp_mesh,
+        )
+
+    def forward(self, *args, **kwargs):
+        return self._local_map_fn(*args, **kwargs)
 
 
 class VarlenAttentionWrapper(torch.nn.Module):
