@@ -15,5 +15,6 @@ _supported_experiments = frozenset(
         "autoparallel.local_map_deepseek_v3",
         "ft.llama3",
         "rl.unified",
+        "sft",
     ]
 )
