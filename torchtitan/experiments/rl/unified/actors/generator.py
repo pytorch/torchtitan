@@ -18,7 +18,7 @@ from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.unified.types import Episode, EpisodeGroup
+from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
@@ -228,10 +228,12 @@ class VLLMGenerator(Actor, Configurable):
         self,
         prompt_texts: list[str],
         expected_answers: list[str] | None = None,
-    ) -> list[EpisodeGroup]:
-        """Generate completions and return a list of EpisodeGroups (one per prompt).
+    ) -> list[Episode]:
+        """Generate completions and return a flat list of Episodes.
 
-        Each EpisodeGroup contains N Episode objects (one per completion sample).
+        Each prompt produces ``num_samples_per_prompt`` Episodes. Episodes
+        from the same prompt share a ``group_id`` so the controller can
+        compute group-level advantages later.
 
         Args:
             prompt_texts: List of prompt strings for which to generate completions.
@@ -263,19 +265,19 @@ class VLLMGenerator(Actor, Configurable):
                 request_outputs = self._engine.step()
                 all_outputs.extend(request_outputs)
 
-            # Build one EpisodeGroup per prompt, each containing N Episodes.
-            groups: list[EpisodeGroup] = []
+            # Build flat list of Episodes; assign a group_id per prompt.
+            episodes: list[Episode] = []
             for idx, output in enumerate(all_outputs):
                 prompt_token_ids = output.prompt_token_ids
                 answer = expected_answers[idx] if expected_answers is not None else ""
+                gid = f"{os.getpid()}_{self.policy_version}_{idx}"
 
-                group: EpisodeGroup = []
                 for sample in output.outputs:
                     per_token_log_probs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    group.append(
+                    episodes.append(
                         Episode(
                             policy_version=self.policy_version,
                             prompt_token_ids=prompt_token_ids,
@@ -283,14 +285,14 @@ class VLLMGenerator(Actor, Configurable):
                             token_ids=sample.token_ids,
                             token_log_probs=per_token_log_probs,
                             expected_answer=answer,
+                            group_id=gid,
                         )
                     )
-                groups.append(group)
 
         logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
-        return groups
+        return episodes
 
     @endpoint
     async def update(self, version: int, state_dict: dict) -> None:

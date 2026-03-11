@@ -10,12 +10,12 @@ from dataclasses import dataclass
 @dataclass
 class Episode:
     """
-    A single prompt + completion pair produced by the generator.
+    A single prompt + completion pair with reward and advantage.
 
-    Each Episode is self-contained: it holds the prompt tokens and one
-    completion's tokens, text, log-probs, and reward. When the generator
-    samples N completions per prompt, it emits N Episode objects grouped
-    into an :data:`EpisodeGroup`.
+    The generator creates Episodes (with group_id, no reward yet).
+    The grader fills in the reward.
+    The controller computes advantages across episodes sharing a group_id.
+    The trainer consumes the final Episodes with advantages set.
 
     Attributes:
         policy_version: Version of policy that produced this episode.
@@ -25,6 +25,11 @@ class Episode:
         token_log_probs: Per-token log probabilities from the generator.
         expected_answer: Expected answer for reward computation.
         reward: Scalar reward assigned by the grader.
+        group_id: Identifies which group this episode belongs to.
+            Episodes with the same group_id share a prompt and have
+            their advantages normalized together.
+        advantage: Advantage value computed by the controller (GRPO:
+            reward minus group mean reward).
     """
 
     policy_version: int
@@ -34,8 +39,5 @@ class Episode:
     token_log_probs: list[float]
     expected_answer: str = ""
     reward: float = 0.0
-
-
-# A Group holds all episodes that share the same prompt (the "G" in GRPO).
-# Advantages are normalized within each group.
-EpisodeGroup = list[Episode]
+    group_id: str = ""
+    advantage: float = 0.0

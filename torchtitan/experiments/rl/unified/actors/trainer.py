@@ -31,7 +31,7 @@ from torchtitan.experiments.rl.unified.actors.utils import (
 from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
-from torchtitan.experiments.rl.unified.types import Episode, EpisodeGroup
+from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -239,16 +239,15 @@ class PolicyTrainer(Actor, Configurable):
         }
 
     @endpoint
-    async def step(self, groups: list[EpisodeGroup]) -> dict:
+    async def step(self, episodes: list[Episode]) -> dict:
         """Perform one training step.
 
-        Computes advantages from rewards on the full batch (GRPO normalizes
-        within each group), then shards completions across DP ranks
-        so each rank processes a unique slice of the data.
+        Expects a flat list of Episodes with ``advantage`` already computed
+        by the controller. Shards episodes across DP ranks so each rank
+        processes a unique slice of the data.
 
         Args:
-            groups: List of Groups (one per prompt), each containing
-                    Episode objects with rewards filled by Grader.
+            episodes: Flat list of Episodes with advantages set.
 
         Returns:
             Training metrics
@@ -257,25 +256,13 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        # Flatten groups into a single episode list while computing GRPO
-        # advantages (normalize rewards within each group).
-        episodes: list[Episode] = []
-        advantages_list: list[torch.Tensor] = []
-        all_rewards: list[float] = []
-        for group in groups:
-            rewards = torch.tensor([ep.reward for ep in group])
-            group_advantages = rewards - rewards.mean()
-            advantages_list.append(group_advantages)
-            all_rewards.extend(ep.reward for ep in group)
-            episodes.extend(group)
-
-        advantages = torch.cat(advantages_list)
+        advantages = torch.tensor([ep.advantage for ep in episodes])
 
         all_token_ids: list[list[int]] = [ep.token_ids for ep in episodes]
         all_prompt_token_ids: list[list[int]] = [ep.prompt_token_ids for ep in episodes]
         all_token_log_probs: list[list[float]] = [ep.token_log_probs for ep in episodes]
 
-        all_rewards_tensor = torch.tensor(all_rewards)
+        all_rewards_tensor = torch.tensor([ep.reward for ep in episodes])
 
         # Shard flattened completions across DP ranks so each rank processes
         # a unique subset of the data.
