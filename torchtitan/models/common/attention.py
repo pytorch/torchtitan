@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -61,6 +61,13 @@ AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
 class VarlenAttentionWrapper(torch.nn.Module):
+    """Wrapper around ``varlen_attn`` with optional Context Parallel support.
+
+    When ``_cp_mesh`` is set (by ``apply_cp_to_attention_module``), the forward
+    method uses Magi Attention (arXiv:2505.13211) that redistributes Q via LPT
+    load balancing and gathers K/V with per-doc packed AllToAll-V across CP ranks.
+    """
+
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
@@ -74,39 +81,75 @@ class VarlenAttentionWrapper(torch.nn.Module):
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
 
-        cu_seq_q = attention_masks.cu_seq_q
-        cu_seq_k = attention_masks.cu_seq_k
-        max_q = attention_masks.max_q
-        max_k = attention_masks.max_k
+        # Pack to (bs * seqlen, n_heads/n_kv_heads, head_dim)
+        xq_packed = xq.transpose(1, 2).flatten(0, 1)
+        xk_packed = xk.transpose(1, 2).flatten(0, 1)
+        xv_packed = xv.transpose(1, 2).flatten(0, 1)
 
-        xq_packed = xq.transpose(1, 2).flatten(0, 1)  # (bs * seqlen, n_heads, head_dim)
-        xk_packed = xk.transpose(1, 2).flatten(
-            0, 1
-        )  # (bs * seqlen, n_kv_heads, head_dim)
-        xv_packed = xv.transpose(1, 2).flatten(
-            0, 1
-        )  # (bs * seqlen, n_kv_heads, head_dim)
+        # Check for CP mode (set by apply_cp_to_attention_module)
+        cp_mesh = getattr(self, "_cp_mesh", None)
+        if cp_mesh is not None:
+            return self._forward_cp(
+                xq_packed, xk_packed, xv_packed, attention_masks, cp_mesh
+            )
 
+        # Standard varlen attention (no CP)
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
             xk_packed,
             xv_packed,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
+            attention_masks.cu_seq_q,
+            attention_masks.cu_seq_k,
+            attention_masks.max_q,
+            attention_masks.max_k,
             scale=scale,
-            # window_size=(left, right) controls the attention window relative to each
-            # query position. 'left' is how many tokens before the query to attend to,
-            # and 'right' is how many tokens after. A value of -1 means unlimited.
-            #
-            # This replaces the is_causal flag:
-            #   - (-1, 0): Causal attention - each token attends to all previous tokens
-            #              and itself, but no future tokens. Equivalent to is_causal=True.
-            #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
-            #               is_causal=False.
-            #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
+        )
+
+    # Cache dispatch plan: key = (cu_seqlens tuple, cp_world_size).
+    _plan_cache: dict[tuple, Any] = {}
+    _PLAN_CACHE_MAX = 8
+
+    def _forward_cp(
+        self,
+        xq_packed: torch.Tensor,
+        xk_packed: torch.Tensor,
+        xv_packed: torch.Tensor,
+        attention_masks: VarlenMetadata,
+        cp_mesh: "DeviceMesh",
+    ) -> torch.Tensor:
+        """Varlen attention with context parallel via Magi Attention."""
+        from torchtitan.distributed.varlen_cp.dispatch_solver import solve_dispatch
+        from torchtitan.distributed.varlen_cp.mask_primitives import (
+            cu_seqlens_to_attn_slices,
+        )
+        from torchtitan.distributed.varlen_cp.ring_attention import (
+            varlen_ring_attention,
+        )
+
+        global_cu_seqlens = attention_masks.cu_seq_q
+        cp_world_size = cp_mesh.size(0)
+        chunk_size = xq_packed.shape[0]
+        total_seqlen = chunk_size * cp_world_size
+
+        cache_key = (tuple(global_cu_seqlens.tolist()), cp_world_size)
+        plan = VarlenAttentionWrapper._plan_cache.get(cache_key)
+        if plan is None:
+            global_slices = cu_seqlens_to_attn_slices(global_cu_seqlens)
+            plan = solve_dispatch(
+                global_slices, total_seqlen, chunk_size, cp_world_size
+            )
+            if len(VarlenAttentionWrapper._plan_cache) >= VarlenAttentionWrapper._PLAN_CACHE_MAX:
+                VarlenAttentionWrapper._plan_cache.clear()
+            VarlenAttentionWrapper._plan_cache[cache_key] = plan
+
+        return varlen_ring_attention(
+            xq_packed,
+            xk_packed,
+            xv_packed,
+            global_cu_seqlens,
+            plan,
+            cp_mesh,
         )
 
 
