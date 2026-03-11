@@ -71,7 +71,6 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )
 
