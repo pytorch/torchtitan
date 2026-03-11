@@ -228,8 +228,6 @@ def inductor_decomposition_pass(
     Returns:
         The joint graph with decompositions applied
     """
-    from torch._functorch._aot_autograd.descriptors import DummyAOTInput
-    from torch._functorch._aot_autograd.subclass_utils import unwrap_tensor_subclasses
     from torch._inductor.decomposition import select_decomp_table
     from torch.fx.experimental.proxy_tensor import make_fx
 
@@ -237,53 +235,25 @@ def inductor_decomposition_pass(
 
     decomp_table = select_decomp_table()
 
-    # Get traced tangents metadata
-    traced_tangents = joint_with_descriptors._aot_state.fw_metadata.traced_tangents
-
-    # Collect all inputs: params, buffers, forward inputs, tangents
-    param_inputs = list(model.parameters())
-    buffer_inputs = list(model.buffers())
-    primals = param_inputs + buffer_inputs + list(forward_inputs)
-    tangents = list(traced_tangents)
-
-    # Create dummy descriptors for unwrapping
-    primals_descs = [DummyAOTInput(i) for i in range(len(primals))]
-    tangents_descs = [DummyAOTInput(i + len(primals)) for i in range(len(tangents))]
-
-    # Unwrap tensor subclasses (DTensor -> _local_tensor)
-    primals_unwrapped, _ = unwrap_tensor_subclasses(
-        primals, primals_descs, append_symints=False
-    )
-    tangents_unwrapped, _ = unwrap_tensor_subclasses(
-        tangents, tangents_descs, append_symints=False
-    )
-
-    # Verify unwrapped tensor shapes match joint graph placeholders
-    all_inputs = primals_unwrapped + tangents_unwrapped
+    # Build fake inputs directly from the joint graph placeholders' metadata.
+    # This is more robust than reconstructing from model.parameters() + buffers
+    # + forward_inputs because the joint graph may contain additional inputs
+    # (e.g. effect tokens for side-effectful ops like MoE load balancing)
+    # that are not easily accessible from the model/metadata.
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    all_inputs = []
+    for ph in placeholders:
+        val = ph.meta.get("val")
+        if val is None:
+            raise RuntimeError(f"Placeholder {ph.target} has no 'val' metadata")
+        all_inputs.append(val)
 
-    if len(all_inputs) != len(placeholders):
-        raise RuntimeError(
-            f"Input count mismatch: {len(all_inputs)} inputs vs {len(placeholders)} placeholders"
-        )
-
-    shape_mismatches = []
-    for i, (inp, ph) in enumerate(zip(all_inputs, placeholders)):
-        if hasattr(inp, "shape") and "val" in ph.meta:
-            expected_shape = ph.meta["val"].shape
-            actual_shape = inp.shape
-            if expected_shape != actual_shape:
-                shape_mismatches.append(
-                    f"  {ph.target}: expected {expected_shape}, got {actual_shape}"
-                )
-
-    if shape_mismatches:
-        logger.error(f"Shape mismatches found ({len(shape_mismatches)}):")
-        for msg in shape_mismatches:
-            logger.error(msg)
-        raise RuntimeError(
-            "Unwrapped tensor shapes don't match joint graph placeholders."
-        )
+    # The joint graph forward() takes (primals, tangents) as two list args.
+    # Split based on traced_tangents count from fw_metadata.
+    fw_metadata = joint_with_descriptors._aot_state.fw_metadata
+    num_tangents = len(fw_metadata.traced_tangents)
+    primals_fake = all_inputs[: len(all_inputs) - num_tangents]
+    tangents_fake = all_inputs[len(all_inputs) - num_tangents :]
 
     # Get the FakeTensorMode from the original joint graph
     fake_mode = None
@@ -297,7 +267,7 @@ def inductor_decomposition_pass(
     if fake_mode is None:
         from torch._guards import detect_fake_mode
 
-        fake_mode = detect_fake_mode(primals_unwrapped)
+        fake_mode = detect_fake_mode(all_inputs)
 
     # Use make_fx with the original fake mode to retrace with decompositions
     with fake_mode:
@@ -305,7 +275,7 @@ def inductor_decomposition_pass(
             gm,
             decomposition_table=decomp_table,
             _allow_non_fake_inputs=False,
-        )(primals_unwrapped, tangents_unwrapped)
+        )(primals_fake, tangents_fake)
 
     # Copy metadata from original placeholders to decomposed placeholders
     orig_placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
