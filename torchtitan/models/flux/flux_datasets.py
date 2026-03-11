@@ -234,12 +234,9 @@ class FluxDataset(IterableDataset, Stateful):
 
     def __iter__(self):
         dataset_iterator = self._get_data_iter()
+        consecutive_bad = 0
+        MAX_CONSECUTIVE_ERRORS = 200
         while True:
-            # TODO: Add support for robust data loading and error handling.
-            # Currently, we assume the dataset is well-formed and does not contain corrupted samples.
-            # If a corrupted sample is encountered, the program will crash and throw an exception.
-            # You can NOT try to catch the exception and continue, because the iterator within dataset
-            # is not broken after raising an exception, so calling next() will throw StopIteration and might cause re-loop.
             try:
                 sample = next(dataset_iterator)
             except StopIteration:
@@ -261,6 +258,26 @@ class FluxDataset(IterableDataset, Stateful):
                         ):
                             self._data.set_epoch(self._data.epoch + 1)
                     continue
+            except Exception as e:
+                # HuggingFace datasets decode images internally during iteration;
+                # a corrupted EXIF tag (e.g. rational value with denominator=0
+                # in CC12M) raises ZeroDivisionError inside PIL before we receive
+                # a sample dict. We recreate the iterator rather than continuing
+                # with the old one, because its internal state may be broken
+                # after an exception.
+                consecutive_bad += 1
+                logger.warning(
+                    f"FluxDataset: skipping dataset error "
+                    f"({consecutive_bad}/{MAX_CONSECUTIVE_ERRORS}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                if consecutive_bad >= MAX_CONSECUTIVE_ERRORS:
+                    raise RuntimeError(
+                        f"FluxDataset: aborting after {consecutive_bad} consecutive "
+                        f"dataset errors. Last: {type(e).__name__}: {e}"
+                    ) from e
+                dataset_iterator = self._get_data_iter()
+                continue
 
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
@@ -289,6 +306,7 @@ class FluxDataset(IterableDataset, Stateful):
                 if torch.rand(1).item() < dropout_prob:
                     sample_dict["clip_tokens"] = self._clip_empty_token
 
+            consecutive_bad = 0
             self._sample_idx += 1
 
             labels = sample_dict.pop("image")
