@@ -168,7 +168,7 @@ class Qwen3VLModel(Qwen3Model):
         self.mrope_section = config.mrope_section
 
         # Number of early LLM layers that receive DeepStack visual features
-        self.num_deepstack_layers = len(config.encoder.deepstack_visual_indicies)
+        self.num_deepstack_layers = len(config.encoder.deepstack_visual_indices)
 
     def _get_mrope_position_ids(
         self,

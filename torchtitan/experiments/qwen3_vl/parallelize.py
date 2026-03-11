@@ -440,9 +440,6 @@ def parallelize_qwen3_vl(
         else:
             logger.info("Applied FSDP to the Qwen3-VL model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the Qwen3-VL model")
-
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the Qwen3-VL model")
 

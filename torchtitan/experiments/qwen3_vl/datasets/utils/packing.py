@@ -72,11 +72,15 @@ class SamplePacker:
 
     @staticmethod
     def _merge_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
+        merged: dict[str, Any] = {
             "input_ids": torch.cat([s["input_ids"] for s in samples]),
             "labels": torch.cat([s["labels"] for s in samples]),
-            "pixel_values": [img for s in samples for img in s["pixel_values"]],
+            "pixel_values": [img for s in samples for img in s.get("pixel_values", [])],
+            "pixel_values_videos": [
+                vid for s in samples for vid in s.get("pixel_values_videos", [])
+            ],
         }
+        return merged
 
     def add_sample(self, sample: dict[str, Any]) -> None:
         """Add a sample to the buffer. Triggers packing when buffer is full."""

@@ -360,9 +360,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         rope_theta: float = 10000.0
 
         # DeepStack: layer indices for extracting intermediate visual features
-        deepstack_visual_indicies: list[int] = field(
-            default_factory=lambda: [7, 15, 23]
-        )
+        deepstack_visual_indices: list[int] = field(default_factory=lambda: [7, 15, 23])
 
     def __init__(self, config: Config):
         super().__init__()
@@ -409,7 +407,7 @@ class Qwen3VLVisionEncoder(nn.Module):
 
         # DeepStack mergers for intermediate layers
         # DeepStack mergers use postshuffle norm (norm after spatial reshape)
-        self.deepstack_visual_indicies = config.deepstack_visual_indicies
+        self.deepstack_visual_indices = config.deepstack_visual_indices
         self.deepstack_merger_list = nn.ModuleList(
             [
                 PatchMerger(
@@ -418,7 +416,7 @@ class Qwen3VLVisionEncoder(nn.Module):
                     spatial_merge_size=config.spatial_merge_size,
                     use_postshuffle_norm=True,
                 )
-                for _ in range(len(config.deepstack_visual_indicies))
+                for _ in range(len(config.deepstack_visual_indices))
             ]
         )
 
@@ -626,8 +624,8 @@ class Qwen3VLVisionEncoder(nn.Module):
                 position_embeddings=position_embeddings,
                 attention_mask=attention_mask,
             )
-            if int(layer_num) in self.deepstack_visual_indicies:
-                idx = self.deepstack_visual_indicies.index(int(layer_num))
+            if int(layer_num) in self.deepstack_visual_indices:
+                idx = self.deepstack_visual_indices.index(int(layer_num))
                 deepstack_feature = self.deepstack_merger_list[idx](hidden_states)
                 deepstack_feature_lists.append(deepstack_feature)
 

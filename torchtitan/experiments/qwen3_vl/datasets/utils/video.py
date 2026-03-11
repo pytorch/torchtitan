@@ -10,7 +10,6 @@ import math
 
 import numpy as np
 import torch
-import torchvision.transforms.functional as F
 
 from torchtitan.tools.logging import logger
 
@@ -44,10 +43,26 @@ def load_video(
 
         video_fps = float(stream.average_rate or stream.guessed_rate or 24)
         total_frames = stream.frames
-        if not total_frames or not video_fps:
+        if total_frames == 0 and stream.duration:
+            total_frames = int(float(stream.duration * stream.time_base) * video_fps)
+        if total_frames == 0:
+            # No metadata available — decode all frames to count them
+            container.seek(0)
+            all_frames = [
+                frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)
+            ]
             container.close()
-            logger.warning(f"Missing video metadata for {path}, skipping")
-            return None
+            if not all_frames:
+                return None
+            total_frames = len(all_frames)
+            duration = total_frames / video_fps
+            nframes = max(min_frames, min(int(duration * fps), max_frames))
+            nframes = min(nframes, total_frames)
+            indices = set(
+                np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
+            )
+            selected = [all_frames[i] for i in sorted(indices)]
+            return torch.from_numpy(np.stack(selected))
 
         duration = total_frames / video_fps
         nframes = int(duration * fps)
@@ -162,6 +177,8 @@ def process_video(
         or None on failure.
     """
     try:
+        import torchvision.transforms.functional as F
+
         T, H, W, C = video.shape
         factor = patch_size * merge_size
 
