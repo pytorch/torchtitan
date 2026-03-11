@@ -53,7 +53,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
                 ],
             ],
             "1D compile with selective op AC",
@@ -507,7 +506,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
                 ]
             ],
             "FSDP + FLEX + per op SAC",
@@ -520,7 +518,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",

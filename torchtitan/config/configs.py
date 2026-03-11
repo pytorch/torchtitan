@@ -288,12 +288,6 @@ class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
-    selective_ac_option: str = "2"
-    """
-    Selective activation checkpointing options ['int', 'op'].
-    'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
-    """
-
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]
     )
@@ -306,6 +300,17 @@ class ActivationCheckpointConfig:
     Note: this config applies to mms not limited to those matching the specified
     fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,
     ANY mm with shape matching (*, in) x (in, out) will be force recomputed.
+    """
+
+    per_op_sac_skip_mm_fqns: list[str] = field(
+        default_factory=lambda: ["lora"]
+    )
+    """
+    When per-op selective ac is used, nn.Linear modules whose FQN contains any
+    string in this list will always be recomputed and excluded from the "save
+    every other mm" alternating counter. This is useful for auxiliary linears
+    (e.g. LoRA adapters) that should not affect the base model's save/recompute
+    pattern.
     """
 
     early_stop: bool = False

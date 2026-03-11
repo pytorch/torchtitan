@@ -26,9 +26,6 @@ from torchtitan.tools.logging import logger
 
 _PolicyFn = Callable[..., CheckpointPolicy]
 
-_layer_sac_count = 0
-
-
 def _sac_policy_fn(
     ctx,
     op,
@@ -114,31 +111,6 @@ def default_activation_checkpoint_policy() -> _PolicyFn:
     return policy_fn
 
 
-def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
-    """Apply layer selective activation checkpointing to the module.
-
-    Args:
-        module (nn.Module): The module to apply layer selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-
-    Returns:
-        nn.Module: The module with layer selective activation checkpointing applied.
-    """
-    global _layer_sac_count
-    _layer_sac_count += 1
-    ac_freq = int(ac_config.selective_ac_option)
-    if not ac_freq or _layer_sac_count % ac_freq == 0:
-        return ptd_checkpoint_wrapper(
-            module,
-            preserve_rng_state=ac_config.preserve_rng_state,
-            determinism_check=ac_config.determinism_check,
-            early_stop=ac_config.early_stop,
-            debug=ac_config.debug,
-        )
-    else:
-        return module
-
-
 def _apply_op_sac(
     module: nn.Module,
     ac_config: ACConfig,
@@ -189,28 +161,31 @@ def _apply_op_sac(
     # instead of decomposing it into aten.mm, so we must handle both.
     mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
 
-    # Auto-detect LoRA adapter linears by scanning for "lora" in module FQN.
-    # Register forward hooks to track when we're inside a LoRA module's forward.
-    # LoRA matmuls are always recomputed and excluded from the "save every other
-    # mm" alternating counter, preserving the base model's original pattern.
-    lora_active = {"count": 0}
+    # Register forward hooks on nn.Linear modules whose FQN matches any pattern
+    # in per_op_sac_skip_mm_fqns. Their matmuls are always recomputed and excluded
+    # from the "save every other mm" alternating counter.
+    skip_active = {"count": 0}
 
-    def _lora_pre_hook(mod, inp):
-        lora_active["count"] += 1
+    def _skip_pre_hook(mod, inp):
+        skip_active["count"] += 1
 
-    def _lora_post_hook(mod, inp, out):
-        lora_active["count"] -= 1
+    def _skip_post_hook(mod, inp, out):
+        skip_active["count"] -= 1
 
-    lora_module_count = 0
-    for module_fqn, submod in module.named_modules():
-        if "lora" in module_fqn and isinstance(submod, nn.Linear):
-            submod.register_forward_pre_hook(_lora_pre_hook)
-            submod.register_forward_hook(_lora_post_hook)
-            lora_module_count += 1
-    if lora_module_count:
+    skip_fqns = ac_config.per_op_sac_skip_mm_fqns
+    skip_module_count = 0
+    if skip_fqns:
+        for module_fqn, submod in module.named_modules():
+            if isinstance(submod, nn.Linear) and any(
+                pattern in module_fqn for pattern in skip_fqns
+            ):
+                submod.register_forward_pre_hook(_skip_pre_hook)
+                submod.register_forward_hook(_skip_post_hook)
+                skip_module_count += 1
+    if skip_module_count:
         logger.debug(
-            f"Selective op AC registered hooks on {lora_module_count} LoRA "
-            f"linear modules to exclude from save/recompute alternation"
+            f"Selective op AC registered hooks on {skip_module_count} linear "
+            f"modules matching {skip_fqns} to exclude from save/recompute alternation"
         )
 
     def _create_wrapped_policy():
@@ -235,9 +210,9 @@ def _apply_op_sac(
                     weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
                 if weight_shape in mm_recompute_shapes:
                     return CheckpointPolicy.PREFER_RECOMPUTE
-                # Skip LoRA adapter matmuls — always recompute and don't
-                # count them in the alternating save/recompute pattern.
-                if lora_active["count"] > 0:
+                # Skip matmuls from modules matching per_op_sac_skip_mm_fqns —
+                # always recompute and don't count in the alternating pattern.
+                if skip_active["count"] > 0:
                     return CheckpointPolicy.PREFER_RECOMPUTE
                 meta[mm_count_key] += 1
 
@@ -300,19 +275,7 @@ def _apply_ac_to_transformer_block(
     if ac_config.mode == "full":
         return _apply_full_ac(module, ac_config)
 
-    assert ac_config.mode == "selective", f"{ac_config.mode}"
-    use_op_sac = ac_config.selective_ac_option == "op"
-    use_layer_sac = ac_config.selective_ac_option.isdigit()
-    if not use_op_sac and not use_layer_sac:
-        raise ValueError(
-            f"Invalid selective AC option: {ac_config.selective_ac_option}. "
-            f"Valid options: 'op' or a positive int representing layer frequency"
-        )
-
-    if use_op_sac:
-        return _apply_op_sac(module, ac_config, base_fqn=base_fqn)
-
-    return _apply_layer_sac(module, ac_config)
+    return _apply_op_sac(module, ac_config, base_fqn=base_fqn)
 
 
 def apply_ac(
