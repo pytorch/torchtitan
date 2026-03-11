@@ -423,9 +423,6 @@ class MoE(Module):
         self.shared_experts = (
             FeedForward.Config(
                 hidden_dim=hidden_dim * config.num_shared_experts,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ).build(dim=dim)
             if config.num_shared_experts > 0
             else None

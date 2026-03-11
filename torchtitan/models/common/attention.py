@@ -407,14 +407,11 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wq: Linear.Config
-        wk: Linear.Config
-        wv: Linear.Config
-        wo: Linear.Config
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
+        linear_bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
@@ -448,16 +445,17 @@ class GQAttention(BaseAttention):
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        self.wq = config.wq.build(
+        linear_config = Linear.Config(bias=config.linear_bias)
+        self.wq = linear_config.build(
             in_features=dim, out_features=self.n_heads * self.head_dim
         )
-        self.wk = config.wk.build(
+        self.wk = linear_config.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wv = config.wv.build(
+        self.wv = linear_config.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wo = config.wo.build(
+        self.wo = linear_config.build(
             in_features=self.n_heads * self.head_dim, out_features=dim
         )
 

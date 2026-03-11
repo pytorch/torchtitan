@@ -45,10 +45,7 @@ gptoss_configs = {
                 load_balance_coeff=1e-3,
             ),
             attention=Attention.Config(
-                wq=Linear.Config(bias=True),
-                wk=Linear.Config(bias=True),
-                wv=Linear.Config(bias=True),
-                wo=Linear.Config(bias=True),
+                linear_bias=True,
             ),
         ),
         rope=RoPE.Config(
@@ -85,10 +82,7 @@ gptoss_configs = {
                 load_balance_coeff=1e-3,
             ),
             attention=Attention.Config(
-                wq=Linear.Config(bias=True),
-                wk=Linear.Config(bias=True),
-                wv=Linear.Config(bias=True),
-                wo=Linear.Config(bias=True),
+                linear_bias=True,
             ),
         ),
         rope=RoPE.Config(
@@ -125,10 +119,7 @@ gptoss_configs = {
                 load_balance_coeff=1e-3,
             ),
             attention=Attention.Config(
-                wq=Linear.Config(bias=True),
-                wk=Linear.Config(bias=True),
-                wv=Linear.Config(bias=True),
-                wo=Linear.Config(bias=True),
+                linear_bias=True,
             ),
         ),
         rope=RoPE.Config(

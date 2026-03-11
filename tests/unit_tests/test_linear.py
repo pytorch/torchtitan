@@ -134,18 +134,6 @@ class TestLinear(unittest.TestCase):
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
-    def test_dtype_explicit(self):
-        """Linear.Config(dtype=torch.float16) creates a float16 linear."""
-        config = Linear.Config(dtype=torch.float16)
-        linear = config.build(in_features=32, out_features=16)
-        self.assertEqual(linear.weight.dtype, torch.float16)
-
-    def test_dtype_default_none(self):
-        """Default dtype=None uses torch.get_default_dtype()."""
-        config = Linear.Config()
-        linear = config.build(in_features=32, out_features=16)
-        self.assertEqual(linear.weight.dtype, torch.get_default_dtype())
-
 
 class TestModuleInjection(unittest.TestCase):
     """Tests for post-quantization Module protocol injection."""

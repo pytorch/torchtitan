@@ -38,12 +38,10 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wq: Linear.Config | None
-        wq_a: Linear.Config | None
-        wq_b: Linear.Config | None
-        wkv_a: Linear.Config
-        wkv_b: Linear.Config
-        wo: Linear.Config
+        wq: Linear.Config | None = None
+        wq_a: Linear.Config | None = None
+        wq_b: Linear.Config | None = None
+        linear_bias: bool = False
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
         q_norm: RMSNorm.Config
@@ -69,8 +67,13 @@ class Attention(BaseAttention):
         self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
 
+        linear_config = Linear.Config(bias=config.linear_bias)
         if self.q_lora_rank == 0:
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
+            assert config.wq.bias == config.linear_bias, (
+                f"wq.bias ({config.wq.bias}) must match "
+                f"linear_bias ({config.linear_bias})"
+            )
             self.wq = config.wq.build(
                 in_features=self.dim, out_features=self.n_heads * self.qk_head_dim
             )
@@ -78,6 +81,14 @@ class Attention(BaseAttention):
             assert (
                 config.wq_a is not None and config.wq_b is not None
             ), "wq_a and wq_b are required when q_lora_rank > 0"
+            assert config.wq_a.bias == config.linear_bias, (
+                f"wq_a.bias ({config.wq_a.bias}) must match "
+                f"linear_bias ({config.linear_bias})"
+            )
+            assert config.wq_b.bias == config.linear_bias, (
+                f"wq_b.bias ({config.wq_b.bias}) must match "
+                f"linear_bias ({config.linear_bias})"
+            )
             self.wq_a = config.wq_a.build(
                 in_features=self.dim, out_features=self.q_lora_rank
             )
@@ -86,16 +97,16 @@ class Attention(BaseAttention):
                 in_features=self.q_lora_rank,
                 out_features=self.n_heads * self.qk_head_dim,
             )
-        self.wkv_a = config.wkv_a.build(
+        self.wkv_a = linear_config.build(
             in_features=self.dim,
             out_features=self.kv_lora_rank + self.qk_rope_head_dim,
         )
         self.kv_norm = config.kv_norm.build(normalized_shape=self.kv_lora_rank)
-        self.wkv_b = config.wkv_b.build(
+        self.wkv_b = linear_config.build(
             in_features=self.kv_lora_rank,
             out_features=self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
         )
-        self.wo = config.wo.build(
+        self.wo = linear_config.build(
             in_features=self.n_heads * self.v_head_dim, out_features=self.dim
         )
         self.softmax_scale = self.qk_head_dim**-0.5

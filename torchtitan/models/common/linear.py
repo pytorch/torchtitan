@@ -6,7 +6,6 @@
 
 from dataclasses import dataclass, field
 
-import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
@@ -33,7 +32,6 @@ class Linear(nn.Linear, Module):
         bias: bool = False
         init_mean: float = 0.0
         init_std: float = 0.02
-        dtype: torch.dtype | None = None
 
     def __init__(self, config: Config):
         if not hasattr(config, "in_features") or not hasattr(config, "out_features"):
@@ -46,7 +44,6 @@ class Linear(nn.Linear, Module):
             config.in_features,
             config.out_features,
             bias=config.bias,
-            dtype=config.dtype,
         )
         self._init_mean = config.init_mean
         self._init_std = config.init_std

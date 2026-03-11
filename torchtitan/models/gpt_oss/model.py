@@ -37,13 +37,10 @@ class Attention(BaseAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
-        wq: Linear.Config
-        wk: Linear.Config
-        wv: Linear.Config
-        wo: Linear.Config
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
+        linear_bias: bool = False
         attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
         attn_mask_type: str = "causal"
         sliding_window_size: int = 128
@@ -60,16 +57,17 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        self.wq = config.wq.build(
+        linear_config = Linear.Config(bias=config.linear_bias)
+        self.wq = linear_config.build(
             in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = config.wk.build(
+        self.wk = linear_config.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = config.wv.build(
+        self.wv = linear_config.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = config.wo.build(
+        self.wo = linear_config.build(
             in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
@@ -263,14 +261,6 @@ class GptOssModel(Decoder):
             )
 
     def __init__(self, config: Config):
-        # Theoretically, we can put the dtype assignment in the real config.
-        # However, this is risky in the sense that we may not set_device
-        # before importing configurations or someone may `set_default_dtype()`
-        # in the trainer.__init__().
-        config = dataclasses.replace(
-            config,
-            output=dataclasses.replace(config.output, dtype=torch.get_default_dtype()),
-        )
         super().__init__(config)
 
     def get_attention_masks(

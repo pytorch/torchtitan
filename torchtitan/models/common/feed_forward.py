@@ -42,20 +42,19 @@ class FeedForward(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hidden_dim: int
-        w1: Linear.Config
-        w2: Linear.Config
-        w3: Linear.Config
+        linear_bias: bool = False
         dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w1 = config.w1.build(
+        linear_config = Linear.Config(bias=config.linear_bias)
+        self.w1 = linear_config.build(
             in_features=config.dim, out_features=config.hidden_dim
         )
-        self.w2 = config.w2.build(
+        self.w2 = linear_config.build(
             in_features=config.hidden_dim, out_features=config.dim
         )
-        self.w3 = config.w3.build(
+        self.w3 = linear_config.build(
             in_features=config.dim, out_features=config.hidden_dim
         )
 

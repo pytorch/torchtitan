@@ -44,19 +44,12 @@ llama4_configs = {
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256),
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
             moe=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
         ),
@@ -95,9 +88,6 @@ llama4_configs = {
                 hidden_dim=compute_ffn_hidden_dim(
                     5120, multiple_of=2048, ffn_dim_multiplier=1.2
                 ),
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
@@ -105,10 +95,6 @@ llama4_configs = {
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -145,9 +131,6 @@ llama4_configs = {
                 hidden_dim=compute_ffn_hidden_dim(
                     5120, multiple_of=2048, ffn_dim_multiplier=1.2
                 ),
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
@@ -155,10 +138,6 @@ llama4_configs = {
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(

@@ -39,9 +39,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=3072,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
@@ -51,10 +48,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -77,9 +70,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=3072,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
@@ -89,10 +79,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -115,9 +101,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=6144,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
@@ -127,10 +110,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -153,9 +132,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=9728,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=32,
@@ -165,10 +141,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -190,9 +162,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=12288,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=32,
@@ -202,10 +171,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -227,9 +192,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=17408,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
@@ -239,10 +201,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -264,9 +222,6 @@ qwen3_configs = {
             ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(
                 hidden_dim=25600,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=64,
@@ -276,10 +231,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -313,9 +264,6 @@ qwen3_configs = {
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=3072,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
@@ -325,10 +273,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -361,9 +305,6 @@ qwen3_configs = {
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=6144,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=32,
@@ -373,10 +314,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
@@ -409,9 +346,6 @@ qwen3_configs = {
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=12288,
-                w1=Linear.Config(),
-                w2=Linear.Config(),
-                w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=64,
@@ -421,10 +355,6 @@ qwen3_configs = {
                 k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
-                wq=Linear.Config(),
-                wk=Linear.Config(),
-                wv=Linear.Config(),
-                wo=Linear.Config(),
             ),
         ),
         rope=RoPE.Config(
