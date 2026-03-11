@@ -114,7 +114,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-        )
+        ).to(xq.dtype)
 
 
 class FlexAttentionWrapper(torch.nn.Module):
