@@ -12,6 +12,7 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.module import Module
 
 
@@ -118,12 +119,12 @@ class MLPEmbedder(Module):
 class QKNorm(torch.nn.Module):
     def __init__(self, dim: int):
         super().__init__()
-        self.query_norm = nn.RMSNorm(dim)
-        self.key_norm = nn.RMSNorm(dim)
+        self.query_norm = RMSNorm.Config().build(normalized_shape=dim)
+        self.key_norm = RMSNorm.Config().build(normalized_shape=dim)
 
     def init_weights(self):
-        self.query_norm.reset_parameters()
-        self.key_norm.reset_parameters()
+        self.query_norm.init_weights()
+        self.key_norm.init_weights()
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         q = self.query_norm(q)

@@ -17,7 +17,6 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.moe.utils import _permute, _unpermute
-from torchtitan.models.common.utils import trunc_normal_
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -153,27 +152,27 @@ def _run_experts_grouped_mm(
     tp_degree: int = 1,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-    num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
+    # Pad num_tokens_per_expert with tail slack so that repeat_interleave
+    # with output_size=x.shape[0] directly produces a static-shaped output,
+    # avoiding the D2H sync that repeat_interleave incurs without output_size.
+    tail_slack = (x.shape[0] - offsets[-1]).unsqueeze(0).to(num_tokens_per_expert.dtype)
+    num_tokens_per_expert_long = torch.cat([num_tokens_per_expert, tail_slack]).long()
 
     h = torch._grouped_mm(
         x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets
     )
 
-    b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
-    tail_slack = x.shape[0] - int(offsets[-1])
-    if tail_slack:
-        b1 = torch.cat([b1, b1.new_zeros((tail_slack, b1.shape[-1]))], dim=0)
+    b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
+    b1 = b1.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
     h = h + b1.to(h.dtype)
 
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
 
     # Apply custom autograd function to scale bias in forward but not in backward
-    b2_base = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
-    b2 = ScaleBiasForward.apply(b2_base, tp_degree)
-    tail_slack = x.shape[0] - int(offsets[-1])
-    if tail_slack:  # padding
-        b2 = torch.cat([b2, b2.new_zeros((tail_slack, b2.shape[-1]))], dim=0)
+    b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
+    b2 = b2.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
+    b2 = ScaleBiasForward.apply(b2, tp_degree)
     h = h + b2.to(h.dtype)
 
     return h
@@ -265,10 +264,10 @@ class GptOssGroupedExperts(nn.Module):
             )
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
 
 
 class GptOssMoE(MoE):
