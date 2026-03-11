@@ -562,7 +562,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--comm.use_torchcomms",
+                    "--comm.mode torchcomms",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--compile.enable",
@@ -575,7 +575,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--comm.use_torchcomms",
+                    "--comm.mode torchcomms",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--compile.enable",

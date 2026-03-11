@@ -356,7 +356,7 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    mode: Literal["default", "fake_backend", "local_tensor", "torchcomms"] = "default"
     """
     Communication mode for distributed training.
 
@@ -368,17 +368,9 @@ class CommConfig:
       rank after another. While the performance will be slow, the numerics should be the same.
       This enables us to verify numerics with fewer GPUs. For example, we can directly run 5D
       parallelisms within a single node to reduce the combinations we need to use in integration tests.
+    - "torchcomms": Use torchcomms-based communicators. Requires the torchcomms package to be installed.
 
     NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
-    """
-
-    use_torchcomms: bool = False
-    """
-    Whether to use torchcomms for communication. When enabled,
-    ``dist_config.use_torchcomms`` is set to ``True`` before distributed
-    initialization so that PyTorch uses torchcomms-based communicators.
-
-    NOTE: This requires the torchcomms package to be installed.
     """
 
 

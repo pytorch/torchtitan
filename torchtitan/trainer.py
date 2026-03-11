@@ -505,18 +505,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def init_distributed(self) -> ParallelDims:
         config = self.config
-
-        if config.comm.use_torchcomms:
-            try:
-                import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
-            except ImportError as err:
-                raise ImportError(
-                    "torchcomms package is required for --comm.use_torchcomms. "
-                ) from err
-            import torch.distributed.config as dist_config
-
-            dist_config.use_torchcomms = True
-
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
