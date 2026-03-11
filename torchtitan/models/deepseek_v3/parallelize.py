@@ -106,29 +106,30 @@ def parallelize_deepseekv3(
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
-    # Check if using DeepEP for MoE communication
-    if parallelism.expert_parallel_comm_backend == "deepep":
+    # Check if using DeepEP/HybridEP for MoE communication
+    comm_backend = parallelism.expert_parallel_comm_backend
+    if comm_backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
             raise ValueError(
-                "DeepEP requires expert parallelism (ep_degree > 1). "
-                "The DeepEP MoE model code does not support EP=1. "
+                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
                 "Please set expert_parallel_degree > 1 or use standard communication backend."
             )
         if parallel_dims.etp_enabled:
             raise NotImplementedError(
-                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
-        use_deepep = True
+        if comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
-        # Import deepep module to register custom ops before accessing them
-        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+            _op_sac_save_list.add(torch.ops.hybridep.dispatch.default)
+            _op_sac_save_list.add(torch.ops.hybridep.combine.default)
+        else:
+            import torchtitan.distributed.deepep  # noqa: F401
 
-        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-        _op_sac_save_list.add(torch.ops.deepep.combine.default)
-    else:
-        use_deepep = False
+            _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+            _op_sac_save_list.add(torch.ops.deepep.combine.default)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(
@@ -142,7 +143,8 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
-            use_deepep=use_deepep,
+            comm_backend=comm_backend,
+            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
         )
 
     if parallel_dims.cp_enabled:
