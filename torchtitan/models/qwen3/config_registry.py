@@ -223,24 +223,3 @@ def qwen3_moe_debug() -> Trainer.Config:
             selective_ac_option="op",
         ),
     )
-
-
-def qwen3_moe_30b_a3b() -> Trainer.Config:
-    return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
-        metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("MOE-30B-A3B"),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=OptimizersContainer.Config(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
-        training=TrainingConfig(local_batch_size=4, seq_len=4096, steps=10),
-        parallelism=ParallelismConfig(
-            tensor_parallel_degree=2,
-            expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
-        ),
-        checkpoint=CheckpointManager.Config(interval=500, last_save_model_only=False),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective", selective_ac_option="op"
-        ),
-    )
