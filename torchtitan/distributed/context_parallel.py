@@ -20,7 +20,7 @@ from torch.distributed.tensor.experimental._attention import (
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
 from torchtitan.tools.logging import logger
 
 
@@ -42,10 +42,7 @@ def apply_cp_to_attention_module(
         attention_type: Type of attention mechanism. Must be one of:
             - "sdpa": scaled_dot_product_attention()
             - "flex": flex_attention()
-            - "varlen": varlen_attn() (not yet implemented)
-
-    Raises:
-        NotImplementedError: If attention_type is "varlen"
+            - "varlen": varlen_attn() with Magi Attention CP
     """
     # Apply context parallelism to every attention module
     # TODO: make seq_dim configurable once the implementation doesn't assume 2
@@ -67,9 +64,14 @@ def apply_cp_to_attention_module(
                 seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
             )
         case "varlen":
-            raise NotImplementedError(
-                "Variable-length attention CP is not yet supported"
-            )
+            # Varlen CP uses Magi Attention (arXiv:2505.13211) rather than
+            # PyTorch's _ContextParallel (which doesn't support varlen).
+            # Set cp_mesh on each VarlenAttentionWrapper so its forward
+            # method can detect CP and use the Magi Attention path.
+            for attention_module in attention_modules:
+                attention_module._cp_mesh = cp_mesh
+            logger.info("Applied Varlen Context Parallel (Magi Attention) to the model")
+            return
         case _:
             raise ValueError(
                 f"Invalid attention_type '{attention_type}'. "
@@ -119,6 +121,15 @@ def prepare_context_parallel_input(
               sharded 'attention_masks'
     """
     attention_masks = extra_kwargs.get("attention_masks", None)
+
+    if isinstance(attention_masks, VarlenMetadata):
+        # Varlen CP path: simple sequence sharding, keep global cu_seqlens.
+        # The VarlenAttentionWrapper._forward_cp handles the ring attention.
+        return _prepare_varlen_cp_input(
+            inputs, labels, extra_kwargs, cp_mesh, device
+        )
+
+    # Standard CP path (SDPA/Flex)
     positions = torch.arange(
         0, inputs.shape[1], dtype=torch.int32, device=device
     ).expand(inputs.shape)
@@ -131,6 +142,44 @@ def prepare_context_parallel_input(
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
         extra_kwargs["attention_masks"] = attention_masks
+
+    return inputs, labels, extra_kwargs
+
+
+def _prepare_varlen_cp_input(
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    extra_kwargs: dict[str, Any],
+    cp_mesh: DeviceMesh,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Prepare inputs for varlen + context parallel.
+
+    Shards inputs and labels along the sequence dimension. Keeps the
+    global VarlenMetadata (cu_seqlens) intact — the VarlenAttentionWrapper
+    with CP enabled will handle cross-rank attention via Magi Attention.
+    """
+    cp_rank = cp_mesh.get_local_rank()
+    cp_world_size = cp_mesh.size(0)
+    seq_len = inputs.shape[1]
+
+    assert seq_len % cp_world_size == 0, (
+        f"Sequence length {seq_len} must be divisible by CP world size "
+        f"{cp_world_size} for varlen CP"
+    )
+    chunk_size = seq_len // cp_world_size
+
+    chunk_start = cp_rank * chunk_size
+    positions = torch.arange(
+        chunk_start,
+        chunk_start + chunk_size,
+        dtype=torch.int32,
+        device=device,
+    ).expand(inputs.shape[0], -1)
+    extra_kwargs["positions"] = positions
+
+    inputs = inputs[:, chunk_start : chunk_start + chunk_size].contiguous()
+    labels = labels[:, chunk_start : chunk_start + chunk_size].contiguous()
 
     return inputs, labels, extra_kwargs
 
