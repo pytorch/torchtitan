@@ -6,13 +6,14 @@
 
 import logging
 import os
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
 import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torch.distributed.tensor import DTensor
-from torchstore.direct_weight_sync import DirectWeightSyncDest, RDMAWeightHandle
+from torchstore.direct_weight_sync import DirectWeightSyncDest, RDMA_KEY_PREFIX, RDMAWeightHandle
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -244,12 +245,12 @@ class VLLMGenerator(Actor, Configurable):
 
     async def _fetch_rdma_handles(self) -> dict[str, list[RDMAWeightHandle]]:
         """Fetch RDMA handles from all trainer ranks via TorchStore."""
-        num_ranks = await ts.get("policy_rdma/num_ranks")
-        all_handles: dict[str, list[RDMAWeightHandle]] = {}
+        num_ranks = await ts.get(f"{RDMA_KEY_PREFIX}/num_ranks")
+        all_handles: defaultdict[str, list[RDMAWeightHandle]] = defaultdict(list)
         for r in range(num_ranks):
-            rank_handles = await ts.get(f"policy_rdma/rank_{r}")
+            rank_handles = await ts.get(f"{RDMA_KEY_PREFIX}/rank_{r}")
             for name, handle in rank_handles.items():
-                all_handles.setdefault(name, []).append(handle)
+                all_handles[name].append(handle)
         logger.debug(
             f"Fetched RDMA handles from {num_ranks} trainer ranks "
             f"({len(all_handles)} params)"

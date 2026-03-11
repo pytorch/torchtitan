@@ -19,7 +19,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torchstore.direct_weight_sync import DirectWeightSyncSource
+from torchstore.direct_weight_sync import DirectWeightSyncSource, RDMA_KEY_PREFIX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
@@ -233,9 +233,9 @@ class PolicyTrainer(Actor, Configurable):
         """
         rank = dist.get_rank()
         handles = self._rdma_source.register(self.model.state_dict(), rank=rank)
-        await ts.put(f"policy_rdma/rank_{rank}", handles)
+        await ts.put(f"{RDMA_KEY_PREFIX}/rank_{rank}", handles)
         if rank == 0:
-            await ts.put("policy_rdma/num_ranks", dist.get_world_size())
+            await ts.put(f"{RDMA_KEY_PREFIX}/num_ranks", dist.get_world_size())
 
     @endpoint
     async def refresh_weights(self) -> None:
