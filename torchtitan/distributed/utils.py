@@ -196,6 +196,7 @@ def set_determinism(
         # this API uses.
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
 
+
 class TrainContext(Protocol):
     @abstractmethod
     def __call__(self) -> contextlib.AbstractContextManager[None]:
