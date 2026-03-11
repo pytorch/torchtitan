@@ -484,7 +484,13 @@ def get_joint_custom_passes_from_config(
     )
 
     joint_custom_passes = []
-    joint_custom_passes.append(validate_flex_attn_annotation_pass)
+
+    # Skip flex_attention annotation validation when full_inductor_compilation
+    # is used, since it compiles everything through Inductor regardless of
+    # annotations. The validation is only relevant for regional_inductor.
+    pass_names = getattr(compile_config, "passes", [])
+    if "full_inductor_compilation" not in pass_names:
+        joint_custom_passes.append(validate_flex_attn_annotation_pass)
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])
