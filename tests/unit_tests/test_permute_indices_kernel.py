@@ -71,7 +71,6 @@ class TestOptimizedKernel(unittest.TestCase):
         experts_per_rank: int,
         num_ranks: int,
         token_range: tuple[int, int] = (1, 16),
-        alignment: int = 32,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Create test data"""
         # Create token counts
@@ -88,18 +87,14 @@ class TestOptimizedKernel(unittest.TestCase):
             torch.cumsum(tokens_per_expert_group, 0) - tokens_per_expert_group
         )
 
-        # Calcu chunk sizes
-        chunk_size_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
-        m_sizes = ((chunk_size_per_expert + alignment - 1) // alignment * alignment).to(
-            torch.int32
-        )
+        # Total tokens per expert (sum across ranks)
+        m_sizes = tokens_per_expert_group.view(num_ranks, -1).sum(0).to(torch.int32)
 
         # Calc write offsets
         write_offsets = torch.cumsum(m_sizes, 0) - m_sizes
 
-        # Calcu max_len
-        total_tokens = tokens_per_expert_group.sum().item()
-        max_len = total_tokens * 2  # Give some extra space
+        # max_len is sum of all tokens
+        max_len = tokens_per_expert_group.sum().item()
 
         return tokens_per_expert_group, start_index_values, write_offsets, max_len
 
@@ -411,119 +406,6 @@ class TestOptimizedKernel(unittest.TestCase):
                     torch.equal(cpu_result, optimized_result),
                     f"Triton kernel failed with extreme max_blocks limit of {max_blocks}",
                 )
-
-
-# NOTE: original tests, kept for reference
-# from torchtitan.models.common.moe.kernels import generate_permute_indices
-
-# def simple_test():
-#     device = torch.device("cuda", 0)
-#     experts_per_rank = 4
-#     num_ranks = 4
-#     tokens_per_expert_group = torch.full(
-#         (num_ranks * experts_per_rank,), 4, dtype=torch.int32, device=device
-#     )
-#     max_len = 128
-#     alignment = 32
-#     # Use the GPU kernel
-#     permuted_indices_gpu, m_sizes, _ = generate_permute_indices(
-#         tokens_per_expert_group, experts_per_rank, num_ranks, max_len, alignment
-#     )
-#     # Use the CPU method
-#     permuted_indices_cpu, m_sizes, _ = generate_permute_indices(
-#         tokens_per_expert_group,
-#         experts_per_rank,
-#         num_ranks,
-#         max_len,
-#         alignment,
-#         use_cpu=True,
-#     )
-#     # Check that the results are the same
-
-#     assert torch.equal(permuted_indices_gpu.cpu(), permuted_indices_cpu)
-#     assert torch.equal(
-#         torch.remainder(m_sizes, alignment),
-#         torch.zeros(experts_per_rank, device=device),
-#     )
-#     # Print the results
-#     print(f"{permuted_indices_gpu=}, \n{permuted_indices_cpu=}")
-#     print(f"{m_sizes=}")
-#     print("Success")
-#     return True  # assert would have failed meaning getting here is success.
-
-
-# def test_with_zero_tokens():
-#     device = torch.device("cuda", 0)
-#     experts_per_rank = 4
-#     num_ranks = 2
-
-#     # Create a test case where some experts have zero tokens
-#     tokens_per_expert_group = torch.tensor(
-#         [4, 0, 2, 3, 1, 0, 0, 5],  # Some experts have zero tokens
-#         dtype=torch.int32,
-#         device=device,
-#     )
-
-#     max_len = 128
-#     alignment = 8
-
-#     # Use the GPU kernel
-#     permuted_indices_gpu, m_sizes, m_offsets = generate_permute_indices(
-#         tokens_per_expert_group,
-#         experts_per_rank,
-#         num_ranks,
-#         max_len,
-#         alignment,
-#     )
-
-#     # Use the CPU method
-#     permuted_indices_cpu, m_sizes_cpu, m_offsets_cpu = generate_permute_indices(
-#         tokens_per_expert_group,
-#         experts_per_rank,
-#         num_ranks,
-#         max_len,
-#         alignment,
-#         use_cpu=True,
-#     )
-
-#     # Check that the results are the same
-#     assert torch.equal(permuted_indices_gpu.cpu(), permuted_indices_cpu)
-#     assert torch.equal(m_sizes, m_sizes_cpu)
-
-#     # Verify that experts with zero tokens have at least min_slots_per_expert
-#     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
-#     zero_token_experts = total_tokens_per_expert == 0
-#     if zero_token_experts.any():
-#         assert (m_sizes[zero_token_experts] >= alignment).all()
-
-#     # Check alignment
-#     assert torch.equal(
-#         torch.remainder(m_sizes, alignment),
-#         torch.zeros(experts_per_rank, device=device),
-#     )
-
-#     # Print the results
-#     print(f"tokens_per_expert_group = {tokens_per_expert_group}")
-#     print(f"total_tokens_per_expert = {total_tokens_per_expert}")
-#     print(f"m_sizes = {m_sizes}")
-#     print(f"m_offsets = {m_offsets}")
-#     print(f"permuted_indices = {permuted_indices_gpu[:sum(m_sizes).item()]}")
-
-#     # Check that experts with zero tokens have -1 in their slots
-#     for e in range(experts_per_rank):
-#         start = (m_offsets[e] - m_sizes[e]).item()
-#         end = m_offsets[e].item()
-#         expert_indices = permuted_indices_gpu[start:end]
-#         if total_tokens_per_expert[e] == 0:
-#             assert (
-#                 expert_indices == -1
-#             ).all(), f"Expert {e} with zero tokens should have all -1 indices"
-#             assert (
-#                 expert_indices.size(0) >= alignment
-#             ), f"Expert {e} with zero tokens should have at least {alignment} slots"
-#             print(
-#                 f"Expert {e} has zero tokens and {expert_indices.size(0)} slots with all -1"
-#             )
 
 
 if __name__ == "__main__":

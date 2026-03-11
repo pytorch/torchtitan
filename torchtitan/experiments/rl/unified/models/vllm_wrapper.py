@@ -29,12 +29,31 @@ from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_attention,
 )
 from torchtitan.protocols.model_spec import ModelSpec
-
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import torch_utils as _torch_utils
 
 
 logger = init_logger(__name__)
+
+# NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
+# This is because piecewise CUDA-graph capture calls weak_ref_tensor()
+# on every subgraphoutput (see vllm/compilation/cuda_graph.py).
+# When TP is active some of those outputs are DTensors which fail with
+# ("The specified pointer resides on host memory").  to_local
+# converts the DTensor to a plain tensor. which succeeds with this
+# cudagraph implementation.
+_original_weak_ref_tensor = _torch_utils.weak_ref_tensor
+
+
+def _dtensor_safe_weak_ref_tensor(tensor):
+    if isinstance(tensor, DTensor):
+        tensor = tensor._local_tensor
+    return _original_weak_ref_tensor(tensor)
+
+
+_torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
 def create_torchtitan_config_from_vllm_config(
@@ -93,6 +112,12 @@ def create_torchtitan_config_from_vllm_config(
     return parallel_dims, parallelism
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+    }
+)
 class TorchTitanVLLMModelWrapper(nn.Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
@@ -129,7 +154,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Use TorchTitan model config directly (no HF config mapping)
         self.config = model_spec.model
-        logger.debug(f"Creating model with config: {self.config}")
+        logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
@@ -158,28 +183,32 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             has_position_id=True,  # vLLM always passes positions explicitly
         )
 
+        # Pre-extend RoPE cache to cover vLLM's max model length (profiling
+        # may use up to 2x max_seq_len, so use max_model_len which already
+        # accounts for this).  This avoids data-dependent control flow in
+        # forward() which is incompatible with torch.compile.
+        max_model_len = vllm_config.model_config.max_model_len
+        if self.model.freqs_cis.shape[0] < max_model_len:
+            self.model.freqs_cis = self._extend_rope_cache(
+                self.model.freqs_cis, max_model_len
+            )
+
         # Initial load model weights from HuggingFace checkpoint path
         self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
 
-    def _extend_rope_cache_if_needed(
-        self, rope_cache: torch.Tensor, max_position: int
+    def _extend_rope_cache(
+        self, rope_cache: torch.Tensor, required_len: int
     ) -> torch.Tensor:
         """
-        Extend RoPE cache if needed during vLLM profiling stage.
+        Build an extended RoPE cache of at least ``required_len`` positions.
 
         Args:
             rope_cache: Current RoPE cache tensor
-            max_position: Maximum position index needed
+            required_len: Minimum number of positions the cache must cover
 
         Returns:
-            Extended RoPE cache if needed, otherwise original cache
+            Extended RoPE cache tensor
         """
-        required_len = max_position + 1
-
-        # No extension needed
-        if required_len <= rope_cache.shape[0]:
-            return rope_cache
-
         # Handle DTensor case
         is_dtensor = isinstance(rope_cache, DTensor)
         if is_dtensor:
@@ -253,15 +282,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Get embeddings
         h = self.model.tok_embeddings(tokens_2d)
 
-        # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
-        if positions is not None:
-            max_position = positions.max().item()
-        else:
-            max_position = 0
-
-        rope_cache = self._extend_rope_cache_if_needed(
-            self.model.freqs_cis, max_position
-        )
+        rope_cache = self.model.freqs_cis
         positions = positions.unsqueeze(0)
 
         # Pass through transformer layers
@@ -275,9 +296,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
-            batch_size, seq_len, hidden_size = h.shape
-            h = h.view(batch_size * seq_len, hidden_size)
-
+            hidden_size = h.size(-1)
+            h = h.view(-1, hidden_size)
         return h
 
     def compute_logits(

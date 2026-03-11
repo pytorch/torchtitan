@@ -13,10 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
-
-from .utils import indices_padding_wrapper
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -28,31 +25,13 @@ def _run_experts_for_loop(
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
-    from .utils import TOKEN_GROUP_ALIGN_SIZE_M
-
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
-
-    # When padding is active (FP8/MXFP8), x may be larger than the actual
-    # token count due to alignment padding. Slice to actual tokens before
-    # compute, then re-pad after. When no padding (BF16), these are no-ops.
-    num_actual_tokens = sum(num_tokens_per_expert_list)
-    num_padding = x.shape[0] - num_actual_tokens
-
-    # Provide hints to torch.compile about the relationship between
-    # num_actual_tokens and x.shape[0], since num_actual_tokens is
-    # data-dependent (unbacked symint).
-    if TOKEN_GROUP_ALIGN_SIZE_M == 1:
-        torch._check(num_padding == 0)
-        torch._check(num_actual_tokens == x.shape[0])
-    else:
-        torch._check(num_actual_tokens >= 0)
-        torch._check(num_actual_tokens <= x.shape[0])
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[:num_actual_tokens],
+        x,
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
@@ -63,12 +42,7 @@ def _run_experts_for_loop(
         h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
         # h shape (tokens_per_expert(varying), dim)
         out_experts_splits.append(h)
-    out = torch.cat(out_experts_splits, dim=0)
-
-    if num_padding > 0:
-        out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-
-    return out
+    return torch.cat(out_experts_splits, dim=0)
 
 
 def _run_experts_grouped_mm(
@@ -125,25 +99,14 @@ class GroupedExperts(nn.Module):
             w3 = self.w3
 
         if self.use_grouped_mm:
-            # NOTE: If EP is not used, we need to pad the indices
-            #       to prepare for grouped_mm;
-            #       otherwise, EP will handle the padding.
-            if (
-                not isinstance(self.w1, DTensor)
-                # pyrefly: ignore[not-iterable]
-                or "ep" not in self.w1.device_mesh.mesh_dim_names
-            ):
-                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
-            else:
-                run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.w1, mean=0.0, std=0.02)
-        trunc_normal_(self.w2, mean=0.0, std=init_std)
-        trunc_normal_(self.w3, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -270,13 +233,16 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        # Compute gate in float32 to help stability of expert load balancing.
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            scores = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
+        # scored is already float32 from the autocast above.
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(scores, dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -316,7 +282,7 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
         if self.gate.bias is not None:
             nn.init.zeros_(self.gate.bias)
 

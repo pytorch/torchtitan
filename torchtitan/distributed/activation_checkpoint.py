@@ -73,6 +73,9 @@ def _apply_op_sac(
         create_selective_checkpoint_contexts,
     )
 
+    # Collect weight shapes to force-recompute, stored as mm RHS shape
+    # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
+    # time to match, since linear's weight is (out_f, in_f).
     mm_recompute_shapes = set()
     if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
         for module_fqn, submod in module.named_modules():
@@ -95,6 +98,10 @@ def _apply_op_sac(
             f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
         )
 
+    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
+    # instead of decomposing it into aten.mm, so we must handle both.
+    mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
+
     def _get_custom_policy(meta):
         def _custom_policy(ctx, func, *args, **kwargs):
             if (
@@ -107,13 +114,17 @@ def _apply_op_sac(
 
             mode = "recompute" if ctx.is_recompute else "forward"
             mm_count_key = f"{mode}_mm_count"
-            if func == torch.ops.aten.mm.default:
-                if args[1].shape in mm_recompute_shapes:
+            if func in mm_ops:
+                weight_shape = args[1].shape
+                # linear weight is (out, in); normalize to (in, out) to match mm
+                if func == torch.ops.aten.linear.default:
+                    weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
+                if weight_shape in mm_recompute_shapes:
                     return CheckpointPolicy.PREFER_RECOMPUTE
                 meta[mm_count_key] += 1
-            # Saves output of all compute ops, except every second mm
+            # Saves output of all compute ops, except every second mm/linear
             to_save = func in op_sac_save_list and not (
-                func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
+                func in mm_ops and meta[mm_count_key] % 2 == 0
             )
             return (
                 CheckpointPolicy.MUST_SAVE

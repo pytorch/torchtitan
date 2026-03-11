@@ -134,10 +134,7 @@ class ExpertParallel(BaseExpertParallel):
         # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
         #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
         # We need to perform another shuffle to get the correct layout, via the _permute function
-        # below. When TOKEN_GROUP_ALIGN_SIZE_M > 1 (FP8/MXFP8), this also pads token groups
-        # to alignment boundaries. For BF16 (TOKEN_GROUP_ALIGN_SIZE_M=1), no padding is applied.
-        # Note that padding will create side effects when wrapping the for-loop implementation
-        # of GroupedExperts, as it does not need padding.
+        # below, which reorders tokens from rank-major to expert-major order.
 
         (
             self.input_shape,

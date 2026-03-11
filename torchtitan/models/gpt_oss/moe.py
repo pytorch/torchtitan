@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from dataclasses import dataclass
 
 import torch
@@ -16,8 +14,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe.moe import MoE
-from torchtitan.models.common.moe.utils import _permute, _unpermute
-from torchtitan.models.common.utils import trunc_normal_
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -41,68 +37,6 @@ class ScaleBiasForward(torch.autograd.Function):
     def backward(ctx, grad_output):
         # Don't scale the gradient - pass it through as-is
         return grad_output, None
-
-
-def indices_padding_wrapper(func: Callable) -> Callable:
-    """
-    In order to use torch._grouped_mm, we need to make sure the number of
-    tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
-    generate_permute_indices kernel also helps achieve this via padding,
-    without incurring synchronization between device and host.
-
-    When TOKEN_GROUP_ALIGN_SIZE_M == 1 (BF16 path), this wrapper is a no-op
-    since BF16 grouped GEMM does not require token group alignment.
-    """
-
-    def wrapper(
-        mlp1_weight: torch.Tensor,
-        mlp1_bias: torch.Tensor,
-        mlp2_weight: torch.Tensor,
-        mlp2_bias: torch.Tensor,
-        swiglu_limit: float,
-        x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-        tp_degree: int = 1,
-    ) -> torch.Tensor:
-        from torchtitan.models.common.moe.utils import TOKEN_GROUP_ALIGN_SIZE_M
-
-        if TOKEN_GROUP_ALIGN_SIZE_M == 1:
-            # BF16 path: no padding needed, call function directly.
-            return func(
-                mlp1_weight,
-                mlp1_bias,
-                mlp2_weight,
-                mlp2_bias,
-                swiglu_limit,
-                x,
-                num_tokens_per_expert,
-                tp_degree,
-            )
-
-        # FP8/MXFP8 path: pad token groups before computation, then unpad after.
-        num_local_experts = mlp1_weight.shape[0]
-        ep_degree = num_tokens_per_expert.shape[0] // num_local_experts
-
-        input_shape, x, permuted_indices, num_tokens_per_expert = _permute(
-            x, num_tokens_per_expert, ep_degree, num_local_experts
-        )
-
-        out = func(
-            mlp1_weight,
-            mlp1_bias,
-            mlp2_weight,
-            mlp2_bias,
-            swiglu_limit,
-            x,
-            num_tokens_per_expert,
-            tp_degree,
-        )
-
-        out = _unpermute(out, input_shape, permuted_indices)
-
-        return out
-
-    return wrapper
 
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
@@ -129,14 +63,11 @@ def _run_experts_for_loop(
     # pyrefly: ignore [bad-assignment]
     num_tokens_per_expert = num_tokens_per_expert.tolist()
 
-    # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert)
-
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     # pyrefly: ignore [bad-assignment]
     x = torch.split(
-        x[: sum(num_tokens_per_expert)],
+        x,
         # pyrefly: ignore [bad-argument-type]
         split_size_or_sections=num_tokens_per_expert,
         dim=0,
@@ -152,13 +83,7 @@ def _run_experts_for_loop(
         b2 = ScaleBiasForward.apply(mlp2_bias[expert_idx], tp_degree)
         h = torch.matmul(h, mlp2_weight[expert_idx].transpose(-2, -1)) + b2
         out_experts_splits.append(h)
-    out = torch.cat(out_experts_splits, dim=0)
-
-    # side-effect code due to the usage of generate_permute_indices
-    # pyrefly: ignore [no-matching-overload]
-    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-
-    return out
+    return torch.cat(out_experts_splits, dim=0)
 
 
 def _run_experts_grouped_mm(
@@ -172,27 +97,27 @@ def _run_experts_grouped_mm(
     tp_degree: int = 1,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-    num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
+    # Pad num_tokens_per_expert with tail slack so that repeat_interleave
+    # with output_size=x.shape[0] directly produces a static-shaped output,
+    # avoiding the D2H sync that repeat_interleave incurs without output_size.
+    tail_slack = (x.shape[0] - offsets[-1]).unsqueeze(0).to(num_tokens_per_expert.dtype)
+    num_tokens_per_expert_long = torch.cat([num_tokens_per_expert, tail_slack]).long()
 
     h = torch._grouped_mm(
         x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets
     )
 
-    b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
-    tail_slack = x.shape[0] - int(offsets[-1])
-    if tail_slack:
-        b1 = torch.cat([b1, b1.new_zeros((tail_slack, b1.shape[-1]))], dim=0)
+    b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
+    b1 = b1.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
     h = h + b1.to(h.dtype)
 
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
 
     # Apply custom autograd function to scale bias in forward but not in backward
-    b2_base = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
-    b2 = ScaleBiasForward.apply(b2_base, tp_degree)
-    tail_slack = x.shape[0] - int(offsets[-1])
-    if tail_slack:  # padding
-        b2 = torch.cat([b2, b2.new_zeros((tail_slack, b2.shape[-1]))], dim=0)
+    b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
+    b2 = b2.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
+    b2 = ScaleBiasForward.apply(b2, tp_degree)
     h = h + b2.to(h.dtype)
 
     return h
@@ -253,15 +178,7 @@ class GptOssGroupedExperts(nn.Module):
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 
         if self.use_grouped_mm:
-            if (
-                not isinstance(self.mlp1_weight, DTensor)
-                # pyrefly: ignore[not-iterable]
-                or "ep" not in self.mlp1_weight.device_mesh.mesh_dim_names
-            ):
-                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
-            else:
-                run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(
+            return _run_experts_grouped_mm(
                 mlp1_weight,
                 mlp1_bias,
                 mlp2_weight,
@@ -284,10 +201,10 @@ class GptOssGroupedExperts(nn.Module):
             )
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
 
 
 class GptOssMoE(MoE):

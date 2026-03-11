@@ -20,5 +20,15 @@ class Module(nn.Module, Configurable):
 
     @abstractmethod
     def init_weights(self, **kwargs) -> None:
-        """Initialize weights. Subclasses define specific signature."""
-        ...
+        """Initialize weights. Subclasses must override this method.
+
+        Note: ``@abstractmethod`` alone does not enforce this because
+        ``nn.Module`` uses plain ``type`` as its metaclass, not ``ABCMeta``.
+        The ``raise NotImplementedError`` provides runtime enforcement so
+        that any subclass (including diamond-inheritance cases like
+        ``Embedding(nn.Embedding, Module)``) gets a clear error if it
+        forgets to implement ``init_weights``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement init_weights()"
+        )

@@ -13,7 +13,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -89,12 +88,12 @@ class Attention(BaseAttention):
             self.wv,
         ]
 
-        trunc_normal_(self.sinks, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
         for linear in linear_list:
-            trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            trunc_normal_(linear.bias, mean=0.0, std=init_std)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
 
     def forward(
         self,
@@ -167,8 +166,8 @@ class GptOssTransformerBlock(TransformerBlock):
         super().__init__()
         self.use_sliding_attention = layer_id % 2 == 0
         self.attention = config.attention.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
+        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         assert config.moe is not None
         self.moe = config.moe.build(dim=dim)
@@ -212,7 +211,7 @@ class GptOssTransformerBlock(TransformerBlock):
     def init_weights(self, **kwargs):
         buffer_device = kwargs.get("buffer_device")
         for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
+            norm.init_weights()
         self.attention.init_weights(init_std=self.weight_init_std)
         self.moe.init_weights(
             init_std=self.weight_init_std, buffer_device=buffer_device

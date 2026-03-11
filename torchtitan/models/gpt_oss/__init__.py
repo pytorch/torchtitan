@@ -6,7 +6,7 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import RoPE
+from torchtitan.models.common import Embedding, RMSNorm, RoPE
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
@@ -26,7 +26,11 @@ gptoss_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=4,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
         layer=GptOssTransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=8,
@@ -56,7 +60,11 @@ gptoss_configs = {
     ),
     "20b": GptOssModel.Config(
         n_layers=24,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
         layer=GptOssTransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=32,
@@ -86,7 +94,11 @@ gptoss_configs = {
     ),
     "120b": GptOssModel.Config(
         n_layers=36,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
         layer=GptOssTransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=128,
