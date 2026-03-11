@@ -393,7 +393,7 @@ def apply_fsdp(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
 
-    if getattr(model.enable_weight_tying, "enable_weight_tying", False):
+    if getattr(model, "enable_weight_tying", False):
         modules = [
             m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
         ]
