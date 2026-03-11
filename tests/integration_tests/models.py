@@ -122,6 +122,19 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+ep+etp",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3 --config qwen3_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                ],
+            ],
+            "Qwen3 FSDP+TP+CP",
+            "qwen3_fsdp+tp+cp",
+            ngpu=8,
+        ),
         # Integration Test Cases for Llama 4
         OverrideDefinitions(
             [

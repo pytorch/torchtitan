@@ -34,6 +34,8 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.parallelize import apply_replicate
+
+from torchtitan.distributed.utils import LocalMapWrapper
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -41,8 +43,6 @@ from torchtitan.models.llama4.parallelize import (
 )
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-
-from torchtitan.models.common.attention import InnerAttentionWrapper
 from torchtitan.tools.logging import logger
 
 
@@ -151,19 +151,21 @@ def parallelize_qwen3(
         # pyrefly: ignore [missing-attribute, not-callable]
         for block in model.layers.values():
             attn = block.attention  # pyrefly: ignore [missing-attribute]
-            # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
-            # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
             if attn_backend == "sdpa":
+                # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+                # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
                 attn.inner_attention.sdpa_backends = (
                     [  # pyrefly: ignore [missing-attribute]
                         SDPBackend.FLASH_ATTENTION,
                         SDPBackend.MATH,
                     ]
                 )
-            attn.inner_attention = (
-                InnerAttentionWrapper(  # pyrefly: ignore [missing-attribute]
-                    attn.inner_attention, tp_mesh  # pyrefly: ignore [missing-attribute]
-                )
+            attn.inner_attention = LocalMapWrapper(  # pyrefly: ignore [missing-attribute]  # pyrefly: ignore [missing-attribute]
+                attn.inner_attention,  # pyrefly: ignore [missing-attribute]
+                device_mesh=tp_mesh,
+                # q, k, v are sharded on heads dim (dim=1 after transpose)
+                in_placements=((Shard(1),), (Shard(1),), (Shard(1),)),
+                out_placements=((Shard(1),),),
             )
 
     if ac_config.mode != "none":
