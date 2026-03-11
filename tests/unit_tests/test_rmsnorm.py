@@ -8,6 +8,7 @@ import unittest
 
 import torch
 import torch.nn as nn
+
 from torchtitan.models.common.rmsnorm import RMSNorm
 
 
@@ -59,17 +60,6 @@ class TestRMSNorm(unittest.TestCase):
         x = torch.randn(2, 10, 32)
         out = norm(x)
         self.assertEqual(out.shape, torch.Size([2, 10, 32]))
-
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-    def test_forward_preserves_low_precision_dtype(self):
-        """Low-precision inputs should stay low precision after normalization."""
-        config = RMSNorm.Config(eps=1e-6)
-        norm = config.build(normalized_shape=32).cuda()
-        x = torch.randn(2, 10, 32, device="cuda", dtype=torch.bfloat16)
-
-        out = norm(x)
-
-        self.assertEqual(out.dtype, torch.bfloat16)
 
     def test_normalized_shape_excluded_from_config_init(self):
         """normalized_shape uses field(init=False), so it cannot be passed to Config()."""

@@ -6,7 +6,6 @@
 
 from dataclasses import dataclass, field
 
-import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
@@ -43,6 +42,3 @@ class RMSNorm(nn.RMSNorm, Module):
 
     def init_weights(self, **kwargs) -> None:
         self.reset_parameters()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(x).to(x.dtype)
