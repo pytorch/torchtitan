@@ -355,9 +355,9 @@ class DeepEPExpertParallel(BaseExpertParallel):
         ep_group = device_mesh.get_group()
 
         if self.comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep
+            from torchtitan.distributed.deepep.hybridep import dispatch_tokens
 
-            hidden_states, tokens_per_expert, self._state = hybridep.dispatch_tokens(
+            hidden_states, tokens_per_expert, self._state = dispatch_tokens(
                 hidden_states,
                 selected_experts_indices,
                 top_scores,

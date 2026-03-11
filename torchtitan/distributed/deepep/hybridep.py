@@ -19,7 +19,7 @@ Configuration (via ParallelismConfig):
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import torch
 from torch._library.opaque_object import (
@@ -80,7 +80,7 @@ class DispatchState:
     """
 
     handle: DispatchHandle
-    permuted_scores: Optional[torch.Tensor] = None
+    permuted_scores: torch.Tensor | None = None
     num_tokens: int = 0
 
 
@@ -88,12 +88,11 @@ def _apply_scores(
     hidden: torch.Tensor,
     scores: torch.Tensor,
     apply_now: bool,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Apply routing scores to hidden states if apply_now, else defer."""
     if apply_now and scores is not None and scores.numel() > 0:
         return hidden * scores.to(hidden.dtype).reshape(-1, 1), None
     return hidden, scores
-
 
 
 # Custom op registration for torch.compile and SAC compatibility
@@ -146,8 +145,8 @@ def _dispatch_impl(
     topk_weights: torch.Tensor,
     num_experts: int,
     non_blocking: bool = False,
-    moe_expert_capacity_factor: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
+    moe_expert_capacity_factor: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """
     DeepEP's dispatch_with_permute needs to know the output buffer size
     (num_permuted_tokens) for the fused permute kernel.
@@ -165,7 +164,9 @@ def _dispatch_impl(
         )
 
     num_local_experts = num_experts // _buffer.group_size
-    from deep_ep.hybrid_ep_buffer import indices_to_map
+    from deep_ep.hybrid_ep_buffer import (  # pyrefly: ignore [missing-import]
+        indices_to_map,
+    )
 
     routing_map, probs = indices_to_map(
         topk_idx, topk_weights.float(), x.shape[0], num_experts
@@ -221,8 +222,8 @@ def _dispatch_fake(
     topk_weights: torch.Tensor,
     num_experts: int,
     non_blocking: bool = False,
-    moe_expert_capacity_factor: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
+    moe_expert_capacity_factor: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """Fake dispatch for torch.compile tracing."""
     num_local_experts = num_experts // _buffer.group_size
     if non_blocking:
@@ -362,7 +363,7 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     try:
-        from deep_ep import HybridEPBuffer
+        from deep_ep import HybridEPBuffer  # pyrefly: ignore [missing-import]
     except ImportError as e:
         raise ImportError(
             "HybridEP requires deep_ep library. "
@@ -402,8 +403,8 @@ def dispatch_tokens(
     num_experts: int,
     group: ProcessGroup,
     score_before_experts: bool = True,
-    non_blocking_expert_capacity_factor: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, DispatchState]:
+    non_blocking_expert_capacity_factor: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
 
     Args:
