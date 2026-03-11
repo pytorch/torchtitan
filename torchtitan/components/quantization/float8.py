@@ -10,12 +10,8 @@ from typing import ClassVar, Literal
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    FP8_GROUP_ALIGNMENT_SIZE,
-    QuantizationConverter,
-)
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -241,9 +237,6 @@ class Float8GroupedMMConverter(QuantizationConverter):
             not parallel_dims.cp_enabled
         ), "Float8 MoE training prototype does not yet support context parallelism"
 
-        # For fp8 grouped GEMM, token group sizes must be multiples of 16
-        # (16 byte alignment / 1 byte per elem = 16 elements)
-        set_token_group_alignment_size_m(FP8_GROUP_ALIGNMENT_SIZE)
         self.enabled = True
 
     def convert(self, model: nn.Module):

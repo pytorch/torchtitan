@@ -147,31 +147,34 @@ def generate_permute_indices(
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
-    alignment: int,
     use_cpu: bool = False,
 ):
     """
     Prepare permutation indices and the number of tokens for each expert.
 
+    Reorders tokens from rank-major to expert-major layout. With multiple EP
+    ranks, tokens arrive interleaved (all experts from rank 0, then rank 1, ...);
+    this function produces indices that group tokens by expert across all ranks.
+
     Args:
-        tokens_per_expert_group: number of tokens for each expert from all ranks.
+        tokens_per_expert_group: number of tokens for each expert from all ranks,
+            shape ``(num_ranks * experts_per_rank,)``.
         experts_per_rank: number of experts per rank.
         num_ranks: number of ranks.
         max_len: maximum length of the output index vector.
-        alignment: alignment for each returned element in `m_sizes` and padding min for zero token experts.
         use_cpu: whether to use CPU implementation.
-
 
     Returns:
         permuted_indices: Tensor of indices that map original token order to the expert-grouped order.
-        m_sizes: aligned number of tokens for each expert (padded to alignment boundary).
+        m_sizes: number of tokens for each expert.
         m_offsets: Cumulative sum of m_sizes. The exclusive ending position for each expert's tokens.
 
     Explanatory details:
-        `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example:
-        From: |       rank 0      |       rank 1      |
-        To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
-              |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
+        ``tokens_per_expert_group`` is of shape ``(num_ranks * experts_per_rank,)``, for example::
+
+            From: |       rank 0      |       rank 1      |
+            To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
+                  |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
     """
 
     # prefix sum to get start index of each expert (parallel scan kernel in future?)
@@ -181,17 +184,9 @@ def generate_permute_indices(
 
     # total tokens for each expert (sum over ranks)
     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
+    m_sizes = total_tokens_per_expert.to(torch.int32)
 
-    # pad out empty experts to alignment requirement
-    total_tokens_per_expert = torch.clamp_min(total_tokens_per_expert, alignment)
-
-    # align the chunk sizes (cdiv)
-    m_sizes = ((total_tokens_per_expert + alignment - 1) // alignment * alignment).to(
-        torch.int32
-    )
-
-    # additional prefix sum to get write offset of each expert in permuted_indices
-    # write offsets is per local expert, not global
+    # prefix sum to get write offset of each expert in permuted_indices
     m_offsets = torch.cumsum(m_sizes, 0)
     write_offsets = m_offsets - m_sizes
 
