@@ -486,7 +486,12 @@ def get_joint_custom_passes_from_config(
     )
 
     joint_custom_passes = []
-    joint_custom_passes.append(validate_flex_attn_annotation_pass)
+
+    # Only validate flex_attention annotations when regional_inductor is used,
+    # since that's the only pass that relies on them.
+    pass_names = getattr(compile_config, "passes", [])
+    if "regional_inductor" in pass_names:
+        joint_custom_passes.append(validate_flex_attn_annotation_pass)
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])
