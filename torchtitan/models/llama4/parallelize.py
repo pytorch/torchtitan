@@ -46,6 +46,7 @@ from torchtitan.distributed.expert_parallel import (
     ReordererSequenceParallel,
     TensorParallel,
 )
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
@@ -53,7 +54,7 @@ from torchtitan.distributed.tensor_parallel import (
 )
 from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.parallelize import (
-    apply_ddp,
+    apply_replicate,
     disable_fsdp_gradient_division,
 )
 from torchtitan.models.llama4.model import Llama4Model
@@ -237,13 +238,11 @@ def parallelize_llama(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -379,19 +378,9 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled
+    )
 
     if model.tok_embeddings is not None:
         # pyrefly: ignore [no-matching-overload]
