@@ -102,17 +102,14 @@ def parallelize_llama(
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
         enable_sp = parallelism.enable_sequence_parallel
-        loss_parallel = not parallelism.disable_loss_parallel
-        if not enable_sp:
-            loss_parallel = False
 
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_tp(
             model,
             tp_mesh,
-            loss_parallel=loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            cp_enabled=parallel_dims.cp_enabled,
+            enable_cp=parallel_dims.cp_enabled,
             enable_sp=enable_sp,
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
@@ -183,7 +180,7 @@ def apply_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    cp_enabled: bool = False,
+    enable_cp: bool = False,
     enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""

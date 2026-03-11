@@ -102,18 +102,15 @@ def parallelize_qwen3(
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
         enable_sp = parallelism.enable_sequence_parallel
-        loss_parallel = not parallelism.disable_loss_parallel
-        if not enable_sp:
-            loss_parallel = False
 
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
-            cp_enabled=parallel_dims.cp_enabled,
+            enable_cp=parallel_dims.cp_enabled,
             enable_sp=enable_sp,
         )
 
@@ -211,7 +208,7 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
-    cp_enabled: bool,
+    enable_cp: bool,
     enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""
@@ -269,7 +266,7 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    positions_sharding = Replicate() if cp_enabled else None
+    positions_sharding = Replicate() if enable_cp else None
     norm_plan = SequenceParallel() if enable_sp else NoParallel()
     qk_norm_plan = SequenceParallel(sequence_dim=2) if enable_sp else NoParallel()
     if enable_sp:

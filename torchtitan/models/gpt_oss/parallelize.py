@@ -108,14 +108,11 @@ def parallelize_gptoss(
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
         enable_sp = parallelism.enable_sequence_parallel
-        loss_parallel = not parallelism.disable_loss_parallel
-        if not enable_sp:
-            loss_parallel = False
 
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=False,
             enable_sp=enable_sp,
