@@ -82,43 +82,27 @@ def apply_non_moe_tp(
     """
 
     if enable_sp:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(1),
-                    use_local_output=False,
-                ),
-                "norm": SequenceParallel(
-                    use_local_output=False,
-                ),
-                "output": ColwiseParallel(
-                    input_layouts=Shard(1),
-                    output_layouts=Replicate(),
-                    use_local_output=True,  # return logits and plain tensor
-                ),
-            },
-        )
+        norm_plan = SequenceParallel(use_local_output=False)
     else:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Replicate(),
-                    use_local_output=False,
-                ),
-                "norm": NoParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Replicate(),
-                    use_local_output=True,  # return logits and plain tensor
-                ),
-            },
-        )
+        norm_plan = NoParallel()
+
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(1) if enable_sp else Replicate(),
+                use_local_output=False,
+            ),
+            "norm": norm_plan,
+            "output": ColwiseParallel(
+                input_layouts=Shard(1) if enable_sp else Replicate(),
+                output_layouts=Replicate(),
+                use_local_output=True,  # return logits and plain tensor
+            ),
+        },
+    )
 
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
@@ -136,95 +120,57 @@ def apply_non_moe_tp(
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
         }
+
         if enable_sp:
-            layer_plan.update(
-                {
-                    "attention_norm": SequenceParallel(
-                        use_local_output=False,
-                    ),
-                    "attention": PrepareModuleInput(
-                        input_layouts=(Shard(1), Replicate(), None, positions_layout),
-                        desired_input_layouts=(
-                            Replicate(),
-                            Replicate(),
-                            None,
-                            positions_layout,
-                        ),
-                    ),
-                    "attention.q_norm": SequenceParallel(
-                        sequence_dim=2,
-                        use_local_output=False,
-                    ),
-                    "attention.k_norm": SequenceParallel(
-                        sequence_dim=2,
-                        use_local_output=False,
-                    ),
-                    "attention.wo": RowwiseParallel(
-                        output_layouts=Shard(1),
-                        use_local_output=False,
-                    ),
-                    "ffn_norm": SequenceParallel(
-                        use_local_output=False,
-                    ),
-                }
-            )
+            norm_plan = SequenceParallel(use_local_output=False)
+            qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=False)
         else:
-            layer_plan.update(
-                {
-                    "attention_norm": NoParallel(),
-                    "attention": PrepareModuleInput(
-                        input_layouts=(
-                            Replicate(),
-                            Replicate(),
-                            None,
-                            positions_layout,
-                        ),
-                        desired_input_layouts=(
-                            Replicate(),
-                            Replicate(),
-                            None,
-                            positions_layout,
-                        ),
+            norm_plan = NoParallel()
+            qk_norm_plan = NoParallel()
+
+        layer_plan.update(
+            {
+                "attention_norm": norm_plan,
+                "attention": PrepareModuleInput(
+                    input_layouts=(
+                        Shard(1) if enable_sp else Replicate(),
+                        Replicate(),
+                        None,
+                        positions_layout,
                     ),
-                    "attention.q_norm": NoParallel(),
-                    "attention.k_norm": NoParallel(),
-                    "attention.wo": RowwiseParallel(
-                        output_layouts=Replicate(), use_local_output=False
+                    desired_input_layouts=(
+                        Replicate(),
+                        Replicate(),
+                        None,
+                        positions_layout,
                     ),
-                    "ffn_norm": NoParallel(),
-                }
-            )
+                ),
+                "attention.q_norm": qk_norm_plan,
+                "attention.k_norm": qk_norm_plan,
+                "attention.wo": RowwiseParallel(
+                    output_layouts=Shard(1) if enable_sp else Replicate(),
+                    use_local_output=False,
+                ),
+                "ffn_norm": norm_plan,
+            }
+        )
 
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
-            if enable_sp:
-                layer_plan.update(
-                    {
-                        "feed_forward": PrepareModuleInput(
-                            input_layouts=(Shard(1),),
-                            desired_input_layouts=(Replicate(),),
-                        ),
-                        "feed_forward.w1": ColwiseParallel(use_local_output=False),
-                        "feed_forward.w2": RowwiseParallel(
-                            output_layouts=Shard(1), use_local_output=False
-                        ),
-                        "feed_forward.w3": ColwiseParallel(use_local_output=False),
-                    }
-                )
-            else:
-                layer_plan.update(
-                    {
-                        "feed_forward": PrepareModuleInput(
-                            input_layouts=(Replicate(),),
-                            desired_input_layouts=(Replicate(),),
-                        ),
-                        "feed_forward.w1": ColwiseParallel(use_local_output=False),
-                        "feed_forward.w2": RowwiseParallel(
-                            output_layouts=Replicate(), use_local_output=False
-                        ),
-                        "feed_forward.w3": ColwiseParallel(use_local_output=False),
-                    }
-                )
+            layer_plan.update(
+                {
+                    "feed_forward": PrepareModuleInput(
+                        input_layouts=(Shard(1) if enable_sp else Replicate(),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": ColwiseParallel(use_local_output=False),
+                    "feed_forward.w2": RowwiseParallel(
+                        output_layouts=Shard(1) if enable_sp else Replicate(),
+                        use_local_output=False,
+                    ),
+                    "feed_forward.w3": ColwiseParallel(use_local_output=False),
+                }
+            )
         else:
             raise ValueError(
                 "Running vLLM inference with torchtitan Qwen3 MoE model is not supported yet."

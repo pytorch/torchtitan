@@ -33,7 +33,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import NoParallel
-from torchtitan.models.llama3.parallelize import apply_ddp
+from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -81,14 +81,6 @@ def parallelize_qwen3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_backend='{attn_backend}'. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -140,6 +132,12 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
+        if parallel_dims.tp_enabled:
+            raise NotImplementedError(
+                "Context Parallel with Tensor Parallel is not yet supported for Qwen3. "
+                "See https://github.com/pytorch/torchtitan/issues/2446"
+            )
+        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
@@ -197,13 +195,11 @@ def parallelize_qwen3(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -223,41 +219,29 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
     if enable_sp:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(1),
-                ),
-                "norm": SequenceParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Shard(1),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-            },
-        )
+        embed_plan = RowwiseParallel(input_layouts=Replicate(), output_layouts=Shard(1))
     else:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Replicate(),
-                    use_local_output=False,
-                ),
-                "norm": NoParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-            },
+        embed_plan = RowwiseParallel(
+            input_layouts=Replicate(),
+            output_layouts=Replicate(),
+            use_local_output=False,
         )
+
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel() if enable_sp else NoParallel(),
+            "output": ColwiseParallel(
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        },
+    )
 
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears with tensorwise scaling.
@@ -286,91 +270,51 @@ def apply_non_moe_tp(
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     positions_sharding = Replicate() if cp_enabled else None
+    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    qk_norm_plan = SequenceParallel(sequence_dim=2) if enable_sp else NoParallel()
+    if enable_sp:
+        rowwise_output_plan = rowwise_parallel(output_layouts=Shard(1))
+    else:
+        rowwise_output_plan = rowwise_parallel(
+            output_layouts=Replicate(), use_local_output=False
+        )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
+            "attention_norm": norm_plan,
+            "attention": prepare_module_input(
+                input_layouts=(sp_layout, Replicate(), None, positions_sharding),
+                desired_input_layouts=(
+                    Replicate(),
+                    Replicate(),
+                    None,
+                    positions_sharding,
+                ),
+            ),
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),
             "attention.wv": colwise_parallel(use_local_output=False),
+            "attention.q_norm": qk_norm_plan,
+            "attention.k_norm": qk_norm_plan,
+            "attention.wo": rowwise_output_plan,
+            "ffn_norm": norm_plan,
         }
-        if enable_sp:
-            # pyrefly: ignore [no-matching-overload]
-            layer_plan.update(
-                {
-                    "attention_norm": SequenceParallel(),
-                    "attention": prepare_module_input(
-                        input_layouts=(Shard(1), Replicate(), None, positions_sharding),
-                        desired_input_layouts=(
-                            Replicate(),
-                            Replicate(),
-                            None,
-                            positions_sharding,
-                        ),
-                    ),
-                    "attention.q_norm": SequenceParallel(sequence_dim=2),
-                    "attention.k_norm": SequenceParallel(sequence_dim=2),
-                    "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-                    "ffn_norm": SequenceParallel(),
-                }
-            )
-        else:
-            # pyrefly: ignore [no-matching-overload]
-            layer_plan.update(
-                {
-                    "attention_norm": NoParallel(),
-                    "attention": prepare_module_input(
-                        input_layouts=(
-                            Replicate(),
-                            Replicate(),
-                            None,
-                            positions_sharding,
-                        ),
-                        desired_input_layouts=(
-                            Replicate(),
-                            Replicate(),
-                            None,
-                            positions_sharding,
-                        ),
-                    ),
-                    "attention.q_norm": NoParallel(),
-                    "attention.k_norm": NoParallel(),
-                    "attention.wo": rowwise_parallel(
-                        output_layouts=Replicate(), use_local_output=False
-                    ),
-                    "ffn_norm": NoParallel(),
-                }
-            )
 
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
-            if enable_sp:
-                # pyrefly: ignore [no-matching-overload]
-                layer_plan.update(
-                    {
-                        "feed_forward": prepare_module_input(
-                            input_layouts=(Shard(1),),
-                            desired_input_layouts=(Replicate(),),
-                        ),
-                        "feed_forward.w1": colwise_parallel(),
-                        "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                        "feed_forward.w3": colwise_parallel(),
-                    }
-                )
-            else:
-                # pyrefly: ignore [no-matching-overload]
-                layer_plan.update(
-                    {
-                        "feed_forward": prepare_module_input(
-                            input_layouts=(Replicate(),),
-                            desired_input_layouts=(Replicate(),),
-                        ),
-                        "feed_forward.w1": colwise_parallel(),
-                        "feed_forward.w2": rowwise_parallel(
-                            output_layouts=Replicate(), use_local_output=False
-                        ),
-                        "feed_forward.w3": colwise_parallel(),
-                    }
-                )
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(sp_layout,),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_output_plan,
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]

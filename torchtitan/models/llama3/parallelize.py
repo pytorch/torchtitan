@@ -10,7 +10,7 @@
 import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._composable.replicate import replicate
+from torch.distributed._composable.replicate_with_fsdp import replicate
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
@@ -33,6 +33,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -167,13 +168,11 @@ def parallelize_llama(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_replicate_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_replicate_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_replicate_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -192,41 +191,29 @@ def apply_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
     if enable_sp:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(1),
-                ),
-                "norm": SequenceParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Shard(1),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-            },
-        )
+        embed_plan = RowwiseParallel(input_layouts=Replicate(), output_layouts=Shard(1))
     else:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Replicate(),
-                    use_local_output=False,
-                ),
-                "norm": NoParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-            },
+        embed_plan = RowwiseParallel(
+            input_layouts=Replicate(),
+            output_layouts=Replicate(),
+            use_local_output=False,
         )
+
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel() if enable_sp else NoParallel(),
+            "output": ColwiseParallel(
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        },
+    )
 
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears with tensorwise scaling.
@@ -254,56 +241,36 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    if enable_sp:
+        rowwise_output_plan = rowwise_parallel(output_layouts=Shard(1))
+    else:
+        rowwise_output_plan = rowwise_parallel(
+            output_layouts=Replicate(), use_local_output=False
+        )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
+            "attention_norm": norm_plan,
+            "attention": prepare_module_input(
+                input_layouts=(sp_layout, None, None, None),
+                desired_input_layouts=(Replicate(), None, None, None),
+            ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
             "attention.wv": colwise_parallel(),
-            "feed_forward.w1": colwise_parallel(),
-            "feed_forward.w2": rowwise_parallel(
-                output_layouts=Shard(1) if enable_sp else Replicate(),
-                # pyrefly: ignore [bad-argument-type]
-                **({"use_local_output": False} if not enable_sp else {}),
+            "attention.wo": rowwise_output_plan,
+            "ffn_norm": norm_plan,
+            "feed_forward": prepare_module_input(
+                input_layouts=(sp_layout,),
+                desired_input_layouts=(Replicate(),),
             ),
+            "feed_forward.w1": colwise_parallel(),
+            "feed_forward.w2": rowwise_output_plan,
             "feed_forward.w3": colwise_parallel(),
         }
-        if enable_sp:
-            # pyrefly: ignore [no-matching-overload]
-            layer_plan.update(
-                {
-                    "attention_norm": SequenceParallel(),
-                    "attention": prepare_module_input(
-                        input_layouts=(Shard(1), None, None, None),
-                        desired_input_layouts=(Replicate(), None, None, None),
-                    ),
-                    "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-                    "ffn_norm": SequenceParallel(),
-                    "feed_forward": prepare_module_input(
-                        input_layouts=(Shard(1),),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                }
-            )
-        else:
-            # pyrefly: ignore [no-matching-overload]
-            layer_plan.update(
-                {
-                    "attention_norm": NoParallel(),
-                    "attention": prepare_module_input(
-                        input_layouts=(Replicate(), None, None, None),
-                        desired_input_layouts=(Replicate(), None, None, None),
-                    ),
-                    "attention.wo": rowwise_parallel(
-                        output_layouts=Replicate(), use_local_output=False
-                    ),
-                    "ffn_norm": NoParallel(),
-                    "feed_forward": prepare_module_input(
-                        input_layouts=(Replicate(),),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                }
-            )
 
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]
@@ -342,8 +309,10 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
     Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division.
     We handle gradient scaling ourselves in the training loop with global token count.
 
+    Note: This also works for ReplicateModule since it inherits from FSDPModule.
+
     Args:
-        model: The model containing FSDP-wrapped modules
+        model: The model containing FSDP-wrapped or Replicate-wrapped modules
     """
     for module in model.modules():
         if isinstance(module, FSDPModule):
@@ -382,19 +351,9 @@ def apply_fsdp(
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled
+    )
 
     if model.tok_embeddings is not None:
         # pyrefly: ignore [no-matching-overload]
@@ -426,15 +385,39 @@ def apply_fsdp(
     disable_fsdp_gradient_division(model)
 
 
-def apply_ddp(
+def apply_replicate(
     model: nn.Module,
     dp_mesh: DeviceMesh,
-    enable_compile: bool,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
 ):
-    if enable_compile:
-        torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
+    if model.tok_embeddings is not None:
+        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
+        replicate(
+            model.tok_embeddings,
+            **replicate_config,
+        )
+    # pyrefly: ignore [missing-attribute]
+    for layer_id, transformer_block in model.layers.items():
+        # pyrefly: ignore [invalid-param-spec]
+        replicate(
+            transformer_block,
+            **replicate_config,
+        )
+
+    if model.norm is not None and model.output is not None:
+        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
+        replicate(
+            [model.norm, model.output],
+            **replicate_config,
+        )
     # pyrefly: ignore [invalid-param-spec]
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    replicate(model, **replicate_config)
 
-    logger.info("Applied DDP to the model")
+    # Disable Replicate's automatic gradient division (ReplicateModule inherits from FSDPModule)
+    disable_fsdp_gradient_division(model)
+
+    logger.info("Applied replicate to the model")

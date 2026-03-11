@@ -72,7 +72,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--parallelism.tensor_parallel_degree 2",
-                    "--no-parallelism.enable_sequence_parallel",
+                    "--parallelism.no-enable-sequence-parallel",
                 ],
             ],
             "2D eager (SP disabled)",

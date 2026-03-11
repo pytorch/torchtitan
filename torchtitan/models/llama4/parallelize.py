@@ -46,6 +46,7 @@ from torchtitan.distributed.expert_parallel import (
     ReordererSequenceParallel,
     TensorParallel,
 )
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
@@ -53,7 +54,7 @@ from torchtitan.distributed.tensor_parallel import (
 )
 from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.parallelize import (
-    apply_ddp,
+    apply_replicate,
     disable_fsdp_gradient_division,
 )
 from torchtitan.models.llama4.model import Llama4Model
@@ -243,13 +244,11 @@ def parallelize_llama(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -267,41 +266,29 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
     if enable_sp:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(1),
-                ),
-                "norm": SequenceParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Shard(1),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-            },
-        )
+        embed_plan = RowwiseParallel(input_layouts=Replicate(), output_layouts=Shard(1))
     else:
-        parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Replicate(),
-                    use_local_output=False,
-                ),
-                "norm": NoParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-            },
+        embed_plan = RowwiseParallel(
+            input_layouts=Replicate(),
+            output_layouts=Replicate(),
+            use_local_output=False,
         )
+
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel() if enable_sp else NoParallel(),
+            "output": ColwiseParallel(
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        },
+    )
 
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears with tensorwise scaling.
@@ -326,71 +313,42 @@ def apply_non_moe_tp(
         )
 
     # Apply tensor + sequence parallelism to every transformer block
+    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    if enable_sp:
+        rowwise_output_plan = rowwise_parallel(output_layouts=Shard(1))
+    else:
+        rowwise_output_plan = rowwise_parallel(
+            output_layouts=Replicate(), use_local_output=False
+        )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
+            "attention_norm": norm_plan,
+            "attention": prepare_module_input(
+                input_layouts=(sp_layout, None, None, None),
+                desired_input_layouts=(Replicate(), None, None, None),
+            ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
             "attention.wv": colwise_parallel(),
+            "attention.wo": rowwise_output_plan,
+            "ffn_norm": norm_plan,
         }
-        if enable_sp:
-            # pyrefly: ignore [no-matching-overload]
-            layer_plan.update(
-                {
-                    "attention_norm": SequenceParallel(),
-                    "attention": prepare_module_input(
-                        input_layouts=(Shard(1), None, None, None),
-                        desired_input_layouts=(Replicate(), None, None, None),
-                    ),
-                    "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-                    "ffn_norm": SequenceParallel(),
-                }
-            )
-        else:
-            # pyrefly: ignore [no-matching-overload]
-            layer_plan.update(
-                {
-                    "attention_norm": NoParallel(),
-                    "attention": prepare_module_input(
-                        input_layouts=(Replicate(), None, None, None),
-                        desired_input_layouts=(Replicate(), None, None, None),
-                    ),
-                    "attention.wo": rowwise_parallel(
-                        output_layouts=Replicate(), use_local_output=False
-                    ),
-                    "ffn_norm": NoParallel(),
-                }
-            )
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
-            if enable_sp:
-                # pyrefly: ignore [no-matching-overload]
-                layer_plan.update(
-                    {
-                        "feed_forward": prepare_module_input(
-                            input_layouts=(Shard(1),),
-                            desired_input_layouts=(Replicate(),),
-                        ),
-                        "feed_forward.w1": colwise_parallel(),
-                        "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                        "feed_forward.w3": colwise_parallel(),
-                    }
-                )
-            else:
-                # pyrefly: ignore [no-matching-overload]
-                layer_plan.update(
-                    {
-                        "feed_forward": prepare_module_input(
-                            input_layouts=(Replicate(),),
-                            desired_input_layouts=(Replicate(),),
-                        ),
-                        "feed_forward.w1": colwise_parallel(),
-                        "feed_forward.w2": rowwise_parallel(
-                            output_layouts=Replicate(), use_local_output=False
-                        ),
-                        "feed_forward.w3": colwise_parallel(),
-                    }
-                )
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(sp_layout,),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_output_plan,
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]
@@ -440,19 +398,9 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled
+    )
 
     if model.tok_embeddings is not None:
         # pyrefly: ignore [no-matching-overload]
