@@ -15,8 +15,6 @@ from torch.distributed.tensor import DTensor, Partial
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.protocols.module import Module
 
-from .utils import indices_padding_wrapper
-
 
 # NOTE: keeping this for-loop implementation for comparison
 #       and readability, may remove later
@@ -30,13 +28,10 @@ def _run_experts_for_loop(
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
-    # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
-
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
+        x,
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
@@ -47,12 +42,7 @@ def _run_experts_for_loop(
         h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
         # h shape (tokens_per_expert(varying), dim)
         out_experts_splits.append(h)
-    out = torch.cat(out_experts_splits, dim=0)
-
-    # side-effect code due to the usage of generate_permute_indices
-    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-
-    return out
+    return torch.cat(out_experts_splits, dim=0)
 
 
 def _run_experts_grouped_mm(
@@ -109,18 +99,7 @@ class GroupedExperts(nn.Module):
             w3 = self.w3
 
         if self.use_grouped_mm:
-            # NOTE: If EP is not used, we need to pad the indices
-            #       to prepare for grouped_mm;
-            #       otherwise, EP will handle the padding.
-            if (
-                not isinstance(self.w1, DTensor)
-                # pyrefly: ignore[not-iterable]
-                or "ep" not in self.w1.device_mesh.mesh_dim_names
-            ):
-                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
-            else:
-                run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
