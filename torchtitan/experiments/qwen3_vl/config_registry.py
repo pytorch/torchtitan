@@ -59,7 +59,7 @@ def qwen3_vl_debugmodel_video() -> Trainer.Config:
     spec = model_registry("debugmodel")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=spec,
         dataloader=MMDataLoader.Config(
@@ -101,7 +101,7 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
     spec = model_registry("debugmodel_moe")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=spec,
         dataloader=MMDataLoader.Config(
@@ -136,7 +136,7 @@ def qwen3_vl_2b() -> Trainer.Config:
     spec = model_registry("2B")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
@@ -206,7 +206,7 @@ def qwen3_vl_30b_a3b() -> Trainer.Config:
     spec = model_registry("30B-A3B")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen/Qwen3-VL-30B-A3B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
         model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
