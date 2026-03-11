@@ -87,6 +87,13 @@ class VarlenAttentionWrapper(torch.nn.Module):
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
 
+        # Some operators can upcast under AMP, but varlen attention currently only
+        # supports bf16/fp16 inputs. If this changes, or fp16 training support 
+        # is added, this may need to be revisited.
+        xq_packed = xq_packed.to(torch.bfloat16)
+        xk_packed = xk_packed.to(torch.bfloat16)
+        xv_packed = xv_packed.to(torch.bfloat16)
+
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
             xk_packed,
