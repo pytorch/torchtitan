@@ -237,9 +237,20 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         return self._tp_group_name
 
     def _forward_body(self, tokens_2d, rope_cache, positions):
-        """Embed + all transformer layers + final norm."""
+        """Embed + all transformer layers + final norm.
+
+        Flattens to 2D ``[T, D]`` right after embedding so that every
+        ``aten::linear`` in the transformer layers hits the 2D fast-path
+        (direct ``mm``) instead of the 3D decomposition
+        (``view + mm + view``).  This cuts ~1400 extra ``aten::view`` ops
+        and the associated CPU dispatch / allocation overhead.
+        """
         torch._check(tokens_2d.shape[1] >= 2)
         h = self.model.tok_embeddings(tokens_2d)
+        # Flatten from [1, S, D] to [S, D] — reduces view/empty/clone ops
+        # under torch.compile by avoiding the 3D aten::linear decomposition.
+        h = h.squeeze(0)
+        positions = positions.squeeze(0)
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None, positions=positions)
         h = self.model.norm(h)
@@ -340,8 +351,10 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             torch._dynamo.decorators.mark_unbacked(positions, 1)
             h = self._compiled_forward_body(tokens_2d, rope_cache, positions)
         else:
-            # Eager path
+            # Eager path — same 2D flatten as _forward_body
             h = self.model.tok_embeddings(tokens_2d)
+            h = h.squeeze(0)
+            positions = positions.squeeze(0)
             for layer in self.model.layers.values():
                 h = layer(h, rope_cache, attention_masks=None, positions=positions)
             h = self.model.norm(h)

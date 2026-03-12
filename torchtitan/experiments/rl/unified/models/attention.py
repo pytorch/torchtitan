@@ -361,11 +361,11 @@ def _gqa_forward_with_vllm_rope(
     Only used when ``self.sequence_first`` is True (vLLM inference path).
     Bypasses VLLMAttention.forward to avoid DTensor wrap/unwrap round-trips.
 
+    Accepts 2D ``[T, D]`` or 3D ``[B, S, D]`` input (caller flattens to 2D
+    for fewer view ops under torch.compile).
+
     The ``rope_cache`` arg is ignored; uses precomputed ``self._vllm_cos_sin_cache``.
     """
-    bs, seqlen, _ = x.shape
-    num_tokens = bs * seqlen
-
     # --- Unwrap DTensor once from x, stay local through attention ---
     is_dtensor = isinstance(x, DTensor)
     if is_dtensor:
@@ -374,16 +374,22 @@ def _gqa_forward_with_vllm_rope(
     else:
         x_local = x
 
+    # Normalise to 2D (T, D) — caller may pass 2D or 3D
+    orig_shape = x_local.shape
+    if x_local.dim() == 3:
+        x_local = x_local.view(-1, x_local.shape[-1])
+    num_tokens = x_local.shape[0]
+
     # Fused QKV projection: one matmul + split instead of 3 separate matmuls
     xqkv = F.linear(x_local, self._fused_qkv_weight)
     xq, xk, xv = xqkv.split([self._q_size, self._kv_size, self._kv_size], dim=-1)
 
-    # Reshape to 4D for QK norms: (B, S, H, D)
-    xq = xq.view(bs, seqlen, -1, self.head_dim)
-    xk = xk.view(bs, seqlen, -1, self.head_dim)
-    xv = xv.view(bs, seqlen, -1, self.head_dim)
+    # Reshape to 3D for QK norms: (T, H, D)
+    xq = xq.view(num_tokens, -1, self.head_dim)
+    xk = xk.view(num_tokens, -1, self.head_dim)
+    xv = xv.view(num_tokens, -1, self.head_dim)
 
-    # QK norms (Qwen3) — must be 4D for per-head normalization.
+    # QK norms (Qwen3) — per-head normalization on last dim.
     # Bypass the DTensor module hooks (NoParallel wraps local tensors as
     # Replicate then redistributes to Shard(2), halving the head count).
     # Call F.rms_norm directly with local weights instead.
@@ -401,21 +407,23 @@ def _gqa_forward_with_vllm_rope(
         pos_1d, xq_2d, xk_2d, self.head_dim, self._vllm_cos_sin_cache,
     )
 
-    # View to 3D for vllm attention: (T, H, D) — no intermediate 4D
+    # View to 3D for vllm attention: (T, H, D)
     q_3d = xq_2d.view(num_tokens, -1, self.head_dim)
     k_3d = xk_2d.view(num_tokens, -1, self.head_dim)
-    v_3d = xv.reshape(num_tokens, -1, self.head_dim)
 
     # Call vllm attention via custom op (bypass DTensor wrapper + auto_functionalized)
     attn_out = torch.ops.torchtitan.vllm_attention(
-        q_3d, k_3d, v_3d, self._vllm_layer_name,
+        q_3d, k_3d, xv, self._vllm_layer_name,
     )
 
     # wo projection + all-reduce on local tensors (bypass DTensor dispatch)
     h = F.linear(attn_out, self._local_wo_weight)
     if self._tp_group_name is not None:
         h = torch.ops.vllm.all_reduce(h, group_name=self._tp_group_name)
-    h = h.view(bs, seqlen, -1)
+
+    # Restore original shape (2D or 3D) for residual add
+    if len(orig_shape) == 3:
+        h = h.view(orig_shape)
 
     # Re-wrap as DTensor so the caller's residual add (x + attn_out) works
     if is_dtensor:
