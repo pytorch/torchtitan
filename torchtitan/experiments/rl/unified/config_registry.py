@@ -21,6 +21,9 @@ from torchtitan.experiments.rl.unified.actors.generator import (
 )
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.simple_grpo import RLTrainer
+from torchtitan.experiments.rl.unified.models.qwen3_ablation import (
+    ablation_model_registry,
+)
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -67,7 +70,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
 def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-1.7B (4 GPUs: 2 gen + 2 train)."""
     return RLTrainer.Config(
-        model_spec=model_registry("1.7B"),
+        model_spec=ablation_model_registry("1.7B"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         batch_invariant_mode=True,

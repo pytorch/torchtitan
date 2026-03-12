@@ -15,25 +15,30 @@ Adapted for the current branch which uses parallelize_qwen3(enable_sp=...) to
 switch between TP+SP and TP-only parallelism modes.
 
 Usage:
-    # Run only vLLM benchmarks (no checkpoint needed)
-    torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
-        --model-path /path/to/Qwen3-1.7B --tp 2 --skip-torchtitan-native
+    # Run vLLM native vs TorchTitan (default, eager mode)
+    torchrun --nproc_per_node=1 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
+        --model-path /path/to/Qwen3-1.7B --tp 1
 
-    # Run only vLLM TorchTitan with TP-only (no SP)
+    # Run with compile(eager) + piecewise cudagraph
+    torchrun --nproc_per_node=1 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
+        --model-path /path/to/Qwen3-1.7B --tp 1 --use-compile-cudagraph
+
+    # Run only vLLM TorchTitan
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
-        --model-path /path/to/Qwen3-1.7B --tp 2 --skip-vllm-native --skip-torchtitan-native
+        --model-path /path/to/Qwen3-1.7B --tp 2 --test-cases vllm-torchtitan
 
     # Run with TP+SP enabled
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
-        --model-path /path/to/Qwen3-1.7B --tp 2 --enable-sp --skip-torchtitan-native
+        --model-path /path/to/Qwen3-1.7B --tp 2 --enable-sp
 
     # Run with profiling
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
-        --model-path /path/to/Qwen3-1.7B --tp 2 --profile --skip-torchtitan-native
+        --model-path /path/to/Qwen3-1.7B --tp 2 --profile
 
     # Run all benchmarks (requires TorchTitan checkpoint for native)
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
-        --model-path /path/to/Qwen3-1.7B --tp 2 --torchtitan-checkpoint /path/to/checkpoint
+        --model-path /path/to/Qwen3-1.7B --tp 2 --test-cases vllm-native,vllm-torchtitan,torchtitan-native \\
+        --torchtitan-checkpoint /path/to/checkpoint
 """
 
 from __future__ import annotations
@@ -103,8 +108,7 @@ class BenchmarkConfig:
     temperature: float | None = None  # None = use gen_config default
     top_p: float | None = None  # None = use gen_config default
     device: str = "cuda"
-    use_cuda_graph: bool = False
-    compile: str = "none"  # "none", "vllm-torchtitan", "torchtitan-native", "all"
+    use_compile_cudagraph: bool = False  # True = compile(eager) + piecewise cudagraph; False = fully eager
     # Profiling options
     profile: bool = False
     profile_dir: str = "./profiler_traces"
@@ -211,14 +215,13 @@ class VLLMNativeBenchmark:
             gen_config = rl_config.generator
             model_path = self.config.model_path or rl_config.hf_assets_path
 
+            use_compile = self.config.use_compile_cudagraph
+            mode_str = "compile(eager) + piecewise cudagraph" if use_compile else "eager (no compile, no cudagraph)"
+
             print("Loading vLLM with native Qwen3 model from HuggingFace...")
             print(f"Model: {model_path}")
             print(f"Tensor Parallel Size: {self.config.tp}")
-            compile_enabled = self.config.compile in ("vllm-native", "all")
-            print(f"Compile: {'Enabled' if compile_enabled else 'Disabled'}")
-            print(
-                f"CUDA Graph: {'Enabled' if self.config.use_cuda_graph else 'Disabled (eager mode)'}"
-            )
+            print(f"Mode: {mode_str}")
 
             if self.config.profile:
                 self.profile_dir = Path(self.config.profile_dir) / "vllm_native"
@@ -237,12 +240,13 @@ class VLLMNativeBenchmark:
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend="external_launcher",
                 gpu_memory_utilization=gen_config.gpu_memory_limit,
-                enforce_eager=gen_config.compile.is_eager,
+                enforce_eager=not use_compile,
             )
 
-            vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
-            if vllm_compilation_config is not None:
-                engine_kwargs["compilation_config"] = vllm_compilation_config
+            if use_compile:
+                vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+                if vllm_compilation_config is not None:
+                    engine_kwargs["compilation_config"] = vllm_compilation_config
 
             if gen_config.seed is not None:
                 engine_kwargs["seed"] = gen_config.seed
@@ -365,15 +369,14 @@ class VLLMTorchTitanBenchmark:
             # CLI --model-path overrides the config's hf_assets_path
             model_path = self.config.model_path or rl_config.hf_assets_path
 
+            use_compile = self.config.use_compile_cudagraph
+            mode_str = "compile(eager) + piecewise cudagraph" if use_compile else "eager (no compile, no cudagraph)"
+
             sp_mode = "TP+SP" if self.config.enable_sp else "TP-only"
             print(f"Loading vLLM with TorchTitan Qwen3 model ({sp_mode})...")
             print(f"Model: {model_path}")
             print(f"Tensor Parallel Size: {self.config.tp}")
-            print(
-                f"CUDA Graph: {'Enabled' if self.config.use_cuda_graph else 'Disabled (eager mode)'}"
-            )
-            compile_enabled = self.config.compile in ("vllm-torchtitan", "all")
-            print(f"Compile: {'Enabled' if compile_enabled else 'Disabled'}")
+            print(f"Mode: {mode_str}")
 
             if self.config.profile:
                 self.profile_dir = Path(self.config.profile_dir) / "vllm_torchtitan"
@@ -387,7 +390,7 @@ class VLLMTorchTitanBenchmark:
             # ── 2. Patch model_spec parallelize_fn (same as inference_example.py) ──
             rl_config.model_spec.parallelize_fn = partial(
                 parallelize_qwen3,
-                enable_sp=False,
+                enable_sp=self.config.enable_sp,
             )
             register_model_to_vllm_model_registry(rl_config.model_spec)
 
@@ -399,13 +402,14 @@ class VLLMTorchTitanBenchmark:
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend="external_launcher",
                 gpu_memory_utilization=gen_config.gpu_memory_limit,
-                enforce_eager=gen_config.compile.is_eager,
+                enforce_eager=not use_compile,
                 hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             )
 
-            vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
-            if vllm_compilation_config is not None:
-                engine_kwargs["compilation_config"] = vllm_compilation_config
+            if use_compile:
+                vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+                if vllm_compilation_config is not None:
+                    engine_kwargs["compilation_config"] = vllm_compilation_config
 
             if gen_config.seed is not None:
                 engine_kwargs["seed"] = gen_config.seed
@@ -671,7 +675,7 @@ class TorchTitanNativeBenchmark:
                 )
 
             # Apply torch.compile if enabled
-            if self.config.compile in ("torchtitan-native", "all"):
+            if self.config.use_compile_cudagraph:
                 print("Applying torch.compile to TorchTitan native model...")
                 self.model = torch.compile(self.model, backend="inductor")
 
@@ -1126,19 +1130,12 @@ def main():
         help="Output file for results",
     )
     parser.add_argument(
-        "--skip-vllm-native",
-        action="store_true",
-        help="Skip vLLM native benchmark",
-    )
-    parser.add_argument(
-        "--skip-vllm-torchtitan",
-        action="store_true",
-        help="Skip vLLM TorchTitan benchmark",
-    )
-    parser.add_argument(
-        "--skip-torchtitan-native",
-        action="store_true",
-        help="Skip TorchTitan native benchmark",
+        "--test-cases",
+        type=str,
+        default="vllm-native,vllm-torchtitan",
+        help="Comma-separated list of test cases to run. "
+        "Options: vllm-native, vllm-torchtitan, torchtitan-native "
+        "(default: vllm-native,vllm-torchtitan)",
     )
     parser.add_argument(
         "--from-hf",
@@ -1189,24 +1186,26 @@ def main():
         help="Number of active profiling steps (default: 2)",
     )
     parser.add_argument(
-        "--use-cuda-graph",
+        "--use-compile-cudagraph",
         action="store_true",
-        help="Enable CUDA graph via compilation config (default: eager)",
-    )
-    parser.add_argument(
-        "--compile",
-        type=str,
-        choices=["none", "vllm-torchtitan", "torchtitan-native", "all"],
-        default="none",
-        help="Enable torch.compile for specified approaches",
+        help="Enable compile(eager) + piecewise cudagraph for vLLM engine. "
+        "Default is fully eager (no compile, no cudagraph).",
     )
     args = parser.parse_args()
 
+    # Parse test cases
+    test_cases = [tc.strip() for tc in args.test_cases.split(",")]
+    valid_cases = {"vllm-native", "vllm-torchtitan", "torchtitan-native"}
+    for tc in test_cases:
+        if tc not in valid_cases:
+            parser.error(
+                f"Unknown test case '{tc}'. Valid options: {', '.join(sorted(valid_cases))}"
+            )
+
     # Validate arguments
-    if not args.skip_torchtitan_native and args.torchtitan_checkpoint is None:
+    if "torchtitan-native" in test_cases and args.torchtitan_checkpoint is None:
         parser.error(
-            "--torchtitan-checkpoint is required for TorchTitan Native benchmark. "
-            "Use --skip-torchtitan-native if you don't want to run it."
+            "--torchtitan-checkpoint is required for torchtitan-native test case."
         )
 
     config = BenchmarkConfig(
@@ -1226,22 +1225,22 @@ def main():
         profile_wait=args.profile_wait,
         profile_warmup=args.profile_warmup,
         profile_active=args.profile_active,
-        use_cuda_graph=args.use_cuda_graph,
-        compile=args.compile,
+        use_compile_cudagraph=args.use_compile_cudagraph,
     )
 
     runner = BenchmarkRunner(config)
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
-    if not args.skip_vllm_native:
-        runner.run_benchmark(VLLMNativeBenchmark, "vllm_native")
+    benchmark_map = {
+        "vllm-native": (VLLMNativeBenchmark, "vllm_native"),
+        "vllm-torchtitan": (VLLMTorchTitanBenchmark, "vllm_torchtitan"),
+        "torchtitan-native": (TorchTitanNativeBenchmark, "torchtitan_native"),
+    }
 
-    if not args.skip_vllm_torchtitan:
-        runner.run_benchmark(VLLMTorchTitanBenchmark, "vllm_torchtitan")
-
-    if not args.skip_torchtitan_native:
-        runner.run_benchmark(TorchTitanNativeBenchmark, "torchtitan_native")
+    for tc in test_cases:
+        cls, key = benchmark_map[tc]
+        runner.run_benchmark(cls, key)
 
     # Print and save results (only on rank 0)
     if local_rank == 0:
