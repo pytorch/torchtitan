@@ -13,7 +13,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -24,6 +23,7 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -40,6 +40,7 @@ class Attention(BaseAttention):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
+        linear_bias: bool = False
         attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
         attn_mask_type: str = "causal"
         sliding_window_size: int = 128
@@ -56,25 +57,18 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        self.wq = nn.Linear(
-            dim,
-            config.n_heads * config.head_dim,
-            bias=True,
+        linear_config = Linear.Config(bias=config.linear_bias)
+        self.wq = linear_config.build(
+            in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = nn.Linear(
-            dim,
-            config.n_kv_heads * config.head_dim,
-            bias=True,
+        self.wk = linear_config.build(
+            in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = nn.Linear(
-            dim,
-            config.n_kv_heads * config.head_dim,
-            bias=True,
+        self.wv = linear_config.build(
+            in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = nn.Linear(
-            config.n_heads * config.head_dim,
-            dim,
-            bias=True,
+        self.wo = linear_config.build(
+            in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
@@ -83,18 +77,9 @@ class Attention(BaseAttention):
     def init_weights(self, **kwargs):
         init_std = kwargs.get("init_std")
         assert init_std is not None
-        linear_list = [
-            self.wq,
-            self.wk,
-            self.wv,
-        ]
-
-        trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in linear_list:
-            trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            trunc_normal_(linear.bias, mean=0.0, std=init_std)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
+        for linear in (self.wq, self.wk, self.wv, self.wo):
+            linear.init_weights(init_std=init_std)
 
     def forward(
         self,
@@ -167,8 +152,8 @@ class GptOssTransformerBlock(TransformerBlock):
         super().__init__()
         self.use_sliding_attention = layer_id % 2 == 0
         self.attention = config.attention.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
+        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         assert config.moe is not None
         self.moe = config.moe.build(dim=dim)
@@ -212,7 +197,7 @@ class GptOssTransformerBlock(TransformerBlock):
     def init_weights(self, **kwargs):
         buffer_device = kwargs.get("buffer_device")
         for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
+            norm.init_weights()
         self.attention.init_weights(init_std=self.weight_init_std)
         self.moe.init_weights(
             init_std=self.weight_init_std, buffer_device=buffer_device
@@ -277,13 +262,6 @@ class GptOssModel(Decoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # GptOss uses dtype=torch.get_default_dtype() for output linear
-        self.output = nn.Linear(
-            config.dim,
-            config.vocab_size,
-            dtype=torch.get_default_dtype(),
-            bias=False,
-        )
 
     def get_attention_masks(
         self,
