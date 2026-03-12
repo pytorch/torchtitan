@@ -395,6 +395,24 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_deepseekv3_fsdp_tp_ep_flexattention",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.joint_passes inductor_decomposition",
+                    "--activation_checkpoint.mode none",
+                ],
+            ],
+            "AOT deepseek_v3 inductor_decomposition",
+            "aot_deepseekv3_inductor_decomposition",
+            ngpu=8,
+        ),
     ]
 
 
