@@ -11,6 +11,9 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch import nn
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -61,16 +64,61 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class VarlenAttentionWrapper(torch.nn.Module):
-    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
-        varlen_attn, mode="max-autotune-no-cudagraphs"
-    )
+class _InnerAttentionBase(torch.nn.Module):
+    """Base class for inner attention wrappers with DTensor support.
+
+    When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
+    uses ``local_map`` to convert them to local tensors before calling
+    ``_forward_local``, then wraps the output back to DTensor.
+    Placements and device mesh are inferred from the input DTensors,
+    similar to sixlib's ``_qkv_to_local`` but using ``local_map``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._local_map_fn: Callable | None = None
 
     def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(q, DTensor):
+            assert isinstance(k, DTensor) and isinstance(v, DTensor), "q, k, v should all be DTensors"
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    self._forward_local,
+                    in_placements=(q.placements, k.placements, v.placements),
+                    out_placements=(q.placements,),
+                    in_grad_placements=(q.placements, k.placements, v.placements),
+                    device_mesh=q.device_mesh,
+                )
+            return self._local_map_fn(q, k, v, **kwargs)
+        return self._forward_local(q, k, v, **kwargs)
+
+    def _forward_local(
         self,
         xq: torch.Tensor,
         xk: torch.Tensor,
         xv: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+
+class VarlenAttentionWrapper(_InnerAttentionBase):
+    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
+        varlen_attn, mode="max-autotune-no-cudagraphs"
+    )
+
+    def _forward_local(
+        self,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        xv: torch.Tensor,
+        *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -118,7 +166,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
         ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(Module):
+class FlexAttentionWrapper(_InnerAttentionBase):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -146,7 +194,7 @@ class FlexAttentionWrapper(Module):
         options=inductor_configs,
     )
 
-    def forward(
+    def _forward_local(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -199,7 +247,7 @@ def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, Non
         FlexAttentionWrapper.forward = orig
 
 
-class ScaledDotProductAttentionWrapper(Module):
+class ScaledDotProductAttentionWrapper(_InnerAttentionBase):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
@@ -222,7 +270,7 @@ class ScaledDotProductAttentionWrapper(Module):
                 SDPBackend.MATH,
             ]
 
-    def forward(
+    def _forward_local(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -565,7 +613,7 @@ class GQAttention(BaseAttention):
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq, xk, xv, attention_masks, **scale_kwargs
+                    xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
                 )
             case "sdpa":
                 assert attention_masks is None

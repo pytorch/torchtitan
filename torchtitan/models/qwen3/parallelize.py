@@ -35,7 +35,6 @@ from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.parallelize import apply_replicate
 
-from torchtitan.distributed.utils import LocalMapWrapper
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -128,11 +127,6 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
-        if parallel_dims.tp_enabled:
-            raise NotImplementedError(
-                "Context Parallel with Tensor Parallel is not yet supported for Qwen3. "
-                "See https://github.com/pytorch/torchtitan/issues/2446"
-            )
         attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
@@ -141,32 +135,18 @@ def parallelize_qwen3(
             attn_backend,
         )
 
-    # When both TP and CP are enabled, set up local_map on inner_attention
-    # to properly handle DTensor <-> local tensor conversion at the TP/CP
-    # boundary. TP's use_local_output=False produces DTensor q/k/v, but CP
-    # hooks expect plain tensors.
-    # TODO(pianpwk): change this once full DTensor lands
     if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        # pyrefly: ignore [missing-attribute, not-callable]
-        for block in model.layers.values():
-            attn = block.attention  # pyrefly: ignore [missing-attribute]
-            if attn_backend == "sdpa":
-                # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
-                # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
-                attn.inner_attention.sdpa_backends = (
+        # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+        # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
+        if attn_backend == "sdpa":
+            # pyrefly: ignore [missing-attribute, not-callable]
+            for block in model.layers.values():
+                block.attention.inner_attention.sdpa_backends = (  # pyrefly: ignore [missing-attribute]
                     [  # pyrefly: ignore [missing-attribute]
                         SDPBackend.FLASH_ATTENTION,
                         SDPBackend.MATH,
                     ]
                 )
-            attn.inner_attention = LocalMapWrapper(  # pyrefly: ignore [missing-attribute]  # pyrefly: ignore [missing-attribute]
-                attn.inner_attention,  # pyrefly: ignore [missing-attribute]
-                device_mesh=tp_mesh,
-                # q, k, v are sharded on heads dim (dim=1 after transpose)
-                in_placements=((Shard(1),), (Shard(1),), (Shard(1),)),
-                out_placements=((Shard(1),),),
-            )
 
     if ac_config.mode != "none":
         apply_ac(
