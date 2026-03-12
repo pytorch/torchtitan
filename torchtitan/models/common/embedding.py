@@ -29,15 +29,20 @@ class Embedding(nn.Embedding, Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        # ``num_embeddings`` and ``embedding_dim`` are usually passed by the
-        # parent modules through build(). Using field(init=False) excludes
-        # them from Config.__init__.
         num_embeddings: int = field(init=False)
         embedding_dim: int = field(init=False)
         init_mean: float = 0.0
         init_std: float = 1.0
 
     def __init__(self, config: Config):
+        if not hasattr(config, "num_embeddings") or not hasattr(
+            config, "embedding_dim"
+        ):
+            raise TypeError(
+                "Embedding.Config requires 'num_embeddings' and 'embedding_dim' to be set. "
+                "Use Config.build(num_embeddings=..., embedding_dim=...) or set them "
+                "on the Config instance before constructing Embedding directly."
+            )
         super().__init__(config.num_embeddings, config.embedding_dim)
         self.config = config
 
