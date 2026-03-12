@@ -86,11 +86,15 @@ def test_lora_before_quantization_raises():
 
 def test_lora_freeze_and_trainability():
     """After convert: base params frozen, LoRA adapters present and trainable."""
-    model = nn.Sequential(OrderedDict([
-        ("fc1", nn.Linear(64, 64)),
-        ("relu", nn.ReLU()),
-        ("fc2", nn.Linear(64, 64)),
-    ]))
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
     converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
     converter.convert(model)
 
@@ -118,11 +122,15 @@ def test_lora_freeze_and_trainability():
 def test_lora_trains_base_frozen():
     """Train for several steps: LoRA params should change, base params should not."""
     torch.manual_seed(42)
-    model = nn.Sequential(OrderedDict([
-        ("fc1", nn.Linear(64, 64)),
-        ("relu", nn.ReLU()),
-        ("fc2", nn.Linear(64, 64)),
-    ]))
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
     converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
     converter.convert(model)
 
