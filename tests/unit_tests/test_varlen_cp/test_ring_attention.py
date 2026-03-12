@@ -25,12 +25,12 @@ from torch.nn.attention.varlen import varlen_attn
 from torchtitan.distributed.varlen_cp.dispatch_solver import DispatchPlan, solve_dispatch
 from torchtitan.distributed.varlen_cp.mask_primitives import cu_seqlens_to_attn_slices
 from torchtitan.distributed.varlen_cp.magi_attention import varlen_magi_dispatch
+from torchtitan.distributed.varlen_cp.flex_attn_kernels import (
+    flex_attn_backward,
+    flex_attn_forward,
+)
 from torchtitan.distributed.varlen_cp.ring_attention import (
-    _backward_step_flash,
     _build_ring_step_cu_seqlens,
-    _compute_and_merge_step,
-    _extract_tokens_for_docs,
-    _scatter_to_chunk,
     merge_with_lse,
     varlen_ring_attention,
 )
@@ -39,6 +39,125 @@ from torchtitan.distributed.varlen_cp.ring_attention import (
 # ---------------------------------------------------------------------------
 # Local test helpers (moved from ring_attention.py, only used in tests)
 # ---------------------------------------------------------------------------
+
+
+def _compute_step_ffa(
+    q, cur_k, cur_v, q_doc_ranges, k_doc_ranges, is_causal,
+    q_chunk_start, k_chunk_start, chunk_size, n_heads, head_dim,
+    accum_out, accum_lse,
+):
+    """Compute one (Q,K) step using flex_attention and merge into accumulator."""
+    device = q.device
+
+    q_ranges = torch.tensor(
+        [[qs - q_chunk_start, qe - q_chunk_start] for qs, qe in q_doc_ranges],
+        dtype=torch.int32, device=device,
+    )
+    k_ranges = torch.tensor(
+        [[ks - k_chunk_start, ke - k_chunk_start] for ks, ke in k_doc_ranges],
+        dtype=torch.int32, device=device,
+    )
+    attn_type = 1 if is_causal else 0
+    attn_type_map = torch.full(
+        (len(q_doc_ranges),), attn_type, dtype=torch.int32, device=device,
+    )
+
+    step_out, step_meta = flex_attn_forward(
+        q, cur_k, cur_v, q_ranges, k_ranges, attn_type_map,
+    )
+
+    step_lse = step_meta.lse.transpose(0, 1)
+
+    q_coverage = torch.zeros(chunk_size, dtype=torch.bool, device=device)
+    for qs, qe in q_doc_ranges:
+        q_coverage[qs - q_chunk_start : qe - q_chunk_start] = True
+    uncovered = ~q_coverage
+    if uncovered.any():
+        step_lse[:, uncovered] = float("-inf")
+        step_out[uncovered] = 0
+
+    return merge_with_lse(accum_out, accum_lse, step_out, step_lse)
+
+
+def _compute_and_merge_step(
+    q, cur_k, cur_v, global_cu_seqlens,
+    q_chunk_start, q_chunk_end, k_chunk_start, k_chunk_end,
+    original_total_seqlen, chunk_size, accum_out, accum_lse,
+):
+    """Compute partial attention for one (Q,K) pair and merge."""
+    device = q.device
+    n_heads = q.shape[1]
+    head_dim = q.shape[2]
+
+    cu_q, cu_k, q_doc_ranges, k_doc_ranges, num_real_q, is_causal = (
+        _build_ring_step_cu_seqlens(
+            global_cu_seqlens, q_chunk_start, q_chunk_end,
+            k_chunk_start, k_chunk_end,
+            original_total_seqlen, chunk_size, device,
+        )
+    )
+
+    if num_real_q == 0 or not k_doc_ranges:
+        return accum_out, accum_lse
+
+    return _compute_step_ffa(
+        q, cur_k, cur_v, q_doc_ranges, k_doc_ranges, is_causal,
+        q_chunk_start, k_chunk_start, chunk_size, n_heads, head_dim,
+        accum_out, accum_lse,
+    )
+
+
+def _backward_step_ffa(
+    grad_output, q, cur_k, cur_v, merged_out, merged_lse,
+    global_cu_seqlens, q_chunk_start, q_chunk_end,
+    k_chunk_start, k_chunk_end, original_total_seqlen, chunk_size,
+    grad_q, grad_kv,
+):
+    """Compute backward for one (Q,K) step using flex_attention backward."""
+    device = q.device
+    n_kv_head_dim = cur_k.shape[2]
+
+    cu_q, cu_k, q_doc_ranges, k_doc_ranges, num_real_q, is_causal = (
+        _build_ring_step_cu_seqlens(
+            global_cu_seqlens, q_chunk_start, q_chunk_end,
+            k_chunk_start, k_chunk_end,
+            original_total_seqlen, chunk_size, device,
+        )
+    )
+
+    if num_real_q == 0 or not k_doc_ranges:
+        return
+
+    q_ranges = torch.tensor(
+        [[qs - q_chunk_start, qe - q_chunk_start] for qs, qe in q_doc_ranges],
+        dtype=torch.int32, device=device,
+    )
+    k_ranges = torch.tensor(
+        [[ks - k_chunk_start, ke - k_chunk_start] for ks, ke in k_doc_ranges],
+        dtype=torch.int32, device=device,
+    )
+    attn_type = 1 if is_causal else 0
+    attn_type_map = torch.full(
+        (len(q_doc_ranges),), attn_type, dtype=torch.int32, device=device,
+    )
+
+    ffa_lse = merged_lse.transpose(0, 1).contiguous()
+
+    dq, dk, dv = flex_attn_backward(
+        grad_output.contiguous(),
+        q.contiguous(),
+        cur_k.contiguous(),
+        cur_v.contiguous(),
+        merged_out.contiguous(),
+        ffa_lse,
+        q_ranges,
+        k_ranges,
+        attn_type_map,
+    )
+
+    grad_q += dq
+    grad_kv[..., :n_kv_head_dim] += dk
+    grad_kv[..., n_kv_head_dim:] += dv
 
 
 def _raw_ring_pass_blocking(
@@ -109,7 +228,7 @@ def _varlen_backward_via_ring_pass(
             cur_k = current_kv[..., : kv_head_dim // 2].contiguous()
             cur_v = current_kv[..., kv_head_dim // 2 :].contiguous()
 
-            _backward_step_flash(
+            _backward_step_ffa(
                 grad_output, q, cur_k, cur_v,
                 merged_out, merged_lse,
                 global_cu_seqlens,
@@ -528,97 +647,6 @@ class TestBuildRingStepCuSeqlens(unittest.TestCase):
         )
         self.assertFalse(is_causal)
         self.assertEqual(n_q, 0)  # No doc spans both chunks
-
-
-class TestExtractTokensForDocs(unittest.TestCase):
-    """Unit tests for _extract_tokens_for_docs."""
-
-    def test_basic_extraction(self):
-        """Extract tokens from two doc ranges."""
-        chunk = torch.arange(64).unsqueeze(-1).float()  # (64, 1)
-        # Global ranges: [10, 20) and [30, 40), chunk_start=0
-        result = _extract_tokens_for_docs(chunk, [(10, 20), (30, 40)], 0)
-        self.assertEqual(result.shape[0], 20)
-        expected = torch.cat([chunk[10:20], chunk[30:40]], dim=0)
-        torch.testing.assert_close(result, expected)
-
-    def test_with_chunk_offset(self):
-        """Extract with non-zero chunk start."""
-        chunk = torch.arange(64).unsqueeze(-1).float()
-        # chunk_start=64, global ranges [64, 80) and [90, 100)
-        # local offsets: [0, 16) and [26, 36)
-        result = _extract_tokens_for_docs(chunk, [(64, 80), (90, 100)], 64)
-        self.assertEqual(result.shape[0], 26)
-        expected = torch.cat([chunk[0:16], chunk[26:36]], dim=0)
-        torch.testing.assert_close(result, expected)
-
-    def test_empty_ranges(self):
-        """Empty doc ranges should return empty tensor."""
-        chunk = torch.randn(64, 4, 8)
-        result = _extract_tokens_for_docs(chunk, [], 0)
-        self.assertEqual(result.shape[0], 0)
-
-
-class TestScatterToChunk(unittest.TestCase):
-    """Unit tests for _scatter_to_chunk."""
-
-    def test_full_coverage(self):
-        """All positions covered by one document."""
-        n_heads, head_dim, chunk_size = 2, 8, 32
-        packed_out = torch.randn(32, n_heads, head_dim)
-        packed_lse = torch.randn(n_heads, 32)
-        q_doc_ranges = [(0, 32)]
-
-        full_out, full_lse = _scatter_to_chunk(
-            packed_out, packed_lse, q_doc_ranges, 0, chunk_size, n_heads, head_dim,
-            torch.device("cpu"), packed_out.dtype,
-        )
-        torch.testing.assert_close(full_out, packed_out)
-        torch.testing.assert_close(full_lse, packed_lse)
-
-    def test_partial_coverage(self):
-        """Only part of chunk covered; rest should be zero / -inf."""
-        n_heads, head_dim, chunk_size = 2, 8, 64
-        packed_out = torch.randn(20, n_heads, head_dim)
-        packed_lse = torch.randn(n_heads, 20)
-        # Doc at positions [10, 30) in chunk starting at 0
-        q_doc_ranges = [(10, 30)]
-
-        full_out, full_lse = _scatter_to_chunk(
-            packed_out, packed_lse, q_doc_ranges, 0, chunk_size, n_heads, head_dim,
-            torch.device("cpu"), packed_out.dtype,
-        )
-        # Check covered region
-        torch.testing.assert_close(full_out[10:30], packed_out)
-        torch.testing.assert_close(full_lse[:, 10:30], packed_lse)
-        # Check uncovered regions
-        self.assertTrue((full_out[:10] == 0).all())
-        self.assertTrue((full_out[30:] == 0).all())
-        self.assertTrue(torch.isinf(full_lse[:, :10]).all())
-        self.assertTrue(torch.isinf(full_lse[:, 30:]).all())
-
-    def test_multi_doc(self):
-        """Two documents, gap in between."""
-        n_heads, head_dim, chunk_size = 2, 8, 64
-        # Doc1: 10 tokens, Doc2: 15 tokens = 25 packed tokens
-        packed_out = torch.randn(25, n_heads, head_dim)
-        packed_lse = torch.randn(n_heads, 25)
-        # chunk_start=64, doc1=[64,74), doc2=[80,95)
-        q_doc_ranges = [(64, 74), (80, 95)]
-
-        full_out, full_lse = _scatter_to_chunk(
-            packed_out, packed_lse, q_doc_ranges, 64, chunk_size, n_heads, head_dim,
-            torch.device("cpu"), packed_out.dtype,
-        )
-        # Doc1 at local positions [0,10)
-        torch.testing.assert_close(full_out[0:10], packed_out[:10])
-        torch.testing.assert_close(full_lse[:, 0:10], packed_lse[:, :10])
-        # Doc2 at local positions [16,31)
-        torch.testing.assert_close(full_out[16:31], packed_out[10:25])
-        torch.testing.assert_close(full_lse[:, 16:31], packed_lse[:, 10:25])
-        # Gap at [10,16) should be zero/-inf
-        self.assertTrue((full_out[10:16] == 0).all())
-        self.assertTrue(torch.isinf(full_lse[:, 10:16]).all())
 
 
 class TestWorkEstimate(unittest.TestCase):

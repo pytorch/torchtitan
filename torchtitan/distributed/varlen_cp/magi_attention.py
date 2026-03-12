@@ -53,7 +53,6 @@ from torchtitan.distributed.varlen_cp.magi_dispatch import (  # noqa: E402
     _redistribute_tensors_to_assigned,
     _return_results,
     _scatter_dq_to_owners,
-    preinit_nvshmem_buffers,
 )
 from torchtitan.distributed.varlen_cp.mask_primitives import cu_seqlens_to_attn_slices
 from torchtitan.distributed.varlen_cp.ring_attention import (
@@ -841,16 +840,6 @@ class _VarlenMagiFunc(torch.autograd.Function):
         half_hd = k.shape[2]
         dtype = q.dtype
         device = q.device
-
-        # Pre-allocate NVSHMEM symmetric memory buffers (collective).
-        max_feat_bf16 = max(n_heads * head_dim, n_kv_heads * kv_head_dim)
-        max_feat_f32 = max_feat_bf16
-        preinit_nvshmem_buffers(
-            cp_group,
-            max_numel_bf16=chunk_size * max_feat_bf16,
-            max_numel_f32=chunk_size * max_feat_f32,
-            device=device,
-        )
 
         # Build or retrieve cached magi plan + metadata
         magi_plan, cache = _get_or_build_cache(
