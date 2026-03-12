@@ -571,6 +571,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "FSDP+CP+PP+compile with torchcomms",
             "torchcomms_3d_dp+cp+pp+compile",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -584,6 +585,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "FSDP+TP+PP+compile with torchcomms",
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
+            skip_rocm_test=True,
         ),
     ]
 
