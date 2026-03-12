@@ -151,9 +151,7 @@ def joint_graph_builder(
             # Create the decomposition pass with context
             decomp_pass = functools.partial(
                 inductor_decomposition_pass,
-                model=model,
                 joint_with_descriptors=joint_with_descriptors,
-                forward_inputs=model_args,
             )
 
             # Prepend to joint_custom_passes
