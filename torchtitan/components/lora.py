@@ -61,7 +61,7 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 )
 
             def init_weights(self, **kwargs) -> None:
-                super().init_weights(**kwargs)
+                super().init_weights(**kwargs)  # pyrefly: ignore [not-callable]
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
                 nn.init.zeros_(self.lora_b.weight)
 
