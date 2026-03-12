@@ -44,6 +44,27 @@ class ProfilingConfig:
     This is used to configure torch.profile.schedule.
     """
 
+    profiler_repeat: int | None = None
+    """
+    The number of times to repeat the profiling cycle
+
+    This is used to configure torch.profile.schedule.
+    """
+
+    profiler_skip_first: int | None = None
+    """
+    The number of initial profiling cycles to skip
+
+    This is used to configure torch.profile.schedule.
+    """
+
+    profiler_skip_first_wait: int | None = None
+    """
+    The number of initial profiling cycles to skip the wait time
+
+    This is used to configure torch.profile.schedule.
+    """
+
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
 
@@ -69,6 +90,16 @@ def maybe_enable_profiling(
             profiling_config.profiler_warmup,
             profiling_config.profiler_active,
         )
+
+        additional_params = {
+            key: val
+            for key, val in [
+                ("repeat", profiling_config.profiler_repeat),
+                ("skip_first", profiling_config.profiler_skip_first),
+                ("skip_first_wait", profiling_config.profiler_skip_first_wait),
+            ]
+            if val is not None
+        }
 
         rank = torch.distributed.get_rank()
 
@@ -107,7 +138,9 @@ def maybe_enable_profiling(
                 torch.profiler.ProfilerActivity.CPU,
                 gpu_device_profiled,
             ],
-            schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
+            schedule=torch.profiler.schedule(
+                wait=wait, warmup=warmup, active=active, **additional_params
+            ),
             on_trace_ready=trace_handler,
             record_shapes=True,
         ) as torch_profiler:
