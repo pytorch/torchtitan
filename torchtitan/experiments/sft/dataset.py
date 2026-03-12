@@ -53,6 +53,7 @@ class SFTDataset(IterableDataset, Stateful):
         self._epoch: int = 0
         self._pack_buffer_input: list[int] = []
         self._pack_buffer_label: list[int] = []
+        self._pack_buffer_positions: list[int] = []
 
         self._logged_first_sample = False
 
@@ -61,33 +62,47 @@ class SFTDataset(IterableDataset, Stateful):
             return iter([])
         return iter(self._data.skip(self._sample_idx))
 
+    @staticmethod
+    def _validate_messages(messages: list[dict[str, str]]) -> None:
+        """Validate that messages are a single-turn [user, assistant] pair."""
+        if len(messages) != 2:
+            raise ValueError(
+                f"Expected single-turn [user, assistant], got {len(messages)} messages"
+            )
+        if messages[0]["role"] != "user":
+            raise ValueError(
+                f"First message must be 'user', got '{messages[0]['role']}'"
+            )
+        if messages[1]["role"] != "assistant":
+            raise ValueError(
+                f"Second message must be 'assistant', got '{messages[1]['role']}'"
+            )
+
     def _tokenize_sample(
         self, sample: dict[str, Any]
     ) -> tuple[list[int], list[int]] | None:
-        """Tokenize a sample and create input/label pairs with label masking.
+        """Tokenize a single-turn sample and create input/label pairs.
 
-        Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:] with non-assistant tokens masked as IGNORE_INDEX.
-        Returns None if the sample is too short (< 2 tokens) or exceeds
+        Expects messages = [user_message, assistant_message] from the
+        sample_processor. Returns (input_ids, label_ids) where
+        input_ids = tokens[:-1] and label_ids = tokens[1:] with prompt
+        tokens masked as IGNORE_INDEX. Returns None if the sample exceeds
         seq_len (dropped to avoid training on truncated responses).
 
-        Uses incremental prefix re-tokenization (delta approach) to determine
-        per-message token boundaries, avoiding BPE merge errors at the
-        prompt/response boundary.
+        Uses incremental prefix re-tokenization to find the prompt/response
+        token boundary, avoiding BPE merge errors. This is the same approach
+        used by torchtune's HFTokenizer.tokenize_messages:
+        https://github.com/pytorch/torchtune/blob/main/torchtune/modules/transforms/tokenizers/_hf_tokenizer.py
         """
         messages = self._sample_processor(sample)
+        self._validate_messages(messages)
+
         full_text = self._tokenizer.apply_chat_template(messages)
         full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=True)
 
-        # Log only the first sample for debugging
         if not self._logged_first_sample:
             logger.info(f"[SFT] First sample full:\n{full_text}")
             self._logged_first_sample = True
-
-        # Need at least 2 tokens for next-token prediction (input[:-1], label[1:])
-        if len(full_tokens) < 2:
-            logger.debug(f"Dropping sample {self._sample_idx}: too short to form input/label pair \n{full_text}")
-            return None
 
         # Drop examples exceeding seq_len rather than truncating. Truncation
         # cuts the end of the response (often the final answer), which teaches
@@ -99,36 +114,23 @@ class SFTDataset(IterableDataset, Stateful):
             )
             return None
 
-        # Next-token prediction shift: input = tokens[:-1], labels = tokens[1:]
-        # The trainer and loss function do NOT shift again.
         input_ids = full_tokens[:-1]
-        label_ids = list(full_tokens[1:])
+        label_ids = full_tokens[1:]
 
-        # Build per-token mask using incremental prefix re-tokenization.
-        # For each message, tokenize the conversation up to that point.
-        # The delta (new tokens) belongs to that message. Mask non-assistant
-        # deltas so we only train on assistant responses.
-        prev_token_len = 0
-        for i, message in enumerate(messages):
-            prefix_messages = messages[: i + 1]
-            is_last = i == len(messages) - 1
-            prefix_text = self._tokenizer.apply_chat_template(
-                prefix_messages,
-                add_generation_prompt=not is_last,
-            )
-            prefix_tokens = self._tokenizer.encode(
-                prefix_text, add_bos=True, add_eos=False
-            )
-            curr_token_len = len(prefix_tokens)
+        # Find the prompt/response token boundary by tokenizing just the
+        # user message with add_generation_prompt=True. This gives us the
+        # prompt prefix including the assistant header. The delta between
+        # this and the full tokenization is the assistant response.
+        prompt_text = self._tokenizer.apply_chat_template(
+            messages[:1], add_generation_prompt=True
+        )
+        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+        prompt_len = len(prompt_tokens)
 
-            if message["role"] != "assistant":
-                # Mask this message's tokens in labels (accounting for shift)
-                mask_start = max(prev_token_len - 1, 0)
-                mask_end = min(curr_token_len - 1, len(label_ids))
-                for j in range(mask_start, mask_end):
-                    label_ids[j] = IGNORE_INDEX
-
-            prev_token_len = curr_token_len
+        # Mask prompt tokens in labels (accounting for the next-token shift:
+        # label[i] predicts token i+1, so prompt labels span [0, prompt_len-1))
+        mask_end = min(prompt_len - 1, len(label_ids))
+        label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
 
         return input_ids, label_ids
 
@@ -149,7 +151,6 @@ class SFTDataset(IterableDataset, Stateful):
 
                 input_ids, label_ids = result
 
-                # Pad to seq_len
                 pad_len = self.seq_len - len(input_ids)
                 if pad_len > 0:
                     input_ids = input_ids + [self._eos_id] * pad_len
@@ -166,7 +167,19 @@ class SFTDataset(IterableDataset, Stateful):
                 self._sample_idx = 0
                 self._epoch += 1
                 self._data = self._data.shuffle(seed=42 + self._epoch)
-                logger.warning(f"SFT dataset '{self._dataset_id}' is being re-looped (epoch {self._epoch})")
+                logger.warning(
+                    f"SFT dataset '{self._dataset_id}' is being re-looped (epoch {self._epoch})"
+                )
+
+    def _flush_pack_buffer(self):
+        """Convert pack buffers to tensors, clear them, and return the batch."""
+        input_tensor = torch.tensor(self._pack_buffer_input, dtype=torch.long)
+        label_tensor = torch.tensor(self._pack_buffer_label, dtype=torch.long)
+        positions_tensor = torch.tensor(self._pack_buffer_positions, dtype=torch.long)
+        self._pack_buffer_input = []
+        self._pack_buffer_label = []
+        self._pack_buffer_positions = []
+        return {"input": input_tensor, "positions": positions_tensor}, label_tensor
 
     def _iter_greedy_packed(self):
         """Greedy packing: pack examples sequentially until seq_len is full.
@@ -195,34 +208,20 @@ class SFTDataset(IterableDataset, Stateful):
                     pad_len = remaining
                     self._pack_buffer_input.extend([self._eos_id] * pad_len)
                     self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
+                    self._pack_buffer_positions.extend(list(range(pad_len)))
 
-                    input_tensor = torch.tensor(
-                        self._pack_buffer_input, dtype=torch.long
-                    )
-                    label_tensor = torch.tensor(
-                        self._pack_buffer_label, dtype=torch.long
-                    )
-                    self._pack_buffer_input = []
-                    self._pack_buffer_label = []
-                    yield {"input": input_tensor}, label_tensor
+                    yield self._flush_pack_buffer()
 
-                # Add example to buffer
+                # Add example to buffer with positions resetting to 0
                 self._pack_buffer_input.extend(input_ids)
                 self._pack_buffer_label.extend(label_ids)
+                self._pack_buffer_positions.extend(list(range(len(input_ids))))
 
                 # If buffer is exactly full, yield it. Buffer can never exceed
                 # seq_len because all examples are <= seq_len (over-length
                 # examples are dropped in _tokenize_sample).
                 if len(self._pack_buffer_input) == self.seq_len:
-                    input_tensor = torch.tensor(
-                        self._pack_buffer_input, dtype=torch.long
-                    )
-                    label_tensor = torch.tensor(
-                        self._pack_buffer_label, dtype=torch.long
-                    )
-                    self._pack_buffer_input = []
-                    self._pack_buffer_label = []
-                    yield {"input": input_tensor}, label_tensor
+                    yield self._flush_pack_buffer()
 
             # Flush remaining buffer at end of data
             if len(self._pack_buffer_input) > 0:
@@ -230,12 +229,9 @@ class SFTDataset(IterableDataset, Stateful):
                 if pad_len > 0:
                     self._pack_buffer_input.extend([self._eos_id] * pad_len)
                     self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
+                    self._pack_buffer_positions.extend(list(range(pad_len)))
 
-                input_tensor = torch.tensor(self._pack_buffer_input, dtype=torch.long)
-                label_tensor = torch.tensor(self._pack_buffer_label, dtype=torch.long)
-                self._pack_buffer_input = []
-                self._pack_buffer_label = []
-                yield {"input": input_tensor}, label_tensor
+                yield self._flush_pack_buffer()
 
             if not self.infinite:
                 logger.warning(f"SFT dataset '{self._dataset_id}' has run out of data")
@@ -244,7 +240,9 @@ class SFTDataset(IterableDataset, Stateful):
                 self._sample_idx = 0
                 self._epoch += 1
                 self._data = self._data.shuffle(seed=42 + self._epoch)
-                logger.warning(f"SFT dataset '{self._dataset_id}' is being re-looped (epoch {self._epoch})")
+                logger.warning(
+                    f"SFT dataset '{self._dataset_id}' is being re-looped (epoch {self._epoch})"
+                )
 
     def state_dict(self):
         return {
@@ -252,13 +250,15 @@ class SFTDataset(IterableDataset, Stateful):
             "epoch": self._epoch,
             "pack_buffer_input": self._pack_buffer_input,
             "pack_buffer_label": self._pack_buffer_label,
+            "pack_buffer_positions": self._pack_buffer_positions,
         }
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
-        self._epoch = state_dict.get("epoch", 0)
+        self._epoch = state_dict["epoch"]
         self._pack_buffer_input = state_dict["pack_buffer_input"]
         self._pack_buffer_label = state_dict["pack_buffer_label"]
+        self._pack_buffer_positions = state_dict["pack_buffer_positions"]
 
 
 class SFTDataLoader(ParallelAwareDataloader):

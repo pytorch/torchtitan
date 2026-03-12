@@ -27,7 +27,9 @@ def _make_tokenizer() -> HuggingFaceTokenizer:
 
 
 def _load_test_dataset():
-    return load_dataset("json", data_files="tests/assets/sft_test/data.json", split="train")
+    return load_dataset(
+        "json", data_files="tests/assets/sft_test/data.json", split="train"
+    )
 
 
 def _make_dataset(**kwargs) -> SFTDataset:
@@ -155,6 +157,34 @@ class TestSFTDatasetPacking(unittest.TestCase):
                 "Multiple examples should be packed, creating gaps in response labels",
             )
 
+    def test_packing_positions_reset_per_document(self):
+        """Positions should reset to 0 at each document boundary."""
+        ds = _make_dataset(seq_len=2048, pack_sequences=True)
+
+        sample = next(iter(ds))
+        positions = sample[0]["positions"]
+
+        self.assertEqual(positions.shape[0], 2048)
+        # First position must be 0
+        self.assertEqual(positions[0].item(), 0)
+        # Positions should reset: find all zeros (document starts)
+        zeros = (positions == 0).nonzero(as_tuple=True)[0]
+        # With multiple packed examples, there should be multiple resets
+        self.assertGreater(
+            len(zeros), 1, "Positions should reset to 0 at each document boundary"
+        )
+        # Between resets, positions should be sequential
+        for i in range(len(zeros) - 1):
+            start = zeros[i].item()
+            end = zeros[i + 1].item()
+            expected = list(range(end - start))
+            actual = positions[start:end].tolist()
+            self.assertEqual(
+                actual,
+                expected,
+                f"Positions should be sequential between resets at {start}:{end}",
+            )
+
     def test_packing_padding(self):
         """Padding positions should use EOS for input and IGNORE_INDEX for labels."""
         tokenizer = _make_tokenizer()
@@ -209,9 +239,13 @@ class TestSFTDatasetDropOverLength(unittest.TestCase):
         ds = _make_dataset(seq_len=16, pack_sequences=False, infinite=False)
         with self.assertLogs(level="DEBUG") as cm:
             sequences = list(ds)
-        self.assertEqual(len(sequences), 0, "All over-length examples should be dropped")
+        self.assertEqual(
+            len(sequences), 0, "All over-length examples should be dropped"
+        )
         drop_logs = [m for m in cm.output if "Dropping sample" in m and "seq_len" in m]
-        self.assertEqual(len(drop_logs), 10, "Should log a drop message for each sample")
+        self.assertEqual(
+            len(drop_logs), 10, "Should log a drop message for each sample"
+        )
 
     def test_short_examples_kept(self):
         # seq_len=512 is longer than test samples, so all are kept
@@ -252,9 +286,7 @@ class TestSFTDatasetCheckpointing(unittest.TestCase):
     def test_checkpoint_roundtrip(self):
         tokenizer = _make_tokenizer()
 
-        ds1 = _make_dataset(
-            tokenizer=tokenizer, pack_sequences=True, infinite=False
-        )
+        ds1 = _make_dataset(tokenizer=tokenizer, pack_sequences=True, infinite=False)
 
         # Consume some samples
         it = iter(ds1)
@@ -265,9 +297,7 @@ class TestSFTDatasetCheckpointing(unittest.TestCase):
         state = ds1.state_dict()
 
         # Create a new dataset and load state
-        ds2 = _make_dataset(
-            tokenizer=tokenizer, pack_sequences=True, infinite=False
-        )
+        ds2 = _make_dataset(tokenizer=tokenizer, pack_sequences=True, infinite=False)
         ds2.load_state_dict(state)
 
         # The remaining data from ds2 should match ds1
@@ -304,7 +334,8 @@ class TestSFTDatasetShuffling(unittest.TestCase):
         self.assertEqual(sorted(epoch1_order), sorted(epoch2_order))
         # Different order
         self.assertNotEqual(
-            epoch1_order, epoch2_order,
+            epoch1_order,
+            epoch2_order,
             "Second epoch should be shuffled into a different order",
         )
 
@@ -359,6 +390,48 @@ class TestSFTDatasetChatTemplate(unittest.TestCase):
         # Should contain user content but not assistant response
         self.assertIn("What is 2 + 3?", prompt_text)
         self.assertNotIn("2 + 3 = 5", prompt_text)
+
+
+class TestSFTDatasetSingleTurnValidation(unittest.TestCase):
+    """Test that multi-turn or malformed messages are rejected."""
+
+    def _tokenize_with_processor(self, processor):
+        ds = _make_dataset(sample_processor=processor, pack_sequences=False)
+        return ds._tokenize_sample(
+            {"question": "What is 1+1?", "answer": "1+1=2. #### 2"}
+        )
+
+    def test_rejects_multi_turn(self):
+        def multi_turn(sample):
+            return [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello"},
+                {"role": "user", "content": sample["question"]},
+                {"role": "assistant", "content": sample["answer"]},
+            ]
+
+        with self.assertRaises(ValueError, msg="single-turn"):
+            self._tokenize_with_processor(multi_turn)
+
+    def test_rejects_wrong_first_role(self):
+        def assistant_first(sample):
+            return [
+                {"role": "assistant", "content": sample["answer"]},
+                {"role": "user", "content": sample["question"]},
+            ]
+
+        with self.assertRaises(ValueError, msg="must be 'user'"):
+            self._tokenize_with_processor(assistant_first)
+
+    def test_rejects_wrong_second_role(self):
+        def two_users(sample):
+            return [
+                {"role": "user", "content": sample["question"]},
+                {"role": "user", "content": sample["answer"]},
+            ]
+
+        with self.assertRaises(ValueError, msg="must be 'assistant'"):
+            self._tokenize_with_processor(two_users)
 
 
 if __name__ == "__main__":
