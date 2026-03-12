@@ -17,7 +17,7 @@ with images and videos. Key features include:
 """
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.models.common import FeedForward, GQAttention, RoPE
+from torchtitan.models.common import Embedding, FeedForward, GQAttention, RMSNorm, RoPE
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.protocols.model_spec import ModelSpec
@@ -39,17 +39,20 @@ qwen3_vl_configs = {
     # Debug model for testing
     "debugmodel": Qwen3VLModel.Config(
         vocab_size=151936,
+        norm=RMSNorm.Config(eps=1e-6),
+        tok_embeddings=Embedding.Config(),
         dim=256,
         n_layers=4,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(hidden_dim=512),
             attention=GQAttention.Config(
                 n_heads=4,
                 n_kv_heads=2,
                 head_dim=64,
-                qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -77,10 +80,13 @@ qwen3_vl_configs = {
     # Debug MoE model for testing
     "debugmodel_moe": Qwen3VLModel.Config(
         vocab_size=151936,
+        norm=RMSNorm.Config(eps=1e-6),
+        tok_embeddings=Embedding.Config(),
         dim=256,
         n_layers=1,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
             moe_enabled=True,
             moe=MoE.Config(
                 hidden_dim=768,
@@ -97,8 +103,8 @@ qwen3_vl_configs = {
                 n_heads=4,
                 n_kv_heads=2,
                 head_dim=64,
-                qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -126,18 +132,21 @@ qwen3_vl_configs = {
     # Qwen3-VL 2B variant (based on Qwen3 1.7B LLM + ViT)
     "2B": Qwen3VLModel.Config(
         vocab_size=151936,
+        norm=RMSNorm.Config(eps=1e-6),
+        tok_embeddings=Embedding.Config(),
         dim=2048,
         n_layers=28,
         enable_weight_tying=True,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(hidden_dim=6144),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
                 head_dim=128,
-                qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -165,17 +174,20 @@ qwen3_vl_configs = {
     # Qwen3-VL 8B variant (based on Qwen3 8B LLM + ViT)
     "8B": Qwen3VLModel.Config(
         vocab_size=151936,
+        norm=RMSNorm.Config(eps=1e-6),
+        tok_embeddings=Embedding.Config(),
         dim=4096,
         n_layers=36,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
             feed_forward=FeedForward.Config(hidden_dim=12288),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
                 head_dim=128,
-                qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -203,10 +215,13 @@ qwen3_vl_configs = {
     # Qwen3-VL 30B-A3B MoE variant
     "30B-A3B": Qwen3VLModel.Config(
         vocab_size=151936,
+        norm=RMSNorm.Config(eps=1e-6),
+        tok_embeddings=Embedding.Config(),
         dim=2048,
         n_layers=48,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
             moe_enabled=True,
             moe=MoE.Config(
                 hidden_dim=768,
@@ -223,8 +238,8 @@ qwen3_vl_configs = {
                 n_heads=32,
                 n_kv_heads=4,
                 head_dim=128,
-                qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -252,10 +267,13 @@ qwen3_vl_configs = {
     # Qwen3-VL 235B-A22B MoE variant
     "235B-A22B": Qwen3VLModel.Config(
         vocab_size=151936,
+        norm=RMSNorm.Config(eps=1e-6),
+        tok_embeddings=Embedding.Config(),
         dim=4096,
         n_layers=94,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
             moe_enabled=True,
             moe=MoE.Config(
                 hidden_dim=1536,
@@ -272,8 +290,8 @@ qwen3_vl_configs = {
                 n_heads=64,
                 n_kv_heads=4,
                 head_dim=128,
-                qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),

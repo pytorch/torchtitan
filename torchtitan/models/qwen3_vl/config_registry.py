@@ -101,7 +101,7 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
     spec = model_registry("debugmodel_moe")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
+        hf_assets_path="../hf_models/Qwen/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=spec,
         dataloader=MMDataLoader.Config(

@@ -9,7 +9,6 @@ _supported_experiments = frozenset(
         "graph_trainer.llama3",
         "graph_trainer.deepseek_v3",
         "vlm",
-        "qwen3_vl",
         "transformers_modeling_backend",
         "autoparallel.llama3",
         "autoparallel.deepseek_v3",

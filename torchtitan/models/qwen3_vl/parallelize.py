@@ -35,9 +35,10 @@ from torchtitan.config import (
     TrainingConfig,
 )
 
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.models.llama3.parallelize import apply_ddp
+from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -444,13 +445,11 @@ def parallelize_qwen3_vl(
             logger.info("Applied CPU Offloading to the Qwen3-VL model")
 
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh is not None and dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=compile_config.enable,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
