@@ -60,7 +60,7 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 )
 
             def init_weights(self, **kwargs) -> None:
-                super().init_weights(**kwargs)
+                super().init_weights(**kwargs)  # pyrefly: ignore [not-callable]
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
                 nn.init.zeros_(self.lora_b.weight)
 
@@ -174,9 +174,11 @@ class LoRAConverter(Configurable):
 
                 if is_dtensor:
                     return DTensor.from_local(
-                        nf4_local, weight.device_mesh, weight.placements
+                        nf4_local,  # pyrefly: ignore [bad-argument-type]
+                        weight.device_mesh,
+                        weight.placements,
                     )
-                return nf4_local
+                return nf4_local  # pyrefly: ignore [bad-return]
 
             def _quantize_hook(
                 mod: nn.Module, args: Any, handle: torch.utils.hooks.RemovableHandle
