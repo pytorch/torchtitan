@@ -31,10 +31,11 @@ def _sac_policy_fn(
     ctx,
     op,
     *args,
-    save_ops: dict,
+    compute_intensive_ops: dict,
+    communication_intensive_ops: dict,
     **kwargs,
 ) -> CheckpointPolicy:
-    if op in save_ops:
+    if op in compute_intensive_ops or op in communication_intensive_ops:
         return CheckpointPolicy.MUST_SAVE
 
     return CheckpointPolicy.PREFER_RECOMPUTE
@@ -90,6 +91,9 @@ _COMM_OPS = [
     # DeepEP (available when deepep is installed)
     (torch.ops, "deepep.dispatch.default"),
     (torch.ops, "deepep.combine.default"),
+    # HybridEP (available when hybridep is installed)
+    (torch.ops, "hybridep.dispatch.default"),
+    (torch.ops, "hybridep.combine.default"),
 ]
 
 
@@ -105,12 +109,10 @@ def default_activation_checkpoint_policy() -> _PolicyFn:
 
     communication_intensive_ops = _resolve_ops(_COMM_OPS)
 
-    # Pre-merge so the policy function does a single dict lookup per call.
-    save_ops = compute_intensive_ops | communication_intensive_ops
-
     policy_fn = partial(
         _sac_policy_fn,
-        save_ops=save_ops,
+        compute_intensive_ops=compute_intensive_ops,
+        communication_intensive_ops=communication_intensive_ops,
     )
     # pyrefly: ignore [missing-attribute]
     policy_fn.cache_hash = "default_activation_checkpoint_policy"
@@ -124,32 +126,16 @@ def _apply_op_sac(
     *,
     base_fqn: str | None = None,
 ) -> nn.Module:
-    """Apply selective activation checkpointing to the module.
-
-    This function uses the policy-based approach. The policy is obtained from
-    `default_activation_checkpoint_policy()` which returns a policy function that decides which
-    ops to save vs recompute.
-
-    Args:
-        module (nn.Module): The module to apply selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-        base_fqn (str, optional): The base fqn of the module. Defaults to None.
-
-    Returns:
-        nn.Module: The module with selective activation checkpointing applied.
-    """
+    """Apply per-op selective activation checkpointing to the module."""
     from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
     mm_recompute_shapes = set()
-    if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
+    recompute_fqns = ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+
+    if recompute_fqns:
         for module_fqn, submod in module.named_modules():
-            fqn = module_fqn
-            if base_fqn is not None:
-                fqn = f"{base_fqn}.{module_fqn}"
-            if not any(
-                filter_fqn in fqn
-                for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
-            ):
+            fqn = f"{base_fqn}.{module_fqn}" if base_fqn else module_fqn
+            if not any(f in fqn for f in recompute_fqns):
                 continue
             if not isinstance(submod, nn.Linear):
                 raise ValueError(
@@ -158,47 +144,17 @@ def _apply_op_sac(
                 )
             out_f, in_f = submod.weight.shape
             mm_recompute_shapes.add((in_f, out_f))
-        logger.debug(
-            f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
-        )
 
     base_policy = default_activation_checkpoint_policy()
-
     # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
     # instead of decomposing it into aten.mm, so we must handle both.
     mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
-
-    # Register forward hooks on nn.Linear modules whose FQN matches any pattern
-    # in per_op_sac_skip_mm_fqns. Their matmuls are always recomputed and excluded
-    # from the "save every other mm" alternating counter.
-    skip_active = {"count": 0}
-
-    def _skip_pre_hook(mod, inp):
-        skip_active["count"] += 1
-
-    def _skip_post_hook(mod, inp, out):
-        skip_active["count"] -= 1
-
-    skip_fqns = ac_config.per_op_sac_skip_mm_fqns
-    skip_module_count = 0
-    if skip_fqns:
-        for module_fqn, submod in module.named_modules():
-            if isinstance(submod, nn.Linear) and any(
-                pattern in module_fqn for pattern in skip_fqns
-            ):
-                submod.register_forward_pre_hook(_skip_pre_hook)
-                submod.register_forward_hook(_skip_post_hook)
-                skip_module_count += 1
-    if skip_module_count:
-        logger.debug(
-            f"Selective op AC registered hooks on {skip_module_count} linear "
-            f"modules matching {skip_fqns} to exclude from save/recompute alternation"
-        )
 
     def _create_wrapped_policy():
         meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
 
         def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
+            # Always save CUDA→CPU copies (activation offloading).
             if (
                 func == torch.ops.aten._to_copy.default
                 and "cuda" in str(args[0].device)
@@ -212,34 +168,28 @@ def _apply_op_sac(
 
             if func in mm_ops:
                 weight_shape = args[1].shape
-                # linear weight is (out, in); normalize to (in, out) to match mm
                 if func == torch.ops.aten.linear.default:
                     weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
                 if weight_shape in mm_recompute_shapes:
                     return CheckpointPolicy.PREFER_RECOMPUTE
-                # Skip matmuls from modules matching per_op_sac_skip_mm_fqns —
-                # always recompute and don't count in the alternating pattern.
-                if skip_active["count"] > 0:
-                    return CheckpointPolicy.PREFER_RECOMPUTE
                 meta[mm_count_key] += 1
 
-            # Save output of all compute/comm ops, except every second mm/linear
+            # Save all compute/comm ops, except every second mm/linear.
             base_decision = base_policy(ctx, func, *args, **kwargs)
             if base_decision == CheckpointPolicy.MUST_SAVE and (
                 func in mm_ops and meta[mm_count_key] % 2 == 0
             ):
                 return CheckpointPolicy.PREFER_RECOMPUTE
-
             return base_decision
 
         return wrapped_policy
 
-    def selective_checkpointing_context_fn():
+    def context_fn():
         return create_selective_checkpoint_contexts(_create_wrapped_policy())
 
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=selective_checkpointing_context_fn,
+        context_fn=context_fn,
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,

@@ -101,8 +101,6 @@ def parallelize_deepseekv3(
 
         else:
             import torchtitan.distributed.deepep  # noqa: F401
-    else:
-        use_deepep = False
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(
