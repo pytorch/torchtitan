@@ -21,6 +21,7 @@ Ablation 2: Replace F.silu(w1(x)) * w3(x) with vLLM's fused SiluAndMul kernel.
 Ablation 3: Replace apply_rotary_emb_cos_sin with vLLM's fused rotary_embedding kernel.
 Ablation 4: Merge separate wq/wk/wv into single wqkv projection (3 GEMMs → 1).
 Ablation 5: Merge separate w1/w3 into single gate_up_proj projection (2 GEMMs → 1).
+Ablation 6: Fused residual-add-norm (vLLM-style residual flow across layers).
 """
 
 from dataclasses import fields
@@ -213,7 +214,12 @@ class FeedForwardMergedGateUp(FeedForward):
 # ── Ablation 1: Fused RMSNorm + Ablation 2 + Ablation 3 in TransformerBlock ──
 
 class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
-    """Qwen3TransformerBlock with all vLLM fused ops."""
+    """Qwen3TransformerBlock with all vLLM fused ops.
+
+    Uses vLLM-style residual flow: forward takes (hidden_states, residual)
+    and returns (hidden_states, residual). The fused RMSNorm computes
+    residual = hidden_states + residual, then normalizes, in a single kernel.
+    """
 
     def __init__(
         self,
@@ -246,6 +252,35 @@ class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
         else:
             self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ):
+        # ── Ablation 6: fused residual-add-norm (within-block) ──
+        # Original: x = x + attn(norm(x)); x = x + ffn(norm(x))
+        #   - 2 separate add kernels + 2 separate norm kernels
+        # Fused:   attn_out = attn(norm(x));
+        #          norm_out, x = ffn_norm(attn_out, x)  ← fused add+norm
+        #          x = x + ffn(norm_out)
+
+        # Attention: norm then attn (no fusion possible for first norm)
+        attn_out = self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, positions
+        )
+
+        # Fused residual-add + ffn-norm: combines x + attn_out and ffn_norm
+        # VLLMRMSNorm(attn_out, x) computes: x = attn_out + x, then norm(x)
+        ffn_input, x = self.ffn_norm(attn_out, x)
+
+        if self.moe_enabled:
+            x = x + self.moe(ffn_input)
+        else:
+            x = x + self.feed_forward(ffn_input)
+        return x
+
 
 class Qwen3ModelAblation(Qwen3Model):
     """Qwen3Model with vLLM's fused kernels for ablation studies.
@@ -254,6 +289,7 @@ class Qwen3ModelAblation(Qwen3Model):
     - RMSNorm: vLLM's Triton-based fused kernel (all layers + final norm)
     - SiluAndMul: vLLM's fused activation kernel (all FFN layers)
     - RoPE: vLLM's fused rotary_embedding kernel (monkey-patched)
+    - Fused residual-add-norm: vLLM-style residual flow across layers
     """
 
     def __init__(self, config: Qwen3Model.Config):
@@ -274,6 +310,7 @@ class Qwen3ModelAblation(Qwen3Model):
                 dim=config.dim,
                 n_layers=config.n_layers,
             )
+
 
 
 def ablation_model_registry(flavor: str) -> ModelSpec:
