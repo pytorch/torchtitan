@@ -87,11 +87,15 @@ def test_lora_before_quantization_raises():
 
 def test_lora_freeze_and_trainability():
     """After convert: base params frozen, LoRA adapters present and trainable."""
-    model = nn.Sequential(OrderedDict([
-        ("fc1", nn.Linear(64, 64)),
-        ("relu", nn.ReLU()),
-        ("fc2", nn.Linear(64, 64)),
-    ]))
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
     converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
     converter.convert(model)
 
@@ -119,11 +123,15 @@ def test_lora_freeze_and_trainability():
 def test_lora_trains_base_frozen():
     """Train for several steps: LoRA params should change, base params should not."""
     torch.manual_seed(42)
-    model = nn.Sequential(OrderedDict([
-        ("fc1", nn.Linear(64, 64)),
-        ("relu", nn.ReLU()),
-        ("fc2", nn.Linear(64, 64)),
-    ]))
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
     converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
     converter.convert(model)
 
@@ -173,7 +181,15 @@ def test_qlora_base_weights_quantized_adapters_full_precision():
     torchao = pytest.importorskip("torchao")
     from torchao.dtypes.nf4tensor import NF4Tensor
 
-    model = SimpleModel()
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
     converter = LoRAConverter(
         LoRAConverter.Config(
             rank=4, alpha=8.0, quantize_base="nf4", nf4_scaler_block_size=1
@@ -205,7 +221,15 @@ def test_qat_preserves_weight_dtype():
     """QAT converter should not change weight dtype (fake quantization happens in forward)."""
     pytest.importorskip("torchao")
 
-    model = SimpleModel()
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
     original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
 
     converter = QATConverter(QATConverter.Config(group_size=64))
