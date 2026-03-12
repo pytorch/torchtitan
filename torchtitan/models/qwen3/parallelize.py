@@ -141,12 +141,10 @@ def parallelize_qwen3(
         if attn_backend == "sdpa":
             # pyrefly: ignore [missing-attribute, not-callable]
             for block in model.layers.values():
-                block.attention.inner_attention.sdpa_backends = (  # pyrefly: ignore [missing-attribute]
-                    [  # pyrefly: ignore [missing-attribute]
-                        SDPBackend.FLASH_ATTENTION,
-                        SDPBackend.MATH,
-                    ]
-                )
+                block.attention.inner_attention.sdpa_backends = [  # pyrefly: ignore [missing-attribute]  # pyrefly: ignore [missing-attribute]
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.MATH,
+                ]
 
     if ac_config.mode != "none":
         apply_ac(

@@ -68,8 +68,11 @@ class _InnerAttentionBase(torch.nn.Module):
     """Base class for inner attention wrappers with DTensor support.
 
     When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
-    uses ``local_map`` to convert them to local tensors before calling
-    ``_forward_local``, then wraps the output back to DTensor.
+    overrides ``__call__`` to wrap ``nn.Module.__call__`` with ``local_map``.
+    This converts TP DTensors to local **before** any ``forward_pre_hook``
+    (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
+    DTensors **after** all ``forward_hook``s complete.
+
     Placements and device mesh are inferred from the input DTensors,
     similar to sixlib's ``_qkv_to_local`` but using ``local_map``.
     """
@@ -78,7 +81,7 @@ class _InnerAttentionBase(torch.nn.Module):
         super().__init__()
         self._local_map_fn: Callable | None = None
 
-    def forward(
+    def __call__(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -86,16 +89,31 @@ class _InnerAttentionBase(torch.nn.Module):
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if isinstance(q, DTensor):
-            assert isinstance(k, DTensor) and isinstance(v, DTensor), "q, k, v should all be DTensors"
+            assert isinstance(k, DTensor) and isinstance(
+                v, DTensor
+            ), "q, k, v should all be DTensors"
             if self._local_map_fn is None:
                 self._local_map_fn = local_map(
-                    self._forward_local,
+                    super().__call__,
                     in_placements=(q.placements, k.placements, v.placements),
                     out_placements=(q.placements,),
+                    # Gradient placements match input placements. Correct for TP
+                    # (Shard on heads dim). For all-gather CP where k/v are
+                    # Replicate, grads should be Partial(). Currently CP is
+                    # handled by _ContextParallel hooks, not local_map.
                     in_grad_placements=(q.placements, k.placements, v.placements),
                     device_mesh=q.device_mesh,
                 )
             return self._local_map_fn(q, k, v, **kwargs)
+        return super().__call__(q, k, v, **kwargs)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self._forward_local(q, k, v, **kwargs)
 
     def _forward_local(
