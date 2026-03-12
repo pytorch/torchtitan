@@ -88,6 +88,13 @@ class VarlenAttentionWrapper(torch.nn.Module):
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
 
+        # Some operators can upcast under AMP, but varlen attention currently only
+        # supports bf16/fp16 inputs. If this changes, or fp16 training support
+        # is added, this may need to be revisited.
+        xq_packed = xq_packed.to(torch.bfloat16)
+        xk_packed = xk_packed.to(torch.bfloat16)
+        xv_packed = xv_packed.to(torch.bfloat16)
+
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
             xk_packed,
@@ -108,7 +115,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-        )
+        ).to(xq.dtype)
 
 
 class FlexAttentionWrapper(torch.nn.Module):

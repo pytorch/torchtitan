@@ -18,13 +18,14 @@ from torchtitan.distributed import ParallelDims
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
-from torchtitan.protocols.module import (
+from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
+
+from .module_utils import (
     capture_module_attrs,
     inject_module_protocol,
     verify_module_protocol,
 )
-from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
 

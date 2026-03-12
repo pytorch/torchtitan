@@ -9,13 +9,13 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import (
+from torchtitan.components.quantization.module_utils import (
     capture_module_attrs,
     inject_module_protocol,
-    Module,
     verify_module_protocol,
 )
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module
 
 
 class TestLinear(unittest.TestCase):

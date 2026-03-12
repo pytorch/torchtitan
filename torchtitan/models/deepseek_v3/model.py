@@ -314,8 +314,7 @@ class DeepSeekV3Model(Decoder):
 
             self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
 
-            # Configure expert parallel communication backend from config
-            if parallelism.expert_parallel_comm_backend == "deepep":
+            if parallelism.expert_parallel_comm_backend in ("deepep", "hybridep"):
                 from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
 
                 self.layer.moe = DeepEPMoE.Config(**_dc.asdict(self.layer.moe))
