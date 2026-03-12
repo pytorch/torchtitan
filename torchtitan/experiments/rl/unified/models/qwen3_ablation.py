@@ -19,6 +19,7 @@ Usage:
 Ablation 1: Replace nn.RMSNorm with vLLM's fused RMSNorm kernel.
 Ablation 2: Replace F.silu(w1(x)) * w3(x) with vLLM's fused SiluAndMul kernel.
 Ablation 3: Replace apply_rotary_emb_cos_sin with vLLM's fused rotary_embedding kernel.
+Ablation 4: Merge separate wq/wk/wv into single wqkv projection (3 GEMMs → 1).
 """
 
 from dataclasses import fields
@@ -28,6 +29,11 @@ import torch.nn.functional as F
 from torch import nn
 
 import torchtitan.models.common.attention as attention_module
+from torchtitan.models.common.attention import (
+    apply_rotary_emb_complex,
+    AttentionMasksType,
+    GQAttention,
+)
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.rope import _reshape_for_broadcast_cos_sin
@@ -86,6 +92,93 @@ def apply_rotary_emb_cos_sin_vllm(
     return xq_out, xk_out
 
 
+# ── Ablation 4: Merged QKV projection ──
+
+class GQAttentionMergedQKV(GQAttention):
+    """GQAttention with merged QKV projection (3 matmuls → 1).
+
+    Keeps separate wq/wk/wv parameters for weight loading compatibility,
+    but merges them into a single wqkv linear at the first forward call.
+    """
+
+    def __init__(self, config: GQAttention.Config, *, dim: int):
+        super().__init__(config, dim=dim)
+        # Sizes for splitting the merged output
+        self._q_size = self.n_heads * self.head_dim
+        self._kv_size = self.n_kv_heads * self.head_dim
+        self._merged_size = self._q_size + 2 * self._kv_size
+        # Merged linear — will be populated from wq/wk/wv weights
+        self.wqkv = nn.Linear(dim, self._merged_size, bias=config.bias)
+        self._merged = False
+
+    def _merge_qkv_weights(self):
+        """Concatenate wq/wk/wv weights into wqkv once."""
+        if self._merged:
+            return
+        with torch.no_grad():
+            self.wqkv.weight.copy_(
+                torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
+            )
+            if self.wqkv.bias is not None:
+                self.wqkv.bias.copy_(
+                    torch.cat([self.wq.bias, self.wk.bias, self.wv.bias], dim=0)
+                )
+        # Free the separate parameters to save memory
+        del self.wq, self.wk, self.wv
+        self._merged = True
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self._merge_qkv_weights()
+
+        bs, seqlen, _ = x.shape
+
+        # Single merged QKV projection
+        qkv = self.wqkv(x)
+        xq, xk, xv = qkv.split([self._q_size, self._kv_size, self._kv_size], dim=-1)
+
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        if self.q_norm is not None:
+            xq = self.q_norm(xq)
+        if self.k_norm is not None:
+            xk = self.k_norm(xk)
+
+        if self.use_rope:
+            if self.rope_backend == "cos_sin":
+                xq, xk = apply_rotary_emb_cos_sin_vllm(xq, xk, rope_cache, positions)
+            else:
+                xq, xk = apply_rotary_emb_complex(
+                    xq, xk, freqs_cis=rope_cache, positions=positions
+                )
+
+        xq = xq.transpose(1, 2)
+        xk = xk.transpose(1, 2)
+        xv = xv.transpose(1, 2)
+
+        scale_kwargs = {"scale": self.scaling} if self.scaling is not None else {}
+
+        # VLLMAttention uses (q, k, v, *, scale) while native wrappers
+        # use (q, k, v, attention_masks=..., **scale_kwargs).
+        if isinstance(self.inner_attention, nn.Module) and hasattr(
+            self.inner_attention, "vllm_attn"
+        ):
+            output = self.inner_attention(xq, xk, xv, **scale_kwargs)
+        else:
+            output = self.inner_attention(
+                xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
+            )
+
+        return self.wo(output.reshape(bs, seqlen, -1))
+
+
 # ── Ablation 2: Fused SiluAndMul ──
 
 class FeedForwardVLLMSiluAndMul(FeedForward):
@@ -109,7 +202,7 @@ class FeedForwardVLLMSiluAndMul(FeedForward):
 # ── Ablation 1: Fused RMSNorm + Ablation 2 + Ablation 3 in TransformerBlock ──
 
 class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
-    """Qwen3TransformerBlock with vLLM's fused RMSNorm and SiluAndMul."""
+    """Qwen3TransformerBlock with all vLLM fused ops."""
 
     def __init__(
         self,
@@ -121,7 +214,8 @@ class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
     ):
         TransformerBlock.__init__(self)
 
-        self.attention = config.attention.build(dim=dim)
+        # ── Ablation 4: use merged QKV attention ──
+        self.attention = GQAttentionMergedQKV(config.attention, dim=dim)
 
         self.moe_enabled = config.moe_enabled
         if self.moe_enabled:
