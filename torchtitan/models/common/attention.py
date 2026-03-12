@@ -64,7 +64,7 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class _InnerAttentionBase(torch.nn.Module):
+class _InnerAttentionLocalMap(torch.nn.Module):
     """Base class for inner attention wrappers with DTensor support.
 
     When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
@@ -73,8 +73,7 @@ class _InnerAttentionBase(torch.nn.Module):
     (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
     DTensors **after** all ``forward_hook``s complete.
 
-    Placements and device mesh are inferred from the input DTensors,
-    similar to sixlib's ``_qkv_to_local`` but using ``local_map``.
+    Placements and device mesh are inferred from the input DTensors.
     """
 
     def __init__(self) -> None:
@@ -126,7 +125,7 @@ class _InnerAttentionBase(torch.nn.Module):
         raise NotImplementedError
 
 
-class VarlenAttentionWrapper(_InnerAttentionBase):
+class VarlenAttentionWrapper(_InnerAttentionLocalMap):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
@@ -184,7 +183,7 @@ class VarlenAttentionWrapper(_InnerAttentionBase):
         ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(_InnerAttentionBase):
+class FlexAttentionWrapper(_InnerAttentionLocalMap):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -265,7 +264,7 @@ def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, Non
         FlexAttentionWrapper.forward = orig
 
 
-class ScaledDotProductAttentionWrapper(_InnerAttentionBase):
+class ScaledDotProductAttentionWrapper(_InnerAttentionLocalMap):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
