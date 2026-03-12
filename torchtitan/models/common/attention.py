@@ -36,6 +36,7 @@ from torchtitan.protocols.module import Module
 __all__ = [
     "FlexAttentionWrapper",
     "GQAttention",
+    "LocalMapModule",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
     "VarlenMetadata",
@@ -62,8 +63,7 @@ class VarlenMetadata(NamedTuple):
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
-
-class _InnerAttentionLocalMap(torch.nn.Module):
+class LocalMapModule(Module):
     """Base class for inner attention wrappers with DTensor support.
 
     When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
@@ -74,6 +74,10 @@ class _InnerAttentionLocalMap(torch.nn.Module):
 
     Placements and device mesh are inferred from the input DTensors.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
 
     def __init__(self) -> None:
         super().__init__()
@@ -126,7 +130,7 @@ class _InnerAttentionLocalMap(torch.nn.Module):
         raise NotImplementedError
 
 
-class VarlenAttentionWrapper(_InnerAttentionLocalMap):
+class VarlenAttentionWrapper(LocalMapModule):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
@@ -184,7 +188,7 @@ class VarlenAttentionWrapper(_InnerAttentionLocalMap):
         ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(_InnerAttentionLocalMap):
+class FlexAttentionWrapper(LocalMapModule):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -240,7 +244,7 @@ class FlexAttentionWrapper(_InnerAttentionLocalMap):
         )
 
 
-class ScaledDotProductAttentionWrapper(_InnerAttentionLocalMap):
+class ScaledDotProductAttentionWrapper(LocalMapModule):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
