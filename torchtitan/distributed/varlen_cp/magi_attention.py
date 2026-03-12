@@ -15,9 +15,8 @@ Implementation based on:
 Architecture:
   Phase A: Redistribute Q sub-chunks to assigned ranks via LPT load balancing
   Phase B: Gather K/V from owner ranks with per-doc packing (zero-redundancy)
-  Compute: Batched FFA kernel per Q sub-chunk (fallback to varlen_attn)
+  Compute: Batched flex_attention per Q sub-chunk
   Phase C: Return output sub-chunks to original owners
-  Optional: Multi-stage K/V fetch overlapped with compute (Section 4.4)
 
 Backward:
   Reuses saved packed K/V from forward (no K/V re-gather needed):
@@ -27,12 +26,9 @@ Backward:
 
 Env vars:
   TORCHTITAN_MAGI_SUB_CHUNKS=2   -- sub-chunks per rank (default 2)
-  TORCHTITAN_OVERLAP_STAGES=1    -- overlap stages for K/V fetch (1=no overlap)
 """
 
 from __future__ import annotations
-
-import os
 
 import torch
 import torch.distributed as dist
@@ -52,24 +48,18 @@ from torchtitan.distributed.varlen_cp.flex_attn_kernels import (
 # Reuse magi helpers that are unchanged
 from torchtitan.distributed.varlen_cp.magi_dispatch import (  # noqa: E402
     _alltoall_v,
-    _alltoall_v_nccl,
     _MAGI_SUB_CHUNKS,
     _redistribute_q,
     _redistribute_tensors_to_assigned,
-    _return_lse,
     _return_results,
     _scatter_dq_to_owners,
     preinit_nvshmem_buffers,
 )
 from torchtitan.distributed.varlen_cp.mask_primitives import cu_seqlens_to_attn_slices
 from torchtitan.distributed.varlen_cp.ring_attention import (
-    _backward_step,
     _build_ring_step_cu_seqlens,
-    _compute_and_merge_step,
     merge_with_lse,
 )
-
-_NUM_OVERLAP_STAGES = int(os.environ.get("TORCHTITAN_OVERLAP_STAGES", "1"))
 
 
 # ---------------------------------------------------------------------------
@@ -459,120 +449,6 @@ def _pack_kv_for_rank(
 # ---------------------------------------------------------------------------
 
 
-def _build_stage_gather_args(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    plan: MagiDispatchPlan,
-    global_cu_seqlens: torch.Tensor,
-    original_total_seqlen: int,
-    cp_rank: int,
-    ki_set: set[int],
-) -> tuple[torch.Tensor, list[int], list[int], list[tuple[int, int]]]:
-    """Build AllToAll-V args for gathering a specific set of K sub-chunks.
-
-    Returns (send_buf, recv_splits, send_splits, recv_layout) where
-    recv_layout is a list of (ki, n_packed_tokens) for unpacking.
-    """
-    cp_world_size = plan.cp_world_size
-    spr = plan.sub_chunks_per_rank
-    sc_size = plan.sub_chunk_size
-    n_kv_heads = k.shape[1]
-    kv_head_dim = k.shape[2] * 2
-
-    local_kv = torch.cat([k, v], dim=-1)
-    my_range = range(cp_rank * spr, (cp_rank + 1) * spr)
-
-    send_splits: list[int] = []
-    send_parts: list[torch.Tensor] = []
-    recv_splits: list[int] = []
-    recv_layout: list[tuple[int, int]] = []
-
-    for r in range(cp_world_size):
-        send_count = 0
-        for ki in my_range:
-            if ki not in ki_set:
-                continue
-            if plan.rank_needs_k(r, ki):
-                qi_list = plan.q_assignments[r]
-                packed = _pack_kv_for_rank(
-                    local_kv,
-                    global_cu_seqlens,
-                    qi_list,
-                    ki,
-                    (ki - cp_rank * spr) * sc_size,
-                    sc_size,
-                    original_total_seqlen,
-                )
-                send_parts.append(packed)
-                send_count += packed.numel()
-        send_splits.append(send_count)
-
-        recv_count = 0
-        r_range = range(r * spr, (r + 1) * spr)
-        for ki in r_range:
-            if ki not in ki_set:
-                continue
-            if plan.rank_needs_k(cp_rank, ki):
-                qi_list = plan.q_assignments[cp_rank]
-                n_tokens = _packed_k_token_count(
-                    global_cu_seqlens,
-                    qi_list,
-                    ki,
-                    sc_size,
-                    original_total_seqlen,
-                )
-                recv_count += n_tokens * n_kv_heads * kv_head_dim
-                recv_layout.append((ki, n_tokens))
-        recv_splits.append(recv_count)
-
-    send_buf = torch.cat(send_parts) if send_parts else k.new_empty(0)
-    return send_buf, recv_splits, send_splits, recv_layout
-
-
-def _unpack_kv_recv(
-    recv_buf: torch.Tensor,
-    recv_layout: list[tuple[int, int]],
-    plan: MagiDispatchPlan,
-    global_cu_seqlens: torch.Tensor,
-    original_total_seqlen: int,
-    cp_rank: int,
-    n_kv_heads: int,
-    kv_head_dim: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> tuple[dict[int, torch.Tensor], dict[int, list[tuple[int, int]]]]:
-    """Unpack AllToAll-V recv buffer into packed_kv and packed_doc_ranges dicts."""
-    sc_size = plan.sub_chunk_size
-    packed_kv: dict[int, torch.Tensor] = {}
-    packed_doc_ranges: dict[int, list[tuple[int, int]]] = {}
-
-    offset = 0
-    for ki, n_tokens in recv_layout:
-        numel = n_tokens * n_kv_heads * kv_head_dim
-        if numel > 0:
-            packed_kv[ki] = recv_buf[offset : offset + numel].reshape(
-                n_tokens,
-                n_kv_heads,
-                kv_head_dim,
-            )
-        else:
-            packed_kv[ki] = torch.empty(
-                0, n_kv_heads, kv_head_dim, device=device, dtype=dtype
-            )
-        offset += numel
-
-        qi_list = plan.q_assignments[cp_rank]
-        packed_doc_ranges[ki] = _packed_k_doc_ranges(
-            global_cu_seqlens,
-            qi_list,
-            ki,
-            sc_size,
-            original_total_seqlen,
-        )
-
-    return packed_kv, packed_doc_ranges
-
-
 def _gather_kv_packed(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -931,290 +807,6 @@ def _scatter_packed_dkv_to_owners(
 
 
 # ---------------------------------------------------------------------------
-# Pipelined forward: multi-stage K/V fetch + FFA compute overlap
-# ---------------------------------------------------------------------------
-
-
-def _partition_ki_into_stages(
-    plan: MagiDispatchPlan,
-    num_stages: int,
-) -> list[set[int]]:
-    """Partition ALL K sub-chunks into ``num_stages`` groups.
-
-    The partition is GLOBAL (same across all ranks) so that AllToAll-V
-    collectives are called consistently by every rank.  Uses round-robin
-    over the full range [0, total_sub_chunks).
-    """
-    total_sub_chunks = plan.cp_world_size * plan.sub_chunks_per_rank
-    stages: list[set[int]] = [set() for _ in range(num_stages)]
-    for ki in range(total_sub_chunks):
-        stages[ki % num_stages].add(ki)
-    return stages
-
-
-def _ffa_compute_stage(
-    assigned_q: dict[int, torch.Tensor],
-    packed_kv: dict[int, torch.Tensor],
-    packed_doc_ranges: dict[int, list[tuple[int, int]]],
-    plan: MagiDispatchPlan,
-    global_cu_seqlens: torch.Tensor,
-    cp_rank: int,
-    ki_set: set[int],
-    sc_size: int,
-    total_seqlen: int,
-    original_total_seqlen: int,
-    n_heads: int,
-    head_dim: int,
-    half_hd: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor]]:
-    """Compute FFA for assigned Q sub-chunks against a subset of K sub-chunks.
-
-    Returns per-qi (output, LSE) dicts for this stage only.
-    """
-    out_results: dict[int, torch.Tensor] = {}
-    lse_results: dict[int, torch.Tensor] = {}
-
-    for qi in plan.q_assignments[cp_rank]:
-        q_sub = assigned_q[qi]
-        ki_list = [ki for ki in plan.q_to_k_needs.get(qi, []) if ki in ki_set]
-        if not ki_list:
-            continue
-
-        ranges = _build_batched_ffa_ranges_packed(
-            qi,
-            ki_list,
-            packed_kv,
-            packed_doc_ranges,
-            global_cu_seqlens,
-            sc_size,
-            total_seqlen,
-            original_total_seqlen,
-            device,
-        )
-        if ranges is None:
-            continue
-
-        q_ranges_l, k_ranges_l, attn_types_l = ranges
-        k_parts = [
-            packed_kv[ki][..., :half_hd]
-            for ki in ki_list
-            if ki in packed_kv and packed_kv[ki].shape[0] > 0
-        ]
-        v_parts = [
-            packed_kv[ki][..., half_hd:]
-            for ki in ki_list
-            if ki in packed_kv and packed_kv[ki].shape[0] > 0
-        ]
-        if not k_parts:
-            continue
-
-        big_k = torch.cat(k_parts, dim=0)
-        big_v = torch.cat(v_parts, dim=0)
-        q_ranges_t = torch.tensor(q_ranges_l, dtype=torch.int32, device=device)
-        k_ranges_t = torch.tensor(k_ranges_l, dtype=torch.int32, device=device)
-        attn_type_map = torch.tensor(attn_types_l, dtype=torch.int32, device=device)
-
-        step_out, step_meta = flex_attn_forward(
-            q_sub,
-            big_k,
-            big_v,
-            q_ranges_t,
-            k_ranges_t,
-            attn_type_map,
-        )
-        step_lse = step_meta.lse.transpose(0, 1)
-
-        # Mask uncovered Q positions
-        q_coverage = torch.zeros(sc_size, dtype=torch.bool, device=device)
-        for qr in q_ranges_l:
-            q_coverage[qr[0] : qr[1]] = True
-        uncovered = ~q_coverage
-        if uncovered.any():
-            step_lse[:, uncovered] = float("-inf")
-            step_out[uncovered] = 0
-
-        out_results[qi] = step_out.to(dtype)
-        lse_results[qi] = step_lse
-
-    return out_results, lse_results
-
-
-def _forward_pipelined(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    global_cu_seqlens: torch.Tensor,
-    assigned_q: dict[int, torch.Tensor],
-    magi_plan: MagiDispatchPlan,
-    original_total_seqlen: int,
-    cp_rank: int,
-    cp_group: dist.ProcessGroup,
-    num_stages: int,
-    n_heads: int,
-    head_dim: int,
-    n_kv_heads: int,
-    kv_head_dim: int,
-    half_hd: int,
-    sc_size: int,
-    total_seqlen: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> tuple[
-    dict[int, torch.Tensor],  # out_results
-    dict[int, torch.Tensor],  # lse_results
-    dict[int, torch.Tensor],  # packed_kv (all stages merged)
-    dict[int, list[tuple[int, int]]],  # packed_doc_ranges
-]:
-    """Pipelined forward: multi-stage K/V fetch overlapped with FFA compute.
-
-    Stage i's FFA compute overlaps with stage i+1's K/V AllToAll-V.
-
-    Timeline::
-
-        comm_stream:  [fetch s0] [fetch s1]         [fetch s2]         ...
-        default:               [FFA s0  ]  [FFA s1  ]  [FFA s2  ]
-    """
-    stage_ki = _partition_ki_into_stages(magi_plan, num_stages)
-
-    # Initialize accumulators
-    all_qi = magi_plan.q_assignments[cp_rank]
-    accum_out: dict[int, torch.Tensor] = {}
-    accum_lse: dict[int, torch.Tensor] = {}
-    for qi in all_qi:
-        accum_out[qi] = torch.zeros(
-            sc_size,
-            n_heads,
-            head_dim,
-            device=device,
-            dtype=dtype,
-        )
-        accum_lse[qi] = torch.full(
-            (n_heads, sc_size),
-            float("-inf"),
-            device=device,
-            dtype=torch.float32,
-        )
-
-    all_packed_kv: dict[int, torch.Tensor] = {}
-    all_packed_doc_ranges: dict[int, list[tuple[int, int]]] = {}
-
-    # Pre-build send args for all stages (local K/V doesn't change).
-    # IMPORTANT: Even empty stages must produce valid zero-split args
-    # so that ALL ranks call AllToAll-V collectively for every stage.
-    stage_args: list[tuple] = []
-    cp_world_size = magi_plan.cp_world_size
-    for s in range(num_stages):
-        if not stage_ki[s]:
-            # Empty stage: all-zero splits, still call the collective
-            zero_splits = [0] * cp_world_size
-            stage_args.append((k.new_empty(0), zero_splits, zero_splits, []))
-            continue
-        args = _build_stage_gather_args(
-            k,
-            v,
-            magi_plan,
-            global_cu_seqlens,
-            original_total_seqlen,
-            cp_rank,
-            stage_ki[s],
-        )
-        stage_args.append(args)
-
-    # Use a separate CUDA stream for communication.  The blocking
-    # _alltoall_v (NVSHMEM or NCCL) runs on comm_stream; FFA compute
-    # runs on the default stream.  The two overlap naturally.
-    comm_stream = torch.cuda.Stream(device=device)
-
-    # Pre-fetch results storage (one per stage, no double-buffer needed
-    # since we wait for each stage before reusing)
-    stage_recv: list[torch.Tensor | None] = [None] * num_stages
-    stage_layout: list[list[tuple[int, int]]] = [[] for _ in range(num_stages)]
-
-    def _fetch_on_comm_stream(s: int) -> None:
-        send_buf, recv_splits, send_splits, recv_layout = stage_args[s]
-        # Always call AllToAll-V — even with zero splits — so all ranks
-        # participate in the collective (skipping would deadlock).
-        with torch.cuda.stream(comm_stream):
-            stage_recv[s] = _alltoall_v_nccl(
-                send_buf,
-                recv_splits,
-                send_splits,
-                cp_group,
-            )
-        stage_layout[s] = recv_layout
-
-    # === Pipeline loop ===
-    # Launch stage 0 fetch
-    _fetch_on_comm_stream(0)
-
-    for s in range(num_stages):
-        # Wait for current stage's K/V to arrive
-        torch.cuda.current_stream().wait_stream(comm_stream)
-
-        # Launch NEXT stage's fetch (overlaps with FFA compute below)
-        if s + 1 < num_stages:
-            # comm_stream must wait for default stream to finish using
-            # the previous recv buffer before we can reuse NVSHMEM pool
-            comm_stream.wait_stream(torch.cuda.current_stream())
-            _fetch_on_comm_stream(s + 1)
-
-        # Unpack current stage's K/V
-        recv = stage_recv[s]
-        if recv is not None and recv.numel() > 0:
-            stage_kv, stage_doc_ranges = _unpack_kv_recv(
-                recv,
-                stage_layout[s],
-                magi_plan,
-                global_cu_seqlens,
-                original_total_seqlen,
-                cp_rank,
-                n_kv_heads,
-                kv_head_dim,
-                device,
-                dtype,
-            )
-        else:
-            stage_kv, stage_doc_ranges = {}, {}
-
-        # Compute FFA for this stage (on default stream)
-        if stage_kv:
-            stage_out, stage_lse = _ffa_compute_stage(
-                assigned_q,
-                stage_kv,
-                stage_doc_ranges,
-                magi_plan,
-                global_cu_seqlens,
-                cp_rank,
-                stage_ki[s],
-                sc_size,
-                total_seqlen,
-                original_total_seqlen,
-                n_heads,
-                head_dim,
-                half_hd,
-                device,
-                dtype,
-            )
-
-            # Merge into accumulators
-            for qi in stage_out:
-                accum_out[qi], accum_lse[qi] = merge_with_lse(
-                    accum_out[qi],
-                    accum_lse[qi],
-                    stage_out[qi],
-                    stage_lse[qi],
-                )
-
-        # Save packed K/V for backward
-        all_packed_kv.update(stage_kv)
-        all_packed_doc_ranges.update(stage_doc_ranges)
-
-    return accum_out, accum_lse, all_packed_kv, all_packed_doc_ranges
-
-
-# ---------------------------------------------------------------------------
 # Custom autograd.Function
 # ---------------------------------------------------------------------------
 
@@ -1277,257 +869,143 @@ class _VarlenMagiFunc(torch.autograd.Function):
             # Phase A: Redistribute Q
             assigned_q = _redistribute_q(q, magi_plan, cp_rank, cp_group)
 
-            # Phase B + Compute: pipelined or non-pipelined path
-            num_stages = _NUM_OVERLAP_STAGES
-
+            # Phase B: Gather K/V
             block_mask_cache: dict[int, object] = {}
-            pipelined_ok = False
-            if num_stages > 1:
-                try:
-                    (
-                        out_results,
-                        lse_results,
+
+            # Use cached gather when available
+            if cache.gather_send_splits.get(cp_rank) is not None:
+                packed_kv, packed_doc_ranges = _gather_kv_packed_cached(
+                    k,
+                    v,
+                    magi_plan,
+                    cp_rank,
+                    cp_group,
+                    cache,
+                )
+            else:
+                packed_kv, packed_doc_ranges = _gather_kv_packed(
+                    k,
+                    v,
+                    magi_plan,
+                    global_cu_seqlens,
+                    original_total_seqlen,
+                    cp_rank,
+                    cp_group,
+                )
+
+            # Compute: batched flex_attention per Q sub-chunk
+            out_results: dict[int, torch.Tensor] = {}
+            lse_results: dict[int, torch.Tensor] = {}
+
+            for qi in magi_plan.q_assignments[cp_rank]:
+                q_sub = assigned_q[qi]
+                ki_list = magi_plan.q_to_k_needs.get(qi, [])
+
+                # Use cached FFA ranges when available
+                cache_key_qi = (cp_rank, qi)
+                if cache_key_qi in cache.ffa_ranges:
+                    ranges = cache.ffa_ranges[cache_key_qi]
+                else:
+                    ranges = _build_batched_ffa_ranges_packed(
+                        qi,
+                        ki_list,
                         packed_kv,
                         packed_doc_ranges,
-                    ) = _forward_pipelined(
-                        q,
-                        k,
-                        v,
                         global_cu_seqlens,
-                        assigned_q,
-                        magi_plan,
-                        original_total_seqlen,
-                        cp_rank,
-                        cp_group,
-                        num_stages,
-                        n_heads,
-                        head_dim,
-                        n_kv_heads,
-                        kv_head_dim,
-                        half_hd,
                         sc_size,
                         total_seqlen,
-                        dtype,
+                        original_total_seqlen,
                         device,
                     )
-                    batched_ok = True
-                    pipelined_ok = True
-                except RuntimeError:
-                    pass
-
-            if not pipelined_ok:
-                # Use cached gather when available
-                if cache.gather_send_splits.get(cp_rank) is not None:
-                    packed_kv, packed_doc_ranges = _gather_kv_packed_cached(
-                        k,
-                        v,
-                        magi_plan,
-                        cp_rank,
-                        cp_group,
-                        cache,
+                if ranges is None:
+                    out_results[qi] = torch.zeros(
+                        sc_size,
+                        n_heads,
+                        head_dim,
+                        device=device,
+                        dtype=dtype,
                     )
-                else:
-                    packed_kv, packed_doc_ranges = _gather_kv_packed(
-                        k,
-                        v,
-                        magi_plan,
-                        global_cu_seqlens,
-                        original_total_seqlen,
-                        cp_rank,
-                        cp_group,
+                    lse_results[qi] = torch.full(
+                        (n_heads, sc_size),
+                        float("-inf"),
+                        device=device,
+                        dtype=torch.float32,
                     )
+                    continue
 
-                out_results: dict[int, torch.Tensor] = {}
-                lse_results: dict[int, torch.Tensor] = {}
+                q_ranges_l, k_ranges_l, attn_types_l = ranges
+                k_parts = [
+                    packed_kv[ki][..., :half_hd]
+                    for ki in ki_list
+                    if ki in packed_kv and packed_kv[ki].shape[0] > 0
+                ]
+                v_parts = [
+                    packed_kv[ki][..., half_hd:]
+                    for ki in ki_list
+                    if ki in packed_kv and packed_kv[ki].shape[0] > 0
+                ]
+                if not k_parts:
+                    out_results[qi] = torch.zeros(
+                        sc_size,
+                        n_heads,
+                        head_dim,
+                        device=device,
+                        dtype=dtype,
+                    )
+                    lse_results[qi] = torch.full(
+                        (n_heads, sc_size),
+                        float("-inf"),
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    continue
 
-                batched_ok = False
-                try:
-                    for qi in magi_plan.q_assignments[cp_rank]:
-                        q_sub = assigned_q[qi]
-                        ki_list = magi_plan.q_to_k_needs.get(qi, [])
+                big_k = torch.cat(k_parts, dim=0)
+                big_v = torch.cat(v_parts, dim=0)
+                q_ranges_t = torch.tensor(
+                    q_ranges_l,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                k_ranges_t = torch.tensor(
+                    k_ranges_l,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                attn_type_map = torch.tensor(
+                    attn_types_l,
+                    dtype=torch.int32,
+                    device=device,
+                )
 
-                        # Use cached FFA ranges when available
-                        cache_key_qi = (cp_rank, qi)
-                        if cache_key_qi in cache.ffa_ranges:
-                            ranges = cache.ffa_ranges[cache_key_qi]
-                        else:
-                            ranges = _build_batched_ffa_ranges_packed(
-                                qi,
-                                ki_list,
-                                packed_kv,
-                                packed_doc_ranges,
-                                global_cu_seqlens,
-                                sc_size,
-                                total_seqlen,
-                                original_total_seqlen,
-                                device,
-                            )
-                        if ranges is None:
-                            out_results[qi] = torch.zeros(
-                                sc_size,
-                                n_heads,
-                                head_dim,
-                                device=device,
-                                dtype=dtype,
-                            )
-                            lse_results[qi] = torch.full(
-                                (n_heads, sc_size),
-                                float("-inf"),
-                                device=device,
-                                dtype=torch.float32,
-                            )
-                            continue
+                step_out, step_meta = flex_attn_forward(
+                    q_sub,
+                    big_k,
+                    big_v,
+                    q_ranges_t,
+                    k_ranges_t,
+                    attn_type_map,
+                )
+                step_lse = step_meta.lse.transpose(0, 1)
 
-                        q_ranges_l, k_ranges_l, attn_types_l = ranges
-                        k_parts = [
-                            packed_kv[ki][..., :half_hd]
-                            for ki in ki_list
-                            if ki in packed_kv and packed_kv[ki].shape[0] > 0
-                        ]
-                        v_parts = [
-                            packed_kv[ki][..., half_hd:]
-                            for ki in ki_list
-                            if ki in packed_kv and packed_kv[ki].shape[0] > 0
-                        ]
-                        if not k_parts:
-                            out_results[qi] = torch.zeros(
-                                sc_size,
-                                n_heads,
-                                head_dim,
-                                device=device,
-                                dtype=dtype,
-                            )
-                            lse_results[qi] = torch.full(
-                                (n_heads, sc_size),
-                                float("-inf"),
-                                device=device,
-                                dtype=torch.float32,
-                            )
-                            continue
+                # Cache BlockMask for backward reuse
+                if step_meta.block_mask is not None:
+                    block_mask_cache[qi] = step_meta.block_mask
 
-                        big_k = torch.cat(k_parts, dim=0)
-                        big_v = torch.cat(v_parts, dim=0)
-                        q_ranges_t = torch.tensor(
-                            q_ranges_l,
-                            dtype=torch.int32,
-                            device=device,
-                        )
-                        k_ranges_t = torch.tensor(
-                            k_ranges_l,
-                            dtype=torch.int32,
-                            device=device,
-                        )
-                        attn_type_map = torch.tensor(
-                            attn_types_l,
-                            dtype=torch.int32,
-                            device=device,
-                        )
+                q_coverage = torch.zeros(
+                    sc_size,
+                    dtype=torch.bool,
+                    device=device,
+                )
+                for qr in q_ranges_l:
+                    q_coverage[qr[0] : qr[1]] = True
+                uncovered = ~q_coverage
+                if uncovered.any():
+                    step_lse[:, uncovered] = float("-inf")
+                    step_out[uncovered] = 0
 
-                        step_out, step_meta = flex_attn_forward(
-                            q_sub,
-                            big_k,
-                            big_v,
-                            q_ranges_t,
-                            k_ranges_t,
-                            attn_type_map,
-                        )
-                        step_lse = step_meta.lse.transpose(0, 1)
-
-                        # Cache BlockMask for backward reuse
-                        if step_meta.block_mask is not None:
-                            block_mask_cache[qi] = step_meta.block_mask
-
-                        q_coverage = torch.zeros(
-                            sc_size,
-                            dtype=torch.bool,
-                            device=device,
-                        )
-                        for qr in q_ranges_l:
-                            q_coverage[qr[0] : qr[1]] = True
-                        uncovered = ~q_coverage
-                        if uncovered.any():
-                            step_lse[:, uncovered] = float("-inf")
-                            step_out[uncovered] = 0
-
-                        out_results[qi] = step_out.to(dtype)
-                        lse_results[qi] = step_lse
-
-                    batched_ok = True
-                except RuntimeError:
-                    out_results.clear()
-                    lse_results.clear()
-
-                if not batched_ok:
-                    # Fallback: per-(qi, ki) pair loop with unpacked K/V
-                    for qi in magi_plan.q_assignments[cp_rank]:
-                        q_sub = assigned_q[qi]
-                        q_start = qi * sc_size
-                        q_end = min(q_start + sc_size, total_seqlen)
-
-                        accum_out = torch.zeros(
-                            sc_size,
-                            n_heads,
-                            head_dim,
-                            device=device,
-                            dtype=dtype,
-                        )
-                        accum_lse = torch.full(
-                            (n_heads, sc_size),
-                            float("-inf"),
-                            device=device,
-                            dtype=torch.float32,
-                        )
-
-                        for ki in magi_plan.q_to_k_needs.get(qi, []):
-                            if ki not in packed_kv or packed_kv[ki].shape[0] == 0:
-                                continue
-                            full_k = torch.zeros(
-                                sc_size,
-                                n_kv_heads,
-                                half_hd,
-                                device=device,
-                                dtype=dtype,
-                            )
-                            full_v = torch.zeros(
-                                sc_size,
-                                n_kv_heads,
-                                half_hd,
-                                device=device,
-                                dtype=dtype,
-                            )
-                            k_global_start = ki * sc_size
-                            doc_ranges = packed_doc_ranges.get(ki, [])
-                            packed_offset = 0
-                            for dr_s, dr_e in doc_ranges:
-                                n_tok = dr_e - dr_s
-                                local_s = dr_s - k_global_start
-                                full_k[local_s : local_s + n_tok] = packed_kv[ki][
-                                    packed_offset : packed_offset + n_tok, :, :half_hd
-                                ]
-                                full_v[local_s : local_s + n_tok] = packed_kv[ki][
-                                    packed_offset : packed_offset + n_tok, :, half_hd:
-                                ]
-                                packed_offset += n_tok
-
-                            k_start = ki * sc_size
-                            k_end = min(k_start + sc_size, total_seqlen)
-                            accum_out, accum_lse = _compute_and_merge_step(
-                                q_sub,
-                                full_k,
-                                full_v,
-                                global_cu_seqlens,
-                                q_start,
-                                q_end,
-                                k_start,
-                                k_end,
-                                original_total_seqlen,
-                                sc_size,
-                                accum_out,
-                                accum_lse,
-                            )
-
-                        out_results[qi] = accum_out.to(dtype)
-                        lse_results[qi] = accum_lse
+                out_results[qi] = step_out.to(dtype)
+                lse_results[qi] = step_lse
 
             # Phase C: Return output to original owners (1 AllToAll-V)
             output = _return_results(
@@ -1573,7 +1051,7 @@ class _VarlenMagiFunc(torch.autograd.Function):
         ctx.cp_rank = cp_rank
         ctx.cp_world_size = cp_world_size
         # Cache BlockMask per qi for backward reuse (avoids create_block_mask)
-        ctx.block_mask_cache = block_mask_cache if batched_ok else {}
+        ctx.block_mask_cache = block_mask_cache
 
         return merged_out
 
@@ -1633,219 +1111,122 @@ class _VarlenMagiFunc(torch.autograd.Function):
             dkv_by_ki: dict[int, torch.Tensor] = {}
 
             block_mask_cache = ctx.block_mask_cache
-            batched_bwd_ok = False
-            try:
-                for qi in magi_plan.q_assignments[cp_rank]:
-                    q_sub = assigned_q[qi]
-                    grad_out_sub = assigned_grad_out[qi]
-                    out_sub = assigned_out[qi]
-                    lse_sub = assigned_lse[qi]
-                    ki_list = magi_plan.q_to_k_needs.get(qi, [])
 
-                    ranges = _build_batched_ffa_ranges_packed(
-                        qi,
-                        ki_list,
-                        packed_kv,
-                        packed_doc_ranges,
-                        global_cu_seqlens,
-                        sc_size,
-                        total_seqlen,
-                        original_total_seqlen,
-                        device,
-                    )
-                    if ranges is None:
-                        dq_by_qi[qi] = torch.zeros_like(
-                            q_sub,
-                            dtype=torch.float32,
-                        )
-                        continue
+            for qi in magi_plan.q_assignments[cp_rank]:
+                q_sub = assigned_q[qi]
+                grad_out_sub = assigned_grad_out[qi]
+                out_sub = assigned_out[qi]
+                lse_sub = assigned_lse[qi]
+                ki_list = magi_plan.q_to_k_needs.get(qi, [])
 
-                    q_ranges_l, k_ranges_l, attn_types_l = ranges
-
-                    k_parts = [
-                        packed_kv[ki][..., :half_hd]
-                        for ki in ki_list
-                        if ki in packed_kv and packed_kv[ki].shape[0] > 0
-                    ]
-                    v_parts = [
-                        packed_kv[ki][..., half_hd:]
-                        for ki in ki_list
-                        if ki in packed_kv and packed_kv[ki].shape[0] > 0
-                    ]
-                    if not k_parts:
-                        dq_by_qi[qi] = torch.zeros_like(
-                            q_sub,
-                            dtype=torch.float32,
-                        )
-                        continue
-
-                    big_k = torch.cat(k_parts, dim=0)
-                    big_v = torch.cat(v_parts, dim=0)
-                    q_ranges_t = torch.tensor(
-                        q_ranges_l,
-                        dtype=torch.int32,
-                        device=device,
-                    )
-                    k_ranges_t = torch.tensor(
-                        k_ranges_l,
-                        dtype=torch.int32,
-                        device=device,
-                    )
-                    attn_type_map = torch.tensor(
-                        attn_types_l,
-                        dtype=torch.int32,
-                        device=device,
-                    )
-
-                    ffa_lse = lse_sub.transpose(0, 1).contiguous()
-
-                    dq, dk_big, dv_big = flex_attn_backward(
-                        grad_out_sub.contiguous(),
-                        q_sub.contiguous(),
-                        big_k.contiguous(),
-                        big_v.contiguous(),
-                        out_sub.contiguous(),
-                        ffa_lse,
-                        q_ranges_t,
-                        k_ranges_t,
-                        attn_type_map,
-                        block_mask=block_mask_cache.get(qi),
-                    )
-
-                    dq_by_qi[qi] = dq
-
-                    # Split dk_big/dv_big per ki (packed layout)
-                    k_offset = 0
-                    for ki in ki_list:
-                        if ki not in packed_kv or packed_kv[ki].shape[0] == 0:
-                            continue
-                        n_tok = packed_kv[ki].shape[0]
-                        if ki not in dkv_by_ki:
-                            dkv_by_ki[ki] = torch.zeros(
-                                n_tok,
-                                n_kv_heads,
-                                kv_head_dim,
-                                device=device,
-                                dtype=torch.float32,
-                            )
-                        dkv_by_ki[ki][..., :half_hd] += dk_big[
-                            k_offset : k_offset + n_tok
-                        ]
-                        dkv_by_ki[ki][..., half_hd:] += dv_big[
-                            k_offset : k_offset + n_tok
-                        ]
-                        k_offset += n_tok
-
-                batched_bwd_ok = True
-            except RuntimeError:
-                dq_by_qi.clear()
-                dkv_by_ki.clear()
-
-            if not batched_bwd_ok:
-                # Fallback: per-(qi, ki) pair loop
-                for qi in magi_plan.q_assignments[cp_rank]:
-                    q_sub = assigned_q[qi]
-                    grad_out_sub = assigned_grad_out[qi]
-                    out_sub = assigned_out[qi]
-                    lse_sub = assigned_lse[qi]
-                    q_start = qi * sc_size
-                    q_end = min(q_start + sc_size, total_seqlen)
-                    grad_q_sub = torch.zeros_like(q_sub, dtype=torch.float32)
-
-                    for ki in magi_plan.q_to_k_needs.get(qi, []):
-                        if ki not in packed_kv or packed_kv[ki].shape[0] == 0:
-                            continue
-                        # Unpack to full sub-chunk for fallback
-                        full_k = torch.zeros(
-                            sc_size,
-                            n_kv_heads,
-                            half_hd,
-                            device=device,
-                            dtype=dtype,
-                        )
-                        full_v = torch.zeros(
-                            sc_size,
-                            n_kv_heads,
-                            half_hd,
-                            device=device,
-                            dtype=dtype,
-                        )
-                        k_global_start = ki * sc_size
-                        doc_ranges = packed_doc_ranges.get(ki, [])
-                        packed_offset = 0
-                        for dr_s, dr_e in doc_ranges:
-                            n_tok = dr_e - dr_s
-                            local_s = dr_s - k_global_start
-                            full_k[local_s : local_s + n_tok] = packed_kv[ki][
-                                packed_offset : packed_offset + n_tok, :, :half_hd
-                            ]
-                            full_v[local_s : local_s + n_tok] = packed_kv[ki][
-                                packed_offset : packed_offset + n_tok, :, half_hd:
-                            ]
-                            packed_offset += n_tok
-
-                        k_start = ki * sc_size
-                        k_end = min(k_start + sc_size, total_seqlen)
-                        # Need full sub-chunk dkv for scatter
-                        if ki not in dkv_by_ki:
-                            dkv_by_ki[ki] = torch.zeros(
-                                sc_size,
-                                n_kv_heads,
-                                kv_head_dim,
-                                device=device,
-                                dtype=torch.float32,
-                            )
-
-                        _backward_step(
-                            grad_out_sub,
-                            q_sub,
-                            full_k,
-                            full_v,
-                            out_sub,
-                            lse_sub,
-                            global_cu_seqlens,
-                            q_start,
-                            q_end,
-                            k_start,
-                            k_end,
-                            original_total_seqlen,
-                            sc_size,
-                            grad_q_sub,
-                            dkv_by_ki[ki],
-                        )
-
-                    dq_by_qi[qi] = grad_q_sub
-
-            # Phase B': Scatter dK/dV back to K/V owners
-            if batched_bwd_ok:
-                # Packed layout: use packed scatter
-                local_dkv = _scatter_packed_dkv_to_owners(
-                    dkv_by_ki,
+                ranges = _build_batched_ffa_ranges_packed(
+                    qi,
+                    ki_list,
+                    packed_kv,
                     packed_doc_ranges,
                     global_cu_seqlens,
-                    magi_plan,
-                    cp_rank,
-                    cp_group,
-                    chunk_size,
-                    n_kv_heads,
-                    kv_head_dim,
-                    device,
+                    sc_size,
+                    total_seqlen,
                     original_total_seqlen,
+                    device,
                 )
-            else:
-                # Full sub-chunk layout: use original scatter
-                from torchtitan.distributed.varlen_cp.magi_dispatch import (
-                    _scatter_dkv_to_owners,
+                if ranges is None:
+                    dq_by_qi[qi] = torch.zeros_like(
+                        q_sub,
+                        dtype=torch.float32,
+                    )
+                    continue
+
+                q_ranges_l, k_ranges_l, attn_types_l = ranges
+
+                k_parts = [
+                    packed_kv[ki][..., :half_hd]
+                    for ki in ki_list
+                    if ki in packed_kv and packed_kv[ki].shape[0] > 0
+                ]
+                v_parts = [
+                    packed_kv[ki][..., half_hd:]
+                    for ki in ki_list
+                    if ki in packed_kv and packed_kv[ki].shape[0] > 0
+                ]
+                if not k_parts:
+                    dq_by_qi[qi] = torch.zeros_like(
+                        q_sub,
+                        dtype=torch.float32,
+                    )
+                    continue
+
+                big_k = torch.cat(k_parts, dim=0)
+                big_v = torch.cat(v_parts, dim=0)
+                q_ranges_t = torch.tensor(
+                    q_ranges_l,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                k_ranges_t = torch.tensor(
+                    k_ranges_l,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                attn_type_map = torch.tensor(
+                    attn_types_l,
+                    dtype=torch.int32,
+                    device=device,
                 )
 
-                kv_shape = (chunk_size, n_kv_heads, kv_head_dim)
-                local_dkv = _scatter_dkv_to_owners(
-                    dkv_by_ki,
-                    magi_plan,
-                    cp_rank,
-                    cp_group,
-                    kv_shape,
+                ffa_lse = lse_sub.transpose(0, 1).contiguous()
+
+                dq, dk_big, dv_big = flex_attn_backward(
+                    grad_out_sub.contiguous(),
+                    q_sub.contiguous(),
+                    big_k.contiguous(),
+                    big_v.contiguous(),
+                    out_sub.contiguous(),
+                    ffa_lse,
+                    q_ranges_t,
+                    k_ranges_t,
+                    attn_type_map,
+                    block_mask=block_mask_cache.get(qi),
                 )
+
+                dq_by_qi[qi] = dq
+
+                # Split dk_big/dv_big per ki (packed layout)
+                k_offset = 0
+                for ki in ki_list:
+                    if ki not in packed_kv or packed_kv[ki].shape[0] == 0:
+                        continue
+                    n_tok = packed_kv[ki].shape[0]
+                    if ki not in dkv_by_ki:
+                        dkv_by_ki[ki] = torch.zeros(
+                            n_tok,
+                            n_kv_heads,
+                            kv_head_dim,
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                    dkv_by_ki[ki][..., :half_hd] += dk_big[
+                        k_offset : k_offset + n_tok
+                    ]
+                    dkv_by_ki[ki][..., half_hd:] += dv_big[
+                        k_offset : k_offset + n_tok
+                    ]
+                    k_offset += n_tok
+
+            # Phase B': Scatter dK/dV back to K/V owners (packed layout)
+            local_dkv = _scatter_packed_dkv_to_owners(
+                dkv_by_ki,
+                packed_doc_ranges,
+                global_cu_seqlens,
+                magi_plan,
+                cp_rank,
+                cp_group,
+                chunk_size,
+                n_kv_heads,
+                kv_head_dim,
+                device,
+                original_total_seqlen,
+            )
 
             # Phase A': Scatter dQ back to Q owners
             q_shape = q.shape

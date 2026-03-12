@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.nn.attention.varlen import AuxRequest, varlen_attn
-
 from torchtitan.distributed.varlen_cp.dispatch_solver import DispatchPlan
 
 # PyTorch-native flex_attention wrappers for range-based attention.
@@ -176,117 +174,6 @@ def _build_ring_step_cu_seqlens(
 
 
 
-
-# ---------------------------------------------------------------------------
-# Token extraction / scattering helpers
-# ---------------------------------------------------------------------------
-
-
-def _extract_tokens_for_docs(
-    chunk_tensor: torch.Tensor,
-    doc_ranges: list[tuple[int, int]],
-    chunk_start: int,
-) -> torch.Tensor:
-    """Extract tokens from a chunk tensor given global doc ranges.
-
-    Converts global (start, end) ranges to chunk-local offsets and
-    concatenates the extracted slices.
-
-    Args:
-        chunk_tensor: Tensor of shape (chunk_size, ...).
-        doc_ranges: List of (global_start, global_end) pairs.
-        chunk_start: Global start position of the chunk.
-
-    Returns:
-        Packed tensor with tokens from all doc ranges.
-    """
-    if not doc_ranges:
-        return chunk_tensor[:0]
-
-    slices = []
-    for gs, ge in doc_ranges:
-        local_s = gs - chunk_start
-        local_e = ge - chunk_start
-        slices.append(chunk_tensor[local_s:local_e])
-
-    return torch.cat(slices, dim=0)
-
-
-
-def _scatter_to_chunk(
-    packed_out: torch.Tensor,
-    packed_lse: torch.Tensor,
-    q_doc_ranges: list[tuple[int, int]],
-    q_chunk_start: int,
-    chunk_size: int,
-    n_heads: int,
-    head_dim: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Scatter packed varlen_attn output back to full chunk positions.
-
-    Positions not covered by any document get zero output and ``-inf`` LSE
-    so they don't affect the LSE merge.
-
-    Args:
-        packed_out: Packed attention output, shape (total_packed_q, n_heads, head_dim).
-        packed_lse: Packed LSE, shape (n_heads, total_packed_q).
-        q_doc_ranges: List of (global_start, global_end) for Q documents.
-        q_chunk_start: Global start of the Q chunk.
-        chunk_size: Chunk size.
-        n_heads: Number of attention heads.
-        head_dim: Dimension per head.
-        device: Device.
-        dtype: Data type for output tensor.
-
-    Returns:
-        Tuple of (full_out, full_lse) with shapes
-        (chunk_size, n_heads, head_dim) and (n_heads, chunk_size).
-    """
-    full_out = torch.zeros(chunk_size, n_heads, head_dim, device=device, dtype=dtype)
-    full_lse = torch.full(
-        (n_heads, chunk_size), float("-inf"), device=device, dtype=torch.float32
-    )
-
-    offset = 0
-    for q_s, q_e in q_doc_ranges:
-        q_len = q_e - q_s
-        local_start = q_s - q_chunk_start
-        full_out[local_start : local_start + q_len] = packed_out[offset : offset + q_len]
-        full_lse[:, local_start : local_start + q_len] = packed_lse[
-            :, offset : offset + q_len
-        ]
-        offset += q_len
-
-    return full_out, full_lse
-
-
-def _extract_lse_for_docs(
-    lse: torch.Tensor,
-    doc_ranges: list[tuple[int, int]],
-    chunk_start: int,
-) -> torch.Tensor:
-    """Extract LSE values for Q document positions.
-
-    Mirrors ``_extract_tokens_for_docs`` but for LSE shape (n_heads, chunk_size).
-
-    Args:
-        lse: LSE tensor, shape (n_heads, chunk_size).
-        doc_ranges: Global (start, end) pairs for documents.
-        chunk_start: Global start of the chunk.
-
-    Returns:
-        Packed LSE, shape (n_heads, total_packed_tokens).
-    """
-    if not doc_ranges:
-        return lse[:, :0]
-    parts = []
-    for gs, ge in doc_ranges:
-        parts.append(lse[:, gs - chunk_start : ge - chunk_start])
-    return torch.cat(parts, dim=1)
-
-
 # ---------------------------------------------------------------------------
 # FFA (Flex-Flash-Attention) compute path
 # ---------------------------------------------------------------------------
@@ -309,9 +196,8 @@ def _compute_step_ffa(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute one (Q,K) step using magi-attention's FFA kernel and merge.
 
-    FFA operates on full chunk-level tensors with range descriptors, avoiding
-    the pack/unpack overhead of varlen_attn.  Each doc's Q/K intersection
-    becomes one FFA range pair.
+    Operates on full chunk-level tensors with range descriptors.  Each doc's
+    Q/K intersection becomes one range pair for flex_attention.
 
     Args:
         q: Full Q chunk, shape (chunk_size, n_heads, head_dim).
@@ -396,9 +282,8 @@ def _compute_and_merge_step(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute partial attention for one (Q_chunk, K_chunk) pair and merge.
 
-    Builds cu_seqlens, extracts tokens, calls varlen_attn, scatters output
-    back to chunk positions, and merges with the running accumulator.
-    Used by both ring-pass and group-cast paths.
+    Builds cu_seqlens for the (Q,K) pair and calls flex_attention via
+    ``_compute_step_ffa``, merging into the running accumulator.
 
     Args:
         q: Local Q chunk, shape (chunk_size, n_heads, head_dim).
@@ -443,194 +328,26 @@ def _compute_and_merge_step(
     if num_real_q == 0 or not k_doc_ranges:
         return accum_out, accum_lse
 
-    # --- FFA path: single kernel call on chunk-level tensors (no pack/unpack) ---
-    try:
-        return _compute_step_ffa(
-            q,
-            cur_k,
-            cur_v,
-            q_doc_ranges,
-            k_doc_ranges,
-            is_causal,
-            q_chunk_start,
-            k_chunk_start,
-            chunk_size,
-            n_heads,
-            head_dim,
-            accum_out,
-            accum_lse,
-        )
-    except RuntimeError:
-        pass  # Fall through to varlen_attn path
-
-    # --- varlen_attn fallback: extract packed tokens, compute, scatter back ---
-
-    # Extract packed Q and K/V tokens for participating documents
-    q_packed = _extract_tokens_for_docs(q, q_doc_ranges, q_chunk_start)
-    k_packed = _extract_tokens_for_docs(cur_k, k_doc_ranges, k_chunk_start)
-    v_packed = _extract_tokens_for_docs(cur_v, k_doc_ranges, k_chunk_start)
-
-    # Compute max sequence lengths for this step
-    q_diffs = torch.diff(cu_q)
-    k_diffs = torch.diff(cu_k)
-    max_q = int(q_diffs.max().item()) if q_diffs.numel() > 0 else 0
-    max_k = int(k_diffs.max().item()) if k_diffs.numel() > 0 else 0
-
-    # Compute partial attention with LSE
-    step_out, step_lse = varlen_attn(
-        q_packed,
-        k_packed,
-        v_packed,
-        cu_q,
-        cu_k,
-        max_q,
-        max_k,
-        is_causal=is_causal,
-        return_aux=AuxRequest(lse=True),
-    )
-
-    # Scatter packed output to full chunk positions
-    full_step_out, full_step_lse = _scatter_to_chunk(
-        step_out,
-        step_lse,
+    return _compute_step_ffa(
+        q,
+        cur_k,
+        cur_v,
         q_doc_ranges,
+        k_doc_ranges,
+        is_causal,
         q_chunk_start,
+        k_chunk_start,
         chunk_size,
         n_heads,
         head_dim,
-        device,
-        dtype,
+        accum_out,
+        accum_lse,
     )
-
-    # Merge with accumulated result
-    return merge_with_lse(accum_out, accum_lse, full_step_out, full_step_lse)
 
 
 # ---------------------------------------------------------------------------
-# Custom backward helpers (flash attention backward kernel)
+# Backward helper (flex_attention backward kernel)
 # ---------------------------------------------------------------------------
-
-
-def _scatter_grad_to_chunk(
-    packed_grad: torch.Tensor,
-    chunk_grad: torch.Tensor,
-    doc_ranges: list[tuple[int, int]],
-    chunk_start: int,
-) -> None:
-    """Scatter packed gradients back to chunk positions (in-place accumulate).
-
-    Args:
-        packed_grad: Packed gradient, shape (num_packed, ...).
-        chunk_grad: Chunk gradient accumulator, shape (chunk_size, ...).
-        doc_ranges: Global (start, end) pairs for documents.
-        chunk_start: Global start of the chunk.
-    """
-    offset = 0
-    for gs, ge in doc_ranges:
-        length = ge - gs
-        local_s = gs - chunk_start
-        chunk_grad[local_s : local_s + length] += packed_grad[offset : offset + length]
-        offset += length
-
-
-def _backward_step_flash(
-    grad_output: torch.Tensor,
-    q: torch.Tensor,
-    cur_k: torch.Tensor,
-    cur_v: torch.Tensor,
-    merged_out: torch.Tensor,
-    merged_lse: torch.Tensor,
-    global_cu_seqlens: torch.Tensor,
-    q_chunk_start: int,
-    q_chunk_end: int,
-    k_chunk_start: int,
-    k_chunk_end: int,
-    original_total_seqlen: int,
-    chunk_size: int,
-    grad_q: torch.Tensor,
-    grad_kv: torch.Tensor,
-) -> None:
-    """Compute backward for one (Q_chunk, K_chunk) step using flash backward.
-
-    Calls ``_flash_attention_backward`` with the merged output and LSE from
-    the full forward pass. This gives correct K/V gradients because the
-    softmax denominator (encoded in the merged LSE) accounts for all K/V
-    chunks, not just the current step.
-
-    Accumulates dQ into ``grad_q`` and dK/dV into ``grad_kv`` in-place.
-
-    Args:
-        grad_output: Upstream gradient, shape (chunk_size, n_heads, head_dim).
-        q: Local Q chunk.
-        cur_k: K for this step.
-        cur_v: V for this step.
-        merged_out: Merged attention output from forward.
-        merged_lse: Merged LSE from forward, shape (n_heads, chunk_size), float32.
-        global_cu_seqlens: Global cumulative sequence lengths.
-        q_chunk_start, q_chunk_end: Q chunk range (global).
-        k_chunk_start, k_chunk_end: K chunk range (global).
-        original_total_seqlen: Total seqlen before padding.
-        chunk_size: Chunk size.
-        grad_q: Gradient accumulator for Q, shape (chunk_size, n_heads, head_dim).
-        grad_kv: Gradient accumulator for K/V, shape (chunk_size, n_kv_heads, 2*head_dim).
-    """
-    device = q.device
-    n_kv_head_dim = cur_k.shape[2]
-
-    cu_q, cu_k, q_doc_ranges, k_doc_ranges, num_real_q, is_causal = (
-        _build_ring_step_cu_seqlens(
-            global_cu_seqlens,
-            q_chunk_start, q_chunk_end,
-            k_chunk_start, k_chunk_end,
-            original_total_seqlen, chunk_size, device,
-        )
-    )
-
-    if num_real_q == 0 or not k_doc_ranges:
-        return
-
-    # Pack tensors the same way as forward
-    q_packed = _extract_tokens_for_docs(q, q_doc_ranges, q_chunk_start)
-    k_packed = _extract_tokens_for_docs(cur_k, k_doc_ranges, k_chunk_start)
-    v_packed = _extract_tokens_for_docs(cur_v, k_doc_ranges, k_chunk_start)
-    out_packed = _extract_tokens_for_docs(merged_out, q_doc_ranges, q_chunk_start)
-    grad_packed = _extract_tokens_for_docs(grad_output, q_doc_ranges, q_chunk_start)
-    lse_packed = _extract_lse_for_docs(merged_lse, q_doc_ranges, q_chunk_start)
-
-    q_diffs = torch.diff(cu_q)
-    k_diffs = torch.diff(cu_k)
-    max_q = int(q_diffs.max().item()) if q_diffs.numel() > 0 else 0
-    max_k = int(k_diffs.max().item()) if k_diffs.numel() > 0 else 0
-
-    dq_packed, dk_packed, dv_packed = torch.ops.aten._flash_attention_backward(
-        grad_packed.contiguous(),
-        q_packed.contiguous(),
-        k_packed.contiguous(),
-        v_packed.contiguous(),
-        out_packed.contiguous(),
-        lse_packed.contiguous(),
-        cu_q, cu_k, max_q, max_k,
-        0.0,  # dropout_p
-        is_causal,
-        torch.empty(2, dtype=torch.uint64, device=device),  # dummy rng_state
-        torch.empty(0, device=device),  # unused
-    )
-
-    # Scatter dQ back to grad_q
-    _scatter_grad_to_chunk(dq_packed.float(), grad_q, q_doc_ranges, q_chunk_start)
-
-    # Scatter dK/dV back to grad_kv
-    offset = 0
-    for k_s, k_e in k_doc_ranges:
-        k_len = k_e - k_s
-        local_s = k_s - k_chunk_start
-        grad_kv[local_s : local_s + k_len, :, :n_kv_head_dim] += (
-            dk_packed[offset : offset + k_len].float()
-        )
-        grad_kv[local_s : local_s + k_len, :, n_kv_head_dim:] += (
-            dv_packed[offset : offset + k_len].float()
-        )
-        offset += k_len
 
 
 def _backward_step_ffa(
@@ -650,13 +367,12 @@ def _backward_step_ffa(
     grad_q: torch.Tensor,
     grad_kv: torch.Tensor,
 ) -> None:
-    """Compute backward for one (Q,K) step using FFA CUTLASS backward kernel.
+    """Compute backward for one (Q,K) step using flex_attention backward.
 
-    Drop-in replacement for ``_backward_step_flash`` when FFA is available.
     Operates on full chunk-level tensors with range descriptors (no pack/unpack).
 
     Args:
-        Same as ``_backward_step_flash``.
+        Same as ``_backward_step``.
     """
     device = q.device
     n_kv_head_dim = cur_k.shape[2]
@@ -725,18 +441,8 @@ def _backward_step(
     grad_q: torch.Tensor,
     grad_kv: torch.Tensor,
 ) -> None:
-    """Dispatch to flex_attention backward, fall back to varlen_attn if needed."""
-    try:
-        return _backward_step_ffa(
-            grad_output, q, cur_k, cur_v, merged_out, merged_lse,
-            global_cu_seqlens,
-            q_chunk_start, q_chunk_end, k_chunk_start, k_chunk_end,
-            original_total_seqlen, chunk_size,
-            grad_q, grad_kv,
-        )
-    except RuntimeError:
-        pass  # Fall through to varlen_attn path
-    _backward_step_flash(
+    """Compute backward for one (Q,K) step using flex_attention backward."""
+    _backward_step_ffa(
         grad_output, q, cur_k, cur_v, merged_out, merged_lse,
         global_cu_seqlens,
         q_chunk_start, q_chunk_end, k_chunk_start, k_chunk_end,
