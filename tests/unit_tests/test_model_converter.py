@@ -81,6 +81,17 @@ def test_build_model_converters_float8_converter():
     assert isinstance(model_converters.converters[0], Float8LinearConverter)
 
 
+def test_lora_before_quantization_raises():
+    """LoRA must come after quantization converters."""
+    with pytest.raises(ValueError, match="LoRA converter must come after"):
+        ModelConvertersContainer.Config(
+            converters=[
+                LoRAConverter.Config(rank=8, alpha=16.0),
+                Float8LinearConverter.Config(emulate=True),
+            ],
+        )
+
+
 def test_lora_freeze_and_trainability():
     """After convert: base params frozen, LoRA adapters present and trainable."""
     model = SimpleModel()
