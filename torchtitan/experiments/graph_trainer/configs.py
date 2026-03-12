@@ -15,11 +15,12 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot"] | None = "aot"
+    mode: Literal["jit", "aot", "make_fx"] | None = "aot"
     """
     Compilation mode. Options:
         jit: standard torch.compile() with custom backend
         aot: explicit joint graph export + custom graph passes
+        make_fx: non-strict tracing of fwd+loss+bwd via make_fx
     """
 
     backend: str = "aot_eager"

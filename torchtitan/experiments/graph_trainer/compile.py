@@ -155,5 +155,12 @@ def apply_compile(
             fsdp_reshard_after_forward,
             joint_passes=[],
         )
+    elif mode == "make_fx":
+        # make_fx traces fwd+loss+bwd together inside forward_backward_step,
+        # so no model-level wrapping is needed here.
+        logger.info("make_fx compile mode: graph capture will happen at training time")
+        return model
     else:
-        raise ValueError(f"Unknown compile mode: {mode}. Must be 'jit' or 'aot'.")
+        raise ValueError(
+            f"Unknown compile mode: {mode}. Must be 'jit', 'aot', or 'make_fx'."
+        )
