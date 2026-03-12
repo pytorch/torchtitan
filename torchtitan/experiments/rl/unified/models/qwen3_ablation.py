@@ -51,6 +51,24 @@ from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
 # ── Ablation 3: Fused RoPE ──
 
+# Cache for converted rope tensor (avoids dtype conversion on every forward call)
+_rope_cache_converted: torch.Tensor | None = None
+
+
+def _get_converted_rope_cache(
+    rope_cache: torch.Tensor, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    """Convert rope_cache to target dtype once and cache the result."""
+    global _rope_cache_converted
+    if (
+        _rope_cache_converted is None
+        or _rope_cache_converted.dtype != dtype
+        or _rope_cache_converted.device != device
+    ):
+        _rope_cache_converted = rope_cache.to(dtype=dtype, device=device)
+    return _rope_cache_converted
+
+
 def apply_rotary_emb_cos_sin_vllm(
     xq: torch.Tensor,
     xk: torch.Tensor,
@@ -77,8 +95,8 @@ def apply_rotary_emb_cos_sin_vllm(
 
     # vLLM's fused rotary embedding kernel (in-place)
     # cos_sin_cache shape: (max_seqlen, head_dim) with cos and sin concatenated
-    # vLLM kernel requires cache to match query dtype
-    cache = rope_cache.to(dtype=xq.dtype, device=xq.device)
+    # Cache the converted rope tensor to avoid dtype conversion every call
+    cache = _get_converted_rope_cache(rope_cache, xq.dtype, xq.device)
     torch.ops._C.rotary_embedding(
         pos_flat,
         xq_flat,
