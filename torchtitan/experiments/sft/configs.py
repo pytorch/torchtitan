@@ -17,13 +17,20 @@ class SFTTrainerConfig(Trainer.Config):
     def __post_init__(self):
         Trainer.Config.__post_init__(self)
         if self.dataloader.pack_sequences:
-            attn_backend = self.model_spec.model.layer.attention.attn_backend
-            if attn_backend not in ("flex", "varlen"):
+            attn = self.model_spec.model.layer.attention
+            if attn.attn_backend not in ("flex", "varlen"):
                 raise ValueError(
                     f"pack_sequences=True requires 'flex' or 'varlen' attention "
                     f"to prevent cross-document attention in packed sequences, "
-                    f"but got attn_backend='{attn_backend}'. Either set "
+                    f"but got attn_backend='{attn.attn_backend}'. Either set "
                     f"pack_sequences=False or switch to flex/varlen attention."
+                )
+            if attn.attn_mask_type != "block_causal":
+                raise ValueError(
+                    f"pack_sequences=True requires attn_mask_type='block_causal' "
+                    f"to prevent cross-document attention in packed sequences, "
+                    f"but got attn_mask_type='{attn.attn_mask_type}'. Set "
+                    f"model_spec.model.layer.attention.attn_mask_type='block_causal'."
                 )
 
         if (

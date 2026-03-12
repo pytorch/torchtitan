@@ -81,12 +81,13 @@ def sft_qwen3_8b_math() -> SFTTrainerConfig:
 
     model_spec = qwen3_registry("8B")
     model_spec.model.layer.attention.attn_backend = "flex"
+    model_spec.model.layer.attention.attn_mask_type = "block_causal"
     return SFTTrainerConfig(
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,
         optimizer=OptimizersContainer.Config(lr=2e-5),
         lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=20,
+            warmup_steps=15,
             decay_ratio=0.9,
             decay_type="cosine",
             min_lr_factor=0.1,
@@ -94,7 +95,7 @@ def sft_qwen3_8b_math() -> SFTTrainerConfig:
         training=TrainingConfig(
             local_batch_size=1,
             seq_len=2048,
-            steps=180, # Trains for ~2 epochs following OLMo 3
+            steps=180,  # Trains for ~2 epochs following OLMo 3
         ),
         dataloader=SFTDataLoader.Config(
             dataset_path="openai/gsm8k",
@@ -107,7 +108,6 @@ def sft_qwen3_8b_math() -> SFTTrainerConfig:
         ),
         checkpoint=CheckpointManager.Config(
             enable=True,
-            interval=100,
             initial_load_in_hf=True,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
@@ -117,7 +117,7 @@ def sft_qwen3_8b_math() -> SFTTrainerConfig:
         validator=Validator.Config(
             enable=True,
             freq=50,
-            steps=5, # Large enough to get a solid signal, but won't run out of data and hang under DP
+            steps=5,  # Large enough to get a solid signal, but won't run out of data and hang under DP
             dataloader=SFTDataLoader.Config(
                 dataset_path="openai/gsm8k",
                 load_dataset_kwargs={"name": "main", "split": "test"},
