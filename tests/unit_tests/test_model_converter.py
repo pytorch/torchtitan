@@ -3,6 +3,8 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from collections import OrderedDict
+
 import pytest
 import torch
 import torch.nn as nn
@@ -12,16 +14,6 @@ from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-
-
-class SimpleModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(64, 64)
-        self.fc2 = nn.Linear(64, 64)
-
-    def forward(self, x):
-        return self.fc2(torch.relu(self.fc1(x)))
 
 
 def build_parallel_dims(trainer_config, world_size):
@@ -94,7 +86,11 @@ def test_lora_before_quantization_raises():
 
 def test_lora_freeze_and_trainability():
     """After convert: base params frozen, LoRA adapters present and trainable."""
-    model = SimpleModel()
+    model = nn.Sequential(OrderedDict([
+        ("fc1", nn.Linear(64, 64)),
+        ("relu", nn.ReLU()),
+        ("fc2", nn.Linear(64, 64)),
+    ]))
     converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
     converter.convert(model)
 
@@ -122,7 +118,11 @@ def test_lora_freeze_and_trainability():
 def test_lora_trains_base_frozen():
     """Train for several steps: LoRA params should change, base params should not."""
     torch.manual_seed(42)
-    model = SimpleModel()
+    model = nn.Sequential(OrderedDict([
+        ("fc1", nn.Linear(64, 64)),
+        ("relu", nn.ReLU()),
+        ("fc2", nn.Linear(64, 64)),
+    ]))
     converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
     converter.convert(model)
 
