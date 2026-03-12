@@ -173,24 +173,32 @@ class GQAttentionMergedQKV(GQAttention):
                     xq, xk, freqs_cis=rope_cache, positions=positions
                 )
 
-        xq = xq.transpose(1, 2)
-        xk = xk.transpose(1, 2)
-        xv = xv.transpose(1, 2)
+        # ── Ablation 7: zero-copy layout for vLLM attention ──
+        # Skip the double-transpose: (bs,seq,heads,dim) → transpose → (bs,heads,seq,dim)
+        # → transpose → (bs*seq,heads,dim). Instead reshape directly.
+        # (bs, seq, heads, dim) is contiguous, so reshape to (bs*seq, heads, dim) is free.
+        if hasattr(self.inner_attention, "vllm_attn"):
+            n_heads_local = xq.shape[2]
+            n_kv_local = xk.shape[2]
+            q = xq.reshape(bs * seqlen, n_heads_local, self.head_dim)
+            k = xk.reshape(bs * seqlen, n_kv_local, self.head_dim)
+            v = xv.reshape(bs * seqlen, n_kv_local, self.head_dim)
 
-        scale_kwargs = {"scale": self.scaling} if self.scaling is not None else {}
-
-        # VLLMAttention uses (q, k, v, *, scale) while native wrappers
-        # use (q, k, v, attention_masks=..., **scale_kwargs).
-        if isinstance(self.inner_attention, nn.Module) and hasattr(
-            self.inner_attention, "vllm_attn"
-        ):
-            output = self.inner_attention(xq, xk, xv, **scale_kwargs)
+            output_flat = self.inner_attention.vllm_attn(q, k, v)
+            output_flat = output_flat.narrow(0, 0, bs * seqlen)
+            output = output_flat.view(bs, seqlen, -1)
         else:
+            # Fallback for non-vLLM attention (training, etc.)
+            xq = xq.transpose(1, 2)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+            scale_kwargs = {"scale": self.scaling} if self.scaling is not None else {}
             output = self.inner_attention(
                 xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
             )
+            output = output.reshape(bs, seqlen, -1)
 
-        return self.wo(output.reshape(bs, seqlen, -1))
+        return self.wo(output)
 
 
 # ── Ablation 2 + 5: Fused SiluAndMul + Merged gate_up projection ──
