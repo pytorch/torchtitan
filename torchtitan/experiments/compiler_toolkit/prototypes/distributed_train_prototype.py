@@ -385,6 +385,208 @@ def setup_llama3_distributed(parallel_dims, device, seed=42):
 
 
 # ---------------------------------------------------------------------------
+# Setup: DeepSeek V3 debugmodel (distributed)
+# ---------------------------------------------------------------------------
+
+
+def setup_deepseekv3_distributed(parallel_dims, device, seed=42):
+    """Set up distributed DeepSeek V3 debugmodel (MoE + MLA) + c4_test data."""
+    from torchtitan.components.loss import cross_entropy_loss
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+    from torchtitan.experiments.simple_fsdp.deepseek_v3 import _simple_fsdp_configs
+    from torchtitan.experiments.simple_fsdp.deepseek_v3.model import (
+        SimpleFSDPDeepSeekV3Model,
+    )
+    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+    from torchtitan.models.deepseek_v3.parallelize import apply_non_moe_tp
+
+    torch.manual_seed(seed)
+
+    # Reduced seq_len and batch to fit make_fx replay in GPU memory
+    # (MoE + MLA produce ~2x the intermediates of dense models)
+    seq_len = 512
+    local_batch_size = 2
+    model_config = _simple_fsdp_configs["debugmodel"]
+    # Sync RoPE max_seq_len and replicate update_from_config logic:
+    # Attention.softmax_scale depends on rope_max_seq_len, rope_factor,
+    # and rope_original_seq_len being synced into layer.attention.
+    model_config = _dc.replace(
+        model_config,
+        rope=_dc.replace(model_config.rope, max_seq_len=seq_len),
+        layer=_dc.replace(
+            model_config.layer,
+            attention=_dc.replace(
+                model_config.layer.attention,
+                rope_max_seq_len=seq_len,
+                rope_factor=model_config.rope.rope_factor,
+                rope_original_seq_len=model_config.rope.original_seq_len,
+            ),
+            # torch._grouped_mm requires CUDA SM90+; disable for CPU compat
+            moe=_dc.replace(model_config.layer.moe, use_grouped_mm=False),
+        ),
+    )
+
+    with torch.device("meta"):
+        model = SimpleFSDPDeepSeekV3Model(model_config)
+
+    # TP: non-MoE only (skip MoE EP/TP for prototype)
+    def _apply_tp(m, tp_mesh):
+        apply_non_moe_tp(
+            m,
+            tp_mesh,
+            loss_parallel=False,
+            enable_float8_tensorwise_tp=False,
+            cp_enabled=False,
+        )
+
+    model = setup_distributed_model(
+        model,
+        parallel_dims,
+        device,
+        apply_tp_fn=_apply_tp if parallel_dims.tp_enabled else None,
+        on_meta=True,
+    )
+
+    config = TrainConfig(
+        lr=8e-4,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-8,
+        weight_decay=0.1,
+        warmup_steps=2,
+        decay_ratio=0.8,
+        decay_type="linear",
+        min_lr_factor=0.0,
+        max_norm=1.0,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+        total_steps=10,
+        has_global_valid_tokens=True,
+    )
+
+    dp_rank = 0
+    dp_world_size = 1
+    if parallel_dims.dp_shard_enabled:
+        dp_mesh = parallel_dims.get_mesh("fsdp")
+        dp_rank = dp_mesh.get_local_rank()
+        dp_world_size = dp_mesh.size()
+
+    tokenizer = HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer")
+    dl_config = HuggingFaceTextDataLoader.Config(dataset="c4_test", infinite=True)
+    dataloader = HuggingFaceTextDataLoader(
+        dl_config,
+        dp_world_size=dp_world_size,
+        dp_rank=dp_rank,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+    )
+
+    data = []
+    data_iter = iter(dataloader)
+    for _ in range(config.total_steps):
+        input_dict, labels_batch = next(data_iter)
+        tokens = input_dict["input"].to(device)
+        labels_batch = labels_batch.to(device)
+        global_valid_tokens = (labels_batch != -100).sum().float()
+        data.append((tokens, labels_batch, global_valid_tokens))
+
+    def loss_fn(pred, labels):
+        return cross_entropy_loss(pred, labels)
+
+    return model, loss_fn, config, data
+
+
+# ---------------------------------------------------------------------------
+# Setup: Qwen3 debugmodel (distributed)
+# ---------------------------------------------------------------------------
+
+
+def setup_qwen3_distributed(parallel_dims, device, seed=42):
+    """Set up distributed Qwen3 debugmodel (dense, weight-tying) + c4_test data.
+
+    No SimpleFSDP wrapper exists for Qwen3 — uses base Qwen3Model directly.
+    setup_distributed_model() wraps init_weights() in disable_active_parametrization().
+    FSDP only, no TP (Qwen3 has no standalone apply_tp).
+    """
+    from torchtitan.components.loss import cross_entropy_loss
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+    from torchtitan.models.qwen3 import qwen3_configs
+    from torchtitan.models.qwen3.model import Qwen3Model
+
+    torch.manual_seed(seed)
+
+    # Reduced seq_len to fit make_fx replay in GPU memory
+    seq_len = 512
+    local_batch_size = 2
+    model_config = qwen3_configs["debugmodel"]
+    model_config = _dc.replace(
+        model_config, rope=_dc.replace(model_config.rope, max_seq_len=seq_len)
+    )
+
+    with torch.device("meta"):
+        model = Qwen3Model(model_config)
+
+    model = setup_distributed_model(
+        model,
+        parallel_dims,
+        device,
+        apply_tp_fn=None,  # No standalone TP for Qwen3
+        on_meta=True,
+    )
+
+    config = TrainConfig(
+        lr=8e-4,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-8,
+        weight_decay=0.1,
+        warmup_steps=2,
+        decay_ratio=0.8,
+        decay_type="linear",
+        min_lr_factor=0.0,
+        max_norm=1.0,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+        total_steps=10,
+        has_global_valid_tokens=True,
+    )
+
+    dp_rank = 0
+    dp_world_size = 1
+    if parallel_dims.dp_shard_enabled:
+        dp_mesh = parallel_dims.get_mesh("fsdp")
+        dp_rank = dp_mesh.get_local_rank()
+        dp_world_size = dp_mesh.size()
+
+    tokenizer = HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer")
+    dl_config = HuggingFaceTextDataLoader.Config(dataset="c4_test", infinite=True)
+    dataloader = HuggingFaceTextDataLoader(
+        dl_config,
+        dp_world_size=dp_world_size,
+        dp_rank=dp_rank,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+    )
+
+    data = []
+    data_iter = iter(dataloader)
+    for _ in range(config.total_steps):
+        input_dict, labels_batch = next(data_iter)
+        tokens = input_dict["input"].to(device)
+        labels_batch = labels_batch.to(device)
+        global_valid_tokens = (labels_batch != -100).sum().float()
+        data.append((tokens, labels_batch, global_valid_tokens))
+
+    def loss_fn(pred, labels):
+        return cross_entropy_loss(pred, labels)
+
+    return model, loss_fn, config, data
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -396,7 +598,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        choices=["toy", "llama3"],
+        choices=["toy", "llama3", "deepseek_v3", "qwen3"],
         default="toy",
         help="Model to use",
     )
@@ -501,6 +703,14 @@ def main():
             )
         elif args.model == "llama3":
             model, loss_fn, config, data = setup_llama3_distributed(
+                parallel_dims, device, args.seed,
+            )
+        elif args.model == "deepseek_v3":
+            model, loss_fn, config, data = setup_deepseekv3_distributed(
+                parallel_dims, device, args.seed,
+            )
+        elif args.model == "qwen3":
+            model, loss_fn, config, data = setup_qwen3_distributed(
                 parallel_dims, device, args.seed,
             )
         else:

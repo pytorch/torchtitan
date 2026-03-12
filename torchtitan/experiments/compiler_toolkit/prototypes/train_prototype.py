@@ -410,6 +410,162 @@ def setup_toy_config(device: torch.device, seed: int = 42):
 
 
 # ---------------------------------------------------------------------------
+# Setup: DeepSeek V3 debugmodel
+# ---------------------------------------------------------------------------
+
+
+def setup_deepseekv3_config(device: torch.device, seed: int = 42):
+    """Set up DeepSeek V3 debugmodel (MoE + MLA attention) + c4_test data."""
+    import dataclasses as _dc
+
+    from torchtitan.components.loss import cross_entropy_loss
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+    from torchtitan.models.deepseek_v3 import deepseekv3_configs
+
+    torch.manual_seed(seed)
+
+    # Reduced seq_len and batch to fit make_fx replay in GPU memory
+    # (MoE + MLA produce ~2x the intermediates of dense models)
+    seq_len = 512
+    model_config = deepseekv3_configs["debugmodel"]
+    # Sync RoPE max_seq_len and replicate update_from_config logic:
+    # Attention.softmax_scale depends on rope_max_seq_len, rope_factor,
+    # and rope_original_seq_len being synced into layer.attention.
+    model_config = _dc.replace(
+        model_config,
+        rope=_dc.replace(model_config.rope, max_seq_len=seq_len),
+        layer=_dc.replace(
+            model_config.layer,
+            attention=_dc.replace(
+                model_config.layer.attention,
+                rope_max_seq_len=seq_len,
+                rope_factor=model_config.rope.rope_factor,
+                rope_original_seq_len=model_config.rope.original_seq_len,
+            ),
+            # torch._grouped_mm requires CUDA SM90+; disable for CPU compat
+            moe=_dc.replace(model_config.layer.moe, use_grouped_mm=False),
+        ),
+    )
+
+    model = model_config.build().to(device)
+    model.init_weights()
+
+    local_batch_size = 2
+    config = TrainConfig(
+        lr=8e-4,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-8,
+        weight_decay=0.1,
+        warmup_steps=2,
+        decay_ratio=0.8,
+        decay_type="linear",
+        min_lr_factor=0.0,
+        max_norm=1.0,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+        total_steps=10,
+        has_global_valid_tokens=True,
+    )
+
+    tokenizer = HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer")
+    dl_config = HuggingFaceTextDataLoader.Config(dataset="c4_test", infinite=True)
+    dataloader = HuggingFaceTextDataLoader(
+        dl_config,
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+    )
+
+    data = []
+    data_iter = iter(dataloader)
+    for _ in range(config.total_steps):
+        input_dict, labels = next(data_iter)
+        tokens = input_dict["input"].to(device)
+        labels = labels.to(device)
+        global_valid_tokens = (labels != -100).sum().float()
+        data.append((tokens, labels, global_valid_tokens))
+
+    def loss_fn(pred, labels):
+        return cross_entropy_loss(pred, labels)
+
+    return model, loss_fn, config, data
+
+
+# ---------------------------------------------------------------------------
+# Setup: Qwen3 debugmodel
+# ---------------------------------------------------------------------------
+
+
+def setup_qwen3_config(device: torch.device, seed: int = 42):
+    """Set up Qwen3 debugmodel (dense, weight-tying) + c4_test data."""
+    import dataclasses as _dc
+
+    from torchtitan.components.loss import cross_entropy_loss
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+    from torchtitan.models.qwen3 import qwen3_configs
+
+    torch.manual_seed(seed)
+
+    # Reduced seq_len to fit make_fx replay in GPU memory
+    seq_len = 512
+    model_config = qwen3_configs["debugmodel"]
+    model_config = _dc.replace(
+        model_config, rope=_dc.replace(model_config.rope, max_seq_len=seq_len)
+    )
+
+    model = model_config.build().to(device)
+    model.init_weights()
+
+    local_batch_size = 2
+    config = TrainConfig(
+        lr=8e-4,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-8,
+        weight_decay=0.1,
+        warmup_steps=2,
+        decay_ratio=0.8,
+        decay_type="linear",
+        min_lr_factor=0.0,
+        max_norm=1.0,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+        total_steps=10,
+        has_global_valid_tokens=True,
+    )
+
+    tokenizer = HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer")
+    dl_config = HuggingFaceTextDataLoader.Config(dataset="c4_test", infinite=True)
+    dataloader = HuggingFaceTextDataLoader(
+        dl_config,
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        local_batch_size=local_batch_size,
+    )
+
+    data = []
+    data_iter = iter(dataloader)
+    for _ in range(config.total_steps):
+        input_dict, labels = next(data_iter)
+        tokens = input_dict["input"].to(device)
+        labels = labels.to(device)
+        global_valid_tokens = (labels != -100).sum().float()
+        data.append((tokens, labels, global_valid_tokens))
+
+    def loss_fn(pred, labels):
+        return cross_entropy_loss(pred, labels)
+
+    return model, loss_fn, config, data
+
+
+# ---------------------------------------------------------------------------
 # Setup: Llama3 debugmodel
 # ---------------------------------------------------------------------------
 
@@ -790,9 +946,9 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        choices=["toy", "llama3"],
+        choices=["toy", "llama3", "deepseek_v3", "qwen3"],
         default="toy",
-        help="Model to use (toy or llama3)",
+        help="Model to use",
     )
     parser.add_argument(
         "--steps",
@@ -835,6 +991,10 @@ def main():
         model, loss_fn, config, data = setup_toy_config(device, args.seed)
     elif args.model == "llama3":
         model, loss_fn, config, data = setup_llama3_config(device, args.seed)
+    elif args.model == "deepseek_v3":
+        model, loss_fn, config, data = setup_deepseekv3_config(device, args.seed)
+    elif args.model == "qwen3":
+        model, loss_fn, config, data = setup_qwen3_config(device, args.seed)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
