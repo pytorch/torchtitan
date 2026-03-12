@@ -10,7 +10,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-
 from torchtitan.config import Configurable
 from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
@@ -89,9 +88,15 @@ class LoRAConverter(Configurable):
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
 
+        save_adapter_only: bool = True
+        """If True, only save LoRA adapter weights in checkpoints.
+        Requires base model to be loaded from HF/initial_load_path on resume.
+        Set to False to save full model weights for debugging without pretrained base."""
+
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
+        self.save_adapter_only = config.save_adapter_only
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
 
     def convert(self, model: nn.Module) -> None:
