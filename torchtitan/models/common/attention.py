@@ -94,10 +94,12 @@ class _InnerAttentionLocalMap(torch.nn.Module):
                     super().__call__,
                     in_placements=(q.placements, k.placements, v.placements),
                     out_placements=(q.placements,),
-                    # Gradient placements match input placements. Correct for TP
-                    # (Shard on heads dim). For all-gather CP where k/v are
-                    # Replicate, grads should be Partial(). Currently CP is
-                    # handled by _ContextParallel hooks, not local_map.
+                    # For TP (Shard on heads dim), in_grad_placements always
+                    # matches in_placements since each rank owns a distinct
+                    # shard of heads and grads stay on the same shard.
+                    # CP grad placements are not a concern here because local_map
+                    # only operates on the TP mesh. CP is handled independently
+                    # by _ContextParallel hooks inside nn.Module.__call__.
                     in_grad_placements=(q.placements, k.placements, v.placements),
                     device_mesh=q.device_mesh,
                 )
