@@ -26,15 +26,18 @@ Shape convention:
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
 import torch
 from torch.nn.attention.flex_attention import (
     BlockMask,
     create_block_mask,
     flex_attention,
 )
-from torch.nn.attention.varlen import varlen_attn
+
+# Raise dynamo cache limit to avoid fallback to unfused O(n²) backward
+# when many different BlockMask shapes are encountered across layers.
+torch._dynamo.config.cache_size_limit = 256
 
 
 @dataclass
@@ -42,6 +45,7 @@ class FlexAttnMeta:
     """Metadata returned from flex_attn_forward."""
 
     lse: torch.Tensor  # (seqlen, n_heads) float32
+    block_mask: BlockMask | None = field(default=None, repr=False)
 
 
 # Compile flex_attention for fused kernel generation.
@@ -102,7 +106,12 @@ def build_flex_block_mask(
     at = attn_type_map.contiguous().to(dtype=torch.int32, device=device)
     mask_mod = _build_range_mask_mod(qr, kr, at)
     return create_block_mask(
-        mask_mod, B=1, H=None, Q_LEN=Q_LEN, KV_LEN=KV_LEN, device=device,
+        mask_mod,
+        B=1,
+        H=None,
+        Q_LEN=Q_LEN,
+        KV_LEN=KV_LEN,
+        device=device,
     )
 
 
@@ -152,7 +161,7 @@ def flex_attn_forward(
         lse = torch.full(
             (Q_LEN, n_heads_q), float("-inf"), device=device, dtype=torch.float32
         )
-        return out, FlexAttnMeta(lse=lse)
+        return out, FlexAttnMeta(lse=lse, block_mask=None)
 
     # flex_attention expects (B, H, S, D) layout
     q_bshd = q.permute(1, 0, 2).unsqueeze(0)  # (1, n_heads_q, Q_LEN, head_dim)
@@ -165,7 +174,12 @@ def flex_attn_forward(
     else:
         mask_mod = _build_range_mask_mod(qr, kr, at)
         block_mask = create_block_mask(
-            mask_mod, B=1, H=None, Q_LEN=Q_LEN, KV_LEN=KV_LEN, device=device,
+            mask_mod,
+            B=1,
+            H=None,
+            Q_LEN=Q_LEN,
+            KV_LEN=KV_LEN,
+            device=device,
         )
 
     # Run flex_attention with compiled kernel
@@ -182,7 +196,7 @@ def flex_attn_forward(
     out = out_bshd.squeeze(0).permute(1, 0, 2).to(dtype)  # (Q_LEN, n_heads_q, head_dim)
     lse = lse_bhs.squeeze(0).permute(1, 0).to(torch.float32)  # (Q_LEN, n_heads_q)
 
-    return out, FlexAttnMeta(lse=lse)
+    return out, FlexAttnMeta(lse=lse, block_mask=block_mask)
 
 
 def flex_attn_backward(
@@ -195,23 +209,28 @@ def flex_attn_backward(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor,
-    block_mask: torch.Tensor | None = None,
+    block_mask: BlockMask | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Range-based attention backward using PyTorch autograd.
+    """Range-based attention backward using ``flex_attention`` recompute.
 
-    Recomputes the forward with gradient tracking via ``varlen_attn``
-    and uses ``torch.autograd.grad`` to get dQ, dK, dV.
+    Recomputes the forward pass through ``_compiled_flex_attention`` and
+    uses ``torch.autograd.grad`` to obtain gradients. When a ``block_mask``
+    is provided (cached from forward), the expensive ``create_block_mask``
+    call is skipped.
 
     Args:
         grad_output: (Q_LEN, n_heads_q, head_dim).
         q, k, v: same shapes as forward.
-        out: forward output (unused).
-        lse: forward LSE (unused).
+        out: forward output (unused, kept for API compatibility).
+        lse: forward LSE (unused, kept for API compatibility).
         q_ranges, k_ranges, attn_type_map: same as forward.
-        block_mask: Unused.
+        block_mask: Cached BlockMask from forward (avoids rebuild).
 
     Returns:
         (dq, dk, dv) all in float32.
+            dq: (Q_LEN, n_heads_q, head_dim)
+            dk: (KV_LEN, n_kv_heads, head_dim)
+            dv: (KV_LEN, n_kv_heads, head_dim)
     """
     Q_LEN = q.shape[0]
     KV_LEN = k.shape[0]
@@ -220,52 +239,62 @@ def flex_attn_backward(
     n_kv_heads = k.shape[1]
     device = q.device
 
-    qr_list = q_ranges.tolist()
-    kr_list = k_ranges.tolist()
-    at_list = attn_type_map.tolist()
+    # Empty case
+    if q_ranges.shape[0] == 0 or Q_LEN == 0:
+        dq = torch.zeros(Q_LEN, n_heads_q, head_dim, device=device, dtype=torch.float32)
+        dk = torch.zeros(
+            KV_LEN, n_kv_heads, head_dim, device=device, dtype=torch.float32
+        )
+        dv = torch.zeros(
+            KV_LEN, n_kv_heads, head_dim, device=device, dtype=torch.float32
+        )
+        return dq, dk, dv
 
-    # GQA expansion for backward
-    if n_heads_q != n_kv_heads:
-        repeat_factor = n_heads_q // n_kv_heads
-        k_exp = k.repeat_interleave(repeat_factor, dim=1)
-        v_exp = v.repeat_interleave(repeat_factor, dim=1)
+    # Build or reuse BlockMask
+    qr = q_ranges.contiguous().to(dtype=torch.int32, device=device)
+    kr = k_ranges.contiguous().to(dtype=torch.int32, device=device)
+    at = attn_type_map.contiguous().to(dtype=torch.int32, device=device)
+
+    if block_mask is not None:
+        bm = block_mask
     else:
-        k_exp = k
-        v_exp = v
+        mask_mod = _build_range_mask_mod(qr, kr, at)
+        bm = create_block_mask(
+            mask_mod,
+            B=1,
+            H=None,
+            Q_LEN=Q_LEN,
+            KV_LEN=KV_LEN,
+            device=device,
+        )
 
-    dq = torch.zeros(Q_LEN, n_heads_q, head_dim, device=device, dtype=torch.float32)
-    dk = torch.zeros(KV_LEN, n_heads_q, head_dim, device=device, dtype=torch.float32)
-    dv = torch.zeros(KV_LEN, n_heads_q, head_dim, device=device, dtype=torch.float32)
+    # Detach and re-enable grad for recompute
+    q_det = q.detach().requires_grad_(True)
+    k_det = k.detach().requires_grad_(True)
+    v_det = v.detach().requires_grad_(True)
 
-    for qr, kr, at in zip(qr_list, kr_list, at_list):
-        q_len = qr[1] - qr[0]
-        k_len = kr[1] - kr[0]
-        if q_len <= 0 or k_len <= 0:
-            continue
+    # Reshape to (B, H, S, D) layout
+    q_bshd = q_det.permute(1, 0, 2).unsqueeze(0)
+    k_bshd = k_det.permute(1, 0, 2).unsqueeze(0)
+    v_bshd = v_det.permute(1, 0, 2).unsqueeze(0)
+    grad_bshd = grad_output.permute(1, 0, 2).unsqueeze(0)
 
-        q_sub = q[qr[0] : qr[1]].detach().requires_grad_(True)
-        k_sub = k_exp[kr[0] : kr[1]].detach().requires_grad_(True)
-        v_sub = v_exp[kr[0] : kr[1]].detach().requires_grad_(True)
+    with torch.enable_grad():
+        out_bshd = _compiled_flex_attention(
+            q_bshd,
+            k_bshd,
+            v_bshd,
+            block_mask=bm,
+            enable_gqa=(n_heads_q != n_kv_heads),
+        )
+        grads = torch.autograd.grad(
+            out_bshd,
+            (q_det, k_det, v_det),
+            grad_bshd,
+        )
 
-        cu_q = torch.tensor([0, q_len], dtype=torch.int32, device=device)
-        cu_k = torch.tensor([0, k_len], dtype=torch.int32, device=device)
-        is_causal = at == 1
-
-        with torch.enable_grad():
-            attn_out = varlen_attn(
-                q_sub, k_sub, v_sub, cu_q, cu_k, q_len, k_len,
-                is_causal=is_causal,
-            )
-            grad_sub = grad_output[qr[0] : qr[1]]
-            grads = torch.autograd.grad(attn_out, (q_sub, k_sub, v_sub), grad_sub)
-
-        dq[qr[0] : qr[1]] += grads[0].to(torch.float32)
-        dk[kr[0] : kr[1]] += grads[1].to(torch.float32)
-        dv[kr[0] : kr[1]] += grads[2].to(torch.float32)
-
-    if n_heads_q != n_kv_heads:
-        repeat_factor = n_heads_q // n_kv_heads
-        dk = dk.view(KV_LEN, n_kv_heads, repeat_factor, head_dim).sum(dim=2)
-        dv = dv.view(KV_LEN, n_kv_heads, repeat_factor, head_dim).sum(dim=2)
-
-    return dq, dk, dv
+    return (
+        grads[0].to(torch.float32),
+        grads[1].to(torch.float32),
+        grads[2].to(torch.float32),
+    )
