@@ -19,8 +19,15 @@ See tests/integration_tests/ for `OverrideDefinitions`.
 
 ### Validating Numerics
 Non-computation changes (e.g. activation checkpointing, refactoring) must produce
-**identical loss** before vs. after with fixed `training.seed` and `training.deterministic`.
+**identical loss** before vs. after with `--debug.seed=42` and `--debug.deterministic`.
 Computation changes require loss convergence on representative datasets (e.g. C4).
+
+With the same parallelisms, GPU settings, and the debug options, two runs should produce
+bit-wise identical loss and grad_norm. Note that stdout only prints the most
+significant five digits, which may not be enough. Follow `scripts/loss_compare.py` to
+enable profiling and check loss and grad_norm from the TensorBoard results.
+
+You should NEVER use `--debug.deterministic_warn_only`.
 
 ## Core Principles
 
