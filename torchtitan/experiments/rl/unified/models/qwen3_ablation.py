@@ -20,6 +20,7 @@ Ablation 1: Replace nn.RMSNorm with vLLM's fused RMSNorm kernel.
 Ablation 2: Replace F.silu(w1(x)) * w3(x) with vLLM's fused SiluAndMul kernel.
 Ablation 3: Replace apply_rotary_emb_cos_sin with vLLM's fused rotary_embedding kernel.
 Ablation 4: Merge separate wq/wk/wv into single wqkv projection (3 GEMMs → 1).
+Ablation 5: Merge separate w1/w3 into single gate_up_proj projection (2 GEMMs → 1).
 """
 
 from dataclasses import fields
@@ -111,22 +112,6 @@ class GQAttentionMergedQKV(GQAttention):
         self.wqkv = nn.Linear(dim, self._merged_size, bias=config.bias)
         self._merged = False
 
-    def _merge_qkv_weights(self):
-        """Concatenate wq/wk/wv weights into wqkv once."""
-        if self._merged:
-            return
-        with torch.no_grad():
-            self.wqkv.weight.copy_(
-                torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
-            )
-            if self.wqkv.bias is not None:
-                self.wqkv.bias.copy_(
-                    torch.cat([self.wq.bias, self.wk.bias, self.wv.bias], dim=0)
-                )
-        # Free the separate parameters to save memory
-        del self.wq, self.wk, self.wv
-        self._merged = True
-
     def forward(
         self,
         x: torch.Tensor,
@@ -134,7 +119,17 @@ class GQAttentionMergedQKV(GQAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._merge_qkv_weights()
+        # Merge wq/wk/wv weights into wqkv on first call
+        if not self._merged:
+            with torch.no_grad():
+                self.wqkv.weight.copy_(
+                    torch.cat([self.wq.weight, self.wk.weight, self.wv.weight], dim=0)
+                )
+                if self.wqkv.bias is not None:
+                    self.wqkv.bias.copy_(
+                        torch.cat([self.wq.bias, self.wk.bias, self.wv.bias], dim=0)
+                    )
+            self._merged = True
 
         bs, seqlen, _ = x.shape
 
@@ -179,23 +174,39 @@ class GQAttentionMergedQKV(GQAttention):
         return self.wo(output.reshape(bs, seqlen, -1))
 
 
-# ── Ablation 2: Fused SiluAndMul ──
+# ── Ablation 2 + 5: Fused SiluAndMul + Merged gate_up projection ──
 
-class FeedForwardVLLMSiluAndMul(FeedForward):
-    """FeedForward with vLLM's fused SiluAndMul kernel.
+class FeedForwardMergedGateUp(FeedForward):
+    """FeedForward with merged gate_up projection and vLLM's fused SiluAndMul.
 
     Original: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-      - 3 kernel launches: silu, mul, (implicit in w2)
-    Fused:    return self.w2(silu_and_mul(cat(w1(x), w3(x))))
-      - 1 fused kernel launch for silu+mul
+      - 2 GEMM launches (w1, w3) + silu + mul
+    Merged:   return self.w2(silu_and_mul(gate_up_proj(x)))
+      - 1 GEMM launch + 1 fused silu+mul kernel
+
+    Keeps separate w1/w3 for weight loading, merges on first forward.
     """
 
     def __init__(self, config: FeedForward.Config, *, dim: int):
         super().__init__(config, dim=dim)
         self.silu_and_mul = VLLMSiluAndMul()
+        # Merged gate_up linear: (dim → 2 * hidden_dim)
+        self.gate_up_proj = nn.Linear(dim, 2 * config.hidden_dim, bias=config.bias)
+        self._merged = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = torch.cat([self.w1(x), self.w3(x)], dim=-1)
+        # Merge w1/w3 weights into gate_up_proj on first call
+        if not self._merged:
+            with torch.no_grad():
+                self.gate_up_proj.weight.copy_(
+                    torch.cat([self.w1.weight, self.w3.weight], dim=0)
+                )
+                if self.gate_up_proj.bias is not None:
+                    self.gate_up_proj.bias.copy_(
+                        torch.cat([self.w1.bias, self.w3.bias], dim=0)
+                    )
+            self._merged = True
+        gate_up = self.gate_up_proj(x)
         return self.w2(self.silu_and_mul(gate_up))
 
 
@@ -223,7 +234,7 @@ class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
             self.moe = config.moe.build(dim=dim)
         else:
             assert config.feed_forward is not None
-            self.feed_forward = FeedForwardVLLMSiluAndMul(
+            self.feed_forward = FeedForwardMergedGateUp(
                 config.feed_forward, dim=dim
             )
 
