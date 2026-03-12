@@ -107,7 +107,7 @@ def parallelize_qwen3(
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
             enable_cp=parallel_dims.cp_enabled,
@@ -205,7 +205,7 @@ def parallelize_qwen3(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
     enable_cp: bool,
@@ -217,14 +217,11 @@ def apply_non_moe_tp(
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
     sp_layout = Shard(1) if enable_sp else Replicate()
-    if enable_sp:
-        embed_plan = RowwiseParallel(input_layouts=Replicate(), output_layouts=Shard(1))
-    else:
-        embed_plan = RowwiseParallel(
-            input_layouts=Replicate(),
-            output_layouts=Replicate(),
-            use_local_output=False,
-        )
+    embed_plan = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=sp_layout,
+        use_local_output=enable_sp,
+    )
 
     parallelize_module(
         model,
@@ -234,8 +231,8 @@ def apply_non_moe_tp(
             "norm": SequenceParallel() if enable_sp else NoParallel(),
             "output": ColwiseParallel(
                 input_layouts=sp_layout,
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
             ),
         },
     )
@@ -269,12 +266,9 @@ def apply_non_moe_tp(
     positions_sharding = Replicate() if enable_cp else None
     norm_plan = SequenceParallel() if enable_sp else NoParallel()
     qk_norm_plan = SequenceParallel(sequence_dim=2) if enable_sp else NoParallel()
-    if enable_sp:
-        rowwise_output_plan = rowwise_parallel(output_layouts=Shard(1))
-    else:
-        rowwise_output_plan = rowwise_parallel(
-            output_layouts=Replicate(), use_local_output=False
-        )
+    rowwise_output_plan = rowwise_parallel(
+        output_layouts=sp_layout, use_local_output=enable_sp
+    )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():

@@ -55,7 +55,7 @@ def parallelize_qwen3(
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -68,7 +68,7 @@ def parallelize_qwen3(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
     enable_sp: bool = True,
@@ -81,10 +81,8 @@ def apply_non_moe_tp(
     region, this separate plan should be removed.
     """
 
-    if enable_sp:
-        norm_plan = SequenceParallel(use_local_output=False)
-    else:
-        norm_plan = NoParallel()
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
 
     parallelize_module(
         model,
@@ -92,12 +90,12 @@ def apply_non_moe_tp(
         {
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1) if enable_sp else Replicate(),
+                output_layouts=sp_layout,
                 use_local_output=False,
             ),
             "norm": norm_plan,
             "output": ColwiseParallel(
-                input_layouts=Shard(1) if enable_sp else Replicate(),
+                input_layouts=sp_layout,
                 output_layouts=Replicate(),
                 use_local_output=True,  # return logits and plain tensor
             ),
@@ -108,64 +106,54 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    if has_position_id:
-        positions_layout = Replicate()
-    else:
-        positions_layout = None
+    positions_layout = Replicate() if has_position_id else None
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        qk_norm_plan = (
+            SequenceParallel(sequence_dim=2, use_local_output=False)
+            if enable_sp
+            else NoParallel()
+        )
         layer_plan = {
+            "attention_norm": norm_plan,
+            "attention": PrepareModuleInput(
+                input_layouts=(
+                    sp_layout,
+                    Replicate(),
+                    None,
+                    positions_layout,
+                ),
+                desired_input_layouts=(
+                    Replicate(),
+                    Replicate(),
+                    None,
+                    positions_layout,
+                ),
+            ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
+            "attention.q_norm": qk_norm_plan,
+            "attention.k_norm": qk_norm_plan,
+            "attention.wo": RowwiseParallel(
+                output_layouts=sp_layout,
+                use_local_output=False,
+            ),
+            "ffn_norm": norm_plan,
         }
-
-        if enable_sp:
-            norm_plan = SequenceParallel(use_local_output=False)
-            qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=False)
-        else:
-            norm_plan = NoParallel()
-            qk_norm_plan = NoParallel()
-
-        layer_plan.update(
-            {
-                "attention_norm": norm_plan,
-                "attention": PrepareModuleInput(
-                    input_layouts=(
-                        Shard(1) if enable_sp else Replicate(),
-                        Replicate(),
-                        None,
-                        positions_layout,
-                    ),
-                    desired_input_layouts=(
-                        Replicate(),
-                        Replicate(),
-                        None,
-                        positions_layout,
-                    ),
-                ),
-                "attention.q_norm": qk_norm_plan,
-                "attention.k_norm": qk_norm_plan,
-                "attention.wo": RowwiseParallel(
-                    output_layouts=Shard(1) if enable_sp else Replicate(),
-                    use_local_output=False,
-                ),
-                "ffn_norm": norm_plan,
-            }
-        )
 
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
                     "feed_forward": PrepareModuleInput(
-                        input_layouts=(Shard(1) if enable_sp else Replicate(),),
+                        input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
                     "feed_forward.w1": ColwiseParallel(use_local_output=False),
                     "feed_forward.w2": RowwiseParallel(
-                        output_layouts=Shard(1) if enable_sp else Replicate(),
+                        output_layouts=sp_layout,
                         use_local_output=False,
                     ),
                     "feed_forward.w3": ColwiseParallel(use_local_output=False),
