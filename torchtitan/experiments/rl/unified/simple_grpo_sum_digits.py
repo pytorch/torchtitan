@@ -253,6 +253,11 @@ class RLTrainer(Configurable):
         # Generate on eval prompts
         episodes = self.generator.generate.call(eval_prompts).get().item(gpus=0)
 
+        # Populate expected_answer from controller
+        samples_per_prompt = self.config.generator.num_samples_per_prompt
+        for i, ep in enumerate(episodes):
+            ep.expected_answer = eval_answers[i // samples_per_prompt]
+
         # Score: check first episode per prompt (episodes are ordered by prompt)
         correct = 0
         format_ok = 0
@@ -312,11 +317,12 @@ class RLTrainer(Configurable):
             # Fully sync RL loop (GRPO)
             # 1. Generator produces flat list of Episodes with group_id
             # TODO: Create a queue to use all episodes from all GPUs
-            episodes = (
-                self.generator.generate.call(train_prompts, train_answers)
-                .get()
-                .item(gpus=0)
-            )
+            episodes = self.generator.generate.call(train_prompts).get().item(gpus=0)
+
+            # Populate expected_answer from controller
+            samples_per_prompt = self.config.generator.num_samples_per_prompt
+            for i, ep in enumerate(episodes):
+                ep.expected_answer = train_answers[i // samples_per_prompt]
 
             # 2. Grader computes rewards per episode
             episodes = self.grader.score.call(episodes).get().item()

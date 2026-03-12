@@ -227,7 +227,6 @@ class VLLMGenerator(Actor, Configurable):
     async def generate(
         self,
         prompt_texts: list[str],
-        expected_answers: list[str] | None = None,
     ) -> list[Episode]:
         """Generate completions and return a flat list of Episodes.
 
@@ -237,8 +236,6 @@ class VLLMGenerator(Actor, Configurable):
 
         Args:
             prompt_texts: List of prompt strings for which to generate completions.
-            expected_answers: Optional expected answers, one per prompt. When
-                provided each Episode is tagged so the Grader can compute rewards.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -269,7 +266,6 @@ class VLLMGenerator(Actor, Configurable):
             episodes: list[Episode] = []
             for idx, output in enumerate(all_outputs):
                 prompt_token_ids = output.prompt_token_ids
-                answer = expected_answers[idx] if expected_answers is not None else ""
                 gid = f"{os.getpid()}_{self.policy_version}_{idx}"
 
                 for sample in output.outputs:
@@ -284,7 +280,6 @@ class VLLMGenerator(Actor, Configurable):
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_log_probs=per_token_log_probs,
-                            expected_answer=answer,
                             group_id=gid,
                         )
                     )
