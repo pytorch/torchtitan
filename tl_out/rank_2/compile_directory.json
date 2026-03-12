@@ -1,0 +1,38 @@
+{
+  "[-/-]": {
+    "artifacts": [
+      {
+        "name": "compilation_metrics_1.html",
+        "number": 1,
+        "readable_url": null,
+        "suffix": "",
+        "url": "-_-_-_-/compilation_metrics_1.html"
+      },
+      {
+        "name": "fx_interpreter_error_2.txt",
+        "number": 2,
+        "readable_url": null,
+        "suffix": "",
+        "url": "-_-_-_-/fx_interpreter_error_2.txt"
+      },
+      {
+        "name": "make_fx_fail_partial_3.txt",
+        "number": 3,
+        "readable_url": null,
+        "suffix": "",
+        "url": "-_-_-_-/make_fx_fail_partial_3.txt"
+      }
+    ]
+  },
+  "[0/0]": {
+    "artifacts": [
+      {
+        "name": "dynamo_output_graph_0.txt",
+        "number": 0,
+        "readable_url": null,
+        "suffix": "",
+        "url": "-_0_0_0/dynamo_output_graph_0.txt"
+      }
+    ]
+  }
+}
