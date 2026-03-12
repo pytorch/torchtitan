@@ -15,6 +15,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.unified.actors.generator import (
+    GeneratorCompileConfig,
     SamplingConfig,
     VLLMGenerator,
 )
@@ -36,19 +37,58 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(
-                local_batch_size=4,
-                seq_len=4096,
-            ),
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            enforce_eager=True,
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+            attention_backend="FLASH_ATTN",
+        ),
+    )
+
+
+def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
+    return RLTrainer.Config(
+        model_spec=model_registry("1.7B"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
+        num_steps=10,
+        batch_invariant_mode=True,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,
@@ -74,17 +114,17 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(
-                local_batch_size=2,
-                seq_len=2048,
-            ),
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
         ),
         generator=VLLMGenerator.Config(
-            enforce_eager=True,
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
@@ -92,7 +132,9 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             num_samples_per_prompt=4,
             sampling=SamplingConfig(
                 temperature=1.0,
+                top_p=0.95,
                 max_tokens=50,
             ),
+            attention_backend="FLASH_ATTN",
         ),
     )
