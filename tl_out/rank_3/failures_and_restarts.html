@@ -1,0 +1,72 @@
+
+<html>
+<head>
+    <style>
+    
+table {
+    width: 90%;
+    border-collapse: collapse;
+    margin: 20px 0;
+}
+table, th, td {
+    border: 1px solid #999;
+    padding: 10px;
+    text-align: left;
+}
+th {
+    background-color: #d3d3d3;
+    font-weight: bold;
+}
+tr:nth-child(odd) {
+    background-color: #f2f2f2;
+}
+a {
+    color: #0066cc;
+    text-decoration: none;
+}
+a:hover {
+    text-decoration: underline;
+}
+
+    </style>
+</head>
+<body>
+    <h1>Failures and Restarts</h1>
+    <table>
+    <tr> <th> Compile Id </th> <th> Failure Type </th> <th> Failure Description </th> <th> Failure Source (compilation failures only) </th> </tr>
+    
+    
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+
+        // Append the current URL's query parameters to all relative links on the page
+        const queryParams = new URLSearchParams(window.location.search);
+        if (queryParams.size === 0) return url; // No query params, return original URL
+
+        function appendQueryParams(url) {
+            const newURL = new URL((new Request(url)).url);  // new URL(<relative URL>) but it actually works
+            const newSearchParams = new URLSearchParams(newURL.searchParams);
+            console.log(newURL.searchParams);
+            console.log(newSearchParams);
+
+            // Append query parameters
+            for (const [key, value] of queryParams) {
+                newSearchParams.set(key, value);
+            }
+
+            newURL.search = newSearchParams;
+            return newURL;
+        }
+
+        // Select all relative links on the page
+        const relativeLinks = document.querySelectorAll('a[href]:not([href^="http://"]):not([href^="https://"]):not([href^="\#"])');
+
+        // Append query parameters to each relative link
+        relativeLinks.forEach((link) => {
+            link.setAttribute("href", appendQueryParams(link.getAttribute("href")))
+        });
+    });
+    </script>
+
+</body>
+</html>

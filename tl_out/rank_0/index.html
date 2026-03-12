@@ -1,0 +1,360 @@
+
+<html>
+<head>
+  <meta charset="UTF-8">
+</head>
+<style>
+
+table td { vertical-align: top; }
+
+.stack-trie { white-space: nowrap; font-family: monospace; }
+.stack-trie ul { padding-left: 1ch;  }
+.stack-trie li { margin-left: 1ch; list-style-type: none;  }
+.stack-trie .marker {
+  cursor: pointer;
+}
+.stack-trie .marker.collapsed::before {
+  content: "+ ";
+}
+.stack-trie .marker:not(.collapsed)::before {
+  content: "- ";
+}
+.stack-trie a { text-decoration: none; }
+.stack-trie a:hover { text-decoration: underline; }
+.status-missing { background-color: purple; color: white; }
+.status-error { background-color: red; color: white; }
+.status-empty { background-color: white; color: black; }
+.status-ok { background-color: green; color: white; }
+.status-break { background-color: lime; color: black; }
+summary::-webkit-details-marker { color: #00ACF3; font-size: 125%; margin-right: 2px; }
+summary:focus { outline-style: none; }
+article > details > summary { font-size: 28px; margin-top: 16px; }
+details > p { margin-left: 24px; }
+        .warning-box {
+            background-color:rgb(249, 178, 178);
+            border: 1px solidrgb(251, 251, 251);
+            padding: 12px 16px;
+            margin: 16px 0;
+        }
+details details summary { font-size: 16px; }
+
+</style>
+<script>
+
+  function toggleList(toggleItem) {
+    const listItem = toggleItem.parentNode;
+    const nestedList = listItem.querySelector('ul');
+    if (nestedList) {
+      nestedList.style.display = nestedList.style.display === 'none' ? 'block' : 'none';
+
+      // Toggle the collapse/expand indicator
+      toggleItem.classList.toggle('collapsed');
+    }
+  }
+
+</script>
+<body>
+<div>
+
+    <script>
+    const ORIGIN = 'https://interncache-all.fbcdn.net/manifold/perfetto-artifacts/tree/ui/index.html';
+
+    async function fetchAndOpen(button, traceUrl) {
+        console.log(`Fetching trace from ${traceUrl}...\n`);
+        const resp = await fetch(traceUrl);
+        // Error checcking is left as an exercise to the reader.
+        const blob = await resp.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        console.log(`fetch() complete, now passing to ui.perfetto.dev\n`);
+        openTrace(button, arrayBuffer, traceUrl);
+    }
+
+    function openTrace(button, arrayBuffer, traceUrl) {
+    const win = window.open(ORIGIN);
+    if (!win) {
+        button.style.background = '#f3ca63';
+        button.onclick = () => openTrace(button, arrayBuffer);
+        console.log(`Popups blocked, you need to manually click the button`);
+        button.innerText = 'Popups blocked, click here to open the trace file';
+        return;
+    }
+
+    const timer = setInterval(() => win.postMessage('PING', ORIGIN), 50);
+
+    const onMessageHandler = (evt) => {
+        if (evt.data !== 'PONG') return;
+
+        // We got a PONG, the UI is ready.
+        window.clearInterval(timer);
+        window.removeEventListener('message', onMessageHandler);
+
+        const reopenUrl = new URL(location.href);
+        reopenUrl.hash = `#reopen=${traceUrl}`;
+        win.postMessage({
+        perfetto: {
+            buffer: arrayBuffer,
+            title: 'The Trace Title',
+            url: reopenUrl.toString(),
+        }}, ORIGIN);
+    };
+
+    window.addEventListener('message', onMessageHandler);
+    }
+
+    // This is triggered when following the link from the Perfetto UI's sidebar.
+    if (location.hash.startsWith('#reopen=')) {
+        const traceUrl = location.hash.substr(8);
+        fetchAndOpen(button, traceUrl);
+    }
+
+    // Replace the link, which uses manifold edge, back to the regular CDN link for chromium events.
+    // For popup from button
+    function constructNonVPNCDNUrl(currentUrl) {
+        // String replace index.html with chromium_events.json and return
+        return currentUrl.replace(/index.html/, 'chromium_events.json');
+    }
+    // Replace the link, which uses manifold edge, back to the regular CDN link for chromium events.
+    // For link within text
+    function constructVPNCDNUrl(currentUrl) {
+        // The base URL to which you want to append the path
+        const baseUrl = "https://interncache-all.fbcdn.net/manifold/tlparse_reports";
+        // Find the index of "tree/logs" in the current URL
+        const pathStartIndex = currentUrl.indexOf("tree/logs");
+        // If "tree/logs" is found, extract the path from there to the end
+        if (pathStartIndex !== -1) {
+            const path = currentUrl.substring(pathStartIndex);
+            // Construct the new URL by appending the extracted path to the base URL
+            const newUrl = `${baseUrl}/${path}`;
+            return newUrl;
+        } else {
+            // Otherwise, just use normal base URL
+            return baseUrl;
+        }
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+        // Replace the OSS Perfetto link with a link to the internal Perfetto UI
+        const perfettoLink = document.querySelector('a[href="https://ui.perfetto.dev/"]');
+        if (perfettoLink) {
+            const chromiumEventsVPNUrl = new URL("chromium_events.json", constructVPNCDNUrl(window.location.href));
+            const chromiumEventsNonVPNUrl = new URL(constructNonVPNCDNUrl(window.location.href));
+            const vpnUrl = `https://interncache-all.fbcdn.net/manifold/perfetto-artifacts/tree/ui/index.html?url=${encodeURIComponent(chromiumEventsVPNUrl)}`;
+            perfettoLink.setAttribute('href', vpnUrl);
+            perfettoLink.text = "Perfetto (Direct link - VPN Required)";
+            const button = document.createElement('button');
+            button.innerText = 'Open in Perfetto (VPNLess)';
+            button.style.background = '#00cf00';
+            button.style.marginLeft = '5px';
+            perfettoLink.after(button);
+            button.onclick = () => fetchAndOpen(perfettoLink, chromiumEventsNonVPNUrl);
+        }
+    });
+    </script>
+    
+local dir /tmp/my_traced_log_dir
+<h2>Stack trie</h2>
+<p>
+The <strong>stack trie</strong> is a way of getting a quick orientation on where all the
+compilations in a model take place, esp., if you are compiling a codebase you are unfamiliar with.
+It is a tree of stack frames, for all stacks that triggered PT2 compilation.  If only a single
+stack is in the tree, you will simply see a plain list of frames (most recent call last).  With
+multiple stacks, at every point where two stacks diverge from having a common prefix, we increase
+the indentation of the list and have a separate sub-list per sub-tree.
+</p>
+<p>
+Links to particular compilation are color coded by status:
+<span class="status-ok">[Success]</span>,
+<span class="status-break">[Success with restart (e.g., graph break)]</span>,
+<span class="status-empty">[Empty graph]</span>,
+<span class="status-error">[Error]</span>,
+<span class="status-missing">[Metrics were missing]</span>
+</p>
+<details><summary>Stack</summary><div class='stack-trie'><ul></ul></div></details>
+</div>
+<div>
+
+<h2>IR dumps</h2>
+<p>
+The <strong>IR dumps</strong> collected dumped intermediate products from various points of the PT2
+compilation process.  The products are organized by compile id, and then sorted in chronological
+order.
+</p>
+<p>
+A <strong>compile id</strong> uniquely identifies are particular compilation inside a PT2
+program.  It is traditionally written as <code>[x/y]</code>, where the <strong>frame id</strong> x
+identifies the particular Python frame which we are compiling, and <strong>frame compile
+id</strong> y identifies how many times we've recompiled this same frame.  For example,
+<code>[0/0]</code> refers to the very first frame compiled by PT2; <code>[0/1]</code> refers to the
+first recompilation of this frame, while <code>[1/0]</code> refers to a different frame, within
+distinct code cache, which we are compiling next (perhaps because of a graph break).  Although
+Dynamo treats distinct frames as completely unrelated, a frame compilation could overlap with another
+frame; for example, if you graph break in an inlined function, Dynamo will typically try to compile
+the nested frame again on an inner frame.  You can identify the hierarchical relationship between
+frames by looking at the stack trie above.
+</p>
+<p>
+In some situations, the compile id will have an extra signifier <code>[x/y_z]</code>, where z is the
+<strong>attempt</strong> for this particular (re)compilation.  Certain conditions will cause Dynamo to
+restart analysis, when Dynamo discovers that it needs to undo a decision it previously made.  The most
+common cause of recompilation is a graph break in an inlined function call, which forces to restart
+and avoid inlining the function in the first place.
+</p>
+<p>
+When compiled autograd is enabled, the compile id will include a prefix signifier <code>[!a/x/y]</code>,
+where a is the <strong>compiled autograd id</strong>. For instance, <code>[!0/-/-]</code> refers 
+to the first graph captured by compiled autograd. It is then traced by torch.compile as <code>[!0/x/y_z]</code>.
+</p>
+<p>
+Here is a high level description of PT2's compilation phases, and the intermediate products each
+phase generates:
+</p>
+<ol>
+<li><em>Optional:</em> If compiled autograd is enabled, and we are processing a backward call, compiled autograd will trace the autograd graph from the autograd engine, and produce an FX graph <code>compiled_autograd_graph</code> that will be Dynamo traced.  Otherwise, Dynamo will directly trace user's bytecode.</li>
+<li>Dynamo symbolically evaluates the Python bytecode of a program, producing <code>dynamo_output_graph</code></li>
+<li><em>Optional:</em> If <code>optimize_ddp</code> is enabled, the DDPOptimizer will split the Dynamo output graph to improve pipelining communications.  Each split subgraph is <code>optimize_ddp_split_child_submod</code>, and the high level graph that plumbs the graphs together is <code>optimize_ddp_split_graph</code>.  If there are multiple splits, each subsequent build product will be produced multiple times, one for each split.</li>
+<li>AOTAutograd traces the (possibly split) Dynamo output graph, producing a <code>aot_joint_graph</code> if backwards is enabled.  It then partitions the graph into <code>aot_forward_graph</code> and <code>aot_backward_graph</code>.  If training is not needed, there may only be an <code>aot_inference_graph</code>.</li>
+<li>Inductor will apply some post grad FX passes, producing <code>inductor_post_grad_graph</code></li>
+<li>Inductor will perform code generation, producing the final <code>inductor_output_code</code> which will be executed at runtime.  This output is a valid Python program and can be directly run.</li>
+</ol>
+
+
+<h2> Chromium Events </h2>
+PT2 generates <a href='chromium_events.json'>Chromium Trace Events</a> in JSON on specific events during compilation.
+You can download and view them in a tool like <a href='https://ui.perfetto.dev/'>Perfetto</a>.
+
+<p>
+<a href="collectives_parity.json">Collectives Parity report</a> comparing scheduler and Inductor output code collective operations.
+</p>
+<p>
+Build products below:
+</p>
+<ul>
+
+    <li><a id="[-/-]">[-/-]</a>
+    <ul>
+        
+            <li><a href="-_-_-_-/compilation_metrics_1.html">-_-_-_-/compilation_metrics_1.html</a>  (1)</li>
+        
+            <li><a href="-_-_-_-/fx_interpreter_error_2.txt">-_-_-_-/fx_interpreter_error_2.txt</a>  (2)</li>
+        
+            <li><a href="-_-_-_-/make_fx_fail_partial_3.txt">-_-_-_-/make_fx_fail_partial_3.txt</a>  (3)</li>
+        
+    </ul>
+    </li>
+
+    <li><a id="[0/0]">[0/0]</a>
+    <ul>
+        
+            <li><a href="-_0_0_0/dynamo_output_graph_0.txt">-_0_0_0/dynamo_output_graph_0.txt</a>  (0)</li>
+        
+    </ul>
+    </li>
+
+</ul>
+</div>
+
+
+
+
+
+<div>
+<h2>Unknown stacks</h2>
+<p>
+  Sometimes, logs are made without a compile id.  This makes it difficult to correlate related
+  logs.  This stack trie shows all places where log entries occurred without compile context; to
+  fix, look an appropriate place in the stack where compile id should have been specified.
+</p>
+<details><summary>Stack</summary><div class='stack-trie'><ul><li>&lt;frozen runpy&gt;:198 in _run_module_as_main<br>&nbsp;&nbsp;&nbsp;&nbsp;</li>
+<li>&lt;frozen runpy&gt;:88 in _run_code<br>&nbsp;&nbsp;&nbsp;&nbsp;</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/train.py:68 in &lt;module&gt;<br>&nbsp;&nbsp;&nbsp;&nbsp;main()</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/train.py:55 in main<br>&nbsp;&nbsp;&nbsp;&nbsp;trainer.train()</li>
+<li>/home/jessicazhong/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py:366 in wrapper<br>&nbsp;&nbsp;&nbsp;&nbsp;return f(*args, **kwargs)</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/trainer.py:819 in train<br>&nbsp;&nbsp;&nbsp;&nbsp;self.train_step(data_iterator)</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/trainer.py:729 in train_step<br>&nbsp;&nbsp;&nbsp;&nbsp;loss = self.forward_backward_step(</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/trainer.py:677 in forward_backward_step<br>&nbsp;&nbsp;&nbsp;&nbsp;pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)</li>
+<li>/home/jessicazhong/pytorch/torch/nn/modules/module.py:1778 in _wrapped_call_impl<br>&nbsp;&nbsp;&nbsp;&nbsp;return self._call_impl(*args, **kwargs)</li>
+<li>/home/jessicazhong/pytorch/torch/nn/modules/module.py:1789 in _call_impl<br>&nbsp;&nbsp;&nbsp;&nbsp;return forward_call(*args, **kwargs)</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/experiments/graph_trainer/graph_utils.py:246 in forward<br>&nbsp;&nbsp;&nbsp;&nbsp;self.joint_graph_module = self.joint_graph_builder(</li>
+<li>/home/jessicazhong/torchtitan/torchtitan/experiments/graph_trainer/graph_utils.py:136 in joint_graph_builder<br>&nbsp;&nbsp;&nbsp;&nbsp;(joint_with_descriptors, tracing_context,) = export_joint(</li>
+<li><span onclick='toggleList(this)' class='marker'></span>
+/home/jessicazhong/torchtitan/torchtitan/experiments/graph_trainer/graph_utils.py:68 in export_joint<br>&nbsp;&nbsp;&nbsp;&nbsp;gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)<ul>
+<li>/home/jessicazhong/pytorch/torch/_dynamo/functional_export.py:801 in inner<br>&nbsp;&nbsp;&nbsp;&nbsp;get_metrics_context(),</li>
+<li>/home/jessicazhong/pytorch/torch/_dynamo/metrics_context.py:102 in __exit__<br>&nbsp;&nbsp;&nbsp;&nbsp;self._on_exit(</li>
+<li>(unknown) /home/jessicazhong/pytorch/torch/_dynamo/utils.py:1790 in record_compilation_metrics<br>&nbsp;&nbsp;&nbsp;&nbsp;torch._logging.trace_structured(</li>
+</ul></li><li><span onclick='toggleList(this)' class='marker'></span>
+/home/jessicazhong/torchtitan/torchtitan/experiments/graph_trainer/graph_utils.py:81 in export_joint<br>&nbsp;&nbsp;&nbsp;&nbsp;aot_export_joint_with_descriptors_alone(gm, args, kwargs),<ul>
+<li>/home/jessicazhong/torchtitan/torchtitan/experiments/graph_trainer/graph_utils.py:100 in aot_export_joint_with_descriptors_alone<br>&nbsp;&nbsp;&nbsp;&nbsp;joint_with_descriptors = aot_export_joint_with_descriptors(</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/aot_autograd.py:1352 in aot_export_joint_with_descriptors<br>&nbsp;&nbsp;&nbsp;&nbsp;aot_graph_capture = aot_stage1_graph_capture(aot_state, functional_call)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_compile.py:223 in aot_stage1_graph_capture<br>&nbsp;&nbsp;&nbsp;&nbsp;) = aot_dispatch_autograd_graph(</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture.py:515 in aot_dispatch_autograd_graph<br>&nbsp;&nbsp;&nbsp;&nbsp;fx_g = _create_graph(</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture.py:129 in _create_graph<br>&nbsp;&nbsp;&nbsp;&nbsp;fx_g = make_fx(</li>
+<li>/home/jessicazhong/pytorch/torch/fx/experimental/proxy_tensor.py:2831 in wrapped<br>&nbsp;&nbsp;&nbsp;&nbsp;return make_fx_tracer.trace(f, *args)</li>
+<li>/home/jessicazhong/pytorch/torch/fx/experimental/proxy_tensor.py:2732 in trace<br>&nbsp;&nbsp;&nbsp;&nbsp;return self._trace_inner(f, *args)</li>
+<li><span onclick='toggleList(this)' class='marker'></span>
+/home/jessicazhong/pytorch/torch/fx/experimental/proxy_tensor.py:2693 in _trace_inner<br>&nbsp;&nbsp;&nbsp;&nbsp;t = dispatch_trace(<ul>
+<li>/home/jessicazhong/pytorch/torch/_compile.py:54 in inner<br>&nbsp;&nbsp;&nbsp;&nbsp;return disable_fn(*args, **kwargs)</li>
+<li>/home/jessicazhong/pytorch/torch/_dynamo/eval_frame.py:1256 in _fn<br>&nbsp;&nbsp;&nbsp;&nbsp;return fn(*args, **kwargs)</li>
+<li>/home/jessicazhong/pytorch/torch/fx/experimental/proxy_tensor.py:1538 in dispatch_trace<br>&nbsp;&nbsp;&nbsp;&nbsp;graph = tracer.trace(root, concrete_args)  # type: ignore[arg-type]</li>
+<li>/home/jessicazhong/pytorch/torch/_dynamo/eval_frame.py:1256 in _fn<br>&nbsp;&nbsp;&nbsp;&nbsp;return fn(*args, **kwargs)</li>
+<li>/home/jessicazhong/pytorch/torch/fx/_symbolic_trace.py:890 in trace<br>&nbsp;&nbsp;&nbsp;&nbsp;(self.create_arg(fn(*args)),),</li>
+<li>/home/jessicazhong/pytorch/torch/fx/_symbolic_trace.py:735 in flatten_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;tree_out = root_fn(*tree_args)</li>
+<li>/home/jessicazhong/pytorch/torch/fx/experimental/proxy_tensor.py:1608 in wrapped<br>&nbsp;&nbsp;&nbsp;&nbsp;out = f(*tensors)  # type:ignore[call-arg]</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture.py:112 in inner_f<br>&nbsp;&nbsp;&nbsp;&nbsp;out, out_descs = call_and_expect_output_descs(f, args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:785 in call_and_expect_output_descs<br>&nbsp;&nbsp;&nbsp;&nbsp;outs_pair = fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:1215 in inner_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;outs, outs_descs = call_and_expect_output_descs(fn, args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:785 in call_and_expect_output_descs<br>&nbsp;&nbsp;&nbsp;&nbsp;outs_pair = fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:1363 in joint_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;return inner_fn(</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:1324 in inner_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;wrapped_outs, wrapped_outs_descs = call_and_expect_output_descs(fn, all_args)  # type: ignore[arg-type]</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:785 in call_and_expect_output_descs<br>&nbsp;&nbsp;&nbsp;&nbsp;outs_pair = fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:1157 in joint_helper<br>&nbsp;&nbsp;&nbsp;&nbsp;return _functionalized_f_helper(primals, tangents)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:892 in _functionalized_f_helper<br>&nbsp;&nbsp;&nbsp;&nbsp;f_outs, f_outs_descs = call_and_expect_output_descs(fn, f_args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:785 in call_and_expect_output_descs<br>&nbsp;&nbsp;&nbsp;&nbsp;outs_pair = fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:495 in joint_helper<br>&nbsp;&nbsp;&nbsp;&nbsp;return inner_fn_with_anomaly(primals, tangents)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:487 in inner_fn_with_anomaly<br>&nbsp;&nbsp;&nbsp;&nbsp;return inner_fn(primals, tangents)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:317 in inner_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;(outs, tangent_mask), (outs_descs, _) = call_and_expect_output_descs(</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:785 in call_and_expect_output_descs<br>&nbsp;&nbsp;&nbsp;&nbsp;outs_pair = fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:178 in inner_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;outs, outs_descs = call_and_expect_output_descs(fn, args_maybe_cloned)  # type: ignore[arg-type]</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:785 in call_and_expect_output_descs<br>&nbsp;&nbsp;&nbsp;&nbsp;outs_pair = fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_compile.py:186 in orig_flat_fn2<br>&nbsp;&nbsp;&nbsp;&nbsp;out = orig_flat_fn(*args)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/utils.py:204 in flat_fn<br>&nbsp;&nbsp;&nbsp;&nbsp;tree_out = fn(*args, **kwargs)</li>
+<li>/home/jessicazhong/pytorch/torch/_functorch/_aot_autograd/graph_capture_wrappers.py:1500 in functional_call<br>&nbsp;&nbsp;&nbsp;&nbsp;out = PropagateUnbackedSymInts(mod).run(*args)</li>
+<li>(unknown) /home/jessicazhong/pytorch/torch/fx/interpreter.py:211 in run<br>&nbsp;&nbsp;&nbsp;&nbsp;trace_structured(</li>
+</ul></li><li><span onclick='toggleList(this)' class='marker'></span>(unknown) 
+/home/jessicazhong/pytorch/torch/fx/experimental/proxy_tensor.py:2699 in _trace_inner<br>&nbsp;&nbsp;&nbsp;&nbsp;trace_structured(<ul>
+</ul></li></ul></li></ul></div></details>
+</div>
+
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+
+        // Append the current URL's query parameters to all relative links on the page
+        const queryParams = new URLSearchParams(window.location.search);
+        if (queryParams.size === 0) return url; // No query params, return original URL
+
+        function appendQueryParams(url) {
+            const newURL = new URL((new Request(url)).url);  // new URL(<relative URL>) but it actually works
+            const newSearchParams = new URLSearchParams(newURL.searchParams);
+            console.log(newURL.searchParams);
+            console.log(newSearchParams);
+
+            // Append query parameters
+            for (const [key, value] of queryParams) {
+                newSearchParams.set(key, value);
+            }
+
+            newURL.search = newSearchParams;
+            return newURL;
+        }
+
+        // Select all relative links on the page
+        const relativeLinks = document.querySelectorAll('a[href]:not([href^="http://"]):not([href^="https://"]):not([href^="\#"])');
+
+        // Append query parameters to each relative link
+        relativeLinks.forEach((link) => {
+            link.setAttribute("href", appendQueryParams(link.getAttribute("href")))
+        });
+    });
+    </script>
+
+</body>
+</html>
