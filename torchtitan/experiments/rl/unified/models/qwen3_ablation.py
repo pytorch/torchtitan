@@ -49,6 +49,30 @@ from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
 
+class DirectRMSNorm(nn.Module):
+    """RMSNorm that calls vLLM's _C::rms_norm directly, bypassing all dispatch.
+
+    nn.RMSNorm: ~37us/call (ATen dispatch chain)
+    VLLMRMSNorm (CustomOp): ~15us/call (CustomOp dispatch)
+    DirectRMSNorm: ~8us/call (direct _C:: call, matching vLLM native)
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is not None:
+            torch.ops._C.fused_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+            return x, residual
+        out = torch.empty_like(x)
+        torch.ops._C.rms_norm(out, x, self.weight, self.variance_epsilon)
+        return out
+
+
 # ── Ablation 3: Fused RoPE ──
 
 # Cache for converted rope tensor (avoids dtype conversion on every forward call)
@@ -130,6 +154,11 @@ class GQAttentionMergedQKV(GQAttention):
         # Merged linear — will be populated from wq/wk/wv weights
         self.wqkv = nn.Linear(dim, self._merged_size, bias=config.bias)
         self._merged = False
+        # Replace QK norms with direct _C:: calls (bypass ATen dispatch)
+        if self.q_norm is not None:
+            self.q_norm = DirectRMSNorm(self.head_dim, eps=config.norm_eps)
+        if self.k_norm is not None:
+            self.k_norm = DirectRMSNorm(self.head_dim, eps=config.norm_eps)
 
     def forward(
         self,
@@ -270,8 +299,8 @@ class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
                 config.feed_forward, dim=dim
             )
 
-        self.attention_norm = VLLMRMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = VLLMRMSNorm(dim, eps=config.norm_eps)
+        self.attention_norm = DirectRMSNorm(dim, eps=config.norm_eps)
+        self.ffn_norm = DirectRMSNorm(dim, eps=config.norm_eps)
 
         if config.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -325,7 +354,7 @@ class Qwen3ModelAblation(Qwen3Model):
         super().__init__(config)
 
         # Replace final norm with vLLM's fused version
-        self.norm = VLLMRMSNorm(config.dim, eps=config.norm_eps)
+        self.norm = DirectRMSNorm(config.dim, eps=config.norm_eps)
 
         # Replace all layers with the ablation block
         self.layers = torch.nn.ModuleDict()
