@@ -53,6 +53,10 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         print_after_conversion: bool = False
         """If true, model definition will be printed after converters are applied."""
 
+        def __post_init__(self):
+            _validate_converter_ordering(self.converters)
+            _validate_quantization(self.converters)
+
     def __init__(
         self,
         config: Config,
@@ -60,7 +64,6 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         parallel_dims: ParallelDims,
         model_compile_enabled: bool,
     ):
-        _validate_quantization(config.converters)
         self.converters: list[ModelConverter] = [
             cc.build(
                 parallel_dims=parallel_dims,
@@ -79,6 +82,27 @@ class ModelConvertersContainer(Configurable, ModelConverter):
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
+
+
+def _validate_converter_ordering(converters: list[Configurable.Config]):
+    """Validates that converters are in the correct order.
+
+    LoRA must come after quantization because quantization replaces nn.Linear
+    with specialized subclasses (e.g. Float8Linear), and LoRA dynamically
+    inherits from whatever linear class it wraps.
+    """
+    from torchtitan.components.lora import LoRAConverter
+
+    seen_lora = False
+    for config in converters:
+        if isinstance(config, LoRAConverter.Config):
+            seen_lora = True
+        elif isinstance(config, QuantizationConverter.Config) and seen_lora:
+            raise ValueError(
+                "LoRA converter must come after quantization converters. "
+                "Quantization replaces nn.Linear with specialized subclasses, "
+                "and LoRA must wrap the final linear class."
+            )
 
 
 def _validate_quantization(converters: list[Configurable.Config]):

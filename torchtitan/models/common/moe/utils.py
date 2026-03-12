@@ -9,12 +9,27 @@ from typing import Literal
 
 import torch
 
+from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
 from torchtitan.tools.utils import _round_up
 
 from .kernels import generate_permute_indices
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
 ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
+
+
+def get_mxfp8_pad_multiple() -> int | None:
+    """Return the pad_multiple needed for MXFP8 grouped GEMMs, or None if not active.
+
+    When TOKEN_GROUP_ALIGN_SIZE_M has been set to the MXFP8 block size (32),
+    dispatch kernels must pad per-expert token groups to that multiple so the
+    quantisation kernel's row-count requirement is satisfied.
+    """
+    return (
+        MXFP8_GROUP_ALIGNMENT_SIZE
+        if TOKEN_GROUP_ALIGN_SIZE_M == MXFP8_GROUP_ALIGNMENT_SIZE
+        else None
+    )
 
 
 def set_token_group_alignment_size_m(
@@ -38,6 +53,13 @@ def set_token_group_alignment_size_m(
     """
     global TOKEN_GROUP_ALIGN_SIZE_M
     TOKEN_GROUP_ALIGN_SIZE_M = alignment_size
+
+
+def maybe_align_num_tokens_for_mxfp8(num_tokens: int) -> int:
+    """Round up token count only when MXFP8 group alignment is active."""
+    if TOKEN_GROUP_ALIGN_SIZE_M != MXFP8_GROUP_ALIGNMENT_SIZE:
+        return num_tokens
+    return _round_up(num_tokens, MXFP8_GROUP_ALIGNMENT_SIZE)
 
 
 def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
