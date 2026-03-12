@@ -32,6 +32,9 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.unified.models.attention import (
+    prepare_local_weights,
+    replace_ffn_with_fused,
+    replace_rope_with_vllm_rotary,
     replace_with_vllm_attention,
 )
 from torchtitan.protocols.model_spec import ModelSpec
@@ -200,6 +203,13 @@ class TorchTitanVLLMModelWrapper(nn.Module):
                 self.model.freqs_cis, max_model_len
             )
 
+        # Replace TorchTitan's cos_sin RoPE with vLLM's fused CUDA kernel.
+        # Must happen after RoPE cache extension so the cache covers max_model_len.
+        replace_rope_with_vllm_rotary(self.model)
+
+        # TP group name for vllm::all_reduce (set after vLLM initializes groups)
+        self._tp_group_name = None
+
         # Weights are loaded later by vLLM via load_weights() callback
 
         # Optionally compile forward/compute_logits with aot_eager for
@@ -211,10 +221,20 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             self._compiled_compute_logits = torch.compile(
                 self._compute_logits, backend="aot_eager", fullgraph=True
             )
-            logger.info("Compiled forward/compute_logits with aot_eager")
+            logger.info("Compiled forward/compute_logits with inductor")
         else:
             self._compiled_forward_body = None
             self._compiled_compute_logits = None
+
+    def _get_tp_group_name(self) -> str | None:
+        """Get the vLLM TP group name for all_reduce, or None if TP is disabled."""
+        if not self.parallel_dims.tp_enabled:
+            return None
+        if self._tp_group_name is None:
+            from vllm.distributed.parallel_state import get_tp_group
+            self._tp_group_name = get_tp_group().unique_name
+            logger.info(f"vLLM TP group name: {self._tp_group_name}")
+        return self._tp_group_name
 
     def _forward_body(self, tokens_2d, rope_cache, positions):
         """Embed + all transformer layers + final norm."""
@@ -423,7 +443,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
                     placements=[Replicate()],
                 )
 
-        return self.load_weights_from_state_dict(torchtitan_state_dict)
+        loaded = self.load_weights_from_state_dict(torchtitan_state_dict)
+        tp_group_name = self._get_tp_group_name()
+        replace_ffn_with_fused(self.model, tp_group_name=tp_group_name)
+        prepare_local_weights(self.model, tp_group_name=tp_group_name)
+        return loaded
 
     def load_weights(self, weights_iter):
         """
@@ -467,6 +491,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             model_state_dict=torchtitan_state_dict,
             options=StateDictOptions(strict=False),
         )
+
+        # Fuse gate+up weights and store local weight refs after loading real weights.
+        tp_group_name = self._get_tp_group_name()
+        replace_ffn_with_fused(self.model, tp_group_name=tp_group_name)
+        prepare_local_weights(self.model, tp_group_name=tp_group_name)
 
         loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
 

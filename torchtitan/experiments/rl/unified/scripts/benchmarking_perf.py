@@ -256,6 +256,10 @@ class VLLMNativeBenchmark:
                 profiler_config = {
                     "profiler": "torch",
                     "torch_profiler_dir": str(self.profile_dir.resolve()),
+                    "torch_profiler_with_stack": True,
+                    "torch_profiler_with_flops": True,
+                    "torch_profiler_record_shapes": True,
+                    "torch_profiler_with_memory": True,
                 }
                 self.profiling_enabled = True
                 print(
@@ -439,6 +443,10 @@ class VLLMTorchTitanBenchmark:
                 profiler_config = {
                     "profiler": "torch",
                     "torch_profiler_dir": str(self.profile_dir.resolve()),
+                    "torch_profiler_with_stack": True,
+                    "torch_profiler_with_flops": True,
+                    "torch_profiler_record_shapes": True,
+                    "torch_profiler_with_memory": True,
                 }
                 self.profiling_enabled = True
                 print(
