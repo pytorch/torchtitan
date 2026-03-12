@@ -302,15 +302,6 @@ class ActivationCheckpointConfig:
     ANY mm with shape matching (*, in) x (in, out) will be force recomputed.
     """
 
-    per_op_sac_skip_mm_fqns: list[str] = field(default_factory=list)
-    """
-    When per-op selective ac is used, nn.Linear modules whose FQN contains any
-    string in this list will always be recomputed and excluded from the "save
-    every other mm" alternating counter. This is useful for auxiliary linears
-    (e.g. LoRA adapters) that should not affect the base model's save/recompute
-    pattern.
-    """
-
     early_stop: bool = False
     """
     Whether to stop recomputing early when all activations have already been

@@ -133,9 +133,6 @@ def parallelize_llama(
         else:
             import torchtitan.distributed.deepep  # noqa: F401
 
-    else:
-        use_deepep = False
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(
             parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims

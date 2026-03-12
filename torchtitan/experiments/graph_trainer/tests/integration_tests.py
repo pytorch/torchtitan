@@ -48,7 +48,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
                     "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
                 ],
             ],
             "JIT 1D with selective op AC",

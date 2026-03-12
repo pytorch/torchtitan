@@ -279,86 +279,62 @@ class TestApplyAC(unittest.TestCase):
             torch.testing.assert_close(g_ref, g_f1)
             torch.testing.assert_close(g_ref, g_fl)
 
-    def test_skip_mm_fqns(self):
-        """Test that per_op_sac_skip_mm_fqns excludes matched linears from alternation."""
+    def test_force_recompute_mm_fqns(self):
+        """Test that per_op_sac_force_recompute_mm_shapes_by_fqns controls
+        exactly which matmuls are recomputed vs stored during backward.
 
-        def get_bw_flops(model_fn):
-            x = torch.randn(512, 512, requires_grad=True)
-            out = model_fn(x)
-            out.backward()
+        Approach: during backward, count aten.mm calls per weight tensor.
+        count=1 means stored (gradient mm only), count=2 means recomputed
+        (gradient mm + recomputed forward mm).
+        """
+        from torch.utils._python_dispatch import TorchDispatchMode
 
-            x = torch.randn(512, 512, requires_grad=True)
-            out = model_fn(x)
-            with FlopCounterMode(display=False) as mode:
+        class MmWeightTracker(TorchDispatchMode):
+            def __init__(self, ptrs):
+                super().__init__()
+                self._ptrs = ptrs
+                self.counts = {n: 0 for n in ptrs.values()}
+
+            def __torch_dispatch__(self, func, types, args, kwargs=None):
+                if func == torch.ops.aten.mm.default:
+                    for arg in args:
+                        name = self._ptrs.get(arg.data_ptr())
+                        if name is not None:
+                            self.counts[name] += 1
+                            break
+                return func(*args, **(kwargs or {}))
+
+        def get_recomputed(force_recompute_fqns):
+            m = ToyModule()
+            apply_ac(
+                m,
+                ACConfig(
+                    mode="selective",
+                    per_op_sac_force_recompute_mm_shapes_by_fqns=force_recompute_fqns,
+                    early_stop=False,
+                ),
+                model_compile_enabled=False,
+            )
+            ptr_to_name = {
+                mod.weight.data_ptr(): fqn.rsplit(".", 1)[-1]
+                for fqn, mod in m.named_modules()
+                if isinstance(mod, nn.Linear)
+            }
+            x = torch.randn(64, 512, requires_grad=True)
+            out = m(x)
+            tracker = MmWeightTracker(ptr_to_name)
+            with tracker:
                 out.backward()
-            return mode.get_total_flops() / (512**3 * 2)
+            return {n for n, c in tracker.counts.items() if c == 2}
 
-        # Without skip: all 3 linears participate in the alternating counter.
-        model_no_skip = ToyModule()
-        apply_ac(
-            model_no_skip,
-            ACConfig(
-                mode="selective",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
-                per_op_sac_skip_mm_fqns=[],
-                early_stop=False,
-            ),
-            model_compile_enabled=False,
-        )
-        flops_no_skip = get_bw_flops(model_no_skip)
-
-        # With skip on "moe": moe.router.gate is excluded from the alternating
-        # counter and always recomputed.
-        model_with_skip = ToyModule()
-        apply_ac(
-            model_with_skip,
-            ACConfig(
-                mode="selective",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
-                per_op_sac_skip_mm_fqns=["moe"],
-                early_stop=False,
-            ),
-            model_compile_enabled=False,
-        )
-        flops_with_skip = get_bw_flops(model_with_skip)
-
-        self.assertNotEqual(flops_no_skip, flops_with_skip)
-
-    def test_skip_mm_fqns_correctness(self):
-        """Test that skip_mm_fqns produces correct gradients."""
-        model_ref = ToyModule()
-
-        model_skip = ToyModule()
-        model_skip.load_state_dict(model_ref.state_dict())
-        apply_ac(
-            model_skip,
-            ACConfig(
-                mode="selective",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
-                per_op_sac_skip_mm_fqns=["moe"],
-            ),
-            model_compile_enabled=False,
-        )
-
-        batch = torch.randn(64, 512)
-
-        # Reference: no AC
-        model_ref.zero_grad(set_to_none=True)
-        x_ref = batch.clone().detach().requires_grad_(True)
-        out_ref = model_ref(x_ref)
-        out_ref.backward()
-
-        # With skip AC
-        model_skip.zero_grad(set_to_none=True)
-        x_skip = batch.clone().detach().requires_grad_(True)
-        out_skip = model_skip(x_skip)
-        out_skip.backward()
-
-        torch.testing.assert_close(out_ref.detach(), out_skip.detach())
-        torch.testing.assert_close(x_ref.grad, x_skip.grad)
-        for p_ref, p_skip in zip(model_ref.parameters(), model_skip.parameters()):
-            if p_ref.grad is not None and p_skip.grad is not None:
-                torch.testing.assert_close(p_ref.grad, p_skip.grad)
+        # No force recompute: alternating pattern recomputes every 2nd mm
+        self.assertEqual(get_recomputed([]), {"wq"})
+        # force_recompute="moe.router.gate": shape (512,512) also matches wq,
+        # so both are force-recomputed; output is 1st in alternation → saved
+        self.assertEqual(get_recomputed(["moe.router.gate"]), {"gate", "wq"})
+        # force_recompute="output": shape (512,1024) is unique to output,
+        # gate and wq still alternate (gate saved, wq recomputed)
+        self.assertEqual(get_recomputed(["output"]), {"wq", "output"})
 
 
 if __name__ == "__main__":
