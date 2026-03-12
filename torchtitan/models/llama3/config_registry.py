@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -102,6 +103,19 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
                 enable_fsdp_float8_all_gather=True,
                 precompute_float8_dynamic_scale_for_fsdp=True,
                 emulate=True,
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_lora() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
             ),
         ],
     )
