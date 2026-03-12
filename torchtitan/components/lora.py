@@ -11,6 +11,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torchtitan.config import Configurable
+from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 
 # Cache for dynamically created LoRA classes
@@ -47,22 +48,19 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 self._lora_scaling = alpha / rank
                 device = device if device is not None else self.weight.device
                 dtype = dtype if dtype is not None else self.weight.dtype
-                self.lora_a = nn.Linear(
-                    self.in_features,
-                    rank,
-                    bias=False,
-                    device=device,
-                    dtype=dtype,
+                self.lora_a = (
+                    Linear.Config(bias=False)
+                    .build(in_features=self.in_features, out_features=rank)
+                    .to(device=device, dtype=dtype)
                 )
-                self.lora_b = nn.Linear(
-                    rank,
-                    self.out_features,
-                    bias=False,
-                    device=device,
-                    dtype=dtype,
+                self.lora_b = (
+                    Linear.Config(bias=False)
+                    .build(in_features=rank, out_features=self.out_features)
+                    .to(device=device, dtype=dtype)
                 )
 
-            def _init_weight(self) -> None:
+            def init_weights(self, **kwargs) -> None:
+                super().init_weights(**kwargs)
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
                 nn.init.zeros_(self.lora_b.weight)
 
@@ -128,20 +126,6 @@ class LoRAConverter(Configurable):
             if isinstance(child, nn.Linear):
                 apply_lora(child, self.rank, self.alpha)
 
-        # Patch init_weights to also reinitialize LoRA adapters
-        original_init_weights = getattr(module, "init_weights", None)
-
-        def new_model_init_weights(*args: Any, **kwargs: Any) -> None:
-            if original_init_weights is not None and callable(original_init_weights):
-                original_init_weights(*args, **kwargs)
-            for sub_module in module.modules():
-                if type(sub_module) in _lora_class_cache.values():
-                    _init_weight = getattr(sub_module, "_init_weight", None)
-                    assert _init_weight is not None and callable(_init_weight)
-                    _init_weight()
-
-        object.__setattr__(module, "init_weights", new_model_init_weights)
-
         # Expose a key filter and flag on the module so ModelWrapper can
         # partition the state dict without knowing about LoRA internals.
         def converter_key_filter(key: str) -> bool:
@@ -153,6 +137,9 @@ class LoRAConverter(Configurable):
 
         # Register a one-shot forward pre-hook to quantize base weights after
         # checkpoint load but before the first forward pass (QLoRA).
+        # TODO: Prototype — move to torchao as a proper QuantizationConverter.
+        # to_nf4 on local tensors loses DTensor grad info, fine here since
+        # base weights are frozen and only LoRA adapters receive gradients.
         if self.quantize_base == "nf4":
             from torch.distributed.tensor import DTensor
 
