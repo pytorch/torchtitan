@@ -18,6 +18,7 @@ Usage:
 
 Ablation 1: Replace nn.RMSNorm with vLLM's fused RMSNorm kernel.
 Ablation 2: Replace F.silu(w1(x)) * w3(x) with vLLM's fused SiluAndMul kernel.
+Ablation 3: Replace apply_rotary_emb_cos_sin with vLLM's fused rotary_embedding kernel.
 """
 
 from dataclasses import fields
@@ -26,8 +27,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import torchtitan.models.common.attention as attention_module
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.rope import _reshape_for_broadcast_cos_sin
 from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
@@ -37,6 +40,53 @@ from torchtitan.protocols.model_spec import ModelSpec
 from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
+
+# ── Ablation 3: Fused RoPE ──
+
+def apply_rotary_emb_cos_sin_vllm(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    rope_cache: torch.Tensor,
+    positions: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Drop-in replacement for apply_rotary_emb_cos_sin using vLLM's fused kernel.
+
+    TorchTitan layout: (bsz, seqlen, n_heads, head_dim)
+    vLLM kernel expects: (num_tokens, n_heads * head_dim) and modifies in-place.
+    """
+    bsz, seqlen, n_heads, head_dim = xq.shape
+    n_kv_heads = xk.shape[2]
+
+    # Flatten batch and seq dims for vLLM kernel
+    xq_flat = xq.reshape(bsz * seqlen, n_heads * head_dim)
+    xk_flat = xk.reshape(bsz * seqlen, n_kv_heads * head_dim)
+
+    # Build position indices
+    if positions is not None:
+        pos_flat = positions.reshape(bsz * seqlen)
+    else:
+        pos_flat = torch.arange(seqlen, device=xq.device).unsqueeze(0).expand(bsz, -1).reshape(-1)
+
+    # vLLM's fused rotary embedding kernel (in-place)
+    # cos_sin_cache shape: (max_seqlen, head_dim) with cos and sin concatenated
+    # vLLM kernel requires cache to match query dtype
+    cache = rope_cache.to(dtype=xq.dtype, device=xq.device)
+    torch.ops._C.rotary_embedding(
+        pos_flat,
+        xq_flat,
+        xk_flat,
+        head_dim,
+        cache,
+        True,  # is_neox_style (Qwen3 uses neox-style RoPE)
+    )
+
+    # Reshape back to TorchTitan layout
+    xq_out = xq_flat.reshape(bsz, seqlen, n_heads, head_dim)
+    xk_out = xk_flat.reshape(bsz, seqlen, n_kv_heads, head_dim)
+    return xq_out, xk_out
+
+
+# ── Ablation 2: Fused SiluAndMul ──
 
 class FeedForwardVLLMSiluAndMul(FeedForward):
     """FeedForward with vLLM's fused SiluAndMul kernel.
@@ -52,10 +102,11 @@ class FeedForwardVLLMSiluAndMul(FeedForward):
         self.silu_and_mul = VLLMSiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Concatenate gate (w1) and up (w3) projections, then apply fused silu+mul
         gate_up = torch.cat([self.w1(x), self.w3(x)], dim=-1)
         return self.w2(self.silu_and_mul(gate_up))
 
+
+# ── Ablation 1: Fused RMSNorm + Ablation 2 + Ablation 3 in TransformerBlock ──
 
 class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
     """Qwen3TransformerBlock with vLLM's fused RMSNorm and SiluAndMul."""
@@ -68,7 +119,6 @@ class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
         dim: int,
         n_layers: int,
     ):
-        # Call grandparent __init__ to skip Qwen3TransformerBlock's nn.RMSNorm creation.
         TransformerBlock.__init__(self)
 
         self.attention = config.attention.build(dim=dim)
@@ -79,12 +129,10 @@ class Qwen3TransformerBlockAblation(Qwen3TransformerBlock):
             self.moe = config.moe.build(dim=dim)
         else:
             assert config.feed_forward is not None
-            # ── Ablation: use FeedForward with vLLM's fused SiluAndMul ──
             self.feed_forward = FeedForwardVLLMSiluAndMul(
                 config.feed_forward, dim=dim
             )
 
-        # ── Ablation: use vLLM's fused RMSNorm ──
         self.attention_norm = VLLMRMSNorm(dim, eps=config.norm_eps)
         self.ffn_norm = VLLMRMSNorm(dim, eps=config.norm_eps)
 
@@ -100,9 +148,13 @@ class Qwen3ModelAblation(Qwen3Model):
     Fused ops:
     - RMSNorm: vLLM's Triton-based fused kernel (all layers + final norm)
     - SiluAndMul: vLLM's fused activation kernel (all FFN layers)
+    - RoPE: vLLM's fused rotary_embedding kernel (monkey-patched)
     """
 
     def __init__(self, config: Qwen3Model.Config):
+        # Monkey-patch RoPE before building attention modules
+        attention_module.apply_rotary_emb_cos_sin = apply_rotary_emb_cos_sin_vllm
+
         super().__init__(config)
 
         # Replace final norm with vLLM's fused version
@@ -123,16 +175,11 @@ def ablation_model_registry(flavor: str) -> ModelSpec:
     """Return a ModelSpec identical to qwen3's but using the ablation model."""
     base_spec = model_registry(flavor)
 
-    # _owner is a ClassVar set by Configurable.__init_subclass__.
-    # We can't modify it on a slots dataclass instance. Instead, create a
-    # thin Config subclass whose _owner points to our ablation model class.
-    # This makes config.build() instantiate Qwen3ModelAblation.
     base_config = base_spec.model
 
     class _AblationConfig(type(base_config)):
         _owner = Qwen3ModelAblation
 
-    # Copy all field values from the base config into a new _AblationConfig instance
     field_values = {}
     for f in fields(base_config):
         if f.init:
