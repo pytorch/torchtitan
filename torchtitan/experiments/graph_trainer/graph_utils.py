@@ -385,13 +385,13 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
                 "full_inductor_compilation pass requires inductor_decomposition to be "
                 "specified in joint_passes. Please add --compile.joint_passes inductor_decomposition"
             )
-        fi_idx = pass_names.index("full_inductor_compilation")
+        full_inductor_idx = pass_names.index("full_inductor_compilation")
         expected_idx = (
             len(pass_names) - 2
             if pass_names[-1] == "cudagraph"
             else len(pass_names) - 1
         )
-        if fi_idx != expected_idx:
+        if full_inductor_idx != expected_idx:
             raise ValueError(
                 "full_inductor_compilation must be the last pass "
                 "(or second-to-last if cudagraph is last)."
