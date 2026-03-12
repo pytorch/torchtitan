@@ -37,6 +37,7 @@ from torchtitan.experiments.rl.unified.models.attention import (
     replace_rope_with_vllm_rotary,
     replace_with_vllm_attention,
 )
+from torchtitan.experiments.rl.unified.models.qwen3_vllm import Qwen3VLLMModel
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -179,8 +180,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             vllm_config
         )
 
-        # Replace attention with vLLM compatible flash attention
-        # TODO: Use config system to replace with vllm Attention
+        self._is_vllm_model = isinstance(self.model, Qwen3VLLMModel)
+
+        # Set up VLLMAttention modules before parallelize (both paths need this)
         replace_with_vllm_attention(self.model, tp_degree=self.parallel_dims.tp)
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
@@ -203,9 +205,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Replace TorchTitan's cos_sin RoPE with vLLM's fused CUDA kernel.
-        # Must happen after RoPE cache extension so the cache covers max_model_len.
-        replace_rope_with_vllm_rotary(self.model)
+        if not self._is_vllm_model:
+            # Legacy path: monkey-patch RoPE for the base Qwen3Model
+            replace_rope_with_vllm_rotary(self.model)
 
         # TP group name for vllm::all_reduce (set after vLLM initializes groups)
         self._tp_group_name = None
@@ -221,7 +223,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             self._compiled_compute_logits = torch.compile(
                 self._compute_logits, backend="aot_eager", fullgraph=True
             )
-            logger.info("Compiled forward/compute_logits with inductor")
+            logger.info("Compiled forward/compute_logits with aot_eager")
         else:
             self._compiled_forward_body = None
             self._compiled_compute_logits = None
@@ -458,8 +460,14 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         loaded = self.load_weights_from_state_dict(torchtitan_state_dict)
         tp_group_name = self._get_tp_group_name()
-        replace_ffn_with_fused(self.model, tp_group_name=tp_group_name)
-        prepare_local_weights(self.model, tp_group_name=tp_group_name)
+        if self._is_vllm_model:
+            self.model.prepare_for_vllm(
+                tp_group_name=tp_group_name,
+                tp_degree=self.parallel_dims.tp,
+            )
+        else:
+            replace_ffn_with_fused(self.model, tp_group_name=tp_group_name)
+            prepare_local_weights(self.model, tp_group_name=tp_group_name)
         return loaded
 
     def load_weights(self, weights_iter):
@@ -507,8 +515,14 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Fuse gate+up weights and store local weight refs after loading real weights.
         tp_group_name = self._get_tp_group_name()
-        replace_ffn_with_fused(self.model, tp_group_name=tp_group_name)
-        prepare_local_weights(self.model, tp_group_name=tp_group_name)
+        if self._is_vllm_model:
+            self.model.prepare_for_vllm(
+                tp_group_name=tp_group_name,
+                tp_degree=self.parallel_dims.tp,
+            )
+        else:
+            replace_ffn_with_fused(self.model, tp_group_name=tp_group_name)
+            prepare_local_weights(self.model, tp_group_name=tp_group_name)
 
         loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
 

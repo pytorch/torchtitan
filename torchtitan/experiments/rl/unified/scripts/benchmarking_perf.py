@@ -55,6 +55,9 @@ from torch.distributed.tensor.parallel import (
 )
 from torch.profiler import profile, ProfilerActivity, schedule
 from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
+from torchtitan.experiments.rl.unified.models.qwen3_vllm import (
+    vllm_qwen3_model_registry,
+)
 from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
@@ -420,12 +423,16 @@ class VLLMTorchTitanBenchmark:
             # reads this module-level flag during __init__)
             from torchtitan.experiments.rl.unified.models import vllm_wrapper
 
-            vllm_wrapper.aot_eager_compile_enabled = self.config.aot_eager_compile
+            # When CUDA graphs are enabled, vLLM's @support_torch_compile
+            # handles compilation + graph capture — skip our aot_eager compile
+            # to avoid conflicts with vLLM's dynamic_arg_dims marking.
+            if self.config.use_cuda_graph:
+                vllm_wrapper.aot_eager_compile_enabled = False
+            else:
+                vllm_wrapper.aot_eager_compile_enabled = self.config.aot_eager_compile
 
             # Register TorchTitan model with vLLM before engine creation
-            model_spec = model_registry("1.7B")
-            # Patch to use RL-specific parallelize function that supports vLLM
-            model_spec.parallelize_fn = parallelize_qwen3
+            model_spec = vllm_qwen3_model_registry("1.7B")
             register_model_to_vllm_model_registry(model_spec)
 
             print("Loading vLLM with TorchTitan Qwen3 model...")
