@@ -24,6 +24,8 @@ class Episode:
         token_ids: Completion token IDs.
         token_log_probs: Per-token log probabilities from the generator.
         expected_answer: Expected answer for reward computation.
+            Passed to Episode by the generator — the generator
+            does not read this field.
         reward: Scalar reward assigned by the grader.
         group_id: Identifies which group this episode belongs to.
             Episodes with the same group_id share a prompt and have
