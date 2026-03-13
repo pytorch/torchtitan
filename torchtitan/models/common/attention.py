@@ -6,13 +6,13 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, ClassVar, NamedTuple
+from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.utils._pytree import tree_map
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -63,35 +63,21 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-def _to_local(x: Any) -> Any:
-    """Convert a DTensor to its local tensor, preserving grad placements.
-
-    For TP (Shard on heads dim), grad_placements always match placements
-    since each rank owns a distinct shard of heads and grads stay on the
-    same shard.
-    """
-    if isinstance(x, DTensor):
-        return x.to_local(grad_placements=x.placements)
-    return x
-
-
-def _from_local(x: Any, *, placements: Any, mesh: Any) -> Any:
-    """Convert a local tensor back to a DTensor."""
-    if isinstance(x, DTensor):
-        return x
-    if isinstance(x, torch.Tensor):
-        return DTensor.from_local(x, mesh, placements)
-    return x
-
-
 class LocalMapModule(Module):
-    """A base class for modules whose ``forward`` runs on local tensors.
+    """Base class for inner attention wrappers with DTensor support.
 
-    Registers forward pre/post hooks that strip DTensors to local tensors
-    before ``forward`` (and any other hooks) run, and restore them
-    afterwards. The hooks are no-ops when inputs are not DTensors.
+    When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
+    overrides ``__call__`` to wrap ``nn.Module.__call__`` with ``local_map``.
+    This converts TP DTensors to local **before** any ``forward_pre_hook``
+    (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
+    DTensors **after** all ``forward_hook``s complete.
 
-    Subclasses override ``forward`` directly.
+    Under ``torch.compile``, the ``__call__`` override is skipped (dynamo
+    bypasses custom ``__call__`` and inlines ``forward`` directly), so
+    ``forward`` calls ``_forward_local`` without ``local_map``. This is
+    correct because dynamo decomposes DTensor ops at trace time.
+
+    Placements and device mesh are inferred from the input DTensors.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -100,29 +86,53 @@ class LocalMapModule(Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_forward_pre_hook(
-            LocalMapModule._pre_hook, with_kwargs=True, prepend=True
-        )
-        self.register_forward_hook(LocalMapModule._post_hook)
+        self._local_map_fn: Callable | None = None
 
-    @staticmethod
-    def _pre_hook(module, args, kwargs):
-        """Strip DTensors to local tensors."""
-        if not isinstance(args[0], DTensor):
-            return args, kwargs
-        module._placements = args[0].placements
-        module._device_mesh = args[0].device_mesh
-        return tree_map(_to_local, args), kwargs
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(q, DTensor):
+            assert isinstance(k, DTensor) and isinstance(
+                v, DTensor
+            ), "q, k, v should all be DTensors"
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    super().__call__,
+                    in_placements=(q.placements, k.placements, v.placements),
+                    out_placements=(q.placements,),
+                    # For TP (Shard on heads dim), in_grad_placements always
+                    # matches in_placements since each rank owns a distinct
+                    # shard of heads and grads stay on the same shard.
+                    # CP grad placements are not a concern here because local_map
+                    # only operates on the TP mesh. CP is handled independently
+                    # by _ContextParallel hooks inside nn.Module.__call__.
+                    in_grad_placements=(q.placements, k.placements, v.placements),
+                    device_mesh=q.device_mesh,
+                )
+            return self._local_map_fn(q, k, v, **kwargs)
+        return super().__call__(q, k, v, **kwargs)
 
-    @staticmethod
-    def _post_hook(module, _input, output):
-        """Restore local tensors back to DTensors."""
-        placements = module._placements
-        mesh = module._device_mesh
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self._forward_local(q, k, v, **kwargs)
 
-        return tree_map(
-            lambda t: _from_local(t, placements=placements, mesh=mesh), output
-        )
+    def _forward_local(
+        self,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        xv: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
 
 
 class VarlenAttentionWrapper(LocalMapModule):
@@ -130,7 +140,7 @@ class VarlenAttentionWrapper(LocalMapModule):
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
 
-    def forward(
+    def _forward_local(
         self,
         xq: torch.Tensor,
         xk: torch.Tensor,
@@ -209,7 +219,7 @@ class FlexAttentionWrapper(LocalMapModule):
         },
     )
 
-    def forward(
+    def _forward_local(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -262,7 +272,7 @@ class ScaledDotProductAttentionWrapper(LocalMapModule):
                 SDPBackend.MATH,
             ]
 
-    def forward(
+    def _forward_local(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
