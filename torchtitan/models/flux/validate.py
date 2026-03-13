@@ -170,9 +170,9 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
-                img_size = (
+                img_size = (  # pyrefly: ignore [missing-attribute]
                     self.config.dataloader.img_size
-                )  # pyrefly: ignore [missing-attribute]
+                )
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,

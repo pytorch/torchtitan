@@ -28,8 +28,10 @@ class FluxTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
         # Overwrite parent class tokenizer
-        tokenizer: FluxTokenizerContainer.Config = field(
-            default_factory=FluxTokenizerContainer.Config
+        tokenizer: FluxTokenizerContainer.Config = (
+            field(  # pyrefly: ignore [bad-override]
+                default_factory=FluxTokenizerContainer.Config
+            )
         )
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
