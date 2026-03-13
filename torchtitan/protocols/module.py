@@ -21,13 +21,3 @@ class Module(nn.Module, Configurable):
     def init_weights(self, **kwargs) -> None:
         """Initialize weights. Override in subclasses with learnable parameters."""
         pass
-
-
-class ModuleContainer(Module):
-    """Lightweight container for grouping sub-modules as named attributes.
-
-    Use instead of bare ``nn.Module()`` when you need an attribute namespace
-    that properly participates in the Module protocol.
-    """
-
-    pass

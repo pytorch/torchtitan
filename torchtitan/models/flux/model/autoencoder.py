@@ -12,7 +12,17 @@ from einops import rearrange
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
-from torchtitan.protocols.module import Module, ModuleContainer
+from torchtitan.protocols.module import Module
+
+
+class _ModuleContainer(Module):
+    """Lightweight container for grouping sub-modules as named attributes.
+
+    Use instead of bare ``nn.Module()`` when you need an attribute namespace
+    that properly participates in the Module protocol.
+    """
+
+    pass
 
 
 @dataclass
@@ -166,7 +176,7 @@ class Encoder(Module):
             for _ in range(self.num_res_blocks):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-            down = ModuleContainer()
+            down = _ModuleContainer()
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions - 1:
@@ -175,7 +185,7 @@ class Encoder(Module):
             self.down.append(down)
 
         # middle
-        self.mid = ModuleContainer()
+        self.mid = _ModuleContainer()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
@@ -249,7 +259,7 @@ class Decoder(Module):
         )
 
         # middle
-        self.mid = ModuleContainer()
+        self.mid = _ModuleContainer()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
@@ -263,7 +273,7 @@ class Decoder(Module):
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-            up = ModuleContainer()
+            up = _ModuleContainer()
             up.block = block
             up.attn = attn
             if i_level != 0:

@@ -228,6 +228,12 @@ class CompiledModule(Module):
         else:
             super().__delattr__(name)
 
+    def init_weights(self, **kwargs) -> None:
+        # Explicitly delegate to inner model. Without this override,
+        # Module.init_weights (a no-op) would be found via MRO before
+        # __getattr__ is triggered, silently skipping weight initialization.
+        self.inner.init_weights(**kwargs)
+
     def state_dict(self, *args, **kwargs) -> Any:
         return self.inner.state_dict(*args, **kwargs)
 
