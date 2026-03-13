@@ -225,12 +225,22 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self, prompt_texts: list[str]) -> list[Episode]:
-        """Generate episodes and return list of Episode (one per prompt).
-        Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
+    async def generate(
+        self,
+        prompt_texts: list[str],
+        expected_answers: list[str],
+    ) -> list[Episode]:
+        """Generate completions and return a flat list of Episodes.
+
+        Each prompt produces ``num_samples_per_prompt`` Episodes. Episodes
+        from the same prompt share a ``group_id`` so the controller can
+        compute group-level advantages later.
 
         Args:
             prompt_texts: List of prompt strings for which to generate completions.
+            expected_answers: List of expected answers, one per prompt.
+                They are copied into each Episode so downstream graders can use them
+                for reward computation and generator doesn't use this field.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -258,32 +268,36 @@ class VLLMGenerator(Actor, Configurable):
                 request_outputs = self._engine.step()
                 all_outputs.extend(request_outputs)
 
-            # Build one Episode per prompt
-            episodes = []
-            for output in all_outputs:
-                prompt_token_ids = output.prompt_token_ids
+            # Sort outputs by request_id to guarantee prompt ordering,
+            # since vLLM may return completed requests out of order.
+            all_outputs.sort(key=lambda o: int(o.request_id))
 
-                completions = []
+            # Build flat list of Episodes; assign a group_id per prompt.
+            # TODO: Assigning group_id here is GRPO-specific and should be
+            # decoupled from the generator in the future.
+            episodes: list[Episode] = []
+            for idx, output in enumerate(all_outputs):
+                prompt_token_ids = output.prompt_token_ids
+                gid = f"{os.getpid()}_{self.policy_version}_{idx}"
+
                 for sample in output.outputs:
                     per_token_log_probs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    completions.append(
-                        Episode.Completion(
+                    episodes.append(
+                        Episode(
+                            policy_version=self.policy_version,
+                            prompt_token_ids=prompt_token_ids,
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_log_probs=per_token_log_probs,
+                            expected_answer=expected_answers[idx]
+                            if expected_answers
+                            else "",
+                            group_id=gid,
                         )
                     )
-
-                episodes.append(
-                    Episode(
-                        policy_version=self.policy_version,
-                        prompt_token_ids=prompt_token_ids,
-                        completions=completions,
-                    )
-                )
 
         logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
@@ -293,7 +307,7 @@ class VLLMGenerator(Actor, Configurable):
     @endpoint
     async def update(self, version: int, state_dict: dict) -> None:
         """Update generator weights.
-        Called by the orchestrator (simple_grpo.py).
+        Called by the orchestrator.
 
         Args:
             version: New policy version number
