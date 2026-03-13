@@ -72,7 +72,7 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/tokenizer",
                         "--tokenizer.clip_tokenizer_path",
                         "tests/assets/tokenizer",
-                        "--encoder._random_init",
+                        "--encoder._random-init",
                         "--encoder.t5_encoder",
                         "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
