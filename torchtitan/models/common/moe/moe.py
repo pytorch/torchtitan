@@ -76,9 +76,10 @@ def _run_experts_grouped_mm(
     return out
 
 
-class GroupedExperts(nn.Module):
+class GroupedExperts(Module):
     def __init__(
         self,
+        *,
         dim: int,
         hidden_dim: int,
         num_experts: int,
@@ -125,13 +126,15 @@ class GroupedExperts(nn.Module):
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
-class TokenChoiceTopKRouter(nn.Module):
+class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
         routed to top K experts based on the router scores.
 
@@ -140,21 +143,22 @@ class TokenChoiceTopKRouter(nn.Module):
     This reduces cross-node communication in distributed settings.
 
     Args:
-        dim (int): Dimension of input tokens.
-        num_experts (int): Number of experts in each moe layer.
-        num_expert_groups (int | None): Number of expert groups for node-limited routing. If None, standard
+        dim: Dimension of input tokens.
+        num_experts: Number of experts in each MoE layer.
+        num_expert_groups: Number of expert groups for node-limited routing. If None, standard
             top-k routing is used. Must be a divisor of num_experts.
-        num_limited_groups (int | None): Number of groups to select in node-limited routing. Required when
+        num_limited_groups: Number of groups to select in node-limited routing. Required when
             num_expert_groups is set.
-        top_k (int): Number of experts each token will be routed to in token-choice routing.
-        score_func (Literal["softmax", "sigmoid"]): Whether to use sigmoid or softmax for router scores.
-        route_norm (bool): Whether to normalize the routing scores when using sigmoid.
-        route_scale (float): Scaling factor applied to the routing scores.
-        gate_bias (bool): Whether to include a bias term in the router's linear gate.
+        top_k: Number of experts each token will be routed to.
+        score_func: Whether to use sigmoid or softmax for router scores.
+        route_norm: Whether to normalize the routing scores when using sigmoid.
+        route_scale: Scaling factor applied to the routing scores.
+        gate_bias: Whether to include a bias term in the router's linear gate.
     """
 
     def __init__(
         self,
+        *,
         dim: int,
         num_experts: int,
         num_expert_groups: int | None,
@@ -305,23 +309,20 @@ class TokenChoiceTopKRouter(nn.Module):
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         self.gate.init_weights(init_std=init_std)
 
 
 # NOTE: the reason we make this a stateless module is to support
 #       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
-class TokenReorderer(nn.Module):
-    """
-    This module reorders token indices to match the order of experts, enabling
+class TokenReorderer(Module):
+    """This module reorders token indices to match the order of experts, enabling
     efficient parallel processing of tokens by experts.
-
-    Args:
-        num_experts (int): Number of experts in the MoE layer.
-        top_k (int): Number of experts each token will be routed to.
     """
 
-    def __init__(self, num_experts: int, top_k: int):
+    def __init__(self, *, num_experts: int, top_k: int):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
@@ -563,10 +564,10 @@ class MoE(Module):
         assert init_std is not None
         assert isinstance(buffer_device, torch.device)
 
-        self.experts.init_weights(init_std)
-        self.router.init_weights(init_std)
+        self.experts.init_weights(init_std=init_std)
+        self.router.init_weights(init_std=init_std)
         if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std)
+            self.shared_experts.init_weights(init_std=init_std)
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(

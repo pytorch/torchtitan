@@ -10,7 +10,6 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -61,7 +60,7 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class VarlenAttentionWrapper(torch.nn.Module):
+class VarlenAttentionWrapper(Module):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
@@ -118,7 +117,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
         ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(torch.nn.Module):
+class FlexAttentionWrapper(Module):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -174,7 +173,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         )
 
 
-class ScaledDotProductAttentionWrapper(torch.nn.Module):
+class ScaledDotProductAttentionWrapper(Module):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
@@ -467,7 +466,7 @@ class GQAttention(BaseAttention):
         )
 
         self.attn_backend = config.attn_backend
-        self.inner_attention: nn.Module
+        self.inner_attention: Module
         match self.attn_backend:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
