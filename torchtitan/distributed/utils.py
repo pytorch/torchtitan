@@ -197,31 +197,6 @@ def set_determinism(
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
 
 
-def create_context_parallel_ctx(
-    cp_mesh: DeviceMesh,
-    cp_buffers: list[torch.Tensor],
-    cp_seq_dims: list[int],
-    cp_no_restore_buffers: set[torch.Tensor],
-    cp_rotate_method: str,
-):
-    try:
-        from torch.distributed.tensor.experimental import context_parallel
-        from torch.distributed.tensor.experimental._attention import set_rotate_method
-    except ImportError as e:
-        raise ValueError(
-            f"PyTorch version {torch.__version__} does not include the experimental "
-            "Context Parallel API. Please update to a newer version."
-        ) from e
-
-    set_rotate_method(cp_rotate_method)
-    return context_parallel(
-        cp_mesh,
-        buffers=cp_buffers,
-        buffer_seq_dims=cp_seq_dims,
-        no_restore_buffers=cp_no_restore_buffers,
-    )
-
-
 class TrainContext(Protocol):
     @abstractmethod
     def __call__(self) -> contextlib.AbstractContextManager[None]:
@@ -243,19 +218,19 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
 ) -> contextlib.AbstractContextManager[None] | torch.autocast:
-    if parallel_dims.fsdp_enabled:
+    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
         # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard")
+        logger.info("Mixed precision training is handled by fully_shard or replicate")
         return contextlib.nullcontext()
     else:
         if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
             logger.warning(
-                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
+                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/DDP is enabled."
             )
             logger.info("Mixed precision training is disabled")
             return contextlib.nullcontext()
         else:
-            # the following code will only be executed for DDP or single-device training
+            # the following code will only be executed for single-device training
             logger.info("Mixed precision training is handled by AMP")
             return torch.autocast(
                 device_type,

@@ -34,11 +34,29 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module rl.unified",
                     "--config rl_grpo_qwen3_debug",
+                    "--generator.compile.backend none",
+                    "--generator.compile.cudagraph_mode none",
                 ],
             ],
-            "RL GRPO TP=1 (debug model)",
-            "rl_grpo_tp1",
+            "RL GRPO TP=1 no compile (debug model)",
+            "rl_grpo_tp1_no_compile",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module rl.unified",
+                    "--config rl_grpo_qwen3_debug",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--batch_invariant_mode False",
+                    "--generator.compile.backend none",
+                    "--generator.compile.cudagraph_mode none",
+                ],
+            ],
+            "RL GRPO TP=2 no compile (debug model)",
+            "rl_grpo_tp2_no_compile",
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
@@ -50,8 +68,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--batch_invariant_mode False",
                 ],
             ],
-            "RL GRPO TP=2 (debug model)",
-            "rl_grpo_tp2",
+            "RL GRPO TP=2 compile (debug model)",
+            "rl_grpo_tp2_compile",
             ngpu=4,
         ),
     ]
@@ -73,7 +91,7 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/unified/simple_grpo.py",
+            "torchtitan/experiments/rl/unified/simple_grpo_sum_digits.py",
             f"--dump_folder {dump_folder}",
         ]
         cmd_parts.extend(override_arg)

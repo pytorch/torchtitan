@@ -17,7 +17,6 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.moe.utils import _permute, _unpermute
-from torchtitan.models.common.utils import trunc_normal_
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -265,10 +264,10 @@ class GptOssGroupedExperts(nn.Module):
             )
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
-        trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
 
 
 class GptOssMoE(MoE):

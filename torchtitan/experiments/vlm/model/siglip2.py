@@ -11,7 +11,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -83,7 +82,7 @@ class VisionEmbeddings(nn.Module):
         self.n_pos_embs = args.n_pos_embs
 
     def init_weights(self):
-        trunc_normal_(self.patch_embedding.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.patch_embedding.weight, mean=0.0, std=0.02)
         nn.init.normal_(self.position_embedding.weight)
 
     def forward(self, pixels_NLD: torch.Tensor, grid_hw: torch.Tensor) -> torch.Tensor:
@@ -154,7 +153,7 @@ class Attention(nn.Module):
 
     def init_weights(self):
         for linear in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
 
 
 class FeedForward(nn.Module):
@@ -170,8 +169,8 @@ class FeedForward(nn.Module):
         return x
 
     def init_weights(self):
-        trunc_normal_(self.fc1.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.fc2.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.fc1.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.fc2.weight, mean=0.0, std=0.02)
 
 
 class TransformerLayer(nn.Module):
