@@ -25,6 +25,13 @@ source titan-rl/bin/activate
 uv pip install torchmonarch
 ```
 
+Install Flash Attention v3 kernels:
+```
+# CUDA 12
+pip install flash-attn-3 --extra-index=https://download.pytorch.org/whl/test/cu126
+# CUDA 13
+pip install flash-attn-3 --extra-index=https://download.pytorch.org/whl/test/cu130
+```
 
 2. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
 ```bash
