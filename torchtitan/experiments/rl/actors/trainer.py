@@ -21,31 +21,18 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.models.attention import (
-    replace_with_vllm_compatible_flash_attention,
-)
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(kw_only=True, slots=True)
-class TrainerCompileConfig:
-    """Compilation settings for the PolicyTrainer."""
-
-    enable: bool = False
-    """Enable per-layer torch.compile on the training model."""
-    backend: str = "eager"
-    """torch.compile backend (e.g. 'eager', 'aot_eager', 'inductor')."""
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -74,7 +61,7 @@ class PolicyTrainer(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
-        compile: TrainerCompileConfig = field(default_factory=TrainerCompileConfig)
+        compile: CompileConfig = field(default_factory=CompileConfig)
 
     def __init__(
         self,
@@ -126,8 +113,6 @@ class PolicyTrainer(Actor, Configurable):
             model_spec, config, device_type, batch_invariant_mode, hf_assets_path
         )
         model.train()
-        if config.compile.enable:
-            model = self._compile_model(model, config.compile.backend)
         self.model = model
         self.model_parts = [model]
 
@@ -219,18 +204,11 @@ class PolicyTrainer(Actor, Configurable):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
 
-        # Replace attention with vLLM compatible attention for RL training.
-        # NOTE: Long-term this will be replaced by pytorch attention
-        # supporting paged attention / kv cache.
-        if batch_invariant_mode:
-            replace_with_vllm_compatible_flash_attention(
-                model, tp_size=self.parallel_dims.tp
-            )
-
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
             parallelism=config.parallelism,
+            compile_config=config.compile,
         )
 
         model.to_empty(device=device_type)
@@ -240,20 +218,6 @@ class PolicyTrainer(Actor, Configurable):
         # Load initial weights from HF
         self._load_initial_hf_weights(model, hf_assets_path)
 
-        return model
-
-    def _compile_model(self, model: torch.nn.Module, backend: str) -> torch.nn.Module:
-        """Compile each transformer layer with torch.compile.
-
-        Args:
-            model: The model whose layers will be compiled.
-            backend: torch.compile backend (e.g. 'eager', 'aot_eager', 'inductor').
-        """
-        for layer_id in model.layers:
-            model.layers[layer_id].compile(backend=backend, fullgraph=True)
-        logger.info(
-            f"Compiled {len(model.layers)} transformer layers with {backend} backend"
-        )
         return model
 
     @endpoint

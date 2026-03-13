@@ -154,3 +154,25 @@ def apply_compile_sparse(
     # https://github.com/pytorch/pytorch/issues/166460
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
+
+def apply_compile_dense_rl(model: nn.Module, compile_config: CompileConfig) -> None:
+    """Apply torch.compile in-place to each TransformerBlock for RL training.
+
+    Uses ``Module.compile()`` (in-place) instead of ``torch.compile()`` +
+    ``register_module()`` to preserve weight naming compatibility between
+    the trainer and vLLM generator (avoids ``_orig_mod`` prefix that
+    ``OptimizedModule`` wrapping introduces).
+
+    Also fixes some numeric issues we have observed with ``torch.compile()``.
+    See https://github.com/pytorch/torchtitan/issues/2673 for more details.
+    """
+    # pyrefly: ignore [missing-attribute]
+    for transformer_block in model.layers.named_children.values():
+        transformer_block.compile(
+            backend=compile_config.backend,
+            fullgraph=True,
+            dynamic=True,
+        )
+
+    logger.info("Compiled each TransformerBlock with torch.compile (RL in-place)")
