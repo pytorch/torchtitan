@@ -127,7 +127,7 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
-        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
+        attn_backend: str | Any = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
@@ -135,8 +135,7 @@ def parallelize_qwen3(
             attn_backend,
         )
 
-    if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
-        # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+        # TODO: cuDNN SDPA backward has a stride mismatch bug with CP.
         # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
         if attn_backend == "sdpa":
             # pyrefly: ignore [missing-attribute, not-callable]
