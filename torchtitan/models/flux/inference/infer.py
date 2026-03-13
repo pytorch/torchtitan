@@ -39,7 +39,7 @@ def inference(config: FluxTrainer.Config):
     trainer.checkpointer.load(step=config.checkpoint.load_step)
 
     # Build tokenizers from the config
-    tokenizer_container = config.tokenizer.build()
+    tokenizer = config.tokenizer.build()
 
     if global_rank == 0:
         logger.info("Starting inference...")
@@ -75,7 +75,7 @@ def inference(config: FluxTrainer.Config):
                 model=trainer.model_parts[0],
                 prompt=prompts[i : i + bs],
                 autoencoder=trainer.autoencoder,
-                tokenizer=tokenizer_container,
+                tokenizer=tokenizer,
                 t5_encoder=trainer.t5_encoder,
                 clip_encoder=trainer.clip_encoder,
             )

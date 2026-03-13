@@ -56,11 +56,11 @@ class FluxTokenizerContainer(BaseTokenizer):
             text: A string or list of strings to encode.
 
         Returns:
-            A dict with keys "clip_tokens" and "t5_tokens", each mapping to a torch.Tensor.
+            A dict with keys "clip" and "t5", each mapping to a torch.Tensor.
         """
         return {
-            "clip_tokens": self.clip_tokenizer.encode(text),
-            "t5_tokens": self.t5_tokenizer.encode(text),
+            "clip": self.clip_tokenizer.encode(text),
+            "t5": self.t5_tokenizer.encode(text),
         }  # pyrefly: ignore [bad-return]
 
     # pyrefly: ignore [bad-override]
@@ -68,16 +68,16 @@ class FluxTokenizerContainer(BaseTokenizer):
         """Decode token IDs using both T5 and CLIP tokenizers.
 
         Args:
-            tokens: A dict with keys "clip_tokens" and/or "t5_tokens".
+            tokens: A dict with keys "clip" and/or "t5".
 
         Returns:
             A dict with keys "clip_text" and/or "t5_text".
         """
         result = {}
-        if "t5_tokens" in tokens:
-            result["t5_text"] = self.t5_tokenizer.decode(tokens["t5_tokens"])
-        if "clip_tokens" in tokens:
-            result["clip_text"] = self.clip_tokenizer.decode(tokens["clip_tokens"])
+        if "t5" in tokens:
+            result["t5_text"] = self.t5_tokenizer.decode(tokens["t5"])
+        if "clip" in tokens:
+            result["clip_text"] = self.clip_tokenizer.decode(tokens["clip"])
         return result
 
     def get_vocab_size(self) -> int:

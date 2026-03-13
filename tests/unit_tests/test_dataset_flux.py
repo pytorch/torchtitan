@@ -99,11 +99,11 @@ class TestFluxDataLoader(unittest.TestCase):
                         len(input_data) == 3
                     )  # (clip_encodings, t5_encodings, prompt)
                     assert labels.shape == (batch_size, 3, 256, 256)
-                    assert input_data["clip_tokens"].shape == (
+                    assert input_data["clip"].shape == (
                         batch_size,
                         77,
                     )
-                    assert input_data["t5_tokens"].shape == (
+                    assert input_data["t5"].shape == (
                         batch_size,
                         256,
                     )
@@ -128,10 +128,6 @@ class TestFluxDataLoader(unittest.TestCase):
                     torch.manual_seed(i)
                     input_ids, labels = next(it_resumed)
 
-                    assert torch.equal(
-                        input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
-                    )
-                    assert torch.equal(
-                        input_ids["t5_tokens"], expected_input_ids["t5_tokens"]
-                    )
+                    assert torch.equal(input_ids["clip"], expected_input_ids["clip"])
+                    assert torch.equal(input_ids["t5"], expected_input_ids["t5"])
                     assert torch.equal(labels, expected_labels)

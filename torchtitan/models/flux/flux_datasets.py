@@ -200,8 +200,8 @@ class FluxDataset(IterableDataset, Stateful):
 
         self._tokenizer = tokenizer
         empty_tokens = tokenizer.encode("")
-        self._t5_empty_token = empty_tokens["t5_tokens"]
-        self._clip_empty_token = empty_tokens["clip_tokens"]
+        self._t5_empty_token = empty_tokens["t5"]
+        self._clip_empty_token = empty_tokens["clip"]
         self._data_processor = data_processor
         self.prompt_dropout_prob = prompt_dropout_prob
         self.img_size = img_size
@@ -273,9 +273,9 @@ class FluxDataset(IterableDataset, Stateful):
             dropout_prob = self.prompt_dropout_prob
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:
-                    sample_dict["t5_tokens"] = self._t5_empty_token
+                    sample_dict["t5"] = self._t5_empty_token
                 if torch.rand(1).item() < dropout_prob:
-                    sample_dict["clip_tokens"] = self._clip_empty_token
+                    sample_dict["clip"] = self._clip_empty_token
 
             self._sample_idx += 1
 
