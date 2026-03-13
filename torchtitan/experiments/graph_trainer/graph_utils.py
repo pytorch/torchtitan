@@ -151,9 +151,7 @@ def joint_graph_builder(
             # Create the decomposition pass with context
             decomp_pass = functools.partial(
                 inductor_decomposition_pass,
-                model=model,
                 joint_with_descriptors=joint_with_descriptors,
-                forward_inputs=model_args,
             )
 
             # Prepend to joint_custom_passes
@@ -370,22 +368,33 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
     Raises:
         ValueError: If pass configuration is invalid
     """
-    if "cudagraph" in pass_names:
-        assert (
-            pass_names[-1] == "cudagraph"
-        ), "cudagraph has to be the last pass to apply"
+    if "cudagraph" in pass_names and pass_names[-1] != "cudagraph":
+        raise ValueError("cudagraph has to be the last pass to apply")
 
     if "auto_bucketing" in pass_names and "transformer_block_bucketing" in pass_names:
         raise ValueError(
             "Cannot apply auto_bucketing and transformer_block_bucketing at the same time!"
         )
 
-    # Validate that full_inductor_compilation requires inductor_decomposition
+    # full_inductor_compilation returns a CompiledFxGraph (not a GraphModule),
+    # so no subsequent pass can inspect/modify the FX graph. It must be the
+    # last pass, or second-to-last if cudagraph is last.
     if "full_inductor_compilation" in pass_names:
         if "inductor_decomposition" not in joint_pass_names:
             raise ValueError(
                 "full_inductor_compilation pass requires inductor_decomposition to be "
                 "specified in joint_passes. Please add --compile.joint_passes inductor_decomposition"
+            )
+        full_inductor_idx = pass_names.index("full_inductor_compilation")
+        expected_idx = (
+            len(pass_names) - 2
+            if pass_names[-1] == "cudagraph"
+            else len(pass_names) - 1
+        )
+        if full_inductor_idx != expected_idx:
+            raise ValueError(
+                "full_inductor_compilation must be the last pass "
+                "(or second-to-last if cudagraph is last)."
             )
 
 
@@ -486,7 +495,13 @@ def get_joint_custom_passes_from_config(
     )
 
     joint_custom_passes = []
-    joint_custom_passes.append(validate_flex_attn_annotation_pass)
+
+    # Skip flex_attention annotation validation when full_inductor_compilation
+    # is used, since it compiles everything through Inductor regardless of
+    # annotations. The validation is only relevant for regional_inductor.
+    pass_names = getattr(compile_config, "passes", [])
+    if "full_inductor_compilation" not in pass_names:
+        joint_custom_passes.append(validate_flex_attn_annotation_pass)
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])
