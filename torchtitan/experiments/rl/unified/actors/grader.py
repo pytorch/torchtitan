@@ -16,11 +16,10 @@ logger = logging.getLogger(__name__)
 
 class Grader(Actor):
     """
-    Evaluates completions and assigns rewards to episode data.
+    Evaluates completions and assigns rewards to episodes.
 
-    The Grader receives episode data from the Generator
-    and computes rewards using a reward function. Advantage computation
-    is done by the Trainer.
+    The Grader receives a flat list of Episodes and computes rewards
+    using a reward function. It scores each episode independently.
 
     Args:
         reward_fn: Reward function that takes (completions: list[str], expected_answer: str)
@@ -40,32 +39,27 @@ class Grader(Actor):
         """
         Score episodes by computing rewards.
 
+        Calls the reward_fn with each episode's completion text and
+        expected answer, then sets the reward on each episode.
+
         Args:
-            episodes: List of Episode data (one per prompt, with completions)
+            episodes: Flat list of Episodes to score.
 
         Returns:
-            Episodes with computed rewards
+            Episodes with rewards filled in.
         """
-        logger.debug(
-            f"Grader scoring {len(episodes)} episodes "
-            f"(policy v{episodes[0].policy_version})..."
-        )
+        logger.debug(f"Grader scoring {len(episodes)} episodes...")
 
-        all_rewards = []
-        for episode in episodes:
-            completion_texts = [c.text for c in episode.completions]
-            rewards = self.reward_fn(completion_texts, episode.expected_answer)
-            for completion, reward in zip(episode.completions, rewards):
-                completion.reward = reward.item()
-            all_rewards.append(rewards)
+        # Score each episode individually
+        for ep in episodes:
+            rewards = self.reward_fn([ep.text], ep.expected_answer)
+            ep.reward = rewards[0].item()
 
-        all_rewards_cat = torch.cat(all_rewards)
-        reward_mean = all_rewards_cat.mean()
-        reward_std = all_rewards_cat.std()
-
+        all_rewards = torch.tensor([ep.reward for ep in episodes])
         logger.debug(
             f"Grader finished scoring: "
-            f"reward_mean={reward_mean.item():.4f}, reward_std={reward_std.item():.4f}"
+            f"reward_mean={all_rewards.mean().item():.4f}, "
+            f"reward_std={all_rewards.std().item():.4f}"
         )
 
         return episodes
