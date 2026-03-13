@@ -64,6 +64,7 @@ class VarlenMetadata(NamedTuple):
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
+
 class LocalMapModule(Module):
     """Base class for inner attention wrappers with DTensor support.
 
@@ -72,6 +73,11 @@ class LocalMapModule(Module):
     This converts TP DTensors to local **before** any ``forward_pre_hook``
     (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
     DTensors **after** all ``forward_hook``s complete.
+
+    Under ``torch.compile``, the ``__call__`` override is skipped (dynamo
+    bypasses custom ``__call__`` and inlines ``forward`` directly), so
+    ``forward`` calls ``_forward_local`` without ``local_map``. This is
+    correct because dynamo decomposes DTensor ops at trace time.
 
     Placements and device mesh are inferred from the input DTensors.
     """
