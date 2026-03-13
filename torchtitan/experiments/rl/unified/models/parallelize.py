@@ -11,6 +11,7 @@
 
 import logging
 
+import torch
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
@@ -24,6 +25,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed import ParallelDims
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ def parallelize_qwen3(
     *,
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
+    compile_config: CompileConfig | None = None,
     has_position_id: bool = False,
 ):
     """
@@ -44,6 +47,8 @@ def parallelize_qwen3(
     TODO: Change to core torchtitan's Qwen3 parallel plan when full DTensor is ready
 
     Args:
+        compile_config: If provided and enabled, applies per-layer torch.compile
+            after TP (matching the pattern in torchtitan/models/llama3/parallelize.py).
         has_position_id: Whether position IDs are passed as an explicit argument
             to the attention module. True for vLLM inference (generator),
             False for training (trainer).
@@ -60,7 +65,28 @@ def parallelize_qwen3(
             has_position_id=has_position_id,
         )
 
+    if (
+        compile_config is not None
+        and compile_config.enable
+        and "model" in compile_config.components
+    ):
+        apply_compile(model, compile_config)
+
     return model
+
+
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
+    """Apply torch.compile to each TransformerBlock.
+
+    Follows the same pattern as torchtitan/models/llama3/parallelize.py.
+    """
+    for layer_id, transformer_block in model.layers.named_children():
+        transformer_block = torch.compile(
+            transformer_block, backend=compile_config.backend, fullgraph=True
+        )
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info("Compiling each TransformerBlock with torch.compile")
 
 
 def apply_non_moe_tp(
