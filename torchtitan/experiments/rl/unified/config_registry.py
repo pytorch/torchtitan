@@ -37,7 +37,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
@@ -49,7 +49,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,
@@ -114,7 +114,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,

@@ -6,12 +6,15 @@
 
 import logging
 import os
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
+import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import distribute_tensor, DTensor
+from torch.distributed.tensor import DTensor
+from torchstore.direct_weight_sync import DirectWeightSyncDest, RDMA_KEY_PREFIX, RDMAWeightHandle
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -215,6 +218,8 @@ class VLLMGenerator(Actor, Configurable):
         logger.info("vLLM rollout engine initialized")
 
         self.policy_version = 0
+        self._rdma_dest = DirectWeightSyncDest()
+        self._rdma_handles: dict[str, list[RDMAWeightHandle]] | None = None
 
         logger.info("Generator initialized with vLLM engine")
 
@@ -291,33 +296,51 @@ class VLLMGenerator(Actor, Configurable):
         return episodes
 
     @endpoint
-    async def update(self, version: int, state_dict: dict) -> None:
-        """Update generator weights.
-        Called by the orchestrator (simple_grpo.py).
+    async def get_weight_checksums(self) -> dict[str, float]:
+        """Return per-param checksums for weight sync verification."""
+        checksums = {}
+        for name, param in self._get_model().model.state_dict().items():
+            if isinstance(param, DTensor):
+                t = param.full_tensor()
+            else:
+                t = param
+            checksums[name] = t.to(torch.float64).sum().item()
+        return checksums
+
+    async def _fetch_rdma_handles(self) -> dict[str, list[RDMAWeightHandle]]:
+        """Fetch RDMA handles from all trainer ranks via TorchStore."""
+        num_ranks = await ts.get(f"{RDMA_KEY_PREFIX}/num_ranks")
+        all_handles: defaultdict[str, list[RDMAWeightHandle]] = defaultdict(list)
+        for r in range(num_ranks):
+            rank_handles = await ts.get(f"{RDMA_KEY_PREFIX}/rank_{r}")
+            for name, handle in rank_handles.items():
+                all_handles[name].append(handle)
+        logger.debug(
+            f"Fetched RDMA handles from {num_ranks} trainer ranks "
+            f"({len(all_handles)} params)"
+        )
+        return all_handles
+
+    @endpoint
+    async def pull_weights(self, version: int) -> None:
+        """Pull latest weights via direct RDMA from trainer memory.
+
+        On the first call, fetches and caches RDMA handles from
+        TorchStore. Subsequent calls reuse cached handles and just
+        re-read the data (which the trainer has updated in-place or
+        refreshed into staging buffers).
 
         Args:
-            version: New policy version number
-            state_dict: Full (unsharded) state dict with plain tensors.
+            version: New policy version number.
         """
-        # Reshard full tensors to match this generator's DTensor layout
-        model_state_dict = dict(self._get_model().model.state_dict())
-        for name, tensor in state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                state_dict[name] = distribute_tensor(
-                    tensor.to(target_dtensor.device_mesh.device_type),
-                    device_mesh=target_dtensor.device_mesh,
-                    placements=target_dtensor.placements,
-                )
+        if self._rdma_handles is None:
+            self._rdma_handles = await self._fetch_rdma_handles()
 
-        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
+        model_sd = self._get_model().model.state_dict()
+        await self._rdma_dest.pull(self._rdma_handles, model_sd)
         self.policy_version = version
         logger.debug(
-            f"Updated weights into vLLM engine model. "
-            f"Number of parameters: {len(load_weights)}. "
-            f"{os.getpid()=} Generator updating weights to policy v{version}..."
+            f"{os.getpid()=} Generator pulled weights via RDMA for policy v{version}"
         )
 
     def __del__(self):
