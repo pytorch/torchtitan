@@ -10,7 +10,6 @@
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torch.backends.cuda import SDPBackend
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -134,19 +133,6 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
             attn_backend,
         )
-
-    if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
-        # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
-        # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
-        if attn_backend == "sdpa":
-            # pyrefly: ignore [missing-attribute, not-callable]
-            for block in model.layers.values():
-                block.attention.inner_attention.sdpa_backends = (
-                    [  # pyrefly: ignore [missing-attribute]
-                        SDPBackend.FLASH_ATTENTION,
-                        SDPBackend.MATH,
-                    ]
-                )
 
     if ac_config.mode != "none":
         apply_ac(
