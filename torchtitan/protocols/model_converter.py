@@ -87,20 +87,21 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 def _validate_converter_ordering(converters: list[Configurable.Config]):
     """Validates that converters are in the correct order.
 
-    LoRA must come after quantization because quantization replaces nn.Linear
-    with specialized subclasses (e.g. Float8Linear), and LoRA dynamically
-    inherits from whatever linear class it wraps.
+    LoRA must come after quantization and QAT because both replace nn.Linear
+    with specialized subclasses (e.g. Float8Linear, FakeQuantizedLinear), and
+    LoRA dynamically inherits from whatever linear class it wraps.
     """
     from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization.qat import QATConverter
 
     seen_lora = False
     for config in converters:
         if isinstance(config, LoRAConverter.Config):
             seen_lora = True
-        elif isinstance(config, QuantizationConverter.Config) and seen_lora:
+        elif isinstance(config, (QuantizationConverter.Config, QATConverter.Config)) and seen_lora:
             raise ValueError(
-                "LoRA converter must come after quantization converters. "
-                "Quantization replaces nn.Linear with specialized subclasses, "
+                "LoRA converter must come after quantization and QAT converters. "
+                "Quantization/QAT replaces nn.Linear with specialized subclasses, "
                 "and LoRA must wrap the final linear class."
             )
 
