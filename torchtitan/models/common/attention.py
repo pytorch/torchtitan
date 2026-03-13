@@ -12,7 +12,7 @@ from typing import ClassVar, NamedTuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
@@ -101,17 +101,23 @@ class LocalMapModule(Module):
             assert isinstance(k, DTensor) and isinstance(
                 v, DTensor
             ), "q, k, v should all be DTensors"
+            # All placements must be Shard. We set
+            # out_placements and in_grad_placements equal to
+            # in_placements below. This is only valid for attention
+            # as qkv are sharded on head dim. CP is handled
+            # independently by _ContextParallel hooks inside
+            # nn.Module.__call__.
+            for tensor, name in ((q, "q"), (k, "k"), (v, "v")):
+                for p in tensor.placements:
+                    assert isinstance(p, Shard), (
+                        f"LocalMapModule requires Shard placements, "
+                        f"but {name} has placement {p}"
+                    )
             if self._local_map_fn is None:
                 self._local_map_fn = local_map(
                     super().__call__,
                     in_placements=(q.placements, k.placements, v.placements),
                     out_placements=(q.placements,),
-                    # For TP (Shard on heads dim), in_grad_placements always
-                    # matches in_placements since each rank owns a distinct
-                    # shard of heads and grads stay on the same shard.
-                    # CP grad placements are not a concern here because local_map
-                    # only operates on the TP mesh. CP is handled independently
-                    # by _ContextParallel hooks inside nn.Module.__call__.
                     in_grad_placements=(q.placements, k.placements, v.placements),
                     device_mesh=q.device_mesh,
                 )
