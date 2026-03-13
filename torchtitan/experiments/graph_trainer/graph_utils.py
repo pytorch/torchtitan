@@ -28,6 +28,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     end_with_pass,
     get_extra_fsdp_pg_name,
 )
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
 
@@ -184,7 +185,7 @@ def joint_graph_builder(
     return wrapper_fn
 
 
-class CompiledModule(torch.nn.Module):
+class CompiledModule(Module):
     def __init__(
         self,
         inner: torch.nn.Module,

@@ -12,6 +12,8 @@ from einops import rearrange
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
+from torchtitan.protocols.module import Module, ModuleContainer
+
 
 @dataclass
 class AutoEncoderParams:
@@ -30,7 +32,7 @@ def swish(x: Tensor) -> Tensor:
     return x * torch.sigmoid(x)
 
 
-class AttnBlock(nn.Module):
+class AttnBlock(Module):
     def __init__(self, in_channels: int):
         super().__init__()
         self.in_channels = in_channels
@@ -62,7 +64,7 @@ class AttnBlock(nn.Module):
         return x + self.proj_out(self.attention(x))
 
 
-class ResnetBlock(nn.Module):
+class ResnetBlock(Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.in_channels = in_channels
@@ -102,7 +104,7 @@ class ResnetBlock(nn.Module):
         return x + h
 
 
-class Downsample(nn.Module):
+class Downsample(Module):
     def __init__(self, in_channels: int):
         super().__init__()
         # no asymmetric padding in torch conv, must do it ourselves
@@ -117,7 +119,7 @@ class Downsample(nn.Module):
         return x
 
 
-class Upsample(nn.Module):
+class Upsample(Module):
     def __init__(self, in_channels: int):
         super().__init__()
         self.conv = nn.Conv2d(
@@ -130,7 +132,7 @@ class Upsample(nn.Module):
         return x
 
 
-class Encoder(nn.Module):
+class Encoder(Module):
     def __init__(
         self,
         resolution: int,
@@ -164,7 +166,7 @@ class Encoder(nn.Module):
             for _ in range(self.num_res_blocks):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-            down = nn.Module()
+            down = ModuleContainer()
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions - 1:
@@ -173,7 +175,7 @@ class Encoder(nn.Module):
             self.down.append(down)
 
         # middle
-        self.mid = nn.Module()
+        self.mid = ModuleContainer()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
@@ -217,7 +219,7 @@ class Encoder(nn.Module):
         return h
 
 
-class Decoder(nn.Module):
+class Decoder(Module):
     def __init__(
         self,
         ch: int,
@@ -247,7 +249,7 @@ class Decoder(nn.Module):
         )
 
         # middle
-        self.mid = nn.Module()
+        self.mid = ModuleContainer()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
@@ -261,7 +263,7 @@ class Decoder(nn.Module):
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-            up = nn.Module()
+            up = ModuleContainer()
             up.block = block
             up.attn = attn
             if i_level != 0:
@@ -312,7 +314,7 @@ class Decoder(nn.Module):
         return h
 
 
-class DiagonalGaussian(nn.Module):
+class DiagonalGaussian(Module):
     def __init__(self, sample: bool = True, chunk_dim: int = 1):
         super().__init__()
         self.sample = sample
@@ -327,7 +329,7 @@ class DiagonalGaussian(nn.Module):
             return mean
 
 
-class AutoEncoder(nn.Module):
+class AutoEncoder(Module):
     def __init__(self, params: AutoEncoderParams):
         super().__init__()
         self.params = params

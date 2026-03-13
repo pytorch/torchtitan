@@ -11,12 +11,13 @@ from torch.distributed.tensor import DTensor
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
+from torchtitan.protocols.module import Module
 from vllm.model_executor.layers.attention import Attention
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMAttention(torch.nn.Module):
+class VLLMAttention(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,

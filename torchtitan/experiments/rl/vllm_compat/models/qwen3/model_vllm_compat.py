@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 # Import from main torchtitan
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.module import Module
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
@@ -82,7 +83,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-class VLLMRMSNorm(nn.Module):
+class VLLMRMSNorm(Module):
     """
     RMSNorm using vLLM's exact Triton kernel for bitwise determinism.
     Compatible with PyTorch's nn.RMSNorm interface but uses vLLM's implementation.
@@ -104,7 +105,7 @@ class VLLMRMSNorm(nn.Module):
         nn.init.ones_(self.weight)
 
 
-class FeedForwardVLLMCompat(nn.Module):
+class FeedForwardVLLMCompat(Module):
     """
     FeedForward module compatible with vLLM implementation.
     Uses merged gate_up projection like vLLM.
@@ -132,13 +133,14 @@ class FeedForwardVLLMCompat(nn.Module):
         output = self.down_proj(activated)
         return output
 
-    def init_weights(self, init_std: float):
-        # Initialize like vLLM
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         nn.init.trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
 
 
-class Attention(nn.Module):
+class Attention(Module):
     """
     Multi-head attention module compatible with vLLM.
     """
@@ -172,7 +174,9 @@ class Attention(nn.Module):
         # Always use vLLM compatible flash attention
         self.inner_attention = VLLMCompatibleFlashAttention()
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         for linear in (self.wq, self.wk, self.wv):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
@@ -226,7 +230,7 @@ class Attention(nn.Module):
         return self.wo(output)
 
 
-class TransformerBlock(nn.Module):
+class TransformerBlock(Module):
     """
     TransformerBlock with vLLM-compatible FFN.
     """
@@ -267,11 +271,11 @@ class TransformerBlock(nn.Module):
 
         return x
 
-    def init_weights(self, buffer_device: torch.device):
+    def init_weights(self, **kwargs) -> None:
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        self.attention.init_weights(init_std=self.weight_init_std)
+        self.feed_forward.init_weights(init_std=self.weight_init_std)
 
 
 class Qwen3VLLMCompatModel(BaseModel):
@@ -318,7 +322,7 @@ class Qwen3VLLMCompatModel(BaseModel):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_weights(buffer_device)
+                layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.config.dim**-0.5

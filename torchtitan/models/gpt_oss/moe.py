@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.moe.utils import _permute, _unpermute
+from torchtitan.protocols.module import Module
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -178,14 +179,15 @@ def _run_experts_grouped_mm(
     return h
 
 
-class GptOssGroupedExperts(nn.Module):
+class GptOssGroupedExperts(Module):
     def __init__(
         self,
+        *,
         dim: int,
         hidden_dim: int,
         num_experts: int,
-        swiglu_limit: float,
         use_grouped_mm: bool,
+        swiglu_limit: float,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -263,7 +265,9 @@ class GptOssGroupedExperts(nn.Module):
                 tp_degree,
             )
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
@@ -287,6 +291,6 @@ class GptOssMoE(MoE):
             dim=dim,
             hidden_dim=config.hidden_dim,
             num_experts=config.num_experts,
-            swiglu_limit=config.swiglu_limit,
             use_grouped_mm=config.use_grouped_mm,
+            swiglu_limit=config.swiglu_limit,
         )
