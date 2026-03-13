@@ -10,10 +10,12 @@ from collections.abc import Callable
 
 import torch
 from torch.distributed._tensor import DTensor
+
+from torchtitan.protocols.module import Module
 from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 
-class VLLMCompatibleFlashAttention(torch.nn.Module):
+class VLLMCompatibleFlashAttention(Module):
     """Wrapper around FlashAttention as used by VLLM"""
 
     def __init__(self) -> None:
