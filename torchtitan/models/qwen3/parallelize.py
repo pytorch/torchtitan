@@ -10,6 +10,7 @@
 import torch
 import torch._inductor.config
 import torch.nn as nn
+from torch.backends.cuda import SDPBackend
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -33,6 +34,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.parallelize import apply_replicate
+
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -125,11 +127,6 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
-        if parallel_dims.tp_enabled:
-            raise NotImplementedError(
-                "Context Parallel with Tensor Parallel is not yet supported for Qwen3. "
-                "See https://github.com/pytorch/torchtitan/issues/2446"
-            )
         attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
@@ -137,6 +134,19 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
             attn_backend,
         )
+
+    if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
+        # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+        # Exclude cuDNN until PyTorch fix lands. See https://github.com/pytorch/pytorch/issues/176915.
+        if attn_backend == "sdpa":
+            # pyrefly: ignore [missing-attribute, not-callable]
+            for block in model.layers.values():
+                block.attention.inner_attention.sdpa_backends = (
+                    [  # pyrefly: ignore [missing-attribute]
+                        SDPBackend.FLASH_ATTENTION,
+                        SDPBackend.MATH,
+                    ]
+                )
 
     if ac_config.mode != "none":
         apply_ac(
