@@ -248,8 +248,8 @@ class TestApplySACPass(TestCase):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
-    def test_getitem_nodes_skipped(self):
-        """operator.getitem nodes should not receive any annotation."""
+    def test_getitem_propagates_parent_tag(self):
+        """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -258,10 +258,28 @@ class TestApplySACPass(TestCase):
             ]
         )
         apply_sac_pass(gm)
-        for node in self._get_call_function_nodes(gm):
-            if node.target is operator.getitem:
-                self.assertNotIn("recompute", node.meta)
-                self.assertNotIn("ac_graph_id", node.meta)
+        nodes = self._get_call_function_nodes(gm)
+        add_node = nodes[0]
+        getitem_node = nodes[1]
+        self.assertEqual(add_node.target, torch.ops.aten.add.Tensor)
+        self.assertEqual(getitem_node.target, operator.getitem)
+        self.assertEqual(getitem_node.meta["recompute"], add_node.meta["recompute"])
+
+    def test_wait_tensor_propagates_parent_tag(self):
+        """wait_tensor nodes should inherit the parent's recompute tag."""
+        custom_save = {torch.ops._c10d_functional.reduce_scatter_tensor.default}
+        gm = self._build_gm(
+            [
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+            ]
+        )
+        apply_sac_pass(gm, op_list_to_save=custom_save)
+        nodes = self._get_call_function_nodes(gm)
+        rs_node = nodes[0]
+        wait_node = nodes[1]
+        self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
     def test_ac_graph_id_set(self):
         """All annotated nodes should have ac_graph_id = 0."""

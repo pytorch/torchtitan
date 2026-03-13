@@ -196,6 +196,21 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--compile.joint_passes apply_sac",
+                ],
+            ],
+            "AOT llama3 FSDP+TP graph SAC",
+            "aot_llama3_fsdp_tp_graph_sac",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes auto_bucketing",
                 ],
             ],
@@ -376,6 +391,23 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "AOT deepseek_v3 FSDP+TP+EP",
             "aot_deepseekv3_fsdp_tp_ep",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.joint_passes apply_sac",
+                ],
+            ],
+            "AOT deepseek_v3 FSDP+TP+EP Graph SAC",
+            "aot_deepseekv3_fsdp_tp_ep_graph_sac",
             ngpu=8,
         ),
         OverrideDefinitions(
