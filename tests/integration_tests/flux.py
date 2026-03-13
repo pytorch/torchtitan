@@ -53,7 +53,11 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
+<<<<<<< HEAD
     random_init_arg = "--tokenizer.test_mode --encoder._random-init"
+=======
+    random_init_arg = "--tokenizer.test_mode --encoder.random_init"
+>>>>>>> 36c59d2b (Fix missed _random_init rename in unit test CLI argument)
     clip_encoder_version_arg = (
         "--encoder.clip_encoder tests/assets/flux_test_encoders/clip-vit-large-patch14/"
     )

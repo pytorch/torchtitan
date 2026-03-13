@@ -19,7 +19,7 @@ class FluxEncoderConfig:
         "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
     )
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
-    _random_init: bool = False
+    random_init: bool = False
     """If True, initialize encoders with random weights instead of loading pretrained weights (for testing only)."""
 
 
