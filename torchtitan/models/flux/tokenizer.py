@@ -73,7 +73,7 @@ class FluxTokenizerContainer(BaseTokenizer):
         Returns:
             A dict with keys "clip_text" and/or "t5_text".
         """
-        result = {}
+        results = {}
         if "t5" in tokens:
             result["t5_text"] = self.t5_tokenizer.decode(tokens["t5"])
         if "clip" in tokens:
