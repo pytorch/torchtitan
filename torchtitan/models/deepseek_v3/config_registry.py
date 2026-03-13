@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -56,6 +57,19 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             selective_ac_option="op",
         ),
     )
+
+
+def deepseek_v3_debugmodel_lora() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+            ),
+        ],
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
