@@ -56,27 +56,15 @@ torchrun --nproc_per_node=2 torchtitan/experiments/rl/unified/inference_example.
 
 **NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
 
-6. Run simple GRPO RL loop
+6. Run simple GRPO RL loop for model to learn sum digits task
 ```bash
-python torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b
+python torchtitan/experiments/rl/unified/simple_grpo_sum_digits.py --module rl.unified --config rl_grpo_qwen3_0_6b
 ```
 
 **NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.
 
 We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
-## TODO
-Work on batch invariance:
-1. Integrate with simple_rl_multiprocess.py to run end-to-end RL with one canonical model definition(UNIFIED mode).
-2. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
-3. Leverage batch-invariant kernels into model definition.
 
-Work on the RL loop:
-1. Design trainer API and integrate with [train.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/train.py#L475)
-2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
-3. Need to load the gsm8k dataset using TorchTitan dataset.
-4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore. Also need to
-    replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).
-5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
-6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
-7. In the longer term, need to add episode queue to achieve async, right now trainer and generator are running synchronously.
+
+**Current status:** Batch invariance is only supported for single-GPU configurations (TP=1) for both the trainer and generator. When tensor parallelism is enabled (TP > 1), batch-invariant mode is not yet supported.
