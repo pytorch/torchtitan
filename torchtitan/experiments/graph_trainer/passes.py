@@ -113,12 +113,14 @@ def validate_flex_attn_annotation_pass(
 # where recomputation is expensive.
 DEFAULT_SAC_SAVE_OPS = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
     torch.ops.aten._scaled_dot_product_attention_math.default,
     torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.all_to_all_single.default,
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
     torch._higher_order_ops.inductor_compiled_code,
@@ -159,11 +161,9 @@ def apply_sac_pass(
     if op_list_to_save is None:
         op_list_to_save = DEFAULT_SAC_SAVE_OPS
 
-    nodes = list(gm.graph.nodes)
-    output_node = nodes[-1].all_input_nodes[0]
     mm_count = 0
 
-    for node in nodes:
+    for node in gm.graph.nodes:
         if node.op != "call_function" or node.target is operator.getitem:
             continue
 
@@ -180,9 +180,6 @@ def apply_sac_pass(
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
         else:
             node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
-
-        if node is output_node:
-            break
 
     gm.recompile()
     logger.info(
