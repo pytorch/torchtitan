@@ -239,6 +239,7 @@ class FluxDataset(IterableDataset, Stateful):
         while True:
             try:
                 sample = next(dataset_iterator)
+            # StopIteration must be caught before Exception: it is a subclass of Exception in Python 3.
             except StopIteration:
                 # We are asumming the program hits here only when reaching the end of the dataset.
                 if not self.infinite:
