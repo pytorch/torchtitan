@@ -231,7 +231,9 @@ class CompiledModule(Module):
     def init_weights(self, **kwargs) -> None:
         # Explicitly delegate to inner model. Without this override,
         # Module.init_weights (a no-op) would be found via MRO before
-        # __getattr__ is triggered, silently skipping weight initialization.
+        # the overwritten __getattr__ is triggered, silently skipping
+        # weight initialization.
+        # This is similar to state_dict, load_state_dict, ...
         self.inner.init_weights(**kwargs)
 
     def state_dict(self, *args, **kwargs) -> Any:
