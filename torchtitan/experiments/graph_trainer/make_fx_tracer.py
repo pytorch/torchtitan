@@ -23,6 +23,52 @@ from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 
+@contextmanager
+def _skip_nested_compile() -> Generator[None, None, None]:
+    """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
+
+    make_fx cannot trace through torch.compile'd functions (e.g. compiled
+    flex_attention in FlexAttentionWrapper). Setting error_on_nested_fx_trace
+    to False makes dynamo silently inline the wrapped function instead of
+    raising, so make_fx traces the underlying ops normally.
+    """
+    prev = torch._dynamo.config.error_on_nested_fx_trace
+    torch._dynamo.config.error_on_nested_fx_trace = False
+    try:
+        yield
+    finally:
+        torch._dynamo.config.error_on_nested_fx_trace = prev
+
+
+@contextmanager
+def use_uncompiled_flex_attention() -> Generator[None, None, None]:
+    """Disable all torch.compile wrapping around flex_attention.
+
+    FlexAttentionWrapper uses a pre-compiled flex_attention (outer compile),
+    and raw flex_attention itself calls torch.compile internally (inner
+    compile). This context manager disables both so that flex_attention
+    dispatches directly through the FlexAttentionHOP without any fusion.
+
+    Use this around both tracing and eager execution to ensure bitwise-
+    identical numerics. The traced graph preserves the FlexAttentionHOP,
+    and eager also dispatches through the same unfused HOP path.
+    """
+    from torch.nn.attention import flex_attention as flex_attn_mod
+    from torch.nn.attention.flex_attention import flex_attention as raw_flex_attention
+
+    from torchtitan.models.common.attention import FlexAttentionWrapper
+
+    prev_compiled = FlexAttentionWrapper._compiled_flex_attn
+    prev_debug = flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG
+    FlexAttentionWrapper._compiled_flex_attn = staticmethod(raw_flex_attention)
+    flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = True
+    try:
+        yield
+    finally:
+        FlexAttentionWrapper._compiled_flex_attn = prev_compiled
+        flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = prev_debug
+
+
 @dataclass
 class SubclassMeta:
     cls: type
@@ -315,7 +361,7 @@ def trace_module(
         return unwrapped_outputs
 
     # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with fake_mode, preserve_node_meta():
+    with fake_mode, preserve_node_meta(), _skip_nested_compile(), use_uncompiled_flex_attention():
         traced = make_fx(
             fn_with_subclass_handling,
             record_stack_traces=True,

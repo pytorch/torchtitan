@@ -9,12 +9,14 @@ from collections import Counter
 
 import torch
 import torch.nn as nn
+from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
     run_traced_module,
     trace_module,
+    use_uncompiled_flex_attention,
 )
 
 
@@ -38,7 +40,7 @@ class TrainStepModule(nn.Module):
         loss = self.loss_fn(logits, labels)
         # Must look up params in forward (not __init__) so that
         # _reparametrize_module's swapped parameters are captured during tracing.
-        params = [p for _, p in self.model.named_parameters(remove_duplicate=False)]
+        params = list(self.model.parameters())
         grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
 
@@ -99,14 +101,14 @@ class TestTraceModule(unittest.TestCase):
         model, tokens, labels, loss_fn = self._make_mlp()
         traced_result = trace_module(model, (tokens,))
         out_eager = model(tokens)
-        pab = _get_params_and_buffers(model)
-        wrapped = run_traced_module(traced_result, pab, (tokens,))
+        params_and_buffers = _get_params_and_buffers(model)
+        wrapped = run_traced_module(traced_result, params_and_buffers, (tokens,))
         self.assertTrue(torch.equal(out_eager, wrapped[0]))
 
     def test_mlp_train_step(self):
         model_ref, tokens, labels, loss_fn = self._make_mlp()
-        model_copy = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        model_copy.load_state_dict(model_ref.state_dict())
+        model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        model_test.load_state_dict(model_ref.state_dict())
 
         train_step = TrainStepModule(model_ref, loss_fn)
         traced_result = trace_module(train_step, (tokens, labels))
@@ -116,9 +118,9 @@ class TestTraceModule(unittest.TestCase):
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        train_step_copy = TrainStepModule(model_copy, loss_fn)
-        pab = _get_params_and_buffers(train_step_copy)
-        wrapped = run_traced_module(traced_result, pab, (tokens, labels))
+        train_step_copy = TrainStepModule(model_test, loss_fn)
+        params_and_buffers = _get_params_and_buffers(train_step_copy)
+        wrapped = run_traced_module(traced_result, params_and_buffers, (tokens, labels))
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -128,15 +130,15 @@ class TestTraceModule(unittest.TestCase):
 
     def test_mlp_multistep_bitwise(self):
         model_ref, tokens, labels, loss_fn = self._make_mlp()
-        model_copy = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        model_copy.load_state_dict(model_ref.state_dict())
+        model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        model_test.load_state_dict(model_ref.state_dict())
 
         train_step_ref = TrainStepModule(model_ref, loss_fn)
-        train_step_copy = TrainStepModule(model_copy, loss_fn)
+        train_step_copy = TrainStepModule(model_test, loss_fn)
         traced_result = trace_module(train_step_ref, (tokens, labels))
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
-        opt_copy = torch.optim.Adam(model_copy.parameters(), lr=self.LR)
+        opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR)
 
         for step in range(1, self.NUM_STEPS + 1):
             logits_ref = model_ref(tokens)
@@ -146,11 +148,13 @@ class TestTraceModule(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            pab = _get_params_and_buffers(train_step_copy)
-            wrapped = run_traced_module(traced_result, pab, (tokens, labels))
+            params_and_buffers = _get_params_and_buffers(train_step_copy)
+            wrapped = run_traced_module(
+                traced_result, params_and_buffers, (tokens, labels)
+            )
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
-            for p, g in zip(model_copy.parameters(), grads_tr, strict=True):
+            for p, g in zip(model_test.parameters(), grads_tr, strict=True):
                 p.grad = g
             opt_copy.step()
             opt_copy.zero_grad()
@@ -217,8 +221,8 @@ class TestTraceDTensor(unittest.TestCase):
         self.assertTrue(has_subclass)
 
         out_eager = model(tokens_dt)
-        pab = _get_params_and_buffers(model)
-        wrapped = run_traced_module(traced_result, pab, (tokens_dt,))
+        params_and_buffers = _get_params_and_buffers(model)
+        wrapped = run_traced_module(traced_result, params_and_buffers, (tokens_dt,))
         self.assertTrue(torch.equal(out_eager.full_tensor(), wrapped[0].full_tensor()))
 
     def test_dtensor_train_step(self):
@@ -228,11 +232,11 @@ class TestTraceDTensor(unittest.TestCase):
         mesh = init_device_mesh(self.DEVICE, (1,))
 
         model_ref = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        model_copy = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        model_copy.load_state_dict(model_ref.state_dict())
+        model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        model_test.load_state_dict(model_ref.state_dict())
 
         self._distribute_params(model_ref, mesh)
-        self._distribute_params(model_copy, mesh)
+        self._distribute_params(model_test, mesh)
 
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
@@ -247,9 +251,11 @@ class TestTraceDTensor(unittest.TestCase):
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        train_step_copy = TrainStepModule(model_copy, get_loss)
-        pab = _get_params_and_buffers(train_step_copy)
-        wrapped = run_traced_module(traced_result, pab, (tokens_dt, labels_dt))
+        train_step_copy = TrainStepModule(model_test, get_loss)
+        params_and_buffers = _get_params_and_buffers(train_step_copy)
+        wrapped = run_traced_module(
+            traced_result, params_and_buffers, (tokens_dt, labels_dt)
+        )
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -350,6 +356,352 @@ class TestMetadataPropagation(unittest.TestCase):
         # After the context, it should be restored
         self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
         self.assertIs(torch.autograd._engine_run_backward, orig_fn)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestTraceModels(unittest.TestCase):
+    DEVICE = "cuda"
+    DTYPE = torch.float32
+    BATCH_SIZE = 2
+    SEQ_LEN = 128
+    NUM_STEPS = 5
+    LR = 1e-3
+
+    def setUp(self):
+        torch.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+
+    def tearDown(self):
+        torch.use_deterministic_algorithms(False)
+
+    def _run_bitwise_test(
+        self,
+        model_ref,
+        model_test,
+        fwd_args,
+        labels,
+        check_collective_ops=False,
+        num_steps=5,
+        lr=1e-3,
+    ):
+        train_step_ref = TrainStepModule(model_ref, get_loss)
+
+        traced_result = trace_module(train_step_ref, (*fwd_args, labels))
+
+        if check_collective_ops:
+            ag = sum(
+                1
+                for n in traced_result.gm.graph.nodes
+                if "all_gather_into_tensor" in str(n.target)
+            )
+            rs = sum(
+                1
+                for n in traced_result.gm.graph.nodes
+                if "reduce_scatter_tensor" in str(n.target)
+            )
+            self.assertTrue(
+                ag > 0 and rs > 0,
+                f"Expected collective ops in FSDP graph (ag={ag}, rs={rs})",
+            )
+
+        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=lr)
+        opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr)
+
+        for step in range(1, num_steps + 1):
+            with use_uncompiled_flex_attention():
+                logits_ref = model_ref(*fwd_args)
+            loss_ref = get_loss(logits_ref, labels)
+            loss_ref.backward()
+            grads_ref = [p.grad.clone() for p in model_ref.parameters()]
+            opt_ref.step()
+            opt_ref.zero_grad()
+
+            train_step_copy = TrainStepModule(model_test, get_loss)
+            params_and_buffers = _get_params_and_buffers(train_step_copy)
+            wrapped = run_traced_module(
+                traced_result, params_and_buffers, (*fwd_args, labels)
+            )
+            loss_tr = wrapped[0]
+            grads_tr = wrapped[1:]
+            for p, g in zip(model_test.parameters(), grads_tr, strict=True):
+                p.grad = g
+            opt_copy.step()
+            opt_copy.zero_grad()
+
+            self.assertTrue(
+                torch.equal(loss_ref, loss_tr), f"Step {step}: loss mismatch"
+            )
+            for gr, gt in zip(grads_ref, grads_tr, strict=True):
+                self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
+
+    def _run_model_test(self, config_cls, model_config, use_attn_masks=False):
+        vocab_size = model_config.vocab_size
+        model_ref = create_model(config_cls, model_config, self.DEVICE, self.DTYPE)
+        model_test = create_model(config_cls, model_config, self.DEVICE, self.DTYPE)
+        model_test.load_state_dict(model_ref.state_dict())
+        tokens = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
+        )
+        labels = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
+        )
+
+        fwd_args = (tokens,)
+        if use_attn_masks:
+            from torchtitan.models.common.attention import (
+                create_attention_mask,
+                get_causal_mask_mod,
+            )
+
+            attn_masks = create_attention_mask(
+                get_causal_mask_mod(), 1, None, self.SEQ_LEN, self.SEQ_LEN
+            )
+            fwd_args = (tokens, attn_masks)
+
+        self._run_bitwise_test(
+            model_ref,
+            model_test,
+            fwd_args,
+            labels,
+            num_steps=self.NUM_STEPS,
+            lr=self.LR,
+        )
+
+    def test_llama3(self):
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        self._run_model_test(Llama3Model, llama3_configs["debugmodel"])
+
+    def test_qwen3(self):
+        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3.model import Qwen3Model
+
+        self._run_model_test(Qwen3Model, qwen3_configs["debugmodel"])
+
+    def test_qwen3_moe(self):
+        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3.model import Qwen3Model
+
+        self._run_model_test(Qwen3Model, qwen3_configs["debugmodel_moe"])
+
+    def test_deepseek_v3(self):
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+
+        self._run_model_test(DeepSeekV3Model, deepseekv3_configs["debugmodel"])
+
+    def test_llama4(self):
+        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4.model import Llama4Model
+
+        self._run_model_test(
+            Llama4Model, llama4_configs["debugmodel"], use_attn_masks=True
+        )
+
+    def test_gpt_oss(self):
+        from torch.nn.attention.flex_attention import and_masks
+
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            get_causal_mask_mod,
+            get_sliding_window_mask_mod,
+        )
+        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss.model import GptOssModel
+
+        config = gptoss_configs["debugmodel"]
+        vocab_size = config.vocab_size
+        model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
+        model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
+        model_test.load_state_dict(model_ref.state_dict())
+        tokens = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
+        )
+        labels = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
+        )
+        causal = get_causal_mask_mod()
+        sw_size = config.layer.attention.sliding_window_size
+        basic_mask = create_attention_mask(causal, 1, None, self.SEQ_LEN, self.SEQ_LEN)
+        sliding_window_mask = create_attention_mask(
+            and_masks(causal, get_sliding_window_mask_mod(sw_size)),
+            1,
+            None,
+            self.SEQ_LEN,
+            self.SEQ_LEN,
+        )
+        attn_masks = {
+            "basic_mask": basic_mask,
+            "sliding_window_mask": sliding_window_mask,
+        }
+        self._run_bitwise_test(
+            model_ref,
+            model_test,
+            (tokens, attn_masks),
+            labels,
+            num_steps=self.NUM_STEPS,
+            lr=self.LR,
+        )
+
+
+class TestTraceFSDP(FSDPTest):
+    @property
+    def world_size(self):
+        return min(torch.cuda.device_count(), 4)
+
+    def _setup(self):
+        from torchtitan.distributed import ParallelDims
+
+        self.parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+    def _run_fsdp_model_test(
+        self, config_cls, model_config, use_attn_masks=False, attn_masks=None
+    ):
+        from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+        self._setup()
+        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+
+        model_ref = create_model(config_cls, model_config, "cuda", torch.float32)
+        model_test = create_model(config_cls, model_config, "cuda", torch.float32)
+        model_test.load_state_dict(model_ref.state_dict())
+        data_parallel(model_ref, device_mesh=fsdp_mesh, mode="fully_shard")
+        data_parallel(model_test, device_mesh=fsdp_mesh, mode="fully_shard")
+
+        vocab_size = model_config.vocab_size
+        seq_len = 128
+        tokens = torch.randint(0, vocab_size, (2, seq_len), device="cuda")
+        labels = torch.randint(0, vocab_size, (2, seq_len), device="cuda")
+
+        if attn_masks is not None:
+            fwd_args = (tokens, attn_masks)
+        elif use_attn_masks:
+            from torchtitan.models.common.attention import (
+                create_attention_mask,
+                get_causal_mask_mod,
+            )
+
+            attn_masks = create_attention_mask(
+                get_causal_mask_mod(), 1, None, seq_len, seq_len
+            )
+            fwd_args = (tokens, attn_masks)
+        else:
+            fwd_args = (tokens,)
+
+        train_step_ref = TrainStepModule(model_ref, get_loss)
+
+        traced_result = trace_module(train_step_ref, (*fwd_args, labels))
+
+        ag = sum(
+            1
+            for n in traced_result.gm.graph.nodes
+            if "all_gather_into_tensor" in str(n.target)
+        )
+        rs = sum(
+            1
+            for n in traced_result.gm.graph.nodes
+            if "reduce_scatter_tensor" in str(n.target)
+        )
+        self.assertTrue(
+            ag > 0 and rs > 0,
+            f"Expected collective ops in FSDP graph (ag={ag}, rs={rs})",
+        )
+
+        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=1e-3)
+        opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3)
+
+        for step in range(1, 6):
+            with use_uncompiled_flex_attention():
+                logits_ref = model_ref(*fwd_args)
+            loss_ref = get_loss(logits_ref, labels)
+            loss_ref.backward()
+            grads_ref = [p.grad.clone() for p in model_ref.parameters()]
+            opt_ref.step()
+            opt_ref.zero_grad()
+
+            train_step_copy = TrainStepModule(model_test, get_loss)
+            params_and_buffers = _get_params_and_buffers(train_step_copy)
+            wrapped = run_traced_module(
+                traced_result, params_and_buffers, (*fwd_args, labels)
+            )
+            loss_tr = wrapped[0]
+            grads_tr = wrapped[1:]
+            for p, g in zip(model_test.parameters(), grads_tr, strict=True):
+                p.grad = g
+            opt_copy.step()
+            opt_copy.zero_grad()
+
+            self.assertTrue(
+                torch.equal(loss_ref, loss_tr), f"Step {step}: loss mismatch"
+            )
+            for gr, gt in zip(grads_ref, grads_tr, strict=True):
+                self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
+
+    def test_llama3_fsdp(self):
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        self._run_fsdp_model_test(Llama3Model, llama3_configs["debugmodel"])
+
+    def test_qwen3_fsdp(self):
+        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3.model import Qwen3Model
+
+        self._run_fsdp_model_test(Qwen3Model, qwen3_configs["debugmodel"])
+
+    def test_deepseek_v3_fsdp(self):
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+
+        self._run_fsdp_model_test(DeepSeekV3Model, deepseekv3_configs["debugmodel"])
+
+    def test_llama4_fsdp(self):
+        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4.model import Llama4Model
+
+        self._run_fsdp_model_test(
+            Llama4Model, llama4_configs["debugmodel"], use_attn_masks=True
+        )
+
+    def test_gpt_oss_fsdp(self):
+        from torch.nn.attention.flex_attention import and_masks
+
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            get_causal_mask_mod,
+            get_sliding_window_mask_mod,
+        )
+        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss.model import GptOssModel
+
+        config = gptoss_configs["debugmodel"]
+        seq_len = 128
+        causal = get_causal_mask_mod()
+        sw_size = config.layer.attention.sliding_window_size
+        basic_mask = create_attention_mask(causal, 1, None, seq_len, seq_len)
+        sliding_window_mask = create_attention_mask(
+            and_masks(causal, get_sliding_window_mask_mod(sw_size)),
+            1,
+            None,
+            seq_len,
+            seq_len,
+        )
+        attn_masks = {
+            "basic_mask": basic_mask,
+            "sliding_window_mask": sliding_window_mask,
+        }
+        self._run_fsdp_model_test(GptOssModel, config, attn_masks=attn_masks)
 
 
 if __name__ == "__main__":
