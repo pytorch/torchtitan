@@ -16,7 +16,6 @@ import dataclasses
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-import torch.nn as nn
 from torch.distributed._tensor import DTensor, Replicate
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
@@ -29,6 +28,7 @@ from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_attention,
 )
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -118,7 +118,7 @@ def create_torchtitan_config_from_vllm_config(
         "positions": 0,
     }
 )
-class TorchTitanVLLMModelWrapper(nn.Module):
+class TorchTitanVLLMModelWrapper(Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
     required interface required by vLLM Engine.

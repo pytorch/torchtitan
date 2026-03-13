@@ -14,6 +14,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.llama3 import Llama3Model as Llama3
+from torchtitan.protocols.module import Module
 
 from .args import Siglip2Config, SpecialTokens
 from .siglip2 import VisionTransformer
@@ -34,7 +35,7 @@ def _scatter_img_tokens(h_BSD, tokens_BS, i_NLD, i_mask_NL, img_id):
     return h_BSD
 
 
-class Projector(nn.Module):
+class Projector(Module):
     """Project the Encoder embedding to the LLM embedding."""
 
     def __init__(self, in_dim: int, out_dim: int) -> None:
@@ -49,7 +50,7 @@ class Projector(nn.Module):
         x_NLD = self.w2(x_NLD)
         return x_NLD
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         nn.init.xavier_uniform_(self.w1.weight)
         if self.w1.bias is not None:
             nn.init.zeros_(self.w1.bias)
