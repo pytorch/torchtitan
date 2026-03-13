@@ -242,12 +242,12 @@ class PolicyTrainer(Actor, Configurable):
     async def step(self, episodes: list[Episode]) -> dict:
         """Perform one training step.
 
-        Computes advantages from rewards on the full batch (GRPO normalizes
-        within each prompt group), then shards completions across DP ranks
-        so each rank processes a unique slice of the data.
+        Expects a flat list of Episodes with ``advantage`` already computed
+        by the controller. Shards episodes across DP ranks so each rank
+        processes a unique slice of the data.
 
         Args:
-            episodes: List of Episode data (one per prompt) with rewards filled by Grader
+            episodes: Flat list of Episodes with advantages set.
 
         Returns:
             Training metrics
@@ -256,25 +256,13 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        # Compute GRPO advantages on the full batch (group normalization
-        # requires seeing all completions per prompt).
-        all_token_ids: list[list[int]] = []
-        all_prompt_token_ids: list[list[int]] = []
-        all_token_log_probs: list[list[float]] = []
-        all_advantages: list[torch.Tensor] = []
-        all_rewards: list[float] = []
-        for episode in episodes:
-            rewards = torch.tensor([c.reward for c in episode.completions])
-            advantages = rewards - rewards.mean()
-            all_advantages.append(advantages)
-            all_rewards.extend(c.reward for c in episode.completions)
-            for completion in episode.completions:
-                all_token_ids.append(completion.token_ids)
-                all_prompt_token_ids.append(episode.prompt_token_ids)
-                all_token_log_probs.append(completion.token_log_probs)
+        advantages = torch.tensor([ep.advantage for ep in episodes])
 
-        advantages = torch.cat(all_advantages)
-        all_rewards_tensor = torch.tensor(all_rewards)
+        all_token_ids: list[list[int]] = [ep.token_ids for ep in episodes]
+        all_prompt_token_ids: list[list[int]] = [ep.prompt_token_ids for ep in episodes]
+        all_token_log_probs: list[list[float]] = [ep.token_log_probs for ep in episodes]
+
+        all_rewards_tensor = torch.tensor([ep.reward for ep in episodes])
 
         # Shard flattened completions across DP ranks so each rank processes
         # a unique subset of the data.
@@ -349,7 +337,7 @@ class PolicyTrainer(Actor, Configurable):
             "reward_std": all_rewards_tensor.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": episodes[0].completions[0].text[:80],
+            "sample_completion": episodes[0].text[:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             # Trainer vs generator log prob divergence

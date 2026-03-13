@@ -17,7 +17,7 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-python3 torchtitan/experiments/rl/unified/simple_grpo.py \
+python3 torchtitan/experiments/rl/unified/simple_grpo_sum_digits.py \
     --module rl.unified --config rl_grpo_qwen3_0_6b \
     --hf_assets_path=<path_to_model_checkpoint>
 """
@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -39,6 +40,7 @@ from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigitsTask
+from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,25 @@ class Provisioner:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
 
         return _bootstrap
+
+
+def _log_samples(episodes: list[Episode]) -> None:
+    """Log the first completion per group for debugging."""
+    seen_groups: set[str] = set()
+    for ep in episodes:
+        if ep.group_id in seen_groups:
+            continue
+        seen_groups.add(ep.group_id)
+        extracted = extract_answer(ep.text)
+        is_correct = (
+            extracted == int(ep.expected_answer) if ep.expected_answer else None
+        )
+        mark = "+" if is_correct else "-"
+        logger.info(
+            f"  [{mark}] expected={ep.expected_answer} extracted={extracted} "
+            f"reward={ep.reward:+.1f}"
+        )
+        logger.info(f"       A: {ep.text[:300].replace(chr(10), ' ').strip()}")
 
 
 class RLTrainer(Configurable):
@@ -230,24 +251,24 @@ class RLTrainer(Configurable):
             eval_questions.append(question)
 
         # Generate on eval prompts
-        episodes = self.generator.generate.call(eval_prompts).get().item(gpus=0)
+        episodes = (
+            self.generator.generate.call(eval_prompts, eval_answers).get().item(gpus=0)
+        )
 
-        # Score: check first completion per episode
+        # Score: check first episode per prompt (episodes are ordered by prompt)
         correct = 0
         format_ok = 0
-        for episode, question, answer in zip(episodes, eval_questions, eval_answers):
-            text = episode.completions[0].text
-            extracted = extract_answer(text)
+        samples_per_prompt = self.config.generator.num_samples_per_prompt
+        for i, (question, answer) in enumerate(zip(eval_questions, eval_answers)):
+            ep = episodes[i * samples_per_prompt]
+            extracted = extract_answer(ep.text)
             is_correct = extracted == int(answer)
-            has_tag = bool(re.search(r"\[ANSWER\]", text))
+            has_tag = bool(re.search(r"\[ANSWER\]", ep.text))
             correct += int(is_correct)
             format_ok += int(has_tag)
 
-            if self.config.log_samples:
-                mark = "+" if is_correct else "-"
-                logger.info(f"  [{mark}] expected={answer} extracted={extracted}")
-                logger.info(f"       Q: {question}")
-                logger.info(f"       A: {text[:300].replace(chr(10), ' ').strip()}")
+        if self.config.log_samples:
+            _log_samples(episodes)
 
         result = {
             "accuracy": correct / num_samples,
@@ -278,7 +299,7 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
 
         for step in range(num_steps):
-            # Generate prompts for this step
+            # Generate data sample for this step
             train_prompts = []
             train_answers = []
             train_questions = []
@@ -288,51 +309,45 @@ class RLTrainer(Configurable):
                 train_answers.append(answer)
                 train_questions.append(question)
 
-            step_start = time.perf_counter()
+            step_start: float = time.perf_counter()
 
-            # Fully sync RL loop with separate scoring step
-            # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
-            # TODO: Create a queue to use all episode from all GPUs
-            episodes = self.generator.generate.call(train_prompts).get().item(gpus=0)
-
-            # Attach expected answers to each episode
-            for episode, answer in zip(episodes, train_answers):
-                episode.expected_answer = answer
+            # Fully sync RL loop (GRPO)
+            # 1. Generator produces flat list of Episodes with group_id
+            # TODO: Create a queue to use all episodes from all GPUs
+            episodes = (
+                self.generator.generate.call(train_prompts, train_answers)
+                .get()
+                .item(gpus=0)
+            )
 
             # 2. Grader computes rewards per episode
-            scored_episodes = self.grader.score.call(episodes).get().item()
+            episodes = self.grader.score.call(episodes).get().item()
+
+            # 3. Controller computes GRPO advantages (normalize within group)
+            groups: dict[str, list[int]] = defaultdict(list)
+            for idx, ep in enumerate(episodes):
+                groups[ep.group_id].append(idx)
+            for indices in groups.values():
+                rewards = torch.tensor([episodes[i].reward for i in indices])
+                mean_reward = rewards.mean().item()
+                for i in indices:
+                    episodes[i].advantage = episodes[i].reward - mean_reward
 
             if self.config.log_samples:
-                for ep, question, answer in zip(
-                    scored_episodes, train_questions, train_answers
-                ):
-                    # Log first completion per prompt
-                    comp = ep.completions[0]
-                    extracted = extract_answer(comp.text)
-                    mark = "+" if comp.reward > 0 else "-"
-                    logger.info(
-                        f"  [{mark}] expected={answer} extracted={extracted} "
-                        f"reward={comp.reward:+.1f}"
-                    )
-                    logger.info(f"       Q: {question}")
-                    logger.info(
-                        f"       A: {comp.text[:300].replace(chr(10), ' ').strip()}"
-                    )
+                _log_samples(episodes)
 
-            # 3. Trainer computes advantages and updates policy
-            metrics = self.trainer.step.call(scored_episodes).get().item(gpus=0)
-            # 4. Sync full weights to generator (each rank reshards locally)
+            # 4. Trainer updates policy using episodes with advantages
+            metrics = self.trainer.step.call(episodes).get().item(gpus=0)
+            # 5. Sync full weights to generator (each rank reshards locally)
             weights = self.trainer.get_weights.call().get().item(gpus=0)
             self.generator.update.call(metrics["policy_version"], weights).get()
 
             t_step = time.perf_counter() - step_start
 
-            all_token_lens = [
-                len(c.token_ids) for ep in scored_episodes for c in ep.completions
-            ]
+            all_token_lens = [len(ep.token_ids) for ep in episodes]
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
-            all_rewards = [c.reward for ep in scored_episodes for c in ep.completions]
+            all_rewards = [ep.reward for ep in episodes]
             correct_count = sum(1 for r in all_rewards if r > 0)
             total_count = len(all_rewards)
 
