@@ -8,7 +8,10 @@ from torchtitan.grpo.vllm_handling.vllm_patching.distributed_updater import (
 )
 from vllm.distributed import get_ep_group, get_pp_group, get_tensor_model_parallel_rank
 from vllm.lora.request import LoRARequest
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+# TODO: Support V2 when it's required
+# from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
 
 def _cleanup_process(proc):
@@ -21,9 +24,11 @@ def _cleanup_process(proc):
             proc.join(timeout=2)
 
 
-class PatchedGPUModelRunner(GPUModelRunner):
-    def load_model(self, eep_scale_up: bool = False) -> None:
-        super().load_model(eep_scale_up)
+class PatchedGPUModelRunner(GPUModelRunnerV1):
+    def load_model(self, load_dummy_weights: bool = False) -> None:
+        print("Running load_model in PatchedGPUModelRunner")
+        super().load_model(load_dummy_weights)
+        print("Finished running load_model in PatchedGPUModelRunner")
         ctx = torch.multiprocessing.get_context("spawn")
         self.model.share_memory()
         lora_state_dict = {}
@@ -93,10 +98,20 @@ class PatchedGPUModelRunner(GPUModelRunner):
         tp_rank = get_tensor_model_parallel_rank()
         pp_rank = get_pp_group().rank_in_group
         pp_size = self.parallel_config.pipeline_parallel_size
-        ep_rank = get_ep_group().rank_in_group
-        # TODO: update this whenever vllm changes how ep is handled instead of requiring ep == tp in this version of vllm
-        ep_size = self.parallel_config.tensor_parallel_size
+        try:
+            ep_rank = get_ep_group().rank_in_group
+        except AssertionError as e:
+            # EP group is only created for EP enabled models
+            ep_rank = 0
+        # https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/#configuration
+        # > Enable EP by setting the --enable-expert-parallel flag. The EP size is automatically calculated as:
+        # > EP_SIZE = TP_SIZE × DP_SIZE
+        ep_size = (
+            self.parallel_config.tensor_parallel_size
+            * self.parallel_config.data_parallel_size
+        )
         gpu_id = torch.cuda.device(self.device).idx
+        print(f"Running weight_updater_process with gpu_id {gpu_id}")
         self.mdl_distributed_proc = ctx.Process(
             target=weight_updater_process,
             args=(
@@ -122,7 +137,9 @@ class PatchedGPUModelRunner(GPUModelRunner):
         _was_daemon = _current._config.get("daemon", False)
         _current._config["daemon"] = False
         try:
+            print("Starting weight_updater_process")
             self.mdl_distributed_proc.start()
+            print("Finished starting weight_updater_process")
         finally:
             _current._config["daemon"] = _was_daemon
         atexit.register(_cleanup_process, self.mdl_distributed_proc)

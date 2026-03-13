@@ -14,7 +14,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -42,7 +42,10 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
+from torch.distributed.checkpoint.state_dict_saver import (
+    AsyncCheckpointerType,
+    AsyncSaveResponse,
+)
 from torch.distributed.checkpoint.stateful import Stateful
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -188,6 +191,10 @@ class CheckpointManager:
 
     """
 
+    mp_queue_send: queue.Queue
+    pg: dist.ProcessGroup
+    purge_thread: threading.Thread | None
+
     def __init__(
         self,
         dataloader: BaseDataLoader | None,
@@ -225,7 +232,7 @@ class CheckpointManager:
         )
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
-            logger.warn(
+            logger.warning(
                 "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
                 "This means replicas can retrain over the same data multiple times, which can result in overfitting."
             )
@@ -250,7 +257,9 @@ class CheckpointManager:
                 for k, v in state_dict.items():
                     self.states[k].load_state_dict(v)
 
+            # pyrefly: ignore [missing-attribute]
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+            assert ft_manager is not None
             self.ft_replica_id = ft_manager.replica_id
 
         async_mode = checkpoint_config.async_mode.lower()
@@ -361,7 +370,7 @@ class CheckpointManager:
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
-    ) -> Future | None:
+    ) -> Future | AsyncSaveResponse | None:
         """Save the checkpoint with dcp.
         Args:
             state_dict (dict): The state dict to save.
@@ -374,10 +383,11 @@ class CheckpointManager:
             Future: The future object if the checkpoint is async, otherwise None.
         """
 
-        ret: Future | None = None
+        ret: Future | AsyncSaveResponse | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
+        fqn_to_index_mapping: dict[Any, int] | None = None
         if to_hf:
             if HuggingFaceStorageWriter is None:
                 raise RuntimeError(
@@ -436,11 +446,11 @@ class CheckpointManager:
                 process_group=self.pg,
             )
 
-        if to_hf and self.sd_adapter.fqn_to_index_mapping:
+        if to_hf and fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
-                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                fqn_to_index_mapping=fqn_to_index_mapping,
                 num_threads=5,
             )
 
@@ -572,7 +582,9 @@ class CheckpointManager:
 
         begin = time.monotonic()
         if not self.enable_ft_dataloader_checkpoints or (
-            self.ft_manager and self.ft_manager.participating_rank() == 0
+            self.ft_manager
+            # pyrefly: ignore [missing-attribute]
+            and self.ft_manager.participating_rank() == 0
         ):
             logger.info("Saving the checkpoint (or staging if async is enabled).")
             checkpoint_id = self._create_checkpoint_id(curr_step)
@@ -604,6 +616,7 @@ class CheckpointManager:
                     checkpoint_id=checkpoint_id,
                     async_mode=self.async_mode,
                 )
+                assert isinstance(result, AsyncSaveResponse)
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
                 self.staging = True
@@ -630,6 +643,7 @@ class CheckpointManager:
             assert self.ft_manager is not None
             logger.info(
                 "Replica %d doesn't save checkpoint.",
+                # pyrefly: ignore [missing-attribute]
                 self.ft_manager.participating_rank(),
             )
 
@@ -689,14 +703,19 @@ class CheckpointManager:
                         f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
                     )
             elif from_hf:
-                checkpoint_id = self.sd_adapter.hf_assets_path
+                assert (
+                    self.sd_adapter is not None
+                    and self.sd_adapter.hf_assets_path is not None
+                ), "from_hf is True but sd_adapter or hf_assets_path is not provided."
+                hf_assets_path = self.sd_adapter.hf_assets_path
+                checkpoint_id = hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights but the path is not valid. \
                         Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
                 logger.info(
-                    f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"
+                    f"loading HF safetensors from --model.hf_assets_path: {hf_assets_path}"
                 )
             else:
                 return False
@@ -746,6 +765,7 @@ class CheckpointManager:
         with ``async_checkpoint_with_pinned_memory``.
         """
         if self.enable_staging and self.staging:
+            assert self.staging_future is not None
             self.staging_future.result()
             self.staging = False
 
@@ -951,6 +971,7 @@ class CheckpointManager:
             and os.path.isdir(self.folder)
             and (
                 not self.enable_ft_dataloader_checkpoints
+                # pyrefly: ignore [missing-attribute]
                 or (self.ft_manager and self.ft_manager.participating_rank() == 0)
             )
         ):

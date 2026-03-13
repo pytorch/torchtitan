@@ -8,7 +8,7 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
+from torchtitan.components.optimizer import build_optimizers, build_optimizers_with_moe_load_balancing
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.hf_datasets.dataloader import build_dataloader
@@ -106,6 +106,26 @@ qwen3next_configs = {
             shared_gate=True,
         ),
     ),
+    "35B_A3B-35": Qwen3NextModelArgs(
+        n_layers=40,
+        moe_enabled=True,
+        moe_inter_dim=512,
+        rope_theta=10000000,
+        vocab_size=248320,
+        linear_split_projections=True,
+        moe_args=MoEArgs(
+            num_experts=256,
+            num_shared_experts=1,
+            top_k=8,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+            shared_gate=True,
+            # load_balance_coeff=None, # for loading of offical model weights 
+        ),
+        attn_type="varlen",
+    ),
 }
 
 
@@ -115,7 +135,7 @@ def get_train_spec() -> TrainSpec:
         model_args=qwen3next_configs,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3next,
         pipelining_fn=None,
-        build_optimizers_fn=build_optimizers,
+        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,

@@ -253,10 +253,20 @@ if __name__ == "__main__":
     #
     # -----------------------------------------------------------------------------
 
-    from rich import print as rprint
-    from rich.pretty import Pretty
+    try:
 
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
+        # pyrefly: ignore[missing-import]
+        from rich import print as rprint
 
-    rprint(Pretty(config))
+        # pyrefly: ignore[missing-import]
+        from rich.pretty import Pretty
+
+        config_manager = ConfigManager()
+        config = config_manager.parse_args()
+
+        rprint(Pretty(config))
+    except ImportError:
+        config_manager = ConfigManager()
+        config = config_manager.parse_args()
+        logger.info(config)
+        logger.warning("rich is not installed, show the raw config")

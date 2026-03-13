@@ -1,4 +1,5 @@
 import warnings
+from dataclasses import asdict
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
@@ -57,6 +58,7 @@ class Nanoset(torch.utils.data.Dataset):
         token_size: int,
         dataset_weights: Union[List[float], None] = None,
         random_seed: int = 1234,
+        target_tokens: Union[int, None] = None,
     ) -> None:
 
         # Checks
@@ -71,6 +73,7 @@ class Nanoset(torch.utils.data.Dataset):
         self.sequence_length = sequence_length
         self.token_size = token_size
         self.random_seed = random_seed
+        self.target_tokens = target_tokens
         self.datatrove_datasets = []
         for dataset_folder in self.dataset_folders:
             self.datatrove_datasets.append(
@@ -128,13 +131,17 @@ class Nanoset(torch.utils.data.Dataset):
         """
         Build dataset index and dataset sample index
         """
-        # Compute samples per epoch and number of epochs
-        samples_per_epoch = sum(self.dataset_lengths)
-        # num_epochs = int(self.train_split_num_samples / samples_per_epoch) + 1
-        num_epochs = 1
+        # Compute target number of samples and how many epochs that requires
+        raw_samples_per_epoch = sum(self.dataset_lengths)
+        if self.target_tokens is not None:
+            target_samples = self.target_tokens // self.sequence_length
+            num_epochs = (target_samples // raw_samples_per_epoch) + 1
+        else:
+            target_samples = raw_samples_per_epoch
+            num_epochs = 1
         # Build the dataset indexes for 1 epoch
         dataset_index, dataset_sample_index = build_nanoset_index_helper(
-            n_samples=samples_per_epoch,
+            n_samples=raw_samples_per_epoch,
             weights=self.dataset_weights,
             dataset_sizes=self.dataset_lengths,
         )
@@ -148,9 +155,9 @@ class Nanoset(torch.utils.data.Dataset):
         dataset_sample_index = np.concatenate(
             [dataset_sample_index for _ in range(num_epochs)]
         )
-        # Just keep the necessary samples
-        # dataset_index = dataset_index[: self.train_split_num_samples]
-        # dataset_sample_index = dataset_sample_index[: self.train_split_num_samples]
+        # Trim to the target number of samples
+        dataset_index = dataset_index[:target_samples]
+        dataset_sample_index = dataset_sample_index[:target_samples]
 
         return dataset_index, dataset_sample_index
 
@@ -220,6 +227,7 @@ class IterableNanoset(IterableDataset, Stateful):
         rank: int = 0,
         infinite: bool = False,
         random_seed: int = 1234,
+        target_tokens: Union[int, None] = None,
     ) -> None:
         self.base_dataset = Nanoset(
             dataset_folders=dataset_folders,
@@ -227,6 +235,7 @@ class IterableNanoset(IterableDataset, Stateful):
             token_size=token_size,
             dataset_weights=dataset_weights,
             random_seed=random_seed,
+            target_tokens=target_tokens,
         )
 
         self.world_size = world_size
@@ -313,10 +322,17 @@ def build_nanoset_dataloader(
         rank=dp_rank,
         infinite=infinite,
         random_seed=job_config.training.dataset_random_seed,
+        target_tokens=job_config.training.target_tokens,
     )
+
+    dataloader_kwargs = {
+        **asdict(job_config.training.dataloader),
+        "batch_size": job_config.training.local_batch_size,
+    }
+
     return ParallelAwareDataloader(
         dataset=nanoset,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=job_config.training.local_batch_size,
+        **dataloader_kwargs,
     )

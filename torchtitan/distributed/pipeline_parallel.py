@@ -14,33 +14,21 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 
-try:
-    from torch.distributed.pipelining.schedules import (
-        _PipelineSchedule,
-        _PipelineScheduleRuntime,
-        get_schedule_class,
-        PipelineScheduleMulti,
-        PipelineScheduleSingle,
-        ScheduleDualPipeV,
-        ScheduleZBVZeroBubble,
-    )
-except ImportError:
-    print("Not using 2.9 or nightly, ScheduleDualPipeV not available.")
-    from torch.distributed.pipelining.schedules import (
-        _PipelineSchedule,
-        _PipelineScheduleRuntime,
-        get_schedule_class,
-        PipelineScheduleMulti,
-        PipelineScheduleSingle,
-        ScheduleZBVZeroBubble,
-    )
+from torch.distributed.pipelining.schedules import (
+    _PipelineSchedule,
+    _PipelineScheduleRuntime,
+    get_schedule_class,
+    OVERLAP_F_B,
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+    ScheduleDualPipeV,
+    ScheduleZBVZeroBubble,
+)
 
-    ScheduleDualPipeV = None
-
-
-from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
+from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.dual_pipe_v import overlap_callback
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
@@ -62,7 +50,7 @@ def pipeline_llm(
     loss_fn: LossFunction,
     vllm_mode: bool = False,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    pp_mesh = parallel_dims.world_mesh["pp"]
+    pp_mesh = parallel_dims.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(
@@ -217,16 +205,23 @@ def build_pipeline_schedule(
             f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
+    # pyrefly: ignore [bad-instantiation]
     schedule = schedule_class(
+        # pyrefly: ignore [bad-argument-type]
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
-        loss_fn=rescale_accumulated_loss(loss_fn, n_microbatches),
+        loss_fn=loss_fn,
         scale_grads=False,
     )
     logger.info(
         f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
         f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
+
+    if job_config.parallelism.pipeline_parallel_expert_parallel_overlap and isinstance(
+        schedule, ScheduleDualPipeV
+    ):
+        schedule.register_custom_function(OVERLAP_F_B, overlap_callback)
 
     if pp_schedule_csv:
         assert schedule_class in [
@@ -237,6 +232,7 @@ def build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
+        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
@@ -474,7 +470,7 @@ def pipeline_module_split(
     else:
         style = "v" if schedule_class is ScheduleZBVZeroBubble else "loop"
 
-    def _get_stage_indices() -> tuple[int]:
+    def _get_stage_indices() -> tuple[int, ...]:
         """
         Compute the stage ids for the stages that will run on this pp rank
         for either a looped or V style schedule
@@ -493,6 +489,8 @@ def pipeline_module_split(
                 zip(range(pp_degree), range(num_stages - 1, pp_degree - 1, -1))
             )
             return stage_v_pairs[pp_rank]
+        else:
+            raise ValueError(f"Unknown style {style}")
 
     for stage_idx in _get_stage_indices():
         module_names = module_names_per_stage[stage_idx]

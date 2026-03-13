@@ -106,6 +106,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         for key, value in state_dict.items():
             if "moe.experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 new_abstract_key = to_hf_map[abstract_key]
 
@@ -115,6 +116,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         abstract_key
                     ] = value.placements
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
+                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
                     # Split GroupedExperts weight to local individual expert weights
                     local_expert_fqn = self._get_local_experts_weights(
@@ -128,15 +130,19 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 else:
                     # keep this path for offline conversion
                     split_values = self._split_experts_weights(
-                        value, self.model_args.moe_args.num_experts
+                        value,
+                        # pyrefly: ignore [missing-attribute]
+                        self.model_args.moe_args.num_experts,
                     )
 
+                    # pyrefly: ignore [missing-attribute]
                     for expert_num in range(0, self.model_args.moe_args.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
@@ -174,18 +180,20 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     int(expert_num)
                 ] = value
 
-                if isinstance(value, DTensor):
+                # Use stored metadata to decide path (online vs offline)
+                # Online mode: local_experts_indices was populated during to_hf()
+                if titan_abstract_key in self.local_experts_indices:
                     stacked_value = self._concatenate_expert_weights_dtensor(
                         expert_weights_by_layer,
                         titan_abstract_key,
                         layer_num,
-                        value.device_mesh,
                     )
                 else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
                         titan_abstract_key,
                         layer_num,
+                        # pyrefly: ignore [missing-attribute]
                         self.model_args.moe_args.num_experts,
                     )
 
@@ -194,6 +202,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = self.from_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)

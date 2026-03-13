@@ -32,11 +32,16 @@ def load_model(train_spec, model_args, peft_config: PEFT):
 def convert_from_hf(
     input_dir, output_dir, model_name, model_flavor, merge_peft_adapter
 ):
-    if model_name == "flux":
-        import torchtitan.experiments.flux  # noqa: F401
     # initialize model to allocate memory for state dict
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
+
+    with torch.device("cpu"):
+        try:
+            model = train_spec.model_cls(model_args, PEFT())
+        except TypeError:
+            model = train_spec.model_cls(model_args)
+    model = ModelWrapper(model)
     sd_adapter = train_spec.state_dict_adapter(model_args, None)
     assert (
         sd_adapter is not None

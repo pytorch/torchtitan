@@ -36,7 +36,7 @@ class Qwen3ModelArgs(BaseModelArgs):
     max_seq_len: int = 4096
     depth_init: bool = True
 
-    use_flex_attn: bool = False
+    attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
     eos_id: int = 151645
 
@@ -59,11 +59,5 @@ class Qwen3ModelArgs(BaseModelArgs):
             job_config.debug.moe_force_load_balance
         )
 
-        # Pass DeepEP config to MoE layer and validate
-        self.moe_args.deepep_config = job_config.deepep
-        self.moe_args.validate_deepep_config()
-
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(self, model, 2 * self.head_dim, seq_len)

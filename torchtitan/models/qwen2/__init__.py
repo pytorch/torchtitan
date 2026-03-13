@@ -58,7 +58,7 @@ qwen2_configs = {
         n_kv_heads=4,
         use_qkv_bias=True,
         rope_theta=1000000,
-        use_flex_attn=True,
+        attn_type="flex",
         attn_mask_type="block_causal",
     ),
 }

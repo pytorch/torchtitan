@@ -94,11 +94,11 @@ def apply_rotary_emb(
     q: torch.Tensor,
     k: torch.Tensor,
     rope_cache: torch.Tensor,
-    position_ids: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary position embeddings to query and key tensors."""
-    if position_ids is not None:
-        rope_cache = rope_cache[position_ids]
+    if positions is not None:
+        rope_cache = rope_cache[positions]
         rope_cache = rope_cache.unsqueeze(2)  # [batch_size, seqlen, 1, head_dim * 2]
     else:
         # reshape for broadcast
@@ -186,11 +186,8 @@ class MLAAttention(nn.Module):
         # Output projection
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, model_args.dim, bias=False)
 
-        self.use_flex_attn = model_args.use_flex_attn
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.inner_attention = FlexAttentionWrapper()
+
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.q_proj.weight, mean=0.0, std=0.02)
@@ -203,7 +200,7 @@ class MLAAttention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         bs, seqlen, _ = x.shape
 
@@ -234,7 +231,7 @@ class MLAAttention(nn.Module):
         k_rope = k_rope.expand(bs, seqlen, self.n_heads, self.qk_rope_head_dim)
 
         # Apply RoPE to rope parts only
-        q_rope, k_rope = apply_rotary_emb(q_rope, k_rope, rope_cache, position_ids)
+        q_rope, k_rope = apply_rotary_emb(q_rope, k_rope, rope_cache, positions)
 
         # Combine nope and rope parts
         q = torch.cat([q_nope, q_rope], dim=-1)
@@ -246,12 +243,9 @@ class MLAAttention(nn.Module):
         v = v.transpose(1, 2)
 
         # Apply attention
-        if self.use_flex_attn:
-            output = self.inner_attention(
-                q, k, v, block_mask=attention_masks["flex_attn"], scale=self.scaling
-            )
-        else:
-            output = self.inner_attention(q, k, v, scale=self.scaling)
+        output = self.inner_attention(
+            q, k, v, block_mask=attention_masks["flex_attn"], scale=self.scaling
+        )
 
         output = output.transpose(1, 2).contiguous().view(bs, seqlen, -1)
         return self.wo(output)
@@ -343,7 +337,7 @@ class KDAAttention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         batch_size, seq_len, _ = x.shape
 
@@ -482,14 +476,14 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         # Attention with residual
         x = x + self.attention(
             self.attention_norm(x),
             rope_cache,
             attention_masks,
-            position_ids=position_ids,
+            positions=positions,
         )
 
         # FFN with residual
@@ -510,7 +504,7 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class KimiLinearModel(nn.Module, ModelProtocol):
+class KimiLinearModel(ModelProtocol):
     """
     Kimi Linear Model with hybrid MLA and KDA attention.
 
@@ -521,7 +515,7 @@ class KimiLinearModel(nn.Module, ModelProtocol):
     """
 
     def __init__(self, model_args: KimiLinearModelArgs):
-        super().__init__()
+        super().__init__(model_args)
 
         have_linear_attention = any(
             lt == "linear_attention" for lt in model_args.layer_types
@@ -645,7 +639,7 @@ class KimiLinearModel(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         h = self.tok_embeddings(tokens)
         for layer in self.layers.values():
@@ -653,7 +647,7 @@ class KimiLinearModel(nn.Module, ModelProtocol):
                 h,
                 self.rope_cache,
                 attention_masks=attention_masks,
-                position_ids=position_ids,
+                positions=positions,
             )
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h

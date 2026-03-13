@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Generator
+from contextlib import AbstractContextManager
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.components.validate import Validator
+from torchtitan.components.validate import ValidationContext, Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
@@ -53,16 +53,18 @@ class FluxValidator(Validator):
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: Generator[None, None, None],
-        maybe_enable_amp: Generator[None, None, None],
+        validation_context: ValidationContext,
+        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
     ):
         self.job_config = job_config
+        self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        # pyrefly: ignore [missing-attribute]
         self.all_timesteps = self.job_config.validation.all_timesteps
         self.validation_dataloader = build_flux_validation_dataloader(
             job_config=job_config,
@@ -74,6 +76,7 @@ class FluxValidator(Validator):
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
+        # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
         self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
 
@@ -91,6 +94,7 @@ class FluxValidator(Validator):
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
     ):
+        # pyrefly: ignore [read-only]
         self.device = device
         self._dtype = _dtype
         self.autoencoder = autoencoder
@@ -109,9 +113,12 @@ class FluxValidator(Validator):
         model.eval()
 
         # Disable cfg dropout during validation
+        # pyrefly: ignore [missing-attribute]
         training_cfg_prob = self.job_config.training.classifier_free_guidance_prob
+        # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = 0.0
 
+        # pyrefly: ignore [missing-attribute]
         save_img_count = self.job_config.validation.save_img_count
 
         parallel_dims = self.parallel_dims
@@ -131,12 +138,14 @@ class FluxValidator(Validator):
             if not isinstance(prompt, list):
                 prompt = [prompt]
             for p in prompt:
+                assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
                     job_config=self.job_config,
+                    # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
@@ -150,6 +159,7 @@ class FluxValidator(Validator):
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
                         self.job_config.job.dump_folder,
+                        # pyrefly: ignore [missing-attribute]
                         self.job_config.validation.save_img_folder,
                     ),
                     x=image,
@@ -211,42 +221,35 @@ class FluxValidator(Validator):
                 latents = pack_latents(latents)
                 target = pack_latents(noise - labels)
 
-                optional_context_parallel_ctx = (
-                    dist_utils.create_context_parallel_ctx(
-                        cp_mesh=parallel_dims.world_mesh["cp"],
-                        cp_buffers=[
-                            latents,
-                            latent_pos_enc,
-                            t5_encodings,
-                            text_pos_enc,
-                            target,
-                        ],
-                        cp_seq_dims=[1, 1, 1, 1, 1],
-                        cp_no_restore_buffers={
-                            latents,
-                            latent_pos_enc,
-                            t5_encodings,
-                            text_pos_enc,
-                            target,
-                        },
-                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-                    )
-                    if parallel_dims.cp_enabled
-                    else None
+            # Apply CP sharding if enabled
+            if parallel_dims.cp_enabled:
+                from torchtitan.distributed.context_parallel import cp_shard
+
+                (
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                ), _ = cp_shard(
+                    parallel_dims.get_mesh("cp"),
+                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
+                    None,  # No attention masks for Flux
+                    load_balancer_type=None,
                 )
 
-                with self.validation_context(optional_context_parallel_ctx):
-                    with self.maybe_enable_amp:
-                        latent_noise_pred = model(
-                            img=latents,
-                            img_ids=latent_pos_enc,
-                            txt=t5_encodings,
-                            txt_ids=text_pos_enc,
-                            y=clip_encodings,
-                            timesteps=timesteps,
-                        )
+            with self.validation_context():
+                with self.maybe_enable_amp:
+                    latent_noise_pred = model(
+                        img=latents,
+                        img_ids=latent_pos_enc,
+                        txt=t5_encodings,
+                        txt_ids=text_pos_enc,
+                        y=clip_encodings,
+                        timesteps=timesteps,
+                    )
 
-                    loss = self.loss_fn(latent_noise_pred, target)
+                loss = self.loss_fn(latent_noise_pred, target)
 
             del noise, target, latent_noise_pred, latents
 
@@ -259,7 +262,7 @@ class FluxValidator(Validator):
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.world_mesh["dp_cp"]
+                loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
             global_avg_loss = loss.item()
@@ -270,6 +273,7 @@ class FluxValidator(Validator):
         model.train()
 
         # re-enable cfg dropout for training
+        # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
 
 
@@ -280,8 +284,8 @@ def build_flux_validator(
     tokenizer: BaseTokenizer,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
-    validation_context: Generator[None, None, None],
-    maybe_enable_amp: Generator[None, None, None],
+    validation_context: ValidationContext,
+    maybe_enable_amp: AbstractContextManager[None],
     metrics_processor: MetricsProcessor | None = None,
     pp_schedule: _PipelineSchedule | None = None,
     pp_has_first_stage: bool | None = None,

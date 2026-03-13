@@ -74,8 +74,14 @@ class MuonOptimizerConfig:
     routing_lr_factor: float = 1.0  # LR multiplier for routing parameters
     expert_lr_factor: float = 1.0  # LR multiplier for expert parameters
 
+    # Muon Split: per-head Newton-Schulz for MLA up-projection matrices
+    muon_split: bool = False
+
     # Gradient synchronization
     replicate_mesh_grad_sync: bool = True
+
+    # Data type of optimizer state
+    state_dtype: torch.dtype = torch.float32
 
 
 class MuonOptimizersContainer(OptimizersContainer):
@@ -120,6 +126,7 @@ class MuonOptimizersContainer(OptimizersContainer):
             adjust_lr=muon_config.adjust_lr,
             flatten=muon_config.flatten,
             use_triton=muon_config.use_triton,
+            state_dtype=muon_config.state_dtype,
         )
 
         # Initialize parent class with dummy optimizer kwargs

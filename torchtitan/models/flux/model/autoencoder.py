@@ -19,7 +19,7 @@ class AutoEncoderParams:
     in_channels: int = 3
     ch: int = 128
     out_ch: int = 3
-    ch_mult: tuple[int] = (1, 2, 4, 4)
+    ch_mult: tuple[int, ...] = (1, 2, 4, 4)
     num_res_blocks: int = 2
     z_channels: int = 16
     scale_factor: float = 0.3611
@@ -191,17 +191,24 @@ class Encoder(nn.Module):
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
+                # pyrefly: ignore[bad-index, not-callable]
                 h = self.down[i_level].block[i_block](hs[-1])
+                # pyrefly: ignore [bad-argument-type]
                 if len(self.down[i_level].attn) > 0:
+                    # pyrefly: ignore[bad-index, not-callable]
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
             if i_level != self.num_resolutions - 1:
+                # pyrefly: ignore [not-callable]
                 hs.append(self.down[i_level].downsample(hs[-1]))
 
         # middle
         h = hs[-1]
+        # pyrefly: ignore [not-callable]
         h = self.mid.block_1(h)
+        # pyrefly: ignore [not-callable]
         h = self.mid.attn_1(h)
+        # pyrefly: ignore [not-callable]
         h = self.mid.block_2(h)
         # end
         h = self.norm_out(h)
@@ -276,8 +283,11 @@ class Decoder(nn.Module):
         h = self.conv_in(z)
 
         # middle
+        # pyrefly: ignore [not-callable]
         h = self.mid.block_1(h)
+        # pyrefly: ignore [not-callable]
         h = self.mid.attn_1(h)
+        # pyrefly: ignore [not-callable]
         h = self.mid.block_2(h)
 
         # cast to proper dtype
@@ -285,10 +295,14 @@ class Decoder(nn.Module):
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
+                # pyrefly: ignore[bad-index, not-callable]
                 h = self.up[i_level].block[i_block](h)
+                # pyrefly: ignore [bad-argument-type]
                 if len(self.up[i_level].attn) > 0:
+                    # pyrefly: ignore[bad-index, not-callable]
                     h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
+                # pyrefly: ignore [not-callable]
                 h = self.up[i_level].upsample(h)
 
         # end
@@ -321,6 +335,7 @@ class AutoEncoder(nn.Module):
             resolution=params.resolution,
             in_channels=params.in_channels,
             ch=params.ch,
+            # pyrefly: ignore [bad-argument-type]
             ch_mult=params.ch_mult,
             num_res_blocks=params.num_res_blocks,
             z_channels=params.z_channels,
@@ -330,6 +345,7 @@ class AutoEncoder(nn.Module):
             in_channels=params.in_channels,
             ch=params.ch,
             out_ch=params.out_ch,
+            # pyrefly: ignore [bad-argument-type]
             ch_mult=params.ch_mult,
             num_res_blocks=params.num_res_blocks,
             z_channels=params.z_channels,

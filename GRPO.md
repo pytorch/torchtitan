@@ -6,17 +6,13 @@ GRPO instructions
 ```shell
 mkdir logs
 chmod g+rw ./logs
+python3.10 -m venv .venv  # or uv venv --python 3.10 if you have uv installed
+source .venv/bin/activate
 pip install uv
-uv pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu129
+uv pip install vllm==0.17.1 --torch-backend=cu129
 uv pip install -r requirements.txt
-pip install --pre -U xformers
-export VLLM_COMMIT=2918c1b49c88c29783c86f78d2c4221cb9622379
-uv pip install vllm torch==2.9.0 --torch-backend=cu129 --prerelease=allow --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT} --extra-index-url https://download.pytorch.org/whl/cu129
-pip install flashinfer-python==0.4.1 flashinfer-cubin==0.4.1
-pip install flashinfer-jit-cache==0.4.1 --index-url https://flashinfer.ai/whl/cu129
-pip install transformers==4.57.1
-```
-
+uv pip install flashinfer-python==0.6.4 flashinfer-cubin==0.6.4
+uv pip install flashinfer-jit-cache==0.6.4 --index-url https://flashinfer.ai/whl/cu129
 ## Configuration instructions
 
 see `torchtitan/grpo/configs/qwen25-7b-math.toml` for good initial values
@@ -118,4 +114,3 @@ Key environment variables accepted by the Slurm script:
 | `PEFT_BASE_DIR` | `/home/shared/peft_bases` | Where PEFT adapter scaffolds are stored |
 | `TRAINING_ARGS` | `""` | Extra CLI args forwarded to torchtitan |
 | `WANDB_PROJECT` | `"torchtitan-grpo"` | Weights & Biases project name |
-

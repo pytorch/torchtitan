@@ -63,6 +63,7 @@ else
     echo "Starting vllm instances..."
 
     VLLM_PP=${VLLM_PP:-1}
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
     GPUS_PER_INSTANCE=$VLLM_PP
     NUM_INSTANCES=$((8 / GPUS_PER_INSTANCE))
 
@@ -80,6 +81,7 @@ else
     source ${VLLM_ENV}/bin/activate
 
     PORT_BASE=9000
+
     LOG_OFFSET=$((SLURM_NODEID * NUM_INSTANCES))
 
     # Start all but the last instance in background

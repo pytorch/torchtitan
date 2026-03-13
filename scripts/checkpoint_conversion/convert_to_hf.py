@@ -21,6 +21,7 @@ from torchtitan.components.peft.state_dict_adapter_update import (
     prune_state_dict_for_peft,
     update_state_dict_adapter,
 )
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.job_config import PEFT
 from torchtitan.config.manager import ConfigManager
 
@@ -30,6 +31,7 @@ def load_model(train_spec, model_args, peft_config: PEFT):
         model = train_spec.model_cls(model_args, peft_config)
     model = ModelWrapper(model)
     return model
+
 
 # Config files to copy from source HF model
 HF_CONFIG_FILES = [
@@ -102,16 +104,21 @@ def find_step_dirs(checkpoint_dir: Path) -> list[Path]:
 
 @torch.inference_mode()
 def convert_to_hf(
-    input_dir, output_dir, model_name, model_flavor, peft_config: PEFT, hf_assets_path
+    input_dir,
+    output_dir,
+    model_name,
+    model_flavor,
+    peft_config: PEFT,
+    hf_assets_path,
+    export_dtype,
 ):
-    if model_name == "flux":
-        import torchtitan.experiments.flux  # noqa: F401
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
 
     model = load_model(train_spec, model_args, peft_config)
 
+    # pyrefly: ignore[bad-instantiation, not-callable]
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None
@@ -144,10 +151,15 @@ def convert_to_hf(
             thread_count_consolidation=5,
         )
 
-        dcp.save(
-            hf_state_dict,
-            storage_writer=storage_writer,
-        )
+    # map and apply export dtype if needed
+    target_dtype = TORCH_DTYPE_MAP[export_dtype]
+    if target_dtype != torch.float32:
+        hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
+
+    dcp.save(
+        hf_state_dict,
+        storage_writer=storage_writer,
+    )
 
     # Copy config files and clean up
     copy_hf_configs(hf_assets_path, output_dir, peft_config)
@@ -160,6 +172,7 @@ def convert_all_checkpoints(
     model_flavor: str,
     peft_config: PEFT,
     hf_assets_path: Path,
+    export_dtype,
 ):
     """Convert all step-* checkpoints in a directory to HF format.
 
@@ -189,7 +202,13 @@ def convert_all_checkpoints(
 
         print(f"Converting {step_name}...")
         convert_to_hf(
-            step_dir, output_dir, model_name, model_flavor, peft_config, hf_assets_path
+            step_dir,
+            output_dir,
+            model_name,
+            model_flavor,
+            peft_config,
+            hf_assets_path,
+            export_dtype,
         )
         print(f"  -> {output_dir}")
 
@@ -218,6 +237,14 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
     parser.add_argument(
+        "--export_dtype",
+        type=str,
+        nargs="?",
+        choices=["float16", "bfloat16", "float32"],
+        default="float32",
+        help="Export dtype for HF checkpoint (default: float32)",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help="Convert all step-* checkpoints in input_dir to {parent}/hf_checkpoints/{step}/",
@@ -245,6 +272,7 @@ if __name__ == "__main__":
             model_flavor,
             peft_config,
             args.hf_assets_path,
+            args.export_dtype,
         )
     else:
         if args.output_dir is None:
@@ -256,4 +284,5 @@ if __name__ == "__main__":
             model_flavor,
             peft_config,
             args.hf_assets_path,
+            args.export_dtype,
         )

@@ -17,6 +17,32 @@ import torch.nn as nn
 from torchtitan.tools.logging import logger
 
 
+def annotate_muon_split_params(model_parts: List[nn.Module]) -> None:
+    """Annotate MLA up-projection params with _muon_split_heads for per-head orthogonalization.
+
+    Finds attention modules with n_heads and wq_b/wkv_b attributes, and sets
+    param._muon_split_heads = n_heads on their weight tensors. This tells the
+    Muon optimizer to reshape [n_heads*d, r] → [n_heads, d, r] before
+    Newton-Schulz, applying orthogonalization independently per head.
+    """
+    annotated = 0
+    for model in model_parts:
+        for name, module in model.named_modules():
+            if not hasattr(module, "n_heads"):
+                continue
+            n_heads = module.n_heads
+            # Annotate MLA up-projection weights (wq_b, wkv_b, or wq when q_lora_rank=0)
+            for attr in ("wq_b", "wkv_b", "wq"):
+                submodule = getattr(module, attr, None)
+                if submodule is not None and hasattr(submodule, "weight"):
+                    submodule.weight._muon_split_heads = n_heads
+                    annotated += 1
+    if annotated > 0:
+        logger.info(
+            f"Muon Split: annotated {annotated} MLA up-projection params for per-head orthogonalization"
+        )
+
+
 def create_parameter_groups(
     model_parts: List[nn.Module], dion_config
 ) -> List[Dict[str, Any]]:
@@ -30,6 +56,11 @@ def create_parameter_groups(
     5. Expert weights (MoE experts) → Follow 2D matrix classification
     6. 2D matrix parameters (not head/embedding/routing) → Use Dion/Muon algorithm
     """
+    # Annotate MLA params for Muon Split if enabled
+    muon_split = getattr(dion_config, "muon_split", False)
+    if muon_split:
+        annotate_muon_split_params(model_parts)
+
     param_groups = []
 
     # Track parameter statistics for logging
@@ -165,24 +196,24 @@ def create_parameter_groups(
 
     algorithm_name = dion_config.algorithm.upper()
     logger.info(f"{algorithm_name} algorithm parameters: {len(param_stats['dion'])}")
-    for name, shape in param_stats["dion"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["dion"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Scalar parameters ({scalar_opt}): {len(param_stats['scalar'])}")
 
     logger.info(
         f"Embedding parameters ({embedding_opt}): {len(param_stats['embedding'])}"
     )
-    for name, shape in param_stats["embedding"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["embedding"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Head parameters ({head_opt}): {len(param_stats['head'])}")
-    for name, shape in param_stats["head"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["head"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Routing parameters ({routing_opt.upper() if routing_opt is not None else algorithm_name}): {len(param_stats['routing'])}")
-    for name, shape in param_stats["routing"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["routing"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     # Special focus on expert weights
     logger.info("=" * 40)
@@ -197,10 +228,10 @@ def create_parameter_groups(
         )
         if expert_optimizer is not None:
             logger.info(f"Expert optimizer configured: {expert_optimizer.upper()}")
-            for name, shape, expert_type in param_stats["expert"]:
-                logger.info(
-                    f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {expert_optimizer.upper()}"
-                )
+            # for name, shape, expert_type in param_stats["expert"]:
+            #     logger.info(
+            #         f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {expert_optimizer.upper()}"
+            #     )
         else:
             logger.info(
                 "Expert optimizer not configured - using default classification:"
@@ -214,14 +245,14 @@ def create_parameter_groups(
                 )
                 flatten_enabled = getattr(dion_config, "flatten", False)
 
-                if (len(shape) == 2) or (is_muon and len(shape) >= 2):
-                    logger.info(
-                        f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {algorithm_name}"
-                    )
-                else:
-                    logger.info(
-                        f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {scalar_opt}"
-                    )
+    #             if (len(shape) == 2) or (is_muon and len(shape) >= 2):
+    #                 logger.info(
+    #                     f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {algorithm_name}"
+    #                 )
+    #             else:
+    #                 logger.info(
+    #                     f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {scalar_opt}"
+    #                 )
     else:
         logger.info("No expert weight parameters detected in this model")
 

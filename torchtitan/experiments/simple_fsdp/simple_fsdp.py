@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -22,18 +22,12 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
-from torch.utils.checkpoint import (
-    checkpoint,
-    CheckpointPolicy,
-    create_selective_checkpoint_contexts,
-)
-
 
 _active_parametrization = True
 
 
 @contextmanager
-def disable_active_parametrization():
+def disable_active_parametrization() -> Generator[None, None, None]:
     global _active_parametrization
     try:
         _active_parametrization = False
@@ -46,37 +40,6 @@ def disable_active_parametrization():
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
-
-
-class _ScaledPartial(Partial):
-    # A subclass of Partial placement that allows user to perform reduction with a custom
-    # factor (reduction_divide_factor) other than the default world size.
-    def __init__(
-        self,
-        reduction_divide_factor: float,
-    ):
-        self.reduction_divide_factor = reduction_divide_factor
-        super().__init__(reduce_op="sum")
-
-    def _reduce_value(
-        self, tensor: torch.Tensor, mesh: DeviceMesh, mesh_dim: int
-    ) -> torch.Tensor:
-        # for all_reduce in DDP
-        tensor.div_(self.reduction_divide_factor)
-        reduced = super()._reduce_value(tensor, mesh, mesh_dim)
-        return reduced
-
-    def _reduce_shard_value(
-        self,
-        tensor: torch.Tensor,
-        mesh: DeviceMesh,
-        mesh_dim: int,
-        shard_spec: Placement,
-    ) -> torch.Tensor:
-        # for reduce_scatter in FSDP
-        tensor.div_(self.reduction_divide_factor)
-        reduced = super()._reduce_shard_value(tensor, mesh, mesh_dim, shard_spec)
-        return reduced
 
 
 def _distribute_dtensor(
@@ -133,14 +96,18 @@ def _distribute_dtensor(
             f"Unsupported placement {dp_placements} for distributing DTensor {tensor}"
         )
 
+    # HSDP case needs 2 placements for 2D outer_mesh
+    current_placements = (Replicate(),) * len(dp_placements)
+    target_placements = tuple(dp_placements)
+
     current_spec = DTensorSpec(
         mesh=outer_mesh,
-        placements=(Replicate(),),
+        placements=current_placements,
         tensor_meta=inner_spec.tensor_meta,
     )
     target_spec = DTensorSpec(
         mesh=outer_mesh,
-        placements=(dp_placements[-1],),
+        placements=target_placements,
         tensor_meta=inner_spec.tensor_meta,
     )
     result_tensor = redistribute_local_tensor(
@@ -183,53 +150,27 @@ def _register_parametrization(
     module.__class__ = module_cls
 
 
-def fsdp_policy():
-    def _fsdp_recomp_policy():
-        def _custom_policy(ctx, func, *args, **kwargs):
-            to_recompute = func in {
-                torch.ops._c10d_functional.all_gather_into_tensor.default,
-                torch.ops._c10d_functional.wait_tensor.default,
-                torch.ops.aten._to_copy.default,  # for dtype cast in FSDP
-            }
-            return (
-                CheckpointPolicy.MUST_RECOMPUTE
-                if to_recompute
-                else CheckpointPolicy.MUST_SAVE
-            )
-
-        return _custom_policy
-
-    return create_selective_checkpoint_contexts(_fsdp_recomp_policy())
-
-
 class ReplicateComputation(torch.nn.Module):
     def __init__(
         self,
-        device_mesh,
-        param_sharding,
-        mode,
-        regional_ac,
-        mp_policy,
-        reshard_after_forward,
-        reduction_divide_factor,
-    ):
+        device_mesh: DeviceMesh,
+        param_sharding: tuple[Placement, ...],
+        mode: str,
+        mp_policy: MixedPrecisionPolicy | None,
+        full_dtensor: bool = False,
+    ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
         self.mode = mode
-        self.compute_placements = [Replicate()] * self.device_mesh.ndim
-        self.grad_placements = [
-            _ScaledPartial(
-                reduction_divide_factor=reduction_divide_factor,
-            )
-            if reduction_divide_factor is not None
-            else Partial(reduce_op="avg")
+        self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
+        self.grad_placements: list[Placement] = [
+            Partial(reduce_op="sum")
         ] * self.device_mesh.ndim
-        self.regional_ac = regional_ac
         mp_policy = mp_policy or MixedPrecisionPolicy()
-        self.param_dtype = mp_policy.param_dtype
-        self.reduce_dtype = mp_policy.reduce_dtype
-        self.reshard_after_forward = reshard_after_forward
+        self.param_dtype: torch.dtype | None = mp_policy.param_dtype
+        self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
+        self.full_dtensor = full_dtensor
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -239,6 +180,10 @@ class ReplicateComputation(torch.nn.Module):
         non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
+            if self.full_dtensor:
+                raise NotImplementedError(
+                    "full_dtensor not implemented for nD parallelisms"
+                )
             dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
@@ -274,7 +219,10 @@ class ReplicateComputation(torch.nn.Module):
                 placements=self.compute_placements,
                 forward_dtype=self.param_dtype,
                 backward_dtype=self.reduce_dtype,
-            ).to_local(grad_placements=self.grad_placements)
+            )
+
+            if not self.full_dtensor:
+                output = output.to_local(grad_placements=self.grad_placements)
         else:
             raise AssertionError(
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
@@ -292,21 +240,7 @@ class ReplicateComputation(torch.nn.Module):
         if not _active_parametrization:
             return x
 
-        if (
-            self.regional_ac
-            and self.mode in ("fully_shard", "hybrid_shard")
-            and self.reshard_after_forward
-        ):
-            # apply checkpointing to implement reshard_after_forward
-            output = checkpoint(
-                self.replicate_compute,
-                x,
-                use_reentrant=False,
-                context_fn=fsdp_policy,
-            )
-        else:
-            output = self.replicate_compute(x)
-
+        output = self.replicate_compute(x)
         return output
 
 
@@ -314,12 +248,11 @@ def data_parallel(
     model: nn.Module,
     device_mesh: DeviceMesh,
     mode: str = "replicate",
-    ac_mode: str = "none",
     mp_policy: MixedPrecisionPolicy | None = None,
-    reshard_after_forward: bool = True,
     shard_dim: int = 0,
-    reduction_divide_factor: float | None = None,
-):
+    full_dtensor: bool = False,
+) -> nn.Module:
+    param_sharding: tuple[Placement, ...]
     if mode == "replicate":
         param_sharding = (Replicate(),)
     elif mode == "fully_shard":
@@ -334,9 +267,6 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     modules = list(model.modules())
-
-    # apply regional ac (with fsdp_policy) if no global ac is to be applied
-    regional_ac = ac_mode == "none"
 
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
@@ -366,7 +296,6 @@ def data_parallel(
                 #         device_mesh,
                 #         param_sharding,
                 #         mode,
-                #         regional_ac,
                 #         mp_policy=mp_policy,
                 #     ),
                 #     unsafe=True,
@@ -379,10 +308,8 @@ def data_parallel(
                 device_mesh,
                 param_sharding,
                 mode,
-                regional_ac,
                 mp_policy=mp_policy,
-                reshard_after_forward=reshard_after_forward,
-                reduction_divide_factor=reduction_divide_factor,
+                full_dtensor=full_dtensor,
             ),
         )
     return model

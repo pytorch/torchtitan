@@ -7,6 +7,8 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -16,14 +18,20 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     FlexAttentionWrapper,
     ScaledDotProductAttentionWrapper,
+    VarlenAttentionWrapper,
+    VarlenMetadata,
     create_attention_mask,
-    get_block_causal_mask_mod_by_seq_lens,
+    create_varlen_metadata_for_document,
+    create_varlen_metadata_from_sequence_lengths,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
 from torchtitan.models.moe import MoE
+from torchtitan.models.utils import trunc_normal_, normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
+
+from torchtitan.tools.logging import logger
 
 from .args import Qwen3NextModelArgs
 
@@ -73,10 +81,10 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     rope_cache: torch.Tensor,
     partial_ratio: float = 1.0,
-    position_ids: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if position_ids is not None:
-        rope_cache = rope_cache[position_ids]
+    if positions is not None:
+        rope_cache = rope_cache[positions]
         rope_cache = rope_cache.unsqueeze(2)  # [batch_size, seqlen, 1, head_dim * 2]
     else:
         rope_cache = reshape_for_broadcast(rope_cache, xq)
@@ -137,6 +145,7 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
         self.partial_rotary_factor = model_args.partial_rotary_factor
+        self.attn_type = getattr(model_args, "attn_type", "sdpa")
 
         self.q_norm = ZeroCenteredRMSNorm(self.head_dim, eps=model_args.norm_eps)
         self.k_norm = ZeroCenteredRMSNorm(self.head_dim, eps=model_args.norm_eps)
@@ -149,16 +158,20 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        self.use_flex_attn = model_args.use_flex_attn
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        match self.attn_type:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case "varlen":
+                self.inner_attention = VarlenAttentionWrapper()
+            case "sdpa":
+                self.inner_attention = ScaledDotProductAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         self.q_norm.weight.data.zero_()
         self.k_norm.weight.data.zero_()
 
@@ -167,7 +180,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         bs, seqlen, _ = x.shape
         xq, gate = torch.chunk(self.wq(x), 2, dim=-1)
@@ -187,7 +200,7 @@ class Attention(nn.Module):
             xk,
             rope_cache,
             partial_ratio=self.partial_rotary_factor,
-            position_ids=position_ids,
+            positions=positions,
         )
 
         keys = repeat_kv(xk, self.n_rep)
@@ -197,14 +210,42 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)
         xv = values.transpose(1, 2)
 
-        if self.use_flex_attn:
-            output = self.inner_attention(
-                xq, xk, xv, block_mask=attention_masks["flex_attn"], scale=self.scaling
-            )
-        else:
-            output = self.inner_attention(xq, xk, xv, scale=self.scaling)
+        match self.attn_type:
+            case "flex":
+                output = (
+                    self.inner_attention(
+                        xq,
+                        xk,
+                        xv,
+                        block_mask=attention_masks["flex_attn"],
+                        scale=self.scaling,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )
+            case "varlen":
+                output = self.inner_attention(
+                    xq,
+                    xk,
+                    xv,
+                    attention_masks["varlen_metadata"],
+                    scale=self.scaling,
+                )
+            case "sdpa":
+                output = (
+                    self.inner_attention(
+                        xq,
+                        xk,
+                        xv,
+                        scale=self.scaling,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
-        output = output.transpose(1, 2).contiguous().view(bs, seqlen, -1)
+        output = output.view(bs, seqlen, -1)
         output = output * torch.sigmoid(gate.view(bs, seqlen, -1))
         return self.wo(output)
 
@@ -221,6 +262,7 @@ class GatedDeltaNet(nn.Module):
             model_args.linear_value_head_dim * model_args.linear_num_value_heads
         )
         self.conv_dim = self.key_dim * 2 + self.value_dim
+        self.split_projections = model_args.linear_split_projections
         self.activation = model_args.hidden_act
         self.conv1d = nn.Conv1d(
             self.conv_dim,
@@ -230,10 +272,28 @@ class GatedDeltaNet(nn.Module):
             groups=self.conv_dim,
             padding=model_args.linear_conv_kernel_dim - 1,
         )
-        projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
-        projection_size_ba = model_args.linear_num_value_heads * 2
-        self.in_proj_qkvz = nn.Linear(model_args.dim, projection_size_qkvz, bias=False)
-        self.in_proj_ba = nn.Linear(model_args.dim, projection_size_ba, bias=False)
+        if self.split_projections:
+            # Qwen3.5-style: 4 separate projections
+            self.in_proj_qkv = nn.Linear(
+                model_args.dim, self.key_dim * 2 + self.value_dim, bias=False
+            )
+            self.in_proj_z = nn.Linear(model_args.dim, self.value_dim, bias=False)
+            self.in_proj_b = nn.Linear(
+                model_args.dim, model_args.linear_num_value_heads, bias=False
+            )
+            self.in_proj_a = nn.Linear(
+                model_args.dim, model_args.linear_num_value_heads, bias=False
+            )
+        else:
+            # Qwen3-Next-style: 2 fused projections
+            projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
+            projection_size_ba = model_args.linear_num_value_heads * 2
+            self.in_proj_qkvz = nn.Linear(
+                model_args.dim, projection_size_qkvz, bias=False
+            )
+            self.in_proj_ba = nn.Linear(
+                model_args.dim, projection_size_ba, bias=False
+            )
         self.dt_bias = nn.Parameter(torch.ones(model_args.linear_num_value_heads))
         self.A_log = nn.Parameter(
             torch.log(torch.empty(model_args.linear_num_value_heads).uniform_(0, 16))
@@ -294,18 +354,19 @@ class GatedDeltaNet(nn.Module):
         a = a.reshape(a.size(0), a.size(1), self.linear_num_value_heads)
         return query, key, value, z, b, a
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        rope_cache: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None,
-    ):
-        # hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
-
-        # Set up dimensions for reshapes later
+    def _project_split(self, hidden_states):
+        """Qwen3.5-style: 4 separate projections."""
         batch_size, seq_len, _ = hidden_states.shape
+        mixed_qkv = self.in_proj_qkv(hidden_states)
+        z = self.in_proj_z(hidden_states).reshape(
+            batch_size, seq_len, -1, self.linear_value_head_dim
+        )
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
+        return mixed_qkv, z, b, a
 
+    def _project_fused(self, hidden_states):
+        """Qwen3-Next-style: 2 fused projections with interleaved head layout."""
         projected_states_qkvz = self.in_proj_qkvz(hidden_states)
         projected_states_ba = self.in_proj_ba(hidden_states)
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
@@ -314,29 +375,38 @@ class GatedDeltaNet(nn.Module):
         query, key, value = (
             x.reshape(x.shape[0], x.shape[1], -1) for x in (query, key, value)
         )
-
         mixed_qkv = torch.cat((query, key, value), dim=-1)
-        mixed_qkv = mixed_qkv.transpose(1, 2)
+        return mixed_qkv, z, b, a
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None,
+    ):
+        batch_size, seq_len, _ = hidden_states.shape
+
+        if self.split_projections:
+            mixed_qkv, z, b, a = self._project_split(hidden_states)
+        else:
+            mixed_qkv, z, b, a = self._project_fused(hidden_states)
+
+        # fla's causal_conv1d expects [B, T, D] layout (not [B, D, T] like nn.Conv1d)
         mixed_qkv, _ = causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
             bias=self.conv1d.bias,
             activation=self.activation,
-            seq_idx=(
-                attention_masks.get("seq_idx", None)
+            cu_seqlens=(
+                attention_masks.get("cu_seqlens", None)
                 if isinstance(attention_masks, dict)
                 else None
             ),
         )
-
-        mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv,
-            [
-                self.key_dim,
-                self.key_dim,
-                self.value_dim,
-            ],
+            [self.key_dim, self.key_dim, self.value_dim],
             dim=-1,
         )
         query = query.reshape(
@@ -390,7 +460,6 @@ class GatedDeltaNet(nn.Module):
             )
 
         z_shape_og = z.shape
-        # reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
@@ -568,9 +637,18 @@ class GatedDeltaNet(nn.Module):
     def init_weights(self, init_std: float):
         self.dt_bias.data.fill_(1.0)
         self.A_log.data.uniform_(0, 16).log_()
-        nn.init.trunc_normal_(self.in_proj_qkvz.weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.in_proj_ba.weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.out_proj.weight, mean=0.0, std=init_std)
+        if self.split_projections:
+            for linear in (
+                self.in_proj_qkv,
+                self.in_proj_z,
+                self.in_proj_b,
+                self.in_proj_a,
+            ):
+                trunc_normal_(linear.weight, mean=0.0, std=init_std)
+        else:
+            trunc_normal_(self.in_proj_qkvz.weight, mean=0.0, std=init_std)
+            trunc_normal_(self.in_proj_ba.weight, mean=0.0, std=init_std)
+        trunc_normal_(self.out_proj.weight, mean=0.0, std=init_std)
         nn.init.kaiming_uniform_(self.conv1d.weight, a=math.sqrt(5))
         if self.conv1d.bias is not None:
             nn.init.zeros_(self.conv1d.bias)
@@ -587,9 +665,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 class TransformerBlock(nn.Module):
@@ -628,13 +706,13 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         x = x + self.attention(
             self.attention_norm(x),
             rope_cache,
             attention_masks,
-            position_ids=position_ids,
+            positions=positions,
         )
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -652,9 +730,9 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Qwen3NextModel(nn.Module, ModelProtocol):
+class Qwen3NextModel(ModelProtocol):
     def __init__(self, model_args: Qwen3NextModelArgs):
-        super().__init__()
+        super().__init__(model_args)
 
         have_linear_attention = any(
             lt == "linear_attention" for lt in model_args.layer_types
@@ -688,13 +766,13 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         buffer_device = buffer_device or self.rope_cache.device
         with torch.device(buffer_device):
             self.rope_cache = self._precompute_rope_cache()
-        nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=0.02)
+        normal_(self.tok_embeddings.weight, mean=0.0, std=0.02)
         for layer in self.layers.values():
             layer.init_weights(buffer_device)
         self.norm.weight.data.zero_()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
-        nn.init.trunc_normal_(
+        trunc_normal_(
             self.output.weight,
             mean=0.0,
             std=final_out_std,
@@ -716,21 +794,33 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         ret = {}
-        mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
             case "causal":
-                return create_attention_mask(
-                    and_masks(*mask_mods),
-                    1,
-                    None,
-                    input_batch.shape[1],
-                    input_batch.shape[1],
-                )
+                match self.model_args.attn_type:
+                    case "flex":
+                        mask_mods = [get_causal_mask_mod()]
+                        return create_attention_mask(
+                            and_masks(*mask_mods),
+                            1,
+                            None,
+                            input_batch.shape[1],
+                            input_batch.shape[1],
+                        )
+                    case "varlen":
+                        raise ValueError(
+                            "varlen attention is only supported with block_causal "
+                            f"attention mask type, got {self.model_args.attn_mask_type}"
+                        )
+                    case _:
+                        raise TypeError(
+                            "Only varlen and flex attn masks are supported"
+                        )
             case "block_causal":
                 B, T = input_batch.shape
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
-
                 device = input_batch.device
+
+                # Compute seq_idx and cu_seqlens (needed by GatedDeltaNet
+                # regardless of attn_type)
                 reset = torch.zeros(B, T, dtype=torch.bool, device=device)
                 reset[:, 0] = True
                 prev = torch.cat(
@@ -763,40 +853,104 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
                 cu_seqlens = torch.cat(cu_seqlens)
                 ret["cu_seqlens"] = cu_seqlens
 
-            # case "block_causal_by_sequence_lengths":
-            #     sequence_lengths = extra_inputs.pop("sequence_lengths", None)
-            #     if sequence_lengths is None:
-            #         raise RuntimeError(
-            #             "`sequence_lengths` required for `block_causal_by_sequence_lengths`"
-            #         )
-            #     B = input_batch.shape[0]
-            #     mask_mods.append(
-            #         get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
-            #     )
-
-            # TODO: calculate seq_idx and cu_seqlens
+                # Add attn_type-specific mask data
+                match self.model_args.attn_type:
+                    case "flex":
+                        mask_mods = [get_causal_mask_mod()]
+                        mask_mods.append(
+                            get_document_mask_mod(input_batch, tokenizer.eos_id)
+                        )
+                        ret["flex_attn"] = create_attention_mask(
+                            and_masks(*mask_mods),
+                            B,
+                            None,
+                            input_batch.shape[1],
+                            input_batch.shape[1],
+                        )
+                    case "varlen":
+                        # Use explicit sequence_lengths from extra_inputs if
+                        # available, otherwise derive from cu_seqlens
+                        if (
+                            extra_inputs is not None
+                            and "sequence_lengths" in extra_inputs
+                        ):
+                            ret["varlen_metadata"] = (
+                                create_varlen_metadata_from_sequence_lengths(
+                                    extra_inputs["sequence_lengths"],
+                                    input_batch.shape[1],
+                                    input_batch.device,
+                                )
+                            )
+                        else:
+                            seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+                            max_seqlen = (
+                                seq_lengths.max().item()
+                                if len(seq_lengths) > 0
+                                else 0
+                            )
+                            ret["varlen_metadata"] = VarlenMetadata(
+                                cu_seq_q=cu_seqlens.to(torch.int32),
+                                cu_seq_k=cu_seqlens.to(torch.int32),
+                                max_q=max_seqlen,
+                                max_k=max_seqlen,
+                            )
+                    case _:
+                        raise TypeError(
+                            "Only varlen and flex attn masks are supported"
+                        )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
-        ret["flex_attn"] = create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+        return ret
+
+    def _build_simple_attention_masks(
+        self, tokens: torch.Tensor
+    ) -> AttentionMasksType:
+        """Build attention masks for unpacked sequences (e.g. inference).
+
+        Assumes each batch element is a single contiguous sequence with no
+        internal document boundaries.
+        """
+        B, T = tokens.shape
+        device = tokens.device
+        # cu_seqlens: [0, T, 2T, ..., BT]
+        cu_seqlens = torch.arange(
+            0, (B + 1) * T, T, dtype=torch.int32, device=device
         )
+        ret: dict[str, Any] = {"cu_seqlens": cu_seqlens}
+        match self.model_args.attn_type:
+            case "varlen":
+                ret["varlen_metadata"] = VarlenMetadata(
+                    cu_seq_q=cu_seqlens,
+                    cu_seq_k=cu_seqlens,
+                    max_q=T,
+                    max_k=T,
+                )
+            case "flex":
+                mask_mods = [get_causal_mask_mod()]
+                ret["flex_attn"] = create_attention_mask(
+                    and_masks(*mask_mods), B, None, T, T
+                )
+            case "sdpa":
+                pass
         return ret
 
     def forward(
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
+        if attention_masks is None:
+            attention_masks = self._build_simple_attention_masks(tokens)
         h = self.tok_embeddings(tokens)
         for layer in self.layers.values():
             h = layer(
                 h,
                 self.rope_cache,
                 attention_masks=attention_masks,
-                position_ids=position_ids,
+                positions=positions,
             )
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h

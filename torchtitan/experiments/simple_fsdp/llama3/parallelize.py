@@ -14,7 +14,7 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
-from ..backend import get_compile_backend
+from ..backend import get_compile_backend_with_passes
 
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
@@ -24,13 +24,43 @@ _op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch.ops.torch_attn._varlen_attn,
+    torch._higher_order_ops.inductor_compiled_code,
 }
+
+
+def get_transformer_block_buckets(model) -> list[list[str] | str]:
+    module_list = [
+        model.tok_embeddings,
+        [model.norm, model.output],
+    ]
+    for layer_id, transformer_block in model.layers.items():
+        module_list.append(transformer_block)
+
+    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
+        """Convert a (possibly nested) list of modules to FQN strings."""
+        result = []
+        for m in modules:
+            if isinstance(m, list):
+                if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
+                    result.append(fqn_list)
+            else:
+                if fqn := module_to_fqn_mapping.get(m):
+                    result.append(fqn)
+        return result
+
+    module_to_name = {m: n for n, m in model.named_modules()}
+    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
+    return module_fqns
 
 
 def parallelize_llama(
@@ -67,7 +97,7 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
-        tp_mesh = parallel_dims.world_mesh["tp"]
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_tp(
             model,
             tp_mesh,
@@ -77,7 +107,6 @@ def parallelize_llama(
         maybe_enable_async_tp(job_config, tp_mesh)
 
     if job_config.activation_checkpoint.mode != "none":
-        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
         model_compile_enabled = (
             job_config.compile.enable and "model" in job_config.compile.components
         )
@@ -85,7 +114,6 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -98,13 +126,13 @@ def parallelize_llama(
     ):
         if parallel_dims.dp_replicate_enabled:
             if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
                 dp_mode = "hybrid_shard"
             else:
-                dp_mesh_dim_names = ("dp_replicate",)
+                dp_mesh_dim_names = ["dp_replicate"]
                 dp_mode = "replicate"
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+            dp_mesh_dim_names = ["fsdp"]
             dp_mode = "fully_shard"
 
         mp_policy = MixedPrecisionPolicy(
@@ -112,27 +140,11 @@ def parallelize_llama(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
 
-        match job_config.parallelism.fsdp_reshard_after_forward:
-            case "always":
-                reshard_after_forward = True
-            case "never":
-                reshard_after_forward = False
-            case "default":
-                # For PP, by default do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                reshard_after_forward = not parallel_dims.pp_enabled
-            case _:
-                raise ValueError(
-                    f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
-                )
-
         model = data_parallel(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.get_mesh(dp_mesh_dim_names),
             mode=dp_mode,
-            ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
-            reshard_after_forward=reshard_after_forward,
         )
         logger.info(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
@@ -140,13 +152,29 @@ def parallelize_llama(
 
     if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
-        backend = (
-            getattr(job_config.compile, "model_backend_override", None)
-            or job_config.compile.backend
+
+        match job_config.parallelism.fsdp_reshard_after_forward:
+            case "always":
+                fsdp_reshard_after_forward = True
+            case "never":
+                fsdp_reshard_after_forward = False
+            case "default":
+                # For PP, by default do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                fsdp_reshard_after_forward = not parallel_dims.pp_enabled
+            case _:
+                raise ValueError(
+                    f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                )
+
+        backend = get_compile_backend_with_passes(
+            job_config.compile,
+            fsdp_reshard_after_forward,
+            get_transformer_block_buckets(model),
         )
         model = torch.compile(
             model,
-            backend=get_compile_backend(backend),
+            backend=backend,
             fullgraph=True,
         )
 

@@ -42,7 +42,7 @@ class KimiLinearModelArgs(BaseModelArgs):
     max_seq_len: int = 8192
 
     # Attention settings
-    use_flex_attn: bool = True
+    attn_type: str = "flex"
     attn_mask_type: str = "block_causal"
     depth_init: bool = True
     enable_weight_tying: bool = False
@@ -85,8 +85,8 @@ class KimiLinearModelArgs(BaseModelArgs):
                 else:
                     self.layer_types.append("linear_attention")
 
-        if not self.use_flex_attn:
-            raise ValueError("Kimi Linear requires FlexAttention")
+        if self.attn_type != "flex":
+            raise ValueError(f"Kimi Linear requires `attn_type` be 'flex' but got {self.attn_type}")
         if (
             job_config.compile.enable
             and "model" in job_config.compile.components

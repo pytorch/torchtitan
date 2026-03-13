@@ -6,6 +6,7 @@
 from functools import partial
 
 import torch
+import torch._inductor.config
 import torch.nn as nn
 from torchtitan.components.quantization import (
     FP8_GROUP_ALIGNMENT_SIZE,

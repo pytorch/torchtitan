@@ -13,8 +13,8 @@ from torchtitan.config import Debug as DebugConfig
 from torchtitan.distributed.utils import set_determinism
 
 
-class FakeDeviceMesh:
-    """Fake DeviceMesh for testing seed uniqueness.
+class FakeParallelDims:
+    """Fake ParallelDims for testing seed uniqueness.
 
     Args:
         mesh_dim_names: List of dimension names (e.g., ["dp", "pp", "tp"])
@@ -26,25 +26,68 @@ class FakeDeviceMesh:
         self.mesh_dim_names = mesh_dim_names
         self.mesh_sizes = dict(zip(mesh_dim_names, mesh_sizes))
         self.rank_coords = dict(zip(mesh_dim_names, rank_coords))
+        # Calculate world_size as product of all mesh sizes
+        self.world_size = 1
+        for size in mesh_sizes:
+            self.world_size *= size
 
-    def __getitem__(self, key):
-        """Return a submesh for the given dimension(s)."""
+        # Add individual parallelism degree attributes to match real ParallelDims interface
+        self.pp = self.mesh_sizes.get("pp", 1)
+        self.tp = self.mesh_sizes.get("tp", 1)
+        self.cp = self.mesh_sizes.get("cp", 1)
+        self.dp_replicate = self.mesh_sizes.get("dp_replicate", 1)
+        self.dp_shard = self.mesh_sizes.get("dp_shard", 1)
+        self.ep = self.mesh_sizes.get("ep", 1)
+        self.etp = self.mesh_sizes.get("etp", 1)
+
+        # For backward compatibility with 'dp' dimension name
+        if "dp" in self.mesh_sizes:
+            self.dp_replicate = self.mesh_sizes["dp"]
+
+        # Create a world_mesh mock
+        self.world_mesh = MagicMock()
+        self.world_mesh.device_type = "cpu"
+
+    def get_mesh(self, key):
+        """Return a submesh for the given dimension."""
         if isinstance(key, str):
             # Single dimension
+            if key not in self.mesh_dim_names:
+                return None
             submesh = MagicMock()
             submesh.get_local_rank.return_value = self.rank_coords[key]
             submesh.size.return_value = self.mesh_sizes[key]
             submesh.get_coordinate.return_value = self.rank_coords[key]
+            submesh.device_type = "cpu"
             return submesh
         elif isinstance(key, list):
-            # Multiple dimensions
+            # Multiple dimensions - check if all exist
+            if not all(dim in self.mesh_dim_names for dim in key):
+                return None
             submesh = MagicMock()
             # For multiple dimensions, get_coordinate should return None
             # since we're not testing this path
             submesh.get_coordinate.return_value = None
+            submesh.device_type = "cpu"
             return submesh
         else:
-            raise ValueError(f"Unsupported key type: {type(key)}")
+            return None
+
+    def get_optional_mesh(self, key):
+        """Return a submesh for the given dimension, or None if not available.
+
+        This is the same as get_mesh() for FakeParallelDims since get_mesh()
+        already returns None for unavailable meshes.
+        """
+        return self.get_mesh(key)
+
+    def get_all_meshes(self):
+        """Return a dict of all meshes."""
+        return {dim: self.get_mesh(dim) for dim in self.mesh_dim_names}
+
+    def __getitem__(self, key):
+        """Return a submesh for the given dimension(s) - for backward compatibility."""
+        return self.get_mesh(key)
 
     def get_coordinate(self):
         """Return the coordinate tuple for this rank."""
@@ -85,12 +128,12 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
                 # Create fake mesh for this rank
                 rank_coords = (dp_rank, pp_rank)
-                fake_mesh = FakeDeviceMesh(mesh_dim_names, mesh_sizes, rank_coords)
+                fake_mesh = FakeParallelDims(mesh_dim_names, mesh_sizes, rank_coords)
 
                 # Call set_determinism with distinct seeds only on PP dimension
                 debug_config = DebugConfig(seed=base_seed, deterministic=False)
                 set_determinism(
-                    world_mesh=fake_mesh,
+                    parallel_dims=fake_mesh,
                     device=self.device,
                     debug_config=debug_config,
                     distinct_seed_mesh_dims=["pp"],
@@ -154,12 +197,14 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
                     # Create fake mesh for this rank
                     rank_coords = (dp_shard_rank, dp_replicate_rank, tp_rank)
-                    fake_mesh = FakeDeviceMesh(mesh_dim_names, mesh_sizes, rank_coords)
+                    fake_mesh = FakeParallelDims(
+                        mesh_dim_names, mesh_sizes, rank_coords
+                    )
 
                     # Call set_determinism with distinct seeds on dp_shard and dp_replicate only
                     debug_config = DebugConfig(seed=base_seed, deterministic=False)
                     set_determinism(
-                        world_mesh=fake_mesh,
+                        parallel_dims=fake_mesh,
                         device=self.device,
                         debug_config=debug_config,
                         distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
@@ -218,12 +263,15 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         base_seed = 42
 
         fake_mesh = MagicMock()
-        fake_mesh.mesh_dim_names = None
-        fake_mesh.get_coordinate.return_value = None
+        fake_mesh.world_size = 1
+        fake_mesh.world_mesh = MagicMock()
+        fake_mesh.get_mesh.return_value = None
+        fake_mesh.get_optional_mesh.return_value = None
+        fake_mesh.get_all_meshes.return_value = {}
 
         debug_config = DebugConfig(seed=base_seed, deterministic=False)
         set_determinism(
-            world_mesh=fake_mesh,
+            parallel_dims=fake_mesh,
             device=self.device,
             debug_config=debug_config,
             distinct_seed_mesh_dims=["pp"],

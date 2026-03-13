@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, List, Literal
@@ -287,12 +286,31 @@ class Optimizer:
     use_triton: bool = False
     """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
 
+    muon_split: bool = False
+    """Enable Muon Split for MLA attention: apply per-head Newton-Schulz orthogonalization
+    on up-projection matrices (wq_b, wkv_b) instead of treating them as single matrices."""
+
+    state_dtype: Literal["float32", "bfloat16"] = "float32"
+    """
+    Dtype for optimizer states (exp_avg, exp_avg_sq for Adam/AdamW).
+    Using bfloat16 reduces memory by ~50% but may affect training stability.
+    Only applies to Adam/AdamW optimizers.
+    """
+
 
 @dataclass
 class LRScheduler:
     warmup_steps: int = 200
     """
     Steps for lr scheduler warmup, normally 1/5 of --training.steps
+    """
+
+    total_steps: int | None = None
+    """
+    Total steps for LR schedule calculation. If None, defaults to training.steps.
+    This allows decoupling the LR schedule from the actual training steps,
+    which is useful for debugging with fewer steps while maintaining the same LR curve,
+    or for early stopping scenarios.
     """
 
     decay_ratio: float | None = None
@@ -321,6 +339,40 @@ class LRScheduler:
 
 
 @dataclass
+class DataLoader:
+    """
+    Configuration for PyTorch DataLoader settings.
+
+    These settings are passed directly to StatefulDataLoader.
+
+    Note:
+        persistent_workers and prefetch_factor are only valid if num_workers > 0.
+
+    Example (TOML config file):
+        [training.dataloader]
+        num_workers = 4
+        pin_memory = true
+        persistent_workers = true
+        prefetch_factor = 2
+    """
+
+    num_workers: int = 0
+    """Number of worker processes for data loading."""
+
+    persistent_workers: bool = False
+    """Keep workers alive between epochs. Only valid when num_workers > 0."""
+
+    pin_memory: bool = False
+    """Copy tensors to CUDA pinned memory before returning them."""
+
+    prefetch_factor: int | None = None
+    """
+    Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
+    Default is 2 when num_workers > 0, otherwise None.
+    """
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
@@ -341,6 +393,13 @@ class Training:
 
     dataset_weights: list[float] | None = None
     """Optional list of weights for weighted sampling from datasets"""
+
+    target_tokens: int | None = None
+    """Optional target total token count for the Nanoset dataset.
+    If set, the dataset index will be sized to produce this many tokens
+    (divided by seq_len to get target samples). Datasets will be upsampled or
+    downsampled accordingly while respecting weights. If None (default),
+    the total is the sum of all underlying dataset lengths."""
 
     dataset_random_seed: int = 1234
     """Random seed for dataset shuffling"""
@@ -402,6 +461,44 @@ class Training:
     many temporary files.
     """
 
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
+
+    enable_detailed_memory_tracking: bool = False
+    """
+    Whether to enable detailed memory tracking at every training phase
+    """
+
+    clear_cache_between_steps: bool = False
+    """
+    Whether to clear CUDA cache between training steps to measure minimum memory requirements
+    """
+
+    skip_optimizer_step: bool = False
+    """
+    Whether to skip the optimizer step (for memory profiling purposes only)
+    """
+
+    aggressive_memory_mode: Literal[
+        "minimal", "balanced", "aggressive", "maximum"
+    ] | None = None
+    """
+    Enable aggressive memory management to reduce CUDA memory fragmentation.
+    This clears CUDA cache and Python GC at strategic points (post-backward, post-optimizer).
+    Modes:
+    - None: Disabled (default)
+    - "minimal": Only clear on high fragmentation (<1% overhead)
+    - "balanced": Clear after backward and optimizer (2-3% overhead)
+    - "aggressive": Clear frequently with sync (5-8% overhead)
+    - "maximum": Clear after every operation (10-15% overhead, for debugging)
+    """
+
+    aggressive_memory_verbose: bool = False
+    """
+    Enable verbose logging for aggressive memory manager.
+    Logs detailed memory stats after each clear operation.
+    """
+
 
 @dataclass
 class Parallelism:
@@ -428,19 +525,28 @@ class Parallelism:
     only `data_parallel_shard_degree` can be negative. 1 means disabled.
     """
 
-    fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
+    fsdp_reshard_after_forward: Literal["default", "always", "never"] | int = "default"
     """
     `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
     within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
     trading off memory and communication. See torch's `fully_shard` API for more documentation
     on `reshard_after_forward`.
 
-    The supported policies include "default", "always" and "never":
+    The supported policies include "default", "always", "never", or an integer:
 
     - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
       scenarios.
     - "always" will enable `reshard_after_forward` for all forward passes.
     - "never" will disable `reshard_after_forward` for all forward passes.
+    - integer N: Partially reshard to groups of N GPUs after forward. Must be a factor of
+      the FSDP shard world size. Use N=8 for intra-node resharding (reduces memory while
+      keeping communication fast via NVLink). This trades memory for communication.
+    """
+
+    fsdp_disable_prefetch: bool = False
+    """
+    Whether to disable FSDP forward/backward prefetching. Disabling prefetch can reduce memory
+    at the cost of performance (less overlap of communication and computation).
     """
 
     tensor_parallel_degree: int = 1
@@ -512,8 +618,31 @@ class Parallelism:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
+    pipeline_parallel_expert_parallel_overlap: bool = True
+    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
+    communication. This is only effective when the pipeline parallel schedule is DualPipeV and
+    pipeline_parallel_degree > 1 and expert_parallel_degree > 1.
+
+    TODO: Does not support activation_checkpoint, set mode="none"
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
+
+    context_parallel_load_balancer: str | None = "headtail"
+    """
+    Load balancer type for context parallelism. Options:
+    - "headtail": Use HeadTailLoadBalancer for SDPA
+    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - None: Disable load balancing
+    """
+
+    def __post_init__(self):
+        if self.context_parallel_load_balancer == "":
+            raise ValueError(
+                "context_parallel_load_balancer cannot be an empty string. "
+                "Use None to disable load balancing."
+            )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
     """
@@ -527,19 +656,7 @@ class Parallelism:
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Currently, it is supported with the following constraints:
-
-    - when etp = tp:
-
-      - cp <= ep <= dp_shard * cp
-      - ep % cp == 0
-      - dp_shard * cp % ep == 0
-
-    - when etp = 1:
-
-      - cp * tp <= ep <= dp_shard * cp * tp
-      - ep % (cp * tp) == 0
-      - dp_shard * cp * tp % ep == 0
+    Currently, etp is either 1 or is the same as tp.
 
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
@@ -553,6 +670,17 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    """
+    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deepep": Uses DeepEP custom kernels for more efficient communication
+
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
     """
 
 
@@ -852,15 +980,15 @@ class Compile:
     enable: bool = False
     """Whether to apply torch.compile"""
 
-    components: list[Literal["model", "loss"]] = field(
-        default_factory=lambda: ["model", "loss"]
-    )
-
+    components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
     backend: str = "inductor"
 
     """Use fullgraph when compiling"""
     fullgraph: bool = True
+
+    """Use old compile implementation"""
+    use_old_compile: bool = False
 
 
 @dataclass
@@ -991,6 +1119,22 @@ class Comm:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
+    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    """
+    Communication mode for distributed training.
+
+    Options:
+    - "default": Normal distributed training with real communication
+    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - "local_tensor": Local tensor mode for debugging purposes. There will be only one process
+      regardless of the number of GPUs. LocalTensor will simulate the computation by running one
+      rank after another. While the performance will be slow, the numerics should be the same.
+      This enables us to verify numerics with fewer GPUs. For example, we can directly run 5D
+      parallelisms within a single node to reduce the combinations we need to use in integration tests.
+
+    NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
+    """
+
 
 @dataclass
 class MemoryEstimation:
@@ -1091,6 +1235,9 @@ class Validation:
     Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
     def __post_init__(self):
         assert (
@@ -1224,6 +1371,48 @@ class Debug:
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
+    enable_nan_tracker: bool = False
+    """If True, enable lightweight NaN/Inf tracking to find where NaN first appears in the model."""
+
+    nan_tracker_verbose: bool = False
+    """If True, print stats for every layer (very verbose output)."""
+
+
+@dataclass
+class LLEP:
+    """Least-Loaded Expert Parallelism (LLEP) configuration.
+
+    Overrides model flavor defaults when set. Leave as None to keep flavor defaults.
+    Only takes effect when the model flavor has use_llep=True.
+
+    Paper defaults (Section 5.1): "For LLEP, we use λ=1.3, α=1, m=1024."
+    Reference: "Least-Loaded Expert Parallelism: Load Balancing An Imbalanced
+    Mixture-of-Experts" (Nguyen et al., Salesforce AI Research)
+    """
+
+    enabled: bool | None = None
+    """Enable LLEP. Overrides model flavor's use_llep when set."""
+
+    max_tokens_factor: float | None = None
+    """α: GPU capacity factor. Paper default: 1.0 (fair share)."""
+
+    min_tokens_per_gemm: int | None = None
+    """m: minimum tokens per GEMM to justify spilling. Paper default: 1024."""
+
+    adaptive_threshold: float | None = None
+    """λ: imbalance ratio to trigger LLEP. Paper default: 1.3. Set 0 for always-on."""
+
+    verbose: bool = False
+    """Enable per-step distribution logging (before/after GPU loads, imbalance ratios,
+    weight transfers, send matrix, received tokens). Also enabled by LLEP_DEBUG=1 env var."""
+
+    autotune: bool = False
+    """Run LLEP autotuning at startup. Finds optimal α, m, λ from real routing stats.
+    Adds ~20-30s to startup. Overrides manual values above when enabled."""
+
+    autotune_samples: int = 3
+    """Number of forward passes for routing stat collection during autotune."""
+
 
 @dataclass
 class JobConfig:
@@ -1240,6 +1429,7 @@ class JobConfig:
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
     deepep: DeepEP = field(default_factory=DeepEP)
+    llep: LLEP = field(default_factory=LLEP)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
@@ -1260,7 +1450,9 @@ class JobConfig:
 
     def maybe_log(self) -> None:
         if self.job.print_config:
-            logger.info(f"Running with configs: {self.to_dict()}")
+            logger.info(
+                f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
+            )
 
         if self.job.save_config_file is not None:
             config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)

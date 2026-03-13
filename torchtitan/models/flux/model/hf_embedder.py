@@ -7,6 +7,7 @@
 import os
 
 from torch import nn, Tensor
+
 from transformers import CLIPTextModel, T5EncoderModel
 
 
@@ -19,6 +20,7 @@ class FluxEmbedder(nn.Module):
             if random_init:
                 # Initialize CLIP model with random weights for test purpose only
                 self.hf_module = CLIPTextModel._from_config(
+                    # pyrefly: ignore [missing-attribute]
                     CLIPTextModel.config_class.from_pretrained(
                         os.path.join(version, "config.json"), **hf_kwargs
                     )
@@ -31,6 +33,7 @@ class FluxEmbedder(nn.Module):
             if random_init:
                 # Initialize T5 model with random weights for test purpose only
                 self.hf_module = T5EncoderModel._from_config(
+                    # pyrefly: ignore [missing-attribute]
                     T5EncoderModel.config_class.from_pretrained(
                         os.path.join(version, "config.json"), **hf_kwargs
                     )

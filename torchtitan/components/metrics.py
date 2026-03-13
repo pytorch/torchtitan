@@ -20,7 +20,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.models.moe import ExpertRoutingHistogram
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import Color, device_module, device_type
+from torchtitan.tools.utils import Color, device_module, device_type, NoColor
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
@@ -36,12 +36,15 @@ DeviceMemStats = namedtuple(
         "max_reserved_pct",
         "num_alloc_retries",
         "num_ooms",
+        "nvidia_smi_used_gib",  # nvidia-smi reported memory for verification
+        "nvidia_smi_used_pct",
     ],
 )
 
 
 class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
+        # pyrefly: ignore [read-only]
         self.device = torch.device(device)  # device object
         self.device_name = device_module.get_device_name(self.device)
         self.device_index = device_module.current_device()
@@ -61,6 +64,48 @@ class DeviceMemoryMonitor:
 
     def _to_pct(self, memory):
         return 100 * memory / self.device_capacity
+
+    def _get_nvidia_smi_memory(self):
+        """Get GPU memory usage from nvidia-smi for verification."""
+        try:
+            import subprocess
+
+            # In SLURM with CUDA_VISIBLE_DEVICES, PyTorch device index 0-7 maps to
+            # physical GPUs listed in CUDA_VISIBLE_DEVICES. We need the physical GPU index.
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            if cuda_visible:
+                # CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" means device 0 is physical GPU 0
+                # But it could also be "4,5,6,7,0,1,2,3" meaning device 0 is physical GPU 4
+                visible_gpus = [
+                    int(x.strip()) for x in cuda_visible.split(",") if x.strip()
+                ]
+                if self.device_index < len(visible_gpus):
+                    physical_gpu_index = visible_gpus[self.device_index]
+                else:
+                    physical_gpu_index = self.device_index
+            else:
+                physical_gpu_index = self.device_index
+
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used",
+                    "--format=csv,noheader,nounits",
+                    f"--id={physical_gpu_index}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                # nvidia-smi reports in MiB
+                used_mib = float(result.stdout.strip())
+                used_gib = used_mib / 1024
+                used_pct = (used_mib * 1024 * 1024) / self.device_capacity * 100
+                return used_gib, used_pct
+        except Exception:
+            pass
+        return -1.0, -1.0
 
     def get_peak_stats(self):
         device_info = device_module.memory_stats(self.device)
@@ -83,6 +128,9 @@ class DeviceMemoryMonitor:
         if num_ooms > 0:
             logger.warning(f"{num_ooms} {device_type.upper()} OOM errors thrown.")
 
+        # Get nvidia-smi memory for verification
+        nvidia_smi_gib, nvidia_smi_pct = self._get_nvidia_smi_memory()
+
         return DeviceMemStats(
             max_active_gib,
             max_active_pct,
@@ -90,6 +138,8 @@ class DeviceMemoryMonitor:
             max_reserved_pct,
             num_retries,
             num_ooms,
+            nvidia_smi_gib,
+            nvidia_smi_pct,
         )
 
     def reset_peak_stats(self):
@@ -164,6 +214,13 @@ class WandBLogger(BaseLogger):
 
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
+
+        # Auto-generate a group ID if none provided (so all ranks share
+        # the same wandb group in distributed training).
+        # DON'T DELETE THIS CODE
+        # - Dakota
+        if group is None:
+            group = os.getenv("WANDB_RUN_GROUP", None)
         if group is None:
             group = wandb.sdk.lib.runid.generate_id()
 
@@ -171,9 +228,15 @@ class WandBLogger(BaseLogger):
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
+            id=os.getenv("WANDB_RUN_ID", None),
+            notes=os.getenv("WANDB_RUN_NOTES", None),
+            tags=os.getenv("WANDB_RUN_TAGS", None),
+            group=group,
+            job_type=os.getenv("WANDB_RUN_JOB_TYPE", None),
+            resume_from=os.getenv("WANDB_RESUME_FROM", None),
+            fork_from=os.getenv("WANDB_FORK_FROM", None),
             dir=log_dir,
             config=job_config.to_dict(),
-            group=group,
         )
         logger.info("WandB logging enabled")
 
@@ -230,7 +293,7 @@ class LoggerContainer(BaseLogger):
 
 
 def ensure_pp_loss_visible(
-    parallel_dims: ParallelDims, job_config: JobConfig, color: Color
+    parallel_dims: ParallelDims, job_config: JobConfig, color: Color | NoColor
 ) -> None:
     """
     Ensures that the loss is visible on the console for pipeline-parallel training.
@@ -384,7 +447,7 @@ class MetricsProcessor:
     device_memory_monitor: DeviceMemoryMonitor
     color: utils.NoColor | utils.Color
 
-    gpu_peak_flops: int
+    gpu_peak_flops: float
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
@@ -436,6 +499,19 @@ class MetricsProcessor:
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
+        """
+        Log training metrics including loss, throughput, and memory statistics.
+
+        Args:
+            step: Current training step
+            global_avg_loss: Global average loss across all valid tokens on all ranks
+                Defined as global_loss_sum / global_valid_tokens
+            global_max_loss: Maximum local loss across all ranks
+                Defined as max(local_loss_sum / local_valid_tokens)
+            grad_norm: Gradient norm after clipping
+            extra_metrics: Optional additional metrics to log
+
+        """
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
@@ -482,7 +558,7 @@ class MetricsProcessor:
         color = self.color
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:7.4f}  "
+            f"{color.green}loss: {global_avg_loss:8.5f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
@@ -496,7 +572,9 @@ class MetricsProcessor:
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
-    def log_validation(self, loss: float, step: int):
+    def log_validation(
+        self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None
+    ):
         time_delta = time.perf_counter() - self.time_last_log
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
@@ -514,6 +592,10 @@ class MetricsProcessor:
             "validation_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
             "validation_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
         }
+
+        if extra_metrics:
+            metrics.update(extra_metrics)
+
         self.logger.log(metrics, step)
 
         color = self.color

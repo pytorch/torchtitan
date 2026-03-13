@@ -26,20 +26,15 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                ]
-            ],
-            "HSDP+CP",
-            "hsdp+cp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--validation.enable",
-                ]
+                    "--validation.steps 5",
+                    "--checkpoint.enable",
+                ],
+                [],
             ],
-            "Flux Validation Test",
-            "validation",
+            "HSDP+CP+Validation+Inference",
+            "hsdp+cp+validation+inference",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
@@ -63,7 +58,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     t5_encoder_version_arg = (
         "--encoder.t5_encoder tests/assets/flux_test_encoders/t5-v1_1-xxl/"
     )
-    tokenzier_path_arg = "--model.tokenizer_path tests/assets/tokenizer"
+    hf_assets_path_arg = "--model.hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
@@ -73,7 +68,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
-        if test_name == "test_generate" and idx == 1:
+        if test_name == "hsdp+cp+validation+inference" and idx == 1:
             # For flux generation, test using inference script
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
@@ -84,7 +79,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
-        cmd += " " + tokenzier_path_arg
+        cmd += " " + hf_assets_path_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
 

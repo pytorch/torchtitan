@@ -6,6 +6,7 @@
 
 
 import torch
+import torch._inductor.config
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import JobConfig
@@ -17,11 +18,10 @@ def maybe_enable_async_tp(job_config: JobConfig, tp_mesh: DeviceMesh):
         return
 
     if not (job_config.compile.enable and "model" in job_config.compile.components):
-        raise RuntimeError("Async TP requires --training.compile")
-
-    from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+        raise RuntimeError(
+            "Async TP requires 'model' in --compile.components and --compile.enable"
+        )
 
     torch._inductor.config._micro_pipeline_tp = True
-    enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info("Async TP is enabled")

@@ -4,15 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Parallelization for Kimi Linear model.
-
-Applies tensor parallelism, expert parallelism, FSDP, and other distributed training techniques.
-"""
-
 import torch
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -22,27 +15,36 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.tools.logging import logger
 
-
-# Operations to save for selective activation checkpointing
+# for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.all_to_all_single.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -51,8 +53,9 @@ def parallelize_kimi_linear(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    """Apply parallelization to Kimi Linear model."""
-    world_mesh = parallel_dims.world_mesh
+    # TODO: TP currently cannot handle uneven seq_len because we set
+    #       `use_local_output=True` to use plain Tensors for legacy reasons.
+    #       Need to revisit this.
     assert (
         job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -60,75 +63,94 @@ def parallelize_kimi_linear(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+        raise NotImplementedError(
+            f"Context Parallel only supports SDPA attention. "
+            f"Got attn_type='{attn_type}'. "
+            f"FlexAttention and varlen attention are not supported with CP."
+        )
+
+    if parallel_dims.tp_enabled:
+        raise NotImplementedError("TP not supported for Kimi Linear")
+
+    # Check if using DeepEP for MoE communication
+    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+        if not parallel_dims.ep_enabled:
+            raise ValueError(
+                "DeepEP requires expert parallelism (ep_degree > 1). "
+                "The DeepEP MoE model code does not support EP=1. "
+                "Please set expert_parallel_degree > 1 or use standard communication backend."
+            )
+        if parallel_dims.etp_enabled:
+            raise NotImplementedError(
+                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+            )
+
+        use_deepep = True
+
+        # Import deepep module to register custom ops before accessing them
+        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+
+        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+        _op_sac_save_list.add(torch.ops.deepep.combine.default)
+    else:
+        use_deepep = False
+
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            dual_pipe_v=dual_pipe_v,
+            use_deepep=use_deepep,
+        )
+
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            attn_type,
+        )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-
-    if parallel_dims.tp_enabled:
-        if (
-            job_config.parallelism.enable_async_tensor_parallel
-            and not model_compile_enabled
-        ):
-            raise RuntimeError("Async TP requires torch.compile")
-
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
-        apply_non_moe_tp(
-            model,
-            world_mesh["tp"],
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
-        )
-
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
-        )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
 
-    if parallel_dims.fsdp_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+    dp_mesh: DeviceMesh | None = None
+    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+        # apply FSDP or HSDP, potentially with Context Parallel
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -139,11 +161,7 @@ def parallelize_kimi_linear(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
@@ -152,132 +170,16 @@ def parallelize_kimi_linear(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
-
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
         apply_ddp(
             model,
-            world_mesh,
+            dp_mesh,
             enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
-
-    # Enable weight tying after applying parallelisms
-    if model.model_args.enable_weight_tying:
-        model.output.weight = model.tok_embeddings.weight
 
     return model
-
-
-def apply_non_moe_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
-    enable_async_tp: bool,
-):
-    """Apply tensor parallelism to non-MoE parts of the model."""
-    # Parallelize embeddings, final norm, and output
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
-            ),
-        },
-    )
-
-    # Set up parallel styles
-    if enable_float8_tensorwise_tp:
-        from torchao.float8.float8_tensor_parallel import (
-            Float8ColwiseParallel,
-            Float8RowwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            Float8RowwiseParallel,
-            Float8ColwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-    else:
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
-            PrepareModuleInput,
-        )
-
-    # Apply TP to each transformer block
-    for transformer_block in model.layers.values():
-        layer_plan = {
-            "attention_norm": SequenceParallel(),
-            "ffn_norm": SequenceParallel(),
-        }
-
-        # Handle attention parallelization based on layer type
-        if transformer_block.is_linear_attn:
-            # KDA attention parallelization
-            layer_plan.update({
-                "attention": prepare_module_input(
-                    input_layouts=(Shard(1), Replicate()),
-                    desired_input_layouts=(Replicate(), Replicate()),
-                ),
-                "attention.q_proj": colwise_parallel(use_local_output=False),
-                "attention.k_proj": colwise_parallel(use_local_output=False),
-                "attention.v_proj": colwise_parallel(use_local_output=False),
-                "attention.o_proj": rowwise_parallel(output_layouts=Shard(1)),
-            })
-        else:
-            # MLA attention parallelization
-            layer_plan.update({
-                "attention": prepare_module_input(
-                    input_layouts=(Shard(1), Replicate()),
-                    desired_input_layouts=(Replicate(), Replicate()),
-                ),
-                "attention.q_proj": colwise_parallel(use_local_output=False),
-                "attention.kv_a_proj_with_mqa": colwise_parallel(use_local_output=False),
-                "attention.kv_a_layernorm": NoParallel(use_local_output=False),
-                "attention.kv_b_proj": colwise_parallel(use_local_output=False),
-                "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            })
-
-        # FFN parallelization (for non-MoE layers)
-        if not transformer_block.moe_enabled:
-            layer_plan.update({
-                "feed_forward": prepare_module_input(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(Replicate(),),
-                ),
-                "feed_forward.w1": colwise_parallel(),
-                "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                "feed_forward.w3": colwise_parallel(),
-            })
-
-        parallelize_module(
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
-
-    if enable_async_tp:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-        torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
-
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
-        "Tensor Parallelism to the model"
-    )

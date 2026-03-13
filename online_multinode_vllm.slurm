@@ -41,10 +41,10 @@ export UCX_NET_DEVICES=bond0
 
 
 # Define environment paths
-export TRAIN_PATH="/home/dakota/github/simple-trainer"
+export TRAIN_PATH="/home/dakota/github/torchtitan"
 export TRAIN_ENV="${TRAIN_PATH}/.venv"
-export VLLM_ENV="/home/dakota/envs/vllm/.venv"
-export API_ENV="/home/dakota/github/trajectory-handler/.venv"
+export VLLM_ENV="/home/dakota/github/torchtitan/.venv"
+export API_ENV="/home/dakota/github/atropos/.venv"
 
 nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
 nodes_array=($nodes)

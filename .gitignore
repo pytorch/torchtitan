@@ -44,3 +44,7 @@ slurm-*
 
 # env files
 .env
+.venv/
+
+# Vibe coding
+.claude

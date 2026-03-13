@@ -10,7 +10,6 @@
 from dataclasses import dataclass, field
 
 from torch import nn
-
 from torchtitan.config import JobConfig
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -37,14 +36,12 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         n_heads (int): Number of attention heads.
         norm_eps (float): Epsilon value used for RMSNorm.
         moe_args (MoEArgs): MoE configuration.
-        n_expert_groups (int): Number of expert groups.
-        n_limited_groups (int): Number of limited groups for MoE routing.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
         qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
         v_head_dim (int): Dimension for value projections.
-        use_flex_attn (bool): Whether to use FlexAttention.
+        attn_type (str): Attention type.
         attn_mask_type (str): Type of attention mask.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
@@ -66,9 +63,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
-    # TODO: node-limited routing is not supported yet
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
+
+    # Expert parallel communication backend (set from config)
+    expert_parallel_comm_backend: str = "standard"  # "standard" or "deepep"
 
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
@@ -76,7 +73,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     qk_nope_head_dim: int = 128
     qk_rope_head_dim: int = 64
     v_head_dim: int = 128
-    use_flex_attn: bool = False
+    attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
 
     # yarn
@@ -86,7 +83,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
-    mscale_all_dim: float = 1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
+    mscale_all_dim: float = (
+        1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
+    )
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -102,22 +101,33 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise NotImplementedError(
-                "CP support for FlexAttention is still in progress."
-            )
-
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
 
-        # Pass DeepEP config to MoE layer and validate
-        self.moe_args.deepep_config = job_config.deepep
-        self.moe_args.validate_deepep_config()
+        # LLEP config overrides from [llep] TOML section
+        if job_config.llep.enabled is not None:
+            self.moe_args.use_llep = job_config.llep.enabled
+        if job_config.llep.max_tokens_factor is not None:
+            self.moe_args.llep.max_tokens_factor = job_config.llep.max_tokens_factor
+        if job_config.llep.min_tokens_per_gemm is not None:
+            self.moe_args.llep.min_tokens_per_gemm = job_config.llep.min_tokens_per_gemm
+        if job_config.llep.adaptive_threshold is not None:
+            self.moe_args.llep.adaptive_threshold = job_config.llep.adaptive_threshold
+        if job_config.llep.verbose:
+            self.moe_args.llep.verbose = True
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+        # Configure expert parallel communication backend from config (defaults to "standard")
+        # When both DeepEP and LLEP are enabled, use adaptive switching
+        if (
+            job_config.parallelism.expert_parallel_comm_backend == "deepep"
+            and self.moe_args.use_llep
+        ):
+            self.moe_impl = "deepep_llep"
+        else:
+            self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(
             self,
             model,

@@ -9,7 +9,7 @@ import json
 import os
 import time
 from datetime import timedelta
-from typing import Any, Generator, Iterable, Optional, Tuple
+from typing import Any, cast, Iterable, Iterator, Optional, Tuple
 
 import numpy as np
 import torch
@@ -52,6 +52,7 @@ from torchtitan.grpo.sglang_handling import (
     wait_for_sglang,
 )
 from torchtitan.grpo.utils import VocabParallelEntropyFunction
+from torchtitan.protocols import ModelProtocol
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -85,7 +86,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # runtime utilities
     device: torch.device
     gc_handler: utils.GarbageCollection
-    train_context: Generator[None, None, None]
+    train_context: dist_utils.TrainContext
     gradient_accumulation_steps: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -115,12 +116,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         device_module.set_device(self.device)
 
         # init distributed and build meshes
-        dist_utils.init_distributed(
+        world_size = dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
-        world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
         self.parallel_dims = parallel_dims = ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
@@ -133,13 +133,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             world_size=world_size,
         )
 
-        world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
-            dp_mesh = world_mesh["dp"]  # type: DeviceMesh
-            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
+            batch_mesh = parallel_dims.get_mesh("batch")
+            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
         else:
-            dp_degree, dp_rank = 1, 0
-            dp_mesh = None
+            batch_degree, batch_rank = 1, 0
 
         # TODO: Figure out how to support fault tolerance with separate SGLang groups.
         assert (
@@ -147,35 +145,45 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ), "Fault tolerance is not supported yet."
 
         self.ft_manager = FTManager(job_config.fault_tolerance)
-        self.dp_degree, self.dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
+        self.batch_degree, self.batch_rank = self.ft_manager.get_dp_info(
+            batch_degree, batch_rank
+        )
 
         if parallel_dims.cp_enabled:
-            self.cp_degree = world_mesh["cp"].size()
+            self.cp_degree = parallel_dims.get_mesh("cp").size()
         else:
             self.cp_degree = 1
 
         if parallel_dims.ep_enabled:
-            self.ep_degree = world_mesh["ep"].size()
-            self.ep_rank = world_mesh["ep"].get_local_rank()
+            ep_mesh = parallel_dims.get_mesh("ep")
+            self.ep_degree = ep_mesh.size()
+            self.ep_rank = ep_mesh.get_local_rank()
         else:
             self.ep_degree = 1
             self.ep_rank = 0
         if parallel_dims.dp_shard_enabled:
-            shard_key = "dp_shard_mod_ep" if parallel_dims.ep_enabled else "dp_shard"
-            self.dp_shard_degree = world_mesh[shard_key].size()
-            self.dp_shard_rank = world_mesh[shard_key].get_local_rank()
+            # fsdp mesh = dp_shard * cp; efsdp accounts for EP.
+            # For weight sync we need the per-shard rank. When cp=1
+            # (normal for GRPO), fsdp_rank == dp_shard_rank.
+            if parallel_dims.ep_enabled:
+                shard_mesh = parallel_dims.get_mesh("efsdp")
+            else:
+                shard_mesh = parallel_dims.get_mesh("fsdp")
+            self.dp_shard_degree = shard_mesh.size()
+            self.dp_shard_rank = shard_mesh.get_local_rank()
         else:
             self.dp_shard_degree = 1
             self.dp_shard_rank = 0
         if parallel_dims.dp_replicate_enabled:
-            self.dp_replicate_degree = world_mesh["dp_replicate"].size()
-            self.dp_replicate_rank = world_mesh["dp_replicate"].get_local_rank()
+            dp_rep_mesh = parallel_dims.get_mesh("dp_replicate")
+            self.dp_replicate_degree = dp_rep_mesh.size()
+            self.dp_replicate_rank = dp_rep_mesh.get_local_rank()
         else:
             self.dp_replicate_degree = 1
             self.dp_replicate_rank = 0
 
         if parallel_dims.pp_enabled:
-            pp_mesh = world_mesh["pp"]  # type: DeviceMesh
+            pp_mesh = parallel_dims.get_mesh("pp")
             self.pp_rank = pp_mesh.get_local_rank()
             self.train_pp_size = pp_mesh.size()
         else:
@@ -190,7 +198,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         if parallel_dims.tp_enabled:
-            self.tp_mesh = world_mesh["tp"]  # type: DeviceMesh
+            self.tp_mesh = parallel_dims.get_mesh("tp")
             self.tp_degree = self.tp_mesh.size()
             self.tp_rank = self.tp_mesh.get_local_rank()
             self.tp_src_rank = torch.distributed.get_rank() - self.tp_rank
@@ -211,7 +219,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
-            world_mesh,
+            parallel_dims,
             self.device,
             job_config.debug,
             distinct_seed_mesh_dims=["pp"],
@@ -284,7 +292,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = None
         elif job_config.training.enable_cpu_offload:
             init_device = "cpu"
-            buffer_device = device_type
+            buffer_device = torch.device(device_type)
         else:
             init_device = device_type
             buffer_device = None
@@ -296,19 +304,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            global_batch_size = job_config.training.local_batch_size * dp_degree
+            global_batch_size = job_config.training.local_batch_size * batch_degree
         assert global_batch_size > 0
         assert (
-            global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0
+            global_batch_size % (job_config.training.local_batch_size * batch_degree)
+            == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
-            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
+            f"% ({job_config.training.local_batch_size} * {batch_degree}) != 0)"
         )
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
-            job_config.training.local_batch_size * dp_degree
+            job_config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
         self.entropy_loss_fn = VocabParallelEntropyFunction.apply
@@ -400,13 +409,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    m.init_weights(buffer_device=buffer_device)
+                    cast(ModelProtocol, m).init_weights(buffer_device=buffer_device)
                 m.train()
             if self.use_ref_model:
                 for m in self.ref_model_parts:
                     m.to_empty(device=init_device)
                     with torch.no_grad():
-                        m.init_weights(buffer_device=buffer_device)
+                        cast(ModelProtocol, m).init_weights(buffer_device=buffer_device)
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
@@ -416,7 +425,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                model.init_weights(buffer_device=buffer_device)
+                cast(ModelProtocol, model).init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -426,7 +435,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 ref_model.to_empty(device=init_device)
                 with torch.no_grad():
-                    ref_model.init_weights(buffer_device=buffer_device)
+                    cast(ModelProtocol, ref_model).init_weights(
+                        buffer_device=buffer_device
+                    )
                 self.ref_model_parts = [ref_model]
 
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
@@ -512,8 +523,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
-                dp_world_size=dp_degree,
-                dp_rank=dp_rank,
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.train_spec.build_loss_fn(job_config),
@@ -528,8 +539,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.debug(
             f"TP RANK: {self.tp_rank}, "
             f"TP GROUP: {torch.distributed.get_process_group_ranks(self.tp_group) if self.tp_group else None}, "
-            f"DP RANK: {dp_rank}, "
-            f"DP GROUP: {torch.distributed.get_process_group_ranks(dp_mesh.get_group()) if dp_mesh else None}, "
+            f"DP RANK: {batch_rank}, "
+            f"DP GROUP: {torch.distributed.get_process_group_ranks(batch_mesh.get_group()) if parallel_dims.dp_enabled else None}, "
             f"DP Replicate Rank: {self.dp_replicate_rank}, "
             f"DP Shard Rank: {self.dp_shard_rank}, "
             f"EP Degree: {self.ep_degree}, "
@@ -705,15 +716,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         if job_config.grpo.ptx_mixin_batchsize > 0:
             self.dataloader = self.train_spec.build_dataloader_fn(
-                dp_world_size=dp_degree,
-                dp_rank=dp_rank,
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
                 job_config=job_config,
             )
-            ptx_per_grad_accum = job_config.training.local_batch_size * dp_degree
+            ptx_per_grad_accum = job_config.training.local_batch_size * batch_degree
             assert (
                 job_config.grpo.ptx_mixin_batchsize % ptx_per_grad_accum == 0
-            ), "The ptx.mixin_batchsize must be divisible by the product of local_batch_size and dp_degree!"
+            ), "The ptx.mixin_batchsize must be divisible by the product of local_batch_size and batch_degree!"
             self.num_ptx_steps = (
                 job_config.grpo.ptx_mixin_batchsize // ptx_per_grad_accum
             )
@@ -934,32 +945,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else:
                 inf_logps = None
         # Create the FlexAttention mask according to the input
-        if getattr(self.model_args, "use_flex_attn", False):
-            cp_mesh = (
-                parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
-            )
+        attn_type = getattr(self.model_args, "attn_type", "sdpa")
+        if attn_type in ["flex", "varlen"]:
             extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=input_ids,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+            extra_inputs.pop("sequence_lengths", None)
         elif sequence_lengths is not None:
             raise RuntimeError("`sequence_lengths` only supported with FlexAttention")
-
-        # apply context parallelism if cp is enabled
-        # ensure CP handles the separate freqs_cis buffer for each pp stage
-        # TODO: actually figure this out if we ever use CP, right now these may be wrong
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[input_ids] + [labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                cp_no_restore_buffers={input_ids, labels},
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-            )
-            if parallel_dims.cp_enabled
-            else None
-        )
         logger.debug(
             f"nanobatch Input size: {input_ids.size()}, labels size: {labels.size()}"
         )
@@ -987,7 +982,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # skipping expensive shape re-inference when shapes are stable.
             self._reset_pp_shape_cache(input_ids)
 
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
@@ -1020,7 +1015,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 metrics = {}
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 # Get pre-computed logps from batch_dict (only for off-policy)
                 old_logp = batch_dict["logp"]
                 old_ref_logp = batch_dict["ref_logp"]
@@ -1109,7 +1104,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ) = self.data_handler.data_handling(
             self.sglang_nccl_group,
             self.cp_degree,
-            self.dp_degree,
+            self.batch_degree,
             self.dp_replicate_rank,
             self.device,
             self.job_config,
@@ -1117,8 +1112,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         data_loading_time = time.perf_counter() - data_load_start
         # Slice to just this dp index
-        start = self.dp_rank * dynamic_grad_acc_size
-        end = (self.dp_rank + 1) * dynamic_grad_acc_size
+        start = self.batch_rank * dynamic_grad_acc_size
+        end = (self.batch_rank + 1) * dynamic_grad_acc_size
         batches = batches[start:end]
         return (
             batches,
@@ -1243,6 +1238,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                             # wait
                             continue
                 total_bs += len(dynamic_batch)
+                dynamic_scale = torch.tensor(len(dynamic_batch)).to(self.device)
+                # Sync across batch dimension
+                # Since we don't scale grads across FSDP shards
+                # (https://github.com/pytorch/torchtitan/pull/2206)
+                # we can now make "total" be total overall
+                batch_mesh = self.parallel_dims.get_mesh("batch")
+                dynamic_scale = dist_utils.dist_sum(dynamic_scale, mesh=batch_mesh)
+                total_masked_tokens = torch.tensor(total_masked_tokens).to(self.device)
+                total_masked_tokens = dist_utils.dist_sum(
+                    total_masked_tokens, mesh=batch_mesh
+                )
                 logger.debug(
                     f"Length dynamic batch: {len(dynamic_batch)}, "
                     f"total_parsed_batches: {total_bs}, "
@@ -1263,7 +1269,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     batch = [dynamic_batch[0][p][:, :curr_len] for p in range(4)] + [
                         dynamic_batch[0][-1]
                     ]
-                dynamic_scale = len(dynamic_batch)
                 curr_len = -1
                 dynamic_batch = list()
 
@@ -1272,27 +1277,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 labels = torch.from_numpy(batch[1]).to(self.device)
 
                 # do logp and ref_logp
-                optional_context_parallel_ctx = (
-                    dist_utils.create_context_parallel_ctx(
-                        cp_mesh=self.world_mesh["cp"],
-                        cp_buffers=[input_ids, labels]
-                        + [m.freqs_cis for m in self.model_parts],
-                        cp_seq_dims=[1, 1] + [0 for _ in self.model_parts],
-                        cp_no_restore_buffers={input_ids, labels},
-                        cp_rotate_method=job_config.parallelism.context_parallel_rotate_method,
-                    )
-                    if self.parallel_dims.cp_enabled
-                    else None
-                )
                 with torch.no_grad():
                     extra_inputs = {}
                     extra_kwargs = {}
-                    if getattr(self.model_args, "use_flex_attn", False):
-                        cp_mesh = (
-                            self.parallel_dims.world_mesh["cp"]
-                            if self.parallel_dims.cp_enabled
-                            else None
-                        )
+                    attn_type = getattr(self.model_args, "attn_type", "sdpa")
+                    if attn_type in ["flex", "varlen"]:
                         extra_kwargs["attention_masks"] = self.model_parts[
                             0
                         ].get_attention_masks(
@@ -1301,7 +1290,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                             extra_inputs=extra_inputs,
                         )
                     if (job_config.grpo.num_microbatches > 1) and (microbatch_idx > 0):
-                        with self.train_context(optional_context_parallel_ctx):
+                        with self.train_context():
                             with self.maybe_enable_amp:
                                 pred, logp = compute_logp_from_model(
                                     self.model_parts[0],
@@ -1317,7 +1306,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     else:
                         logp = None
                     if self.use_ref_model:
-                        with self.train_context(optional_context_parallel_ctx):
+                        with self.train_context():
                             with self.maybe_enable_amp:
                                 ref_pred, ref_logp = compute_logp_from_model(
                                     self.ref_model_parts[0],
@@ -1380,7 +1369,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # extra_kwargs are.
                 extra_kwargs = {}
 
-                if getattr(self.model_args, "use_flex_attn", False):
+                attn_type = getattr(self.model_args, "attn_type", "sdpa")
+                if attn_type in ["flex", "varlen"]:
                     extra_kwargs["attention_masks"] = model_parts[
                         0
                     ].get_attention_masks(
@@ -1389,30 +1379,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         extra_inputs=extra_inputs,
                     )
 
-                # apply context parallelism if cp is enabled
-                # ensure CP handles the separate freqs_cis buffer for each pp stage
-                cp_mesh = (
-                    parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
-                )
-                optional_context_parallel_ctx = (
-                    dist_utils.create_context_parallel_ctx(
-                        cp_mesh=parallel_dims.world_mesh["cp"],
-                        cp_buffers=list(input_dict.values())
-                        + [labels]
-                        + [m.freqs_cis for m in model_parts],
-                        cp_seq_dims=[1] * len(input_dict)
-                        + [1]
-                        + [0 for _ in model_parts],
-                        cp_no_restore_buffers=set(input_dict.values()).union([labels]),
-                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-                    )
-                    if parallel_dims.cp_enabled
-                    else None
-                )
-
                 if parallel_dims.pp_enabled:
                     # Pipeline Parallel forward / backward inside step() call
-                    with self.train_context(optional_context_parallel_ctx):
+                    with self.train_context():
                         targets, losses = (
                             (labels, []) if self.pp_has_last_stage else (None, None)
                         )
@@ -1443,7 +1412,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     )
                 else:
                     # Non-PP forward / backward
-                    with self.train_context(optional_context_parallel_ctx):
+                    with self.train_context():
                         assert len(model_parts) == 1
                         with self.maybe_enable_amp:
                             pred = model_parts[0](
@@ -1557,9 +1526,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 [p for m in self.model_parts for p in m.parameters()],
                 self.job_config.training.max_norm,
                 foreach=True,
-                pp_mesh=(
-                    parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-                ),
+                pp_mesh=parallel_dims.get_optional_mesh("pp"),
                 ep_enabled=parallel_dims.ep_enabled,
             )
             grad_norms.append(grad_norm.mean().item())
@@ -1574,13 +1541,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             ft_pg = self.ft_manager.loss_sync_pg
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
-                dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_mean(
+                    loss, parallel_dims.get_optional_mesh("loss"), ft_pg
+                ),
+                dist_utils.dist_max(
+                    loss, parallel_dims.get_optional_mesh("loss"), ft_pg
+                ),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
                     ),
-                    parallel_dims.world_mesh["dp_cp"],
+                    parallel_dims.get_optional_mesh("loss"),
                     ft_pg,
                 ),
             )
@@ -1589,14 +1560,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     torch.tensor(
                         total_ptx_loss, dtype=torch.float32, device=self.device
                     ),
-                    parallel_dims.world_mesh["dp_cp"],
+                    parallel_dims.get_optional_mesh("loss"),
                     ft_pg,
                 )
                 global_dynamic_scale = dist_utils.dist_mean(
                     torch.tensor(
                         total_dynamic_scale, dtype=torch.float32, device=self.device
                     ),
-                    parallel_dims.world_mesh["dp_cp"],
+                    parallel_dims.get_optional_mesh("loss"),
                     ft_pg,
                 )
         else:
@@ -1672,19 +1643,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if "min" in key:
                 out_metrics[key] = -dist_utils.dist_max(
                     torch.tensor(-value, dtype=torch.float32, device=self.device),
-                    self.parallel_dims.world_mesh["dp_cp"],
+                    self.parallel_dims.get_optional_mesh("loss"),
                     ft_pg,
                 )
             elif "max" in key:
                 out_metrics[key] = dist_utils.dist_max(
                     torch.tensor(value, dtype=torch.float32, device=self.device),
-                    self.parallel_dims.world_mesh["dp_cp"],
+                    self.parallel_dims.get_optional_mesh("loss"),
                     ft_pg,
                 )
             else:
                 out_metrics[key] = dist_utils.dist_mean(
                     torch.tensor(value, device=self.device, dtype=torch.float32),
-                    self.parallel_dims.world_mesh["dp_cp"],
+                    self.parallel_dims.get_optional_mesh("loss"),
                     ft_pg,
                 )
         return out_metrics
@@ -1793,7 +1764,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+    ) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
         data_iterator = iter(data_iterable)
@@ -1885,7 +1856,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # sglang updates...
                 dist_utils.set_pg_timeouts(
                     timeout=timedelta(minutes=10),
-                    world_mesh=self.parallel_dims.world_mesh,
+                    parallel_dims=self.parallel_dims,
                 )
 
                 # Update ref and inference weights...
@@ -1933,7 +1904,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # reduce timeout (assuming lazy init and compilation are finished)
                 dist_utils.set_pg_timeouts(
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
-                    world_mesh=self.parallel_dims.world_mesh,
+                    parallel_dims=self.parallel_dims,
                 )
 
         if torch.distributed.get_rank() == 0:
@@ -1950,9 +1921,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
-        if self.checkpointer:
+        if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
-        if self.metrics_processor:
+        if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
 
 
@@ -1984,5 +1955,6 @@ if __name__ == "__main__":
         raise
     else:
         trainer.close()
-        torch.distributed.destroy_process_group()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")

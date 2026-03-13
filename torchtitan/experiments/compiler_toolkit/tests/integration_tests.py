@@ -24,7 +24,6 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
                     "--model.name compiler_toolkit.llama3",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--activation_checkpoint.mode none",
                 ],
             ],
             "llama3 FSDP+TP",
@@ -37,12 +36,114 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
                     "--model.name compiler_toolkit.llama3",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes autobucketing_reordering",
+                ],
+            ],
+            "llama3 FSDP+TP autobucketing",
+            "llama3_fsdp_tp_autobucketing",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes transformer_block_bucketing",
+                ],
+            ],
+            "llama3 FSDP+TP manualbucketing",
+            "llama3_fsdp_tp_manualbucketing",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes cudagraph",
+                ],
+            ],
+            "llama3 FSDP+TP+cudagraph",
+            "llama3_fsdp_tp_cudagraph",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
                     "--model.flavor debugmodel_flex_attn",
-                    "--activation_checkpoint.mode none",
                 ],
             ],
             "llama3 FSDP+TP+FlexAttn",
             "llama3_fsdp_tp_flexattn",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--model.flavor debugmodel_flex_attn",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes autobucketing_reordering,regional_inductor",
+                ],
+            ],
+            "llama3 FSDP+TP+FlexAttn autobucketing regional_inductor",
+            "llama3_fsdp_tp_flexattn_autobucketing_regional_inductor",
+            ngpu=4,
+        ),
+        # TODO: enable this when cudagraph is fixed
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--model.name compiler_toolkit.llama3",
+        #             "--parallelism.data_parallel_shard_degree 2",
+        #             "--parallelism.tensor_parallel_degree 2",
+        #             "--model.flavor debugmodel_flex_attn",
+        #             "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+        #             "--compile.passes autobucketing_reordering,regional_inductor,cudagraph",
+        #         ],
+        #     ],
+        #     "llama3 FSDP+TP+FlexAttn autobucketing regional_inductor+cudagraph",
+        #     "llama3_fsdp_tp_flexattn_autobucketing_regional_inductor_cudagraph",
+        #     ngpu=4,
+        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.joint_passes inductor_decomposition",
+                    "--compile.passes full_inductor_compilation",
+                ],
+            ],
+            "llama3 full_inductor_compilation",
+            "llama3_full_inductor_compilation",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes transformer_block_bucketing,regional_inductor",
+                ],
+            ],
+            "llama3 FSDP+TP+FlexAttn manualbucketing regional_inductor",
+            "llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=4,
         ),
         # deepseek_v3 tests
@@ -93,6 +194,12 @@ def main():
         "--config_path",
         default="./tests/integration_tests/base_config.toml",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
+    )
+    parser.add_argument(
+        "--gpu_arch_type",
+        default="cuda",
+        choices=["cuda", "rocm"],
+        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
     )
     parser.add_argument(
         "--test_name",
