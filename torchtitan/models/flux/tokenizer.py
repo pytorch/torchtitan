@@ -75,10 +75,10 @@ class FluxTokenizerContainer(BaseTokenizer):
         """
         results = {}
         if "t5" in tokens:
-            result["t5_text"] = self.t5_tokenizer.decode(tokens["t5"])
+            results["t5_text"] = self.t5_tokenizer.decode(tokens["t5"])
         if "clip" in tokens:
-            result["clip_text"] = self.clip_tokenizer.decode(tokens["clip"])
-        return result
+            results["clip_text"] = self.clip_tokenizer.decode(tokens["clip"])
+        return results
 
     def get_vocab_size(self) -> int:
         return self.t5_tokenizer.get_vocab_size()
