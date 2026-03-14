@@ -148,9 +148,9 @@ class GroupedExperts(Module):
 
 
 class TokenChoiceTopKRouter(Module):
-    """Token-choice top-K routing for Mixture-of-Experts layers.
+    """This class implements token-choice routing. In token-choice top-K routing, each token is
+        routed to top K experts based on the router scores.
 
-    Each token is routed to top K experts based on the router scores.
     Optionally supports node-limited (group-limited) routing where experts are divided into groups
     (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
     This reduces cross-node communication in distributed settings.
