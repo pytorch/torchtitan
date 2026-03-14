@@ -247,6 +247,19 @@ class GptOssModel(Decoder):
                     "CP support for gpt-oss model is still in progress."
                 )
 
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layer.attention.n_heads
+                n_kv_heads = self.layer.attention.n_kv_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
+
         # pyrefly: ignore [bad-override]
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
