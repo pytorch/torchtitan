@@ -278,5 +278,46 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         )
 
 
+    @patch("torch.distributed.distributed_c10d.get_world_size")
+    @patch("torch.distributed.distributed_c10d.get_rank")
+    def test_detect_anomaly_enabled(self, mock_get_rank, mock_get_world_size):
+        """detect_anomaly=True calls set_detect_anomaly with check_nan=False."""
+        mock_get_world_size.return_value = 1
+        mock_get_rank.return_value = 0
+
+        fake_mesh = MagicMock()
+        fake_mesh.world_size = 1
+
+        debug_config = DebugConfig(seed=42, detect_anomaly=True)
+        with patch("torch.autograd.set_detect_anomaly") as mock_sda:
+            set_determinism(
+                parallel_dims=fake_mesh,
+                device=self.device,
+                debug_config=debug_config,
+                distinct_seed_mesh_dims=[],
+            )
+            mock_sda.assert_called_once_with(True, check_nan=False)
+
+    @patch("torch.distributed.distributed_c10d.get_world_size")
+    @patch("torch.distributed.distributed_c10d.get_rank")
+    def test_detect_anomaly_disabled_by_default(self, mock_get_rank, mock_get_world_size):
+        """detect_anomaly defaults to False and does not call set_detect_anomaly."""
+        mock_get_world_size.return_value = 1
+        mock_get_rank.return_value = 0
+
+        fake_mesh = MagicMock()
+        fake_mesh.world_size = 1
+
+        debug_config = DebugConfig(seed=42)
+        with patch("torch.autograd.set_detect_anomaly") as mock_sda:
+            set_determinism(
+                parallel_dims=fake_mesh,
+                device=self.device,
+                debug_config=debug_config,
+                distinct_seed_mesh_dims=[],
+            )
+            mock_sda.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
