@@ -79,10 +79,10 @@ def _run_experts_grouped_mm(
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        use_grouped_mm: bool = True
         dim: int = field(init=False)
         hidden_dim: int = field(init=False)
         num_experts: int = field(init=False)
+        use_grouped_mm: bool = True
 
     def __init__(self, config: Config):
         super().__init__()
@@ -141,42 +141,44 @@ class GroupedExperts(Module):
 
 
 class TokenChoiceTopKRouter(Module):
-    """Token-choice top-K routing for Mixture of Experts.
+    """This class implements token-choice routing. In token-choice top-K routing, each token is
+        routed to top K experts based on the router scores.
 
-    Each token is routed to top K experts based on the router scores.
-    Optionally supports node-limited (group-limited) routing where experts are
-    divided into groups (e.g., by node), and only ``num_limited_groups`` groups
-    are considered before selecting top_k experts. This reduces cross-node
-    communication in distributed settings.
-
-    Config Args:
-        top_k (int): Number of experts each token will be routed to.
-        score_func (Literal["softmax", "sigmoid"]): Scoring function for router scores.
-        route_norm (bool): Whether to normalize the routing scores.
-        route_scale (float): Scaling factor applied to the routing scores.
-        gate (Linear.Config): Configuration for the router's linear gate layer.
-            Use ``Linear.Config(bias=True)`` to include a bias term.
-        num_expert_groups (int | None): Number of expert groups for node-limited
-            routing. If None, standard top-k routing is used. Must be a divisor
-            of num_experts.
-        num_limited_groups (int | None): Number of groups to select in
-            node-limited routing. Required when num_expert_groups is set.
-        dim (int): Dimension of input tokens. Set via ``build(dim=...)``.
-        num_experts (int): Number of experts. Set via ``build(num_experts=...)``.
+    Optionally supports node-limited (group-limited) routing where experts are divided into groups
+    (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
+    This reduces cross-node communication in distributed settings.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        """Configuration for TokenChoiceTopKRouter.
+
+        Args:
+            top_k (int): Number of experts each token will be routed to.
+            score_func (Literal["softmax", "sigmoid"]): Scoring function for router scores.
+            route_norm (bool): Whether to normalize the routing scores.
+            route_scale (float): Scaling factor applied to the routing scores.
+            gate (Linear.Config): Configuration for the router's linear gate layer.
+                Use ``Linear.Config(bias=True)`` to include a bias term.
+            num_expert_groups (int | None): Number of expert groups for node-limited
+                routing. If None, standard top-k routing is used. Must be a divisor
+                of num_experts.
+            num_limited_groups (int | None): Number of groups to select in
+                node-limited routing. Required when num_expert_groups is set.
+            dim (int): Dimension of input tokens. Set via ``build(dim=...)``.
+            num_experts (int): Number of experts. Set via ``build(num_experts=...)``.
+        """
+
+        dim: int = field(init=False)
+        num_experts: int = field(init=False)
+        num_expert_groups: int | None = None  # must be a divisor of num_experts
+        num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
         gate: Linear.Config = field(default_factory=Linear.Config)
-        num_expert_groups: int | None = None  # must be a divisor of num_experts
-        num_limited_groups: int | None = None
         _debug_force_load_balance: bool = False
-        dim: int = field(init=False)
-        num_experts: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -393,9 +395,7 @@ class MoE(Module):
         load_balance_coeff: float | None = 1e-3
         # Expert hidden dimension (replaces old moe_inter_dim)
         hidden_dim: int = 0
-        experts: GroupedExperts.Config = field(
-            default_factory=GroupedExperts.Config
-        )
+        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
         router: TokenChoiceTopKRouter.Config = field(
             default_factory=TokenChoiceTopKRouter.Config
         )
@@ -408,9 +408,7 @@ class MoE(Module):
         self.experts = config.experts.build(
             dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
-        self.router = config.router.build(
-            dim=dim, num_experts=num_experts
-        )
+        self.router = config.router.build(dim=dim, num_experts=num_experts)
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
