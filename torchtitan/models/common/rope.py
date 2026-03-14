@@ -347,9 +347,6 @@ def apply_rotary_emb_cos_sin(
     """
     head_dim = xq.shape[-1]
     rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
-    # Keep cos/sin in their precomputed float32 dtype and upcast x to match,
-    # mirroring apply_rotary_emb_complex. This prevents inductor from changing
-    # the dtype boundary when fusing with adjacent ops (e.g. q_norm/k_norm).
     cos = rope_cache[..., :head_dim].to(device=xq.device)
     sin = rope_cache[..., head_dim:].to(device=xq.device)
     xq_f = xq.float()
