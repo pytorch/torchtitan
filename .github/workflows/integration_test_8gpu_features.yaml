@@ -66,6 +66,9 @@ jobs:
         fi
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
+        fi
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
 

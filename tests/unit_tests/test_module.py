@@ -13,24 +13,22 @@ from torchtitan.protocols.module import Module
 
 
 class TestModuleInitWeights(unittest.TestCase):
-    """Tests for Module.init_weights enforcement.
+    """Tests for Module.init_weights behavior.
 
-    Module.init_weights uses ``raise NotImplementedError`` because
-    nn.Module's metaclass is plain ``type`` (not ABCMeta), so
-    @abstractmethod alone does not prevent instantiation of subclasses
-    that forget to implement init_weights.
+    Module.init_weights provides a default no-op implementation so that
+    subclasses without learnable parameters (or loaded from checkpoints)
+    do not need to override it.
     """
 
-    def test_missing_init_weights_raises_on_call(self):
-        """Subclass without init_weights gets NotImplementedError at call time."""
+    def test_default_init_weights_is_noop(self):
+        """Subclass without init_weights gets the default no-op."""
 
-        class BadModule(Module):
+        class SimpleModule(Module):
             def __init__(self):
                 super().__init__()
 
-        m = BadModule()
-        with self.assertRaises(NotImplementedError):
-            m.init_weights()
+        m = SimpleModule()
+        m.init_weights()  # should not raise
 
     def test_init_weights_implemented(self):
         """Subclass with init_weights works normally."""
@@ -99,16 +97,15 @@ class TestDiamondInheritance(unittest.TestCase):
         self.assertIsInstance(emb, nn.Module)
         self.assertIsInstance(emb, Module)
 
-    def test_missing_init_weights_raises(self):
-        """Diamond class without init_weights raises on call."""
+    def test_default_init_weights_noop_diamond(self):
+        """Diamond class without init_weights gets the default no-op."""
 
-        class BadEmbedding(nn.Embedding, Module):
+        class SimpleEmbedding(nn.Embedding, Module):
             def __init__(self, num_embeddings, embedding_dim):
                 super().__init__(num_embeddings, embedding_dim)
 
-        emb = BadEmbedding(10, 4)
-        with self.assertRaises(NotImplementedError):
-            emb.init_weights()
+        emb = SimpleEmbedding(10, 4)
+        emb.init_weights()  # should not raise
 
     def test_module_hierarchy_is_flat(self):
         """Diamond embedding adds no extra layer to the module tree."""

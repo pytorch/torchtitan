@@ -108,21 +108,43 @@ def validate_flex_attn_annotation_pass(
     return gm
 
 
-# Default set of ops whose outputs should be saved (not recomputed) during
-# activation checkpointing. These are compute-intensive or communication ops
-# where recomputation is expensive.
-DEFAULT_SAC_SAVE_OPS = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
-}
+def _get_default_sac_save_ops() -> set:
+    """Build the default set of ops whose outputs should be saved (not recomputed)
+    during activation checkpointing.
+
+    Compute-intensive ops are obtained dynamically from PyTorch's partitioner
+    (``get_default_op_list``) so the list stays in sync with upstream changes.
+    """
+    from torch._functorch.partitioners import get_default_op_list
+
+    # Compute-intensive ops from PyTorch's partitioner
+    compute_intensive_ops = {
+        op.default for op in get_default_op_list().compute_intensive_ops
+    }
+
+    # attention variants
+    scaled_dot_product_attention_ops = {
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+        torch.ops.aten._scaled_dot_product_attention_math.default,
+        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+    }
+
+    higher_order_ops = {
+        torch._higher_order_ops.flex_attention,
+        torch._higher_order_ops.inductor_compiled_code,
+    }
+
+    communication_intensive_ops = {
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        torch.ops._c10d_functional.all_to_all_single.default,
+    }
+
+    return (
+        compute_intensive_ops
+        | scaled_dot_product_attention_ops
+        | higher_order_ops
+        | communication_intensive_ops
+    )
 
 
 def apply_sac_pass(
@@ -151,20 +173,36 @@ def apply_sac_pass(
     Args:
         gm: The joint forward-backward graph module
         op_list_to_save: Set of op targets whose outputs should be saved.
-            Defaults to DEFAULT_SAC_SAVE_OPS if None.
+            Defaults to ``_get_default_sac_save_ops()`` if None.
 
     Returns:
         The annotated graph module
     """
     if op_list_to_save is None:
-        op_list_to_save = DEFAULT_SAC_SAVE_OPS
+        op_list_to_save = _get_default_sac_save_ops()
 
-    nodes = list(gm.graph.nodes)
-    output_node = nodes[-1].all_input_nodes[0]
     mm_count = 0
 
-    for node in nodes:
-        if node.op != "call_function" or node.target is operator.getitem:
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+
+        if node.target in (
+            operator.getitem,
+            torch.ops._c10d_functional.wait_tensor.default,
+        ):
+            # Propagate recompute tag from the parent node:
+            # - getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa),
+            #   it is followed by getitem nodes that extract individual elements.
+            #   They inherit the parent's recompute tag, otherwise they will be
+            #   exposed as graph outputs and saved for backwards unnecessarily.
+            # - wait_tensor: Semantically tied to its parent async collective
+            #   (e.g., reduce_scatter_tensor, all_gather_into_tensor) and must
+            #   share the same save/recompute decision.
+            parent = node.args[0]
+            if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
+                node.meta["recompute"] = parent.meta["recompute"]
+                node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
 
         node.meta["ac_graph_id"] = 0
@@ -180,9 +218,6 @@ def apply_sac_pass(
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
         else:
             node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
-
-        if node is output_node:
-            break
 
     gm.recompile()
     logger.info(
