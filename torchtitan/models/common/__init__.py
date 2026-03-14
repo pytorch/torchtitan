@@ -21,7 +21,7 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import Linear
-from .moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from .moe import MoE
 from .rmsnorm import RMSNorm
 from .rope import (
     apply_rotary_emb_complex,
@@ -41,11 +41,9 @@ __all__ = [
     "get_document_mask_mod",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
-    "GroupedExperts",
     "GQAttention",
     "Linear",
     "MoE",
-    "TokenChoiceTopKRouter",
     "RMSNorm",
     "RoPE",
     "ScaledDotProductAttentionWrapper",
