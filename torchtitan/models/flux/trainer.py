@@ -210,7 +210,11 @@ class FluxTrainer(Trainer):
 
                 # Scale loss as we used SUM reduction for mse loss function
                 # pyrefly: ignore [unsupported-operation]
-                loss = self.loss_fn(latent_noise_pred, target).main / global_valid_tokens
+                loss = (
+                    # pyrefly: ignore [unsupported-operation]
+                    self.loss_fn(latent_noise_pred, target).main
+                    / global_valid_tokens
+                )
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]

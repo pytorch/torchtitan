@@ -43,9 +43,10 @@ class TestLoss(unittest.TestCase):
 
         # Test case 2: Use the exact same predictions and labels in multiple microbatches
         # Simulating gradient accumulation with identical data
-        loss2 = cross_entropy_loss(predictions, labels).main + cross_entropy_loss(
-            predictions, labels
-        ).main
+        loss2 = (
+            cross_entropy_loss(predictions, labels).main
+            + cross_entropy_loss(predictions, labels).main
+        )
         num_valid_tokens2 = num_valid_tokens1 * 2
 
         # Per-token loss should be identical

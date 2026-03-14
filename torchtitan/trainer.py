@@ -20,7 +20,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import IGNORE_INDEX, Loss, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -30,7 +30,6 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.components.loss import Loss
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,

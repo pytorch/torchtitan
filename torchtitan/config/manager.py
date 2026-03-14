@@ -107,13 +107,7 @@ class ConfigManager:
                 try:
                     module = importlib.import_module(module_path)
                     break
-                except ImportError as import_error:
-                    import traceback
-                    logger.debug(f"Failed to import {module_path}: {import_error}")
-                    import torch
-                    print("==" * 50)
-                    print(traceback.format_exc())
-                    print("==" * 50)
+                except ImportError:
                     continue
             if module is None:
                 raise ImportError(
