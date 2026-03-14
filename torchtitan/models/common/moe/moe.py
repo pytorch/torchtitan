@@ -141,12 +141,28 @@ class GroupedExperts(Module):
 
 
 class TokenChoiceTopKRouter(Module):
-    """This class implements token-choice routing. In token-choice top-K routing, each token is
-        routed to top K experts based on the router scores.
+    """Token-choice top-K routing for Mixture of Experts.
 
-    Optionally supports node-limited (group-limited) routing where experts are divided into groups
-    (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
-    This reduces cross-node communication in distributed settings.
+    Each token is routed to top K experts based on the router scores.
+    Optionally supports node-limited (group-limited) routing where experts are
+    divided into groups (e.g., by node), and only ``num_limited_groups`` groups
+    are considered before selecting top_k experts. This reduces cross-node
+    communication in distributed settings.
+
+    Config Args:
+        top_k (int): Number of experts each token will be routed to.
+        score_func (Literal["softmax", "sigmoid"]): Scoring function for router scores.
+        route_norm (bool): Whether to normalize the routing scores.
+        route_scale (float): Scaling factor applied to the routing scores.
+        gate (Linear.Config): Configuration for the router's linear gate layer.
+            Use ``Linear.Config(bias=True)`` to include a bias term.
+        num_expert_groups (int | None): Number of expert groups for node-limited
+            routing. If None, standard top-k routing is used. Must be a divisor
+            of num_experts.
+        num_limited_groups (int | None): Number of groups to select in
+            node-limited routing. Required when num_expert_groups is set.
+        dim (int): Dimension of input tokens. Set via ``build(dim=...)``.
+        num_experts (int): Number of experts. Set via ``build(num_experts=...)``.
     """
 
     @dataclass(kw_only=True, slots=True)

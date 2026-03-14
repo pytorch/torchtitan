@@ -8,7 +8,8 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.moe import TokenChoiceTopKRouter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 

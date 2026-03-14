@@ -9,7 +9,8 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
 

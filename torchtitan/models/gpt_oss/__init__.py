@@ -7,7 +7,7 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe.moe import TokenChoiceTopKRouter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
