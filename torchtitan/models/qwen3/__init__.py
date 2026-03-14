@@ -7,7 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, FeedForward, GQAttention, RoPE
+from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -32,10 +32,13 @@ qwen3_configs = {
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=3072),
+            feed_forward=FeedForward.Config(
+                hidden_dim=3072,
+            ),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
@@ -53,6 +56,35 @@ qwen3_configs = {
             backend="cos_sin",
         ),
     ),
+    "debugmodel_flex": Qwen3Model.Config(
+        vocab_size=2048,
+        dim=256,
+        n_layers=8,
+        norm=RMSNorm.Config(eps=1e-6),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
+        layer=Qwen3TransformerBlock.Config(
+            attention_norm=RMSNorm.Config(eps=1e-6),
+            ffn_norm=RMSNorm.Config(eps=1e-6),
+            feed_forward=FeedForward.Config(hidden_dim=3072),
+            attention=GQAttention.Config(
+                n_heads=16,
+                n_kv_heads=8,
+                head_dim=128,
+                q_norm=RMSNorm.Config(eps=1e-6),
+                k_norm=RMSNorm.Config(eps=1e-6),
+                attn_backend="flex",
+                rope_backend="cos_sin",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=128,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+    ),
     "0.6B": Qwen3Model.Config(
         vocab_size=151936,
         dim=1024,
@@ -60,10 +92,13 @@ qwen3_configs = {
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=3072),
+            feed_forward=FeedForward.Config(
+                hidden_dim=3072,
+            ),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
@@ -88,10 +123,13 @@ qwen3_configs = {
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=6144),
+            feed_forward=FeedForward.Config(
+                hidden_dim=6144,
+            ),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
@@ -116,10 +154,13 @@ qwen3_configs = {
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=9728),
+            feed_forward=FeedForward.Config(
+                hidden_dim=9728,
+            ),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
@@ -142,11 +183,14 @@ qwen3_configs = {
         dim=4096,
         n_layers=36,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=12288),
+            feed_forward=FeedForward.Config(
+                hidden_dim=12288,
+            ),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
@@ -169,11 +213,14 @@ qwen3_configs = {
         dim=5120,
         n_layers=40,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=17408),
+            feed_forward=FeedForward.Config(
+                hidden_dim=17408,
+            ),
             attention=GQAttention.Config(
                 n_heads=40,
                 n_kv_heads=8,
@@ -196,11 +243,14 @@ qwen3_configs = {
         dim=5120,
         n_layers=64,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
             ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=25600),
+            feed_forward=FeedForward.Config(
+                hidden_dim=25600,
+            ),
             attention=GQAttention.Config(
                 n_heads=64,
                 n_kv_heads=8,
@@ -224,6 +274,7 @@ qwen3_configs = {
         dim=256,
         n_layers=8,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
@@ -239,7 +290,9 @@ qwen3_configs = {
                 route_scale=1.0,
                 score_before_experts=False,
             ),
-            feed_forward=FeedForward.Config(hidden_dim=3072),
+            feed_forward=FeedForward.Config(
+                hidden_dim=3072,
+            ),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
@@ -262,6 +315,7 @@ qwen3_configs = {
         dim=2048,
         n_layers=48,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
@@ -277,7 +331,9 @@ qwen3_configs = {
                 route_scale=1.0,
                 score_before_experts=False,
             ),
-            feed_forward=FeedForward.Config(hidden_dim=6144),
+            feed_forward=FeedForward.Config(
+                hidden_dim=6144,
+            ),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=4,
@@ -300,6 +356,7 @@ qwen3_configs = {
         dim=4096,
         n_layers=94,
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(eps=1e-6),
@@ -315,7 +372,9 @@ qwen3_configs = {
                 route_scale=1.0,
                 score_before_experts=False,
             ),
-            feed_forward=FeedForward.Config(hidden_dim=12288),
+            feed_forward=FeedForward.Config(
+                hidden_dim=12288,
+            ),
             attention=GQAttention.Config(
                 n_heads=64,
                 n_kv_heads=4,

@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -21,10 +21,10 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module
 
@@ -68,6 +68,7 @@ class Decoder(BaseModel):
         dim: int
         n_layers: int
         vocab_size: int
+        output: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
@@ -96,7 +97,9 @@ class Decoder(BaseModel):
             )
 
         self.norm = config.norm.build(normalized_shape=config.dim)
-        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.output = config.output.build(
+            in_features=config.dim, out_features=config.vocab_size
+        )
 
     def init_weights(
         self,
@@ -119,10 +122,15 @@ class Decoder(BaseModel):
             layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.init_weights()
+
+        # TODO: this init_weights logic can be the same as others
+        # if we move final_out_std and cutoff_factor logic to
+        # decoder.__init__(). Refactor this logic when we refactor
+        # init_weights.
         final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            trunc_normal_(
+            nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,

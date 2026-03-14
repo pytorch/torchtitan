@@ -33,6 +33,12 @@ class RMSNorm(nn.RMSNorm, Module):
         elementwise_affine: bool = True
 
     def __init__(self, config: Config):
+        if not hasattr(config, "normalized_shape"):
+            raise TypeError(
+                "RMSNorm.Config requires 'normalized_shape' to be set. "
+                "Use Config.build(normalized_shape=...) or set it "
+                "on the Config instance before constructing RMSNorm directly."
+            )
         super().__init__(
             config.normalized_shape,
             eps=config.eps,

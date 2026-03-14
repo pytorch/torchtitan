@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -20,6 +19,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
@@ -38,6 +38,10 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        wq: Linear.Config | None = None
+        wq_a: Linear.Config | None = None
+        wq_b: Linear.Config | None = None
+        linear_bias: bool = False
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
         q_norm: RMSNorm.Config
@@ -63,24 +67,48 @@ class Attention(BaseAttention):
         self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
 
+        linear_config = Linear.Config(bias=config.linear_bias)
         if self.q_lora_rank == 0:
-            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
-        else:
-            self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
-            self.q_norm = config.q_norm.build(normalized_shape=self.q_lora_rank)
-            self.wq_b = nn.Linear(
-                self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
+            assert config.wq is not None, "wq is required when q_lora_rank == 0"
+            assert config.wq.bias == config.linear_bias, (
+                f"wq.bias ({config.wq.bias}) must match "
+                f"linear_bias ({config.linear_bias})"
             )
-        self.wkv_a = nn.Linear(
-            self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+            self.wq = config.wq.build(
+                in_features=self.dim, out_features=self.n_heads * self.qk_head_dim
+            )
+        else:
+            assert (
+                config.wq_a is not None and config.wq_b is not None
+            ), "wq_a and wq_b are required when q_lora_rank > 0"
+            assert config.wq_a.bias == config.linear_bias, (
+                f"wq_a.bias ({config.wq_a.bias}) must match "
+                f"linear_bias ({config.linear_bias})"
+            )
+            assert config.wq_b.bias == config.linear_bias, (
+                f"wq_b.bias ({config.wq_b.bias}) must match "
+                f"linear_bias ({config.linear_bias})"
+            )
+            self.wq_a = config.wq_a.build(
+                in_features=self.dim, out_features=self.q_lora_rank
+            )
+            self.q_norm = config.q_norm.build(normalized_shape=self.q_lora_rank)
+            self.wq_b = config.wq_b.build(
+                in_features=self.q_lora_rank,
+                out_features=self.n_heads * self.qk_head_dim,
+            )
+        self.wkv_a = linear_config.build(
+            in_features=self.dim,
+            out_features=self.kv_lora_rank + self.qk_rope_head_dim,
         )
         self.kv_norm = config.kv_norm.build(normalized_shape=self.kv_lora_rank)
-        self.wkv_b = nn.Linear(
-            self.kv_lora_rank,
-            self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
+        self.wkv_b = linear_config.build(
+            in_features=self.kv_lora_rank,
+            out_features=self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
         )
-        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
+        self.wo = linear_config.build(
+            in_features=self.n_heads * self.v_head_dim, out_features=self.dim
+        )
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if config.rope_max_seq_len > config.rope_original_seq_len:
@@ -163,8 +191,8 @@ class Attention(BaseAttention):
             linear_list.append(self.wq)
 
         for linear in linear_list:
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            linear.init_weights()
+        self.wo.init_weights(init_std=init_std)
 
         self.kv_norm.init_weights()
         if self.q_lora_rank > 0:
@@ -286,8 +314,7 @@ class DeepSeekV3Model(Decoder):
 
             self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
 
-            # Configure expert parallel communication backend from config
-            if parallelism.expert_parallel_comm_backend == "deepep":
+            if parallelism.expert_parallel_comm_backend in ("deepep", "hybridep"):
                 from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
 
                 self.layer.moe = DeepEPMoE.Config(**_dc.asdict(self.layer.moe))

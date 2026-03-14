@@ -3,7 +3,7 @@ datasets >= 3.6.0
 tensorboard
 wandb
 fsspec
-tyro
+tyro >= 1.0.5
 tokenizers >= 0.15.0
 safetensors
 einops

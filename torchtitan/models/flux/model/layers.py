@@ -12,6 +12,7 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.module import Module
 
@@ -48,9 +49,6 @@ class EmbedND(Module):
         self.dim = config.dim
         self.theta = config.theta
         self.axes_dim = config.axes_dim
-
-    def init_weights(self, **kwargs):
-        pass  # no learnable parameters
 
     def forward(self, ids: Tensor) -> Tensor:
         n_axes = ids.shape[-1]
@@ -96,17 +94,23 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
 class MLPEmbedder(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        in_layer: Linear.Config
+        out_layer: Linear.Config
         in_dim: int
         hidden_dim: int
 
     def __init__(self, config: Config):
         super().__init__()
-        self.in_layer = nn.Linear(config.in_dim, config.hidden_dim, bias=True)
+        self.in_layer = config.in_layer.build(
+            in_features=config.in_dim, out_features=config.hidden_dim
+        )
         self.silu = nn.SiLU()
-        self.out_layer = nn.Linear(config.hidden_dim, config.hidden_dim, bias=True)
+        self.out_layer = config.out_layer.build(
+            in_features=config.hidden_dim, out_features=config.hidden_dim
+        )
 
-    # pyrefly: ignore [bad-override]
-    def init_weights(self, init_std: float = 0.02):
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std", 0.02)
         nn.init.normal_(self.in_layer.weight, std=init_std)
         nn.init.constant_(self.in_layer.bias, 0)
         nn.init.normal_(self.out_layer.weight, std=init_std)
@@ -116,13 +120,13 @@ class MLPEmbedder(Module):
         return self.out_layer(self.silu(self.in_layer(x)))
 
 
-class QKNorm(torch.nn.Module):
-    def __init__(self, dim: int):
+class QKNorm(Module):
+    def __init__(self, *, dim: int):
         super().__init__()
         self.query_norm = RMSNorm.Config().build(normalized_shape=dim)
         self.key_norm = RMSNorm.Config().build(normalized_shape=dim)
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         self.query_norm.init_weights()
         self.key_norm.init_weights()
 
@@ -132,18 +136,20 @@ class QKNorm(torch.nn.Module):
         return q.to(v), k.to(v)
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False):
+class SelfAttention(Module):
+    def __init__(self, *, dim: int, num_heads: int = 8, qkv_bias: bool = False):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.norm = QKNorm(head_dim)
-        self.proj = nn.Linear(dim, dim)
+        self.qkv = Linear.Config(bias=qkv_bias).build(
+            in_features=dim, out_features=dim * 3
+        )
+        self.norm = QKNorm(dim=head_dim)
+        self.proj = Linear.Config(bias=True).build(in_features=dim, out_features=dim)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         for layer in (self.qkv, self.proj):
             nn.init.xavier_uniform_(layer.weight)
             nn.init.constant_(layer.bias, 0)
@@ -167,14 +173,16 @@ class ModulationOut:
     gate: Tensor
 
 
-class Modulation(nn.Module):
-    def __init__(self, dim: int, double: bool):
+class Modulation(Module):
+    def __init__(self, *, dim: int, double: bool):
         super().__init__()
         self.is_double = double
         self.multiplier = 6 if double else 3
-        self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
+        self.lin = Linear.Config(bias=True).build(
+            in_features=dim, out_features=self.multiplier * dim
+        )
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         nn.init.constant_(self.lin.weight, 0)
         nn.init.constant_(self.lin.bias, 0)
 
@@ -194,6 +202,10 @@ class DoubleStreamBlock(Module):
     class Config(Module.Config):
         hidden_size: int
         num_heads: int
+        img_mlp_in: Linear.Config
+        img_mlp_out: Linear.Config
+        txt_mlp_in: Linear.Config
+        txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
 
@@ -203,7 +215,7 @@ class DoubleStreamBlock(Module):
         mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.img_mod = Modulation(config.hidden_size, double=True)
+        self.img_mod = Modulation(dim=config.hidden_size, double=True)
         self.img_norm1 = nn.LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
@@ -215,12 +227,16 @@ class DoubleStreamBlock(Module):
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.img_mlp = nn.Sequential(
-            nn.Linear(config.hidden_size, mlp_hidden_dim, bias=True),
+            config.img_mlp_in.build(
+                in_features=config.hidden_size, out_features=mlp_hidden_dim
+            ),
             nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, config.hidden_size, bias=True),
+            config.img_mlp_out.build(
+                in_features=mlp_hidden_dim, out_features=config.hidden_size
+            ),
         )
 
-        self.txt_mod = Modulation(config.hidden_size, double=True)
+        self.txt_mod = Modulation(dim=config.hidden_size, double=True)
         self.txt_norm1 = nn.LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
@@ -232,15 +248,18 @@ class DoubleStreamBlock(Module):
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.txt_mlp = nn.Sequential(
-            nn.Linear(config.hidden_size, mlp_hidden_dim, bias=True),
+            config.txt_mlp_in.build(
+                in_features=config.hidden_size, out_features=mlp_hidden_dim
+            ),
             nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, config.hidden_size, bias=True),
+            config.txt_mlp_out.build(
+                in_features=mlp_hidden_dim, out_features=config.hidden_size
+            ),
         )
 
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
-    # pyrefly: ignore [bad-override]
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         # initialize all the nn.Linear submodules
         for layer in (
             self.img_mlp[0],
@@ -320,6 +339,8 @@ class SingleStreamBlock(Module):
     class Config(Module.Config):
         hidden_size: int
         num_heads: int
+        linear1: Linear.Config
+        linear2: Linear.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
 
@@ -332,15 +353,17 @@ class SingleStreamBlock(Module):
 
         self.mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
         # qkv and mlp_in
-        self.linear1 = nn.Linear(
-            config.hidden_size, config.hidden_size * 3 + self.mlp_hidden_dim
+        self.linear1 = config.linear1.build(
+            in_features=config.hidden_size,
+            out_features=config.hidden_size * 3 + self.mlp_hidden_dim,
         )
         # proj and mlp_out
-        self.linear2 = nn.Linear(
-            config.hidden_size + self.mlp_hidden_dim, config.hidden_size
+        self.linear2 = config.linear2.build(
+            in_features=config.hidden_size + self.mlp_hidden_dim,
+            out_features=config.hidden_size,
         )
 
-        self.norm = QKNorm(head_dim)
+        self.norm = QKNorm(dim=head_dim)
 
         self.hidden_size = config.hidden_size
         self.pre_norm = nn.LayerNorm(
@@ -348,11 +371,10 @@ class SingleStreamBlock(Module):
         )
 
         self.mlp_act = nn.GELU(approximate="tanh")
-        self.modulation = Modulation(config.hidden_size, double=False)
+        self.modulation = Modulation(dim=config.hidden_size, double=False)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
-    # pyrefly: ignore [bad-override]
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         for layer in (self.linear1, self.linear2):
             nn.init.xavier_uniform_(layer.weight)
             nn.init.constant_(layer.bias, 0)
@@ -383,6 +405,8 @@ class SingleStreamBlock(Module):
 class LastLayer(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        linear: Linear.Config
+        adaln_linear: Linear.Config
         hidden_size: int
         patch_size: int
         out_channels: int
@@ -392,17 +416,18 @@ class LastLayer(Module):
         self.norm_final = nn.LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.linear = nn.Linear(
-            config.hidden_size,
-            config.patch_size * config.patch_size * config.out_channels,
-            bias=True,
+        self.linear = config.linear.build(
+            in_features=config.hidden_size,
+            out_features=config.patch_size * config.patch_size * config.out_channels,
         )
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(config.hidden_size, 2 * config.hidden_size, bias=True)
+            nn.SiLU(),
+            config.adaln_linear.build(
+                in_features=config.hidden_size, out_features=2 * config.hidden_size
+            ),
         )
 
-    # pyrefly: ignore [bad-override]
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         # pyrefly: ignore [bad-argument-type]
         nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
         # pyrefly: ignore [bad-argument-type]

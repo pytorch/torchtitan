@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn, Tensor
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
@@ -28,6 +29,8 @@ class FluxModel(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
+        img_in: Linear.Config
+        txt_in: Linear.Config
         in_channels: int = 64
         out_channels: int = 64
         vec_in_dim: int = 768
@@ -52,18 +55,26 @@ class FluxModel(BaseModel):
         )
         time_in_config: MLPEmbedder.Config = field(
             default_factory=lambda: MLPEmbedder.Config(
+                in_layer=Linear.Config(bias=True),
+                out_layer=Linear.Config(bias=True),
                 in_dim=256,
                 hidden_dim=3072,
             )
         )
         vector_in_config: MLPEmbedder.Config = field(
             default_factory=lambda: MLPEmbedder.Config(
+                in_layer=Linear.Config(bias=True),
+                out_layer=Linear.Config(bias=True),
                 in_dim=768,
                 hidden_dim=3072,
             )
         )
         double_block_config: DoubleStreamBlock.Config = field(
             default_factory=lambda: DoubleStreamBlock.Config(
+                img_mlp_in=Linear.Config(bias=True),
+                img_mlp_out=Linear.Config(bias=True),
+                txt_mlp_in=Linear.Config(bias=True),
+                txt_mlp_out=Linear.Config(bias=True),
                 hidden_size=3072,
                 num_heads=24,
                 mlp_ratio=4.0,
@@ -72,6 +83,8 @@ class FluxModel(BaseModel):
         )
         single_block_config: SingleStreamBlock.Config = field(
             default_factory=lambda: SingleStreamBlock.Config(
+                linear1=Linear.Config(bias=True),
+                linear2=Linear.Config(bias=True),
                 hidden_size=3072,
                 num_heads=24,
                 mlp_ratio=4.0,
@@ -79,6 +92,8 @@ class FluxModel(BaseModel):
         )
         final_layer_config: LastLayer.Config = field(
             default_factory=lambda: LastLayer.Config(
+                linear=Linear.Config(bias=True),
+                adaln_linear=Linear.Config(bias=True),
                 hidden_size=3072,
                 patch_size=1,
                 out_channels=64,
@@ -117,10 +132,14 @@ class FluxModel(BaseModel):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_heads
         self.pe_embedder = config.pe_config.build()
-        self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
+        self.img_in = config.img_in.build(
+            in_features=self.in_channels, out_features=self.hidden_size
+        )
         self.time_in = config.time_in_config.build()
         self.vector_in = config.vector_in_config.build()
-        self.txt_in = nn.Linear(config.context_in_dim, self.hidden_size)
+        self.txt_in = config.txt_in.build(
+            in_features=config.context_in_dim, out_features=self.hidden_size
+        )
 
         self.double_blocks = nn.ModuleList(
             [config.double_block_config.build() for _ in range(config.depth)]
