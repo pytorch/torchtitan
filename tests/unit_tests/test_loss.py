@@ -7,7 +7,7 @@
 import unittest
 
 import torch
-from torchtitan.components.loss import cross_entropy_loss, IGNORE_INDEX
+from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 
 
 class TestLoss(unittest.TestCase):
@@ -23,6 +23,7 @@ class TestLoss(unittest.TestCase):
         batch_size = 4
         seq_len = 8
         vocab_size = 100
+        cross_entropy_loss = CrossEntropyLoss(CrossEntropyLoss.Config()).loss_fn
 
         # Create predictions (logits) - same for all test cases
         predictions = torch.randn(batch_size, seq_len, vocab_size)
@@ -37,14 +38,14 @@ class TestLoss(unittest.TestCase):
         labels[3, 7] = IGNORE_INDEX
 
         # Test case 1: Compute loss on this label set
-        loss1 = cross_entropy_loss(predictions, labels)
+        loss1 = cross_entropy_loss(predictions, labels).main
         num_valid_tokens1 = (labels != IGNORE_INDEX).sum().item()
 
         # Test case 2: Use the exact same predictions and labels in multiple microbatches
         # Simulating gradient accumulation with identical data
-        loss2 = cross_entropy_loss(predictions, labels) + cross_entropy_loss(
+        loss2 = cross_entropy_loss(predictions, labels).main + cross_entropy_loss(
             predictions, labels
-        )
+        ).main
         num_valid_tokens2 = num_valid_tokens1 * 2
 
         # Per-token loss should be identical
@@ -63,7 +64,7 @@ class TestLoss(unittest.TestCase):
         predictions_doubled = torch.cat([predictions, predictions], dim=0)
         labels_doubled = torch.cat([labels, labels], dim=0)
 
-        loss_doubled = cross_entropy_loss(predictions_doubled, labels_doubled)
+        loss_doubled = cross_entropy_loss(predictions_doubled, labels_doubled).main
         num_valid_tokens_doubled = (labels_doubled != IGNORE_INDEX).sum().item()
 
         per_token_loss_doubled = loss_doubled / num_valid_tokens_doubled
@@ -97,25 +98,26 @@ class TestLoss(unittest.TestCase):
         """
         torch.manual_seed(123)
         vocab_size = 100
+        cross_entropy_loss = CrossEntropyLoss(CrossEntropyLoss.Config()).loss_fn
 
         # Microbatch 1: 2x4 with all valid tokens
         pred1 = torch.randn(2, 4, vocab_size)
         labels1 = torch.randint(0, vocab_size, (2, 4))
-        loss1 = cross_entropy_loss(pred1, labels1)
+        loss1 = cross_entropy_loss(pred1, labels1).main
         tokens1 = (labels1 != IGNORE_INDEX).sum()
 
         # Microbatch 2: 2x4 with half valid tokens
         pred2 = torch.randn(2, 4, vocab_size)
         labels2 = torch.randint(0, vocab_size, (2, 4))
         labels2[:, ::2] = IGNORE_INDEX  # Mask every other token
-        loss2 = cross_entropy_loss(pred2, labels2)
+        loss2 = cross_entropy_loss(pred2, labels2).main
         tokens2 = (labels2 != IGNORE_INDEX).sum()
 
         # Microbatch 3: 2x4 with 1/4 valid tokens
         pred3 = torch.randn(2, 4, vocab_size)
         labels3 = torch.randint(0, vocab_size, (2, 4))
         labels3[:, 1:] = IGNORE_INDEX  # Only first token valid
-        loss3 = cross_entropy_loss(pred3, labels3)
+        loss3 = cross_entropy_loss(pred3, labels3).main
         tokens3 = (labels3 != IGNORE_INDEX).sum()
 
         # Simulate gradient accumulation: sum losses, sum tokens, then normalize

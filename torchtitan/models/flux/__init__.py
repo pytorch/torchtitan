@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.loss import build_mse_loss
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -232,7 +231,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=flux_configs[flavor],
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
-        build_loss_fn=build_mse_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=FluxStateDictAdapter,
     )
