@@ -8,45 +8,116 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
-from collections import defaultdict
+from collections.abc import Callable
+from functools import lru_cache, partial
 
 import torch
 import torch._functorch.config
 import torch.nn as nn
+from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
 
 
-_layer_sac_count = 0
+_PolicyFn = Callable[..., CheckpointPolicy]
 
 
-def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
-    """Apply layer selective activation checkpointing to the module.
+def _sac_policy_fn(
+    ctx,
+    op,
+    *args,
+    compute_intensive_ops: dict,
+    communication_intensive_ops: dict,
+    **kwargs,
+) -> CheckpointPolicy:
+    if op in compute_intensive_ops or op in communication_intensive_ops:
+        return CheckpointPolicy.MUST_SAVE
 
-    Args:
-        module (nn.Module): The module to apply layer selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
+    return CheckpointPolicy.PREFER_RECOMPUTE
 
-    Returns:
-        nn.Module: The module with layer selective activation checkpointing applied.
+
+def _resolve_ops(op_specs: list) -> dict:
+    """Resolve op specs into a dict of op -> CheckpointPolicy.MUST_SAVE.
+
+    Each spec is either:
+      - An op object (always included)
+      - A tuple (root, dotted_path) for conditionally available ops,
+        e.g. (torch.ops, "deepep.dispatch.default")
     """
-    global _layer_sac_count
-    _layer_sac_count += 1
-    ac_freq = int(ac_config.selective_ac_option)
-    if not ac_freq or _layer_sac_count % ac_freq == 0:
-        return ptd_checkpoint_wrapper(
-            module,
-            preserve_rng_state=ac_config.preserve_rng_state,
-            determinism_check=ac_config.determinism_check,
-            early_stop=ac_config.early_stop,
-            debug=ac_config.debug,
-        )
-    else:
-        return module
+    ops = {}
+    for spec in op_specs:
+        if isinstance(spec, tuple):
+            obj, path = spec
+            try:
+                for part in path.split("."):
+                    obj = getattr(obj, part)
+                ops[obj] = CheckpointPolicy.MUST_SAVE
+            except AttributeError:
+                pass
+        else:
+            ops[spec] = CheckpointPolicy.MUST_SAVE
+    return ops
+
+
+# Ops whose outputs are expensive to recompute (matmuls, attention, etc.)
+_COMPUTE_OPS = [
+    # SDPA variants
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+    # For low precision training, always save the absolute maximum used
+    # to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
+    torch._higher_order_ops.flex_attention,
+    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
+    # instead of decomposing it into aten.mm, so include it explicitly.
+    torch.ops.aten.linear.default,
+    # Inductor compiled code (available when torch.compile is used)
+    (torch._higher_order_ops, "inductor_compiled_code"),
+    # torch_attn custom backend
+    (torch.ops, "torch_attn._varlen_attn.default"),
+]
+
+# Communication ops whose outputs should be saved to avoid re-communication.
+_COMM_OPS = [
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.all_to_all_single.default,
+    # DeepEP (available when deepep is installed)
+    (torch.ops, "deepep.dispatch.default"),
+    (torch.ops, "deepep.combine.default"),
+    # HybridEP (available when hybridep is installed)
+    (torch.ops, "hybridep.dispatch.default"),
+    (torch.ops, "hybridep.combine.default"),
+]
+
+
+@lru_cache()
+def default_activation_checkpoint_policy() -> _PolicyFn:
+    """Returns a checkpointing policy function that saves results of compute and communicate ops."""
+    aten_op_types = get_default_op_list()
+    compute_intensive_ops = {
+        op.default: CheckpointPolicy.MUST_SAVE  # pyrefly: ignore [missing-attribute]
+        for op in aten_op_types.compute_intensive_ops
+    }
+    compute_intensive_ops.update(_resolve_ops(_COMPUTE_OPS))
+
+    communication_intensive_ops = _resolve_ops(_COMM_OPS)
+
+    policy_fn = partial(
+        _sac_policy_fn,
+        compute_intensive_ops=compute_intensive_ops,
+        communication_intensive_ops=communication_intensive_ops,
+    )
+    # pyrefly: ignore [missing-attribute]
+    policy_fn.cache_hash = "default_activation_checkpoint_policy"
+    # pyrefly: ignore [bad-return]
+    return policy_fn
 
 
 def _apply_op_sac(
@@ -54,38 +125,17 @@ def _apply_op_sac(
     ac_config: ACConfig,
     *,
     base_fqn: str | None = None,
-    op_sac_save_list: set[torch._ops.OpOverload],
 ) -> nn.Module:
-    """Apply selective activation checkpointing to the module.
+    """Apply per-op selective activation checkpointing to the module."""
+    from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
-    Args:
-        module (nn.Module): The module to apply selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-        base_fqn (str, optional): The base fqn of the module. Defaults to None.
-        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
-
-    Returns:
-        nn.Module: The module with selective activation checkpointing applied.
-    """
-    from torch.utils.checkpoint import (
-        CheckpointPolicy,
-        create_selective_checkpoint_contexts,
-    )
-
-    # Collect weight shapes to force-recompute, stored as mm RHS shape
-    # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
-    # time to match, since linear's weight is (out_f, in_f).
     mm_recompute_shapes = set()
-    if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
+    recompute_fqns = ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+
+    if recompute_fqns:
         for module_fqn, submod in module.named_modules():
-            fqn = module_fqn
-            if base_fqn is not None:
-                fqn = f"{base_fqn}.{module_fqn}"
-            if not any(
-                filter_fqn in fqn
-                for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
-            ):
+            fqn = f"{base_fqn}.{module_fqn}" if base_fqn else module_fqn
+            if not any(f in fqn for f in recompute_fqns):
                 continue
             if not isinstance(submod, nn.Linear):
                 raise ValueError(
@@ -94,16 +144,17 @@ def _apply_op_sac(
                 )
             out_f, in_f = submod.weight.shape
             mm_recompute_shapes.add((in_f, out_f))
-        logger.debug(
-            f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
-        )
 
+    base_policy = default_activation_checkpoint_policy()
     # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
     # instead of decomposing it into aten.mm, so we must handle both.
     mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
 
-    def _get_custom_policy(meta):
-        def _custom_policy(ctx, func, *args, **kwargs):
+    def _create_wrapped_policy():
+        meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
+
+        def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
+            # Always save CUDA→CPU copies (activation offloading).
             if (
                 func == torch.ops.aten._to_copy.default
                 and "cuda" in str(args[0].device)
@@ -114,33 +165,31 @@ def _apply_op_sac(
 
             mode = "recompute" if ctx.is_recompute else "forward"
             mm_count_key = f"{mode}_mm_count"
+
             if func in mm_ops:
                 weight_shape = args[1].shape
-                # linear weight is (out, in); normalize to (in, out) to match mm
                 if func == torch.ops.aten.linear.default:
                     weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
                 if weight_shape in mm_recompute_shapes:
                     return CheckpointPolicy.PREFER_RECOMPUTE
                 meta[mm_count_key] += 1
-            # Saves output of all compute ops, except every second mm/linear
-            to_save = func in op_sac_save_list and not (
+
+            # Save all compute/comm ops, except every second mm/linear.
+            base_decision = base_policy(ctx, func, *args, **kwargs)
+            if base_decision == CheckpointPolicy.MUST_SAVE and (
                 func in mm_ops and meta[mm_count_key] % 2 == 0
-            )
-            return (
-                CheckpointPolicy.MUST_SAVE
-                if to_save
-                else CheckpointPolicy.PREFER_RECOMPUTE
-            )
+            ):
+                return CheckpointPolicy.PREFER_RECOMPUTE
+            return base_decision
 
-        return _custom_policy
+        return wrapped_policy
 
-    def selective_checkpointing_context_fn():
-        meta = defaultdict(int)
-        return create_selective_checkpoint_contexts(_get_custom_policy(meta))
+    def context_fn():
+        return create_selective_checkpoint_contexts(_create_wrapped_policy())
 
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=selective_checkpointing_context_fn,
+        context_fn=context_fn,
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
@@ -172,8 +221,6 @@ def _apply_ac_to_transformer_block(
     ac_config: ACConfig,
     *,
     base_fqn: str | None = None,
-    model_compile_enabled: bool = False,
-    op_sac_save_list: set[torch._ops.OpOverload] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
     if ac_config.mode not in valid_ac_modes:
@@ -184,22 +231,7 @@ def _apply_ac_to_transformer_block(
     if ac_config.mode == "full":
         return _apply_full_ac(module, ac_config)
 
-    assert ac_config.mode == "selective", f"{ac_config.mode}"
-    use_op_sac = ac_config.selective_ac_option == "op"
-    use_layer_sac = ac_config.selective_ac_option.isdigit()
-    if not use_op_sac and not use_layer_sac:
-        raise ValueError(
-            f"Invalid selective AC option: {ac_config.selective_ac_option}. "
-            f"Valid options: 'op' or a positive int representing layer frequency"
-        )
-
-    if use_op_sac:
-        op_sac_save_list = op_sac_save_list or set()
-        return _apply_op_sac(
-            module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
-        )
-
-    return _apply_layer_sac(module, ac_config)
+    return _apply_op_sac(module, ac_config, base_fqn=base_fqn)
 
 
 def apply_ac(
@@ -207,7 +239,6 @@ def apply_ac(
     ac_config: ACConfig,
     *,
     model_compile_enabled: bool = False,
-    op_sac_save_list: set[torch._ops.OpOverload] | None = None,
     base_folder: str = "",
 ) -> None:
     """Apply activation checkpointing to the model.
@@ -216,8 +247,7 @@ def apply_ac(
         model (nn.Module): The model to apply activation checkpointing to.
         ac_config (ACConfig): The activation checkpointing config.
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
-        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
+
     Returns:
         None
     """
@@ -252,8 +282,6 @@ def apply_ac(
                 transformer_block,
                 ac_config,
                 base_fqn=f"layers.{layer_id}",
-                model_compile_enabled=model_compile_enabled,
-                op_sac_save_list=op_sac_save_list,
             )
             layers.register_module(layer_id, transformer_block)
 
