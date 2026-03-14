@@ -9,7 +9,12 @@ import unittest
 import torch
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe.moe import (
+    GroupedExperts,
+    MoE,
+    TokenChoiceTopKRouter,
+    TokenReorderer,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -194,6 +199,49 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
         self.assertIsNot(r1, r2)
         self.assertEqual(r1.gate.weight.shape, torch.Size([8, 32]))
         self.assertEqual(r2.gate.weight.shape, torch.Size([16, 64]))
+
+
+class TestTokenReorderer(unittest.TestCase):
+    """Tests for TokenReorderer Config/build pattern."""
+
+    def test_config_build(self):
+        """TokenReorderer.Config.build() creates a working instance."""
+        config = TokenReorderer.Config()
+        reorderer = config.build(num_experts=8, top_k=2)
+        self.assertIsInstance(reorderer, TokenReorderer)
+        self.assertIsInstance(reorderer, Module)
+        self.assertEqual(reorderer.num_experts, 8)
+        self.assertEqual(reorderer.top_k, 2)
+
+    def test_config_build_without_fields_raises(self):
+        """build() raises when required fields are not provided."""
+        config = TokenReorderer.Config()
+        with self.assertRaises(TypeError):
+            config.build()
+
+    def test_config_build_partial_fields_raises(self):
+        """build() raises when only some required fields are provided."""
+        config = TokenReorderer.Config()
+        with self.assertRaises(TypeError):
+            config.build(num_experts=8)
+
+    def test_shared_config_builds_independent_instances(self):
+        """A single Config can build multiple independent instances."""
+        config = TokenReorderer.Config()
+        r1 = config.build(num_experts=8, top_k=2)
+        r2 = config.build(num_experts=16, top_k=4)
+        self.assertIsNot(r1, r2)
+        self.assertEqual(r1.num_experts, 8)
+        self.assertEqual(r2.num_experts, 16)
+        self.assertEqual(r1.top_k, 2)
+        self.assertEqual(r2.top_k, 4)
+
+    def test_init_weights_noop(self):
+        """init_weights is a no-op (TokenReorderer has no learnable parameters)."""
+        config = TokenReorderer.Config()
+        reorderer = config.build(num_experts=4, top_k=1)
+        # Should not raise
+        reorderer.init_weights()
 
 
 class TestMoEConfig(unittest.TestCase):

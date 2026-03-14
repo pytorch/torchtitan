@@ -77,6 +77,13 @@ def _run_experts_grouped_mm(
 
 
 class GroupedExperts(Module):
+    """Grouped experts for Mixture-of-Experts layers.
+
+    ``dim``, ``hidden_dim``, and ``num_experts`` use ``field(init=False)``
+    so they are excluded from ``Config.__init__()``.  They are typically
+    supplied via ``build()`` kwargs from the parent MoE module.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int = field(init=False)
@@ -141,12 +148,16 @@ class GroupedExperts(Module):
 
 
 class TokenChoiceTopKRouter(Module):
-    """This class implements token-choice routing. In token-choice top-K routing, each token is
-        routed to top K experts based on the router scores.
+    """Token-choice top-K routing for Mixture-of-Experts layers.
 
+    Each token is routed to top K experts based on the router scores.
     Optionally supports node-limited (group-limited) routing where experts are divided into groups
     (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
     This reduces cross-node communication in distributed settings.
+
+    ``dim`` and ``num_experts`` use ``field(init=False)`` so they are
+    excluded from ``Config.__init__()``.  They are typically supplied via
+    ``build()`` kwargs from the parent MoE module.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -328,20 +339,33 @@ class TokenChoiceTopKRouter(Module):
 
 # NOTE: the reason we make this a stateless module is to support
 #       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
-class TokenReorderer(nn.Module):
-    """
-    This module reorders token indices to match the order of experts, enabling
+class TokenReorderer(Module):
+    """Reorders token indices to match the order of experts, enabling
     efficient parallel processing of tokens by experts.
 
-    Args:
-        num_experts (int): Number of experts in the MoE layer.
-        top_k (int): Number of experts each token will be routed to.
+    ``num_experts`` and ``top_k`` use ``field(init=False)`` so they are
+    excluded from ``Config.__init__()``.  They are typically supplied via
+    ``build()`` kwargs from the parent MoE module.
     """
 
-    def __init__(self, num_experts: int, top_k: int):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        """Configuration for TokenReorderer.
+
+        Args:
+            num_experts (int): Number of experts in the MoE layer.
+                Set via ``build(num_experts=...)``.
+            top_k (int): Number of experts each token will be routed to.
+                Set via ``build(top_k=...)``.
+        """
+
+        num_experts: int = field(init=False)
+        top_k: int = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
+        self.num_experts = config.num_experts
+        self.top_k = config.top_k
 
     def forward(
         self,
@@ -385,6 +409,10 @@ class TokenReorderer(nn.Module):
             num_tokens_per_expert,
         )
 
+    def init_weights(self, **kwargs) -> None:
+        # Stateless module — no learnable parameters to initialize.
+        pass
+
 
 class MoE(Module):
     @dataclass(kw_only=True, slots=True)
@@ -409,7 +437,7 @@ class MoE(Module):
             dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
         self.router = config.router.build(dim=dim, num_experts=num_experts)
-        self.reorderer = TokenReorderer(
+        self.reorderer = TokenReorderer.Config().build(
             num_experts=num_experts, top_k=config.router.top_k
         )
         self.shared_experts = (
