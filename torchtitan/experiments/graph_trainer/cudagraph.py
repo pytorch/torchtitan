@@ -11,6 +11,7 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
+import logging
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -19,45 +20,103 @@ import torch
 from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch.utils._ordered_set import OrderedSet
 
-
-def init_global_graph_pool() -> tuple[
-    torch.cuda.CUDAGraph, torch.cuda._POOL_HANDLE, torch.cuda.Stream
-]:
-    dummy_graph = torch.cuda.CUDAGraph()
-
-    # create a global cudagraph memory pool to allow memory reuse across cudagraphs.
-    graph_pool = torch.cuda.graph_pool_handle()
-
-    # create a global cuda stream for graph capture. we need to use a single stream
-    # for all allocations to the memory pool, otherwise the allocations to separate streams
-    # will not be used.
-    graph_capture_stream = torch.cuda.Stream()
-
-    # use a dummy graph to keep the global graph pool alive
-    with (
-        # suppress an empty cudagraph warning, since we intentionally create
-        # an empty cudagraph here
-        warnings.catch_warnings(record=True),
-        torch.cuda.graph(
-            dummy_graph,
-            pool=graph_pool,
-            stream=graph_capture_stream,
-            capture_error_mode="thread_local",
-        ),
-    ):
-        pass
-
-    return dummy_graph, graph_pool, graph_capture_stream
+logger = logging.getLogger(__name__)
 
 
-(
-    _global_dummy_graph,
-    _global_graph_pool,
-    _global_graph_capture_stream,
-) = init_global_graph_pool()
+class _CUDAGraphManager:
+    """A manager to hold a shared graph pool, stream, and wrapper registry."""
+
+    def __init__(self) -> None:
+        self._initialized = False
+        self._cudagraph_wrappers: list["CUDAGraphWrapper"] = []
+        self._teardown_called = False
+
+    def maybe_initialize(self) -> None:
+        if self._initialized:
+            return
+
+        self._initialized = True
+
+        # create a global cudagraph memory pool to allow memory reuse across cudagraphs.
+        self.graph_pool = torch.cuda.graph_pool_handle()
+
+        # create a global cuda stream for graph capture. we need to use a single stream
+        # for all allocations to the memory pool, otherwise the allocations to separate
+        # streams will not be used.
+        self.stream = torch.cuda.Stream()
+
+        # use a dummy graph to keep the global graph pool alive
+        self._dummy_graph = torch.cuda.CUDAGraph()
+        with (
+            # suppress an empty cudagraph warning, since we intentionally create
+            # an empty cudagraph here
+            warnings.catch_warnings(record=True),
+            torch.cuda.graph(
+                self._dummy_graph,
+                pool=self.graph_pool,
+                stream=self.stream,
+                capture_error_mode="thread_local",
+            ),
+        ):
+            pass
+
+    def register_wrapper(self, wrapper: "CUDAGraphWrapper") -> None:
+        assert not self._teardown_called, "Cannot register new cudagraph after teardown"
+        self._cudagraph_wrappers.append(wrapper)
+
+    def teardown(self) -> None:
+        """Destroy all cudagraphs and release the cudagraph memory pool.
+
+        Note [explicit cudagraph teardown]
+        cudagraph holds reference to nccl which prevents destroy process
+        group. so we need to explicitly delete cudagraph which is held
+        in _CUDAGraphManager and CUDAGraphWrapper. If cudagraph is not
+        used, this is a no-op.
+        """
+        if not self._initialized:
+            return
+        if self._teardown_called:
+            logger.warning("cudagraph manager teardown called twice")
+            return
+
+        for wrapper in self._cudagraph_wrappers:
+            wrapper.teardown()
+        self._cudagraph_wrappers.clear()
+
+        self._dummy_graph = None
+        self.stream = None
+        self.graph_pool = None
+        self._teardown_called = True
+
+
+_cg_manager = _CUDAGraphManager()
+
+
+def cudagraph_teardown() -> None:
+    """Destroy all cudagraphs and release the cudagraph memory pool.
+    See Note [explicit cudagraph teardown] for more details.
+    """
+    _cg_manager.teardown()
 
 
 class CUDAGraphWrapper:
+    """Wraps a callable with cudagraph. It warms up the callable, records cudagraph,
+    and replays cudagraph during runtime. It also handles static input tensors, which
+    are tensors whose tensor addresses do not change across runs.
+
+    Args:
+        runnable: The callable to wrap with CUDA graph. This can be a
+            torch.fx.GraphModule when used in an FX graph pass, or any
+            callable when used in PyTorch eager mode.
+        example_inputs: A list of example inputs to the callable.
+        static_input_indices: A tuple of indices identifying static input
+            tensors. Static inputs are tensors whose memory addresses remain
+            constant across invocations. Common examples include model weights,
+            buffers, and outputs from previously wrapped CUDA graph functions.
+        should_check_address: Whether to verify static input tensor addresses
+            at runtime. This should only be enabled for debugging purposes.
+    """
+
     def __init__(
         self,
         runnable: Callable,
@@ -65,31 +124,32 @@ class CUDAGraphWrapper:
         static_input_indices: tuple[int] | None = None,
         should_check_address: bool = False,
     ):
-        self.runnable = runnable
-        self.graph_pool = _global_graph_pool
-        self.stream = _global_graph_capture_stream
-        self.static_input_indices = OrderedSet(
+        _cg_manager.maybe_initialize()
+        _cg_manager.register_wrapper(self)
+
+        self._runnable = runnable
+        self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
-        self.input_indices_to_copy = [
+        self._input_indices_to_copy = [
             i
             for i, inp in enumerate(example_inputs)
-            if isinstance(inp, torch.Tensor) and i not in self.static_input_indices
+            if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
         ]
-        self.cudagraph: torch.cuda.CUDAGraph | None = None
-        self.has_warmup = False
+        self._cudagraph: torch.cuda.CUDAGraph | None = None
+        self._has_warmup = False
 
-        self.args = None
-        self.output = None
+        self._args = None
+        self._output = None
 
         # (debug only) whether check static input tensor addresses during runtime
-        self.should_check_address = should_check_address
+        self._should_check_address = should_check_address
 
-    def copy_non_static_inputs(self, *args):
-        for i in self.input_indices_to_copy:
-            self.args[i].copy_(args[i])
+    def _copy_non_static_inputs(self, *args):
+        for i in self._input_indices_to_copy:
+            self._args[i].copy_(args[i])
 
-    def check_input_types(self, inputs) -> None:
+    def _check_input_types(self, inputs) -> None:
         for inp in inputs:
             assert isinstance(inp, (torch.Tensor, int, torch._C.Generator)), (
                 "args must be tensor, integer (for dynamic shapes), "
@@ -97,47 +157,59 @@ class CUDAGraphWrapper:
                 f"but found {type(inp)}"
             )
 
-    def check_static_inputs_address(self) -> None:
-        for i in self.static_input_indices:
-            actual = self.args[i].data_ptr()
-            expected = self.input_addresses[i]
+    def _check_static_inputs_address(self) -> None:
+        for i in self._static_input_indices:
+            actual = self._args[i].data_ptr()
+            expected = self._input_addresses[i]
             assert expected == actual, (
                 "Expected the same static tensor address but found "
                 f"{expected} != {actual}"
             )
 
     def __call__(self, *args):
-        if not self.has_warmup:
-            self.has_warmup = True
+        if not self._has_warmup:
+            self._has_warmup = True
             device = torch.cuda.current_device()
 
             # warmup in cudagraph memory pool to avoid fragmentation
             # across eager memory pool and cudagraph memory pool.
-            with _use_cuda_memory_pool_manager(device, self.graph_pool, self.stream):
-                out = self.runnable(*args)
+            with _use_cuda_memory_pool_manager(
+                device, _cg_manager.graph_pool, _cg_manager.stream
+            ):
+                out = self._runnable(*args)
             return out
 
-        if self.cudagraph is None:
-            self.check_input_types(args)
-            self.args = args
-            self.input_addresses = [
+        if self._cudagraph is None:
+            self._check_input_types(args)
+            self._args = args
+            self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
             ]
 
-            self.cudagraph = torch.cuda.CUDAGraph()
+            self._cudagraph = torch.cuda.CUDAGraph()
 
             with torch.cuda.graph(
-                self.cudagraph, pool=self.graph_pool, stream=self.stream
+                self._cudagraph,
+                pool=_cg_manager.graph_pool,
+                stream=_cg_manager.stream,
             ):
                 # `output` is managed by pytorch's cudagraph pool
-                self.output = self.runnable(*args)
+                self._output = self._runnable(*args)
 
-        if self.should_check_address:
-            self.check_static_inputs_address()
+        if self._should_check_address:
+            self._check_static_inputs_address()
 
-        self.copy_non_static_inputs(*args)
-        self.cudagraph.replay()
-        return self.output
+        self._copy_non_static_inputs(*args)
+        self._cudagraph.replay()
+        return self._output
+
+    def teardown(self) -> None:
+        """Destroy cudagraph and release references.
+        See Note [explicit cudagraph teardown] for more details.
+        """
+        self._cudagraph = None
+        self._args = None
+        self._output = None
 
 
 def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:
