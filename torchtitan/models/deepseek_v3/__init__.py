@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
@@ -287,7 +286,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=deepseekv3_configs[flavor],
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

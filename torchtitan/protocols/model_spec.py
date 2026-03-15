@@ -39,7 +39,6 @@ class ModelSpec:
     # resolver does not handle ``Callable[..., X]`` (Ellipsis as param spec).
     # The detailed TypeAliases above are still available for use in function
     # signatures elsewhere in the codebase.
-    build_loss_fn: Callable
     parallelize_fn: Callable
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None
