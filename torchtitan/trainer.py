@@ -40,6 +40,7 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.activation_offloading import get_activation_offloading_ctx
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
@@ -464,6 +465,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             device_type,
         )
 
+        if config.training.enable_activation_offload and parallel_dims.pp_enabled:
+            raise NotImplementedError(
+                "Activation offloading is not supported with Pipeline Parallel. "
+                "PP schedules interleave forward and backward in non-standard "
+                "order, which violates the layer-ordering assumptions of the "
+                "offload manager.  Disable either pipeline_parallel_degree > 1 "
+                "or enable_activation_offload."
+            )
+        self.activation_offload_ctx = get_activation_offloading_ctx(
+            self.model_parts[0],
+            config.training.enable_activation_offload,
+        )
+
         # Build validator if validation is configured
         if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
@@ -674,7 +688,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    with self.activation_offload_ctx:
+                        pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     # Compute loss sum (reduction='sum')
                     loss_sum = self.loss_fn(pred, labels)
 

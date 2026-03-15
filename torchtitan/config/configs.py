@@ -47,6 +47,15 @@ class TrainingConfig:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
+    enable_activation_offload: bool = False
+    """
+    Whether to offload activation tensors to CPU during forward and prefetch
+    them back before backward. Uses separate CUDA streams for D2H/H2D
+    transfers to overlap with computation. Orthogonal to activation
+    checkpointing — can be used independently or combined.
+    Not supported with Pipeline Parallel.
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
