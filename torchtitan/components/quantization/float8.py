@@ -274,7 +274,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
         from torchao.quantization.quant_api import quantize_
 
         try:
-            from torchao.prototype.moe_training.config import FP8GroupedMMConfig
+            from torchao.prototype.moe_training.config import Float8TrainingOpConfig
         except ImportError as e:
             raise ImportError(
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
@@ -293,7 +293,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
             model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
         )
 
-        config = FP8GroupedMMConfig()
+        config = Float8TrainingOpConfig()
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
 
         # Re-inject Linear protocol and re-attach attrs

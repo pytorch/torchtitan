@@ -247,6 +247,20 @@ class GptOssModel(Decoder):
                     "CP support for gpt-oss model is still in progress."
                 )
 
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layer.attention.n_heads
+                # pyrefly: ignore [missing-attribute]
+                n_kv_heads = self.layer.attention.n_kv_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
+
         # pyrefly: ignore [bad-override]
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -269,7 +283,6 @@ class GptOssModel(Decoder):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-
         basic_mask_mods = []
         assert isinstance(self.config.layer.attention, Attention.Config)
         sliding_window_mask_mods = [
