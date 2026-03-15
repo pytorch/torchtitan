@@ -1,0 +1,42 @@
+[
+  {
+    "question": "What is 2 + 3?",
+    "answer": "2 + 3 = 5. #### 5"
+  },
+  {
+    "question": "If you have 10 apples and give away 4, how many do you have left?",
+    "answer": "10 - 4 = 6. #### 6"
+  },
+  {
+    "question": "What is 7 * 8?",
+    "answer": "7 * 8 = 56. #### 56"
+  },
+  {
+    "question": "A store has 25 books. If 12 are sold, how many remain?",
+    "answer": "25 - 12 = 13. #### 13"
+  },
+  {
+    "question": "What is 100 / 5?",
+    "answer": "100 / 5 = 20. #### 20"
+  },
+  {
+    "question": "Sam has 3 boxes with 6 toys each. How many toys in total?",
+    "answer": "3 * 6 = 18. #### 18"
+  },
+  {
+    "question": "What is 15 + 27?",
+    "answer": "15 + 27 = 42. #### 42"
+  },
+  {
+    "question": "A class has 30 students. If 5 are absent, how many are present?",
+    "answer": "30 - 5 = 25. #### 25"
+  },
+  {
+    "question": "What is 9 * 9?",
+    "answer": "9 * 9 = 81. #### 81"
+  },
+  {
+    "question": "If a pizza is cut into 8 slices and you eat 3, how many are left?",
+    "answer": "8 - 3 = 5. #### 5"
+  }
+]
