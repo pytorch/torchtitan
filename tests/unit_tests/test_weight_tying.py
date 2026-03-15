@@ -6,23 +6,13 @@
 
 import unittest
 
-try:
-    from torchtitan.models.common.attention import GQAttention
-    from torchtitan.models.common.embedding import Embedding
-    from torchtitan.models.common.feed_forward import (
-        compute_ffn_hidden_dim,
-        FeedForward,
-    )
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.common.rmsnorm import RMSNorm
-    from torchtitan.models.common.rope import RoPE
-    from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
-
-    HAS_TORCHTITAN_MODELS = True
-except Exception:
-    HAS_TORCHTITAN_MODELS = False
-
-_SKIP_MSG = "torchtitan model imports not available (missing triton or other deps)"
+from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.feed_forward import compute_ffn_hidden_dim, FeedForward
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.rope import RoPE
+from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 
 
 def _make_config(enable_weight_tying: bool = False):
@@ -56,7 +46,6 @@ def _make_config(enable_weight_tying: bool = False):
     )
 
 
-@unittest.skipUnless(HAS_TORCHTITAN_MODELS, _SKIP_MSG)
 class TestLlama3WeightTying(unittest.TestCase):
     def test_weights_are_shared_when_tying_enabled(self):
         """tok_embeddings.weight and output.weight should share the same storage."""
