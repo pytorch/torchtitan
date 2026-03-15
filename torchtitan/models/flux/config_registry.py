@@ -8,8 +8,10 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.quantization.mx import MXFP8Converter
 from torchtitan.config import (
     ActivationCheckpointConfig,
+    CompileConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -17,6 +19,7 @@ from torchtitan.models.flux.configs import Encoder, Inference, Validation
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from . import model_registry
 
@@ -178,3 +181,34 @@ def flux_schnell() -> FluxTrainer.Config:
             all_timesteps=False,
         ),
     )
+
+def flux_schnell_mxfp8() -> FluxTrainer.Config:
+    """Flux schnell with MXFP8 quantization and torch.compile.
+    Requires SM100+ (B200/B100) and torchao nightly."""
+    config = flux_schnell()
+    config.compile = CompileConfig(enable=True)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            MXFP8Converter.Config(
+                fqns=["double_blocks", "single_blocks", "img_in", "txt_in",
+                      "time_in", "vector_in", "final_layer"],
+            ),
+        ],
+    )
+    return config
+
+
+def flux_dev_mxfp8() -> FluxTrainer.Config:
+    """Flux dev with MXFP8 quantization and torch.compile.
+    Requires SM100+ (B200/B100) and torchao nightly."""
+    config = flux_dev()
+    config.compile = CompileConfig(enable=True)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            MXFP8Converter.Config(
+                fqns=["double_blocks", "single_blocks", "img_in", "txt_in",
+                      "time_in", "vector_in", "final_layer"],
+            ),
+        ],
+    )
+    return config

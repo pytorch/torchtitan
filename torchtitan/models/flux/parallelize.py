@@ -46,6 +46,9 @@ def parallelize_flux(
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
 
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(model, compile_config)
+
     if parallel_dims.fsdp_enabled:
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -127,6 +130,24 @@ def apply_fsdp(
     disable_fsdp_gradient_division(model)
 
 
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
+    """
+    Apply torch.compile to each DoubleStreamBlock and SingleStreamBlock, which
+    makes compilation efficient due to repeated structure.
+    """
+    for block_id, block in model.double_blocks.named_children():
+        block = torch.compile(block, backend=compile_config.backend, fullgraph=True)
+        model.double_blocks.register_module(block_id, block)
+
+    for block_id, block in model.single_blocks.named_children():
+        block = torch.compile(block, backend=compile_config.backend, fullgraph=True)
+        model.single_blocks.register_module(block_id, block)
+
+    logger.info(
+        "Compiling each DoubleStreamBlock and SingleStreamBlock with torch.compile"
+    )
+
+
 def apply_ac(model: nn.Module, ac_config):
     """Apply activation checkpointing to the model."""
 
@@ -187,7 +208,11 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
+    compile_config: CompileConfig,
 ):
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile_to_encoders(t5_model, clip_model, compile_config)
+
     if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -223,3 +248,35 @@ def parallelize_encoders(
             logger.info("Applied FSDP to the T5 encoder model")
 
     return t5_model, clip_model
+
+
+def apply_compile_to_encoders(
+    t5_model: nn.Module,
+    clip_model: nn.Module,
+    compile_config: CompileConfig,
+):
+    """
+    Apply torch.compile to the T5 and CLIP encoder blocks used by Flux.
+    Compilation is applied per-block for efficiency due to repeated structure.
+
+    Note: fullgraph=True is intentionally omitted here because HuggingFace
+    model internals may contain graph-breaking patterns. The encoders are
+    frozen (inference-only), so allowing graph breaks has minimal impact.
+    """
+    # Compile each T5 encoder block
+    # pyrefly: ignore [missing-attribute]
+    for block_id, block in t5_model.hf_module.encoder.block.named_children():
+        block = torch.compile(block, backend=compile_config.backend)
+        # pyrefly: ignore [missing-attribute]
+        t5_model.hf_module.encoder.block.register_module(block_id, block)
+
+    # Compile each CLIP encoder layer
+    # pyrefly: ignore [missing-attribute]
+    for layer_id, layer in clip_model.hf_module.text_model.encoder.layers.named_children():
+        layer = torch.compile(layer, backend=compile_config.backend)
+        # pyrefly: ignore [missing-attribute]
+        clip_model.hf_module.text_model.encoder.layers.register_module(layer_id, layer)
+
+    logger.info(
+        "Compiling T5 encoder blocks and CLIP encoder layers with torch.compile"
+    )
