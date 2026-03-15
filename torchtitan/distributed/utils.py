@@ -131,6 +131,16 @@ def set_determinism(
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
+    if debug_config.detect_anomaly:
+        logger.warning(
+            "Anomaly detection enabled. This incurs significant overhead "
+            "and is for debugging only."
+        )
+        # check_nan=False disables the NaN/Inf gradient check that internally calls
+        # aten._is_any_true, which has no DTensor sharding strategy and would crash.
+        # Stack trace recording (the useful part) is still enabled.
+        torch.autograd.set_detect_anomaly(True, check_nan=False)
+
     seed = debug_config.seed
     if parallel_dims.world_size == 1:
         if seed is not None:
