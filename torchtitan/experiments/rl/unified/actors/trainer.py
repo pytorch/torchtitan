@@ -21,7 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.unified.actors.utils import (
     compute_policy_gradient_loss,
@@ -64,6 +64,7 @@ class PolicyTrainer(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
+        compile: CompileConfig = field(default_factory=CompileConfig)
 
     def __init__(
         self,
@@ -212,6 +213,7 @@ class PolicyTrainer(Actor, Configurable):
             model,
             parallel_dims=self.parallel_dims,
             parallelism=config.parallelism,
+            compile_config=config.compile,
         )
 
         model.to_empty(device=device_type)
