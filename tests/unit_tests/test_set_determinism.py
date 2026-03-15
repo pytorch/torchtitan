@@ -277,7 +277,6 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
             distinct_seed_mesh_dims=["pp"],
         )
 
-
     @patch("torch.distributed.distributed_c10d.get_world_size")
     @patch("torch.distributed.distributed_c10d.get_rank")
     def test_detect_anomaly_enabled(self, mock_get_rank, mock_get_world_size):
@@ -300,7 +299,9 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
     @patch("torch.distributed.distributed_c10d.get_world_size")
     @patch("torch.distributed.distributed_c10d.get_rank")
-    def test_detect_anomaly_disabled_by_default(self, mock_get_rank, mock_get_world_size):
+    def test_detect_anomaly_disabled_by_default(
+        self, mock_get_rank, mock_get_world_size
+    ):
         """detect_anomaly defaults to False and does not call set_detect_anomaly."""
         mock_get_world_size.return_value = 1
         mock_get_rank.return_value = 0
