@@ -19,7 +19,6 @@ from torchtitan.models.flux.model.layers import (
     timestep_embedding,
 )
 from torchtitan.protocols import BaseModel
-from torchtitan.tools.logging import logger
 
 
 class FluxModel(BaseModel):
@@ -100,18 +99,62 @@ class FluxModel(BaseModel):
             )
         )
 
+
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass
+
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            # TODO(jianiw): Add the number of flops for the autoencoder
             nparams = sum(p.numel() for p in model.parameters())
-            logger.warning(
-                "FLUX model haven't implement get_nparams_and_flops() function"
+
+            # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
+            # layers). This assumes every token passes through every parameter.
+            num_flops_per_token = 6 * nparams
+
+            # Correction 1: DoubleStreamBlocks have symmetric img/txt streams;
+            # each token only passes through one side. Subtract one side's
+            # per-token linear params per block (excluding modulation, which
+            # is per-sample and handled separately below).
+            #
+            # Per-side per-token weight params:
+            #   attn.qkv:  h * 3h       = 3h²
+            #   attn.proj: h * h         =  h²
+            #   mlp:       2 * h * h*r   = 2rh²
+            #   Total: h² * (4 + 2r)
+            db_h = self.double_block_config.hidden_size
+            db_r = self.double_block_config.mlp_ratio
+            nparams_db_one_side_per_token = int(db_h * db_h * (4 + 2 * db_r))
+            num_flops_per_token -= 6 * nparams_db_one_side_per_token * self.depth
+
+            # Correction 2: Modulation layers operate on vec (per-sample
+            # conditioning from CLIP + timestep), not per-token. The 6*nparams
+            # base counts them as per-token; replace with amortized per-token
+            # cost (once per sample / seq_len tokens).
+            #
+            # Per-sample modulation weight params:
+            #   DoubleStreamBlock: img_mod(6h²) + txt_mod(6h²) = 12h² per block
+            #   SingleStreamBlock: modulation(3h²) per block
+            #   LastLayer: adaLN_modulation(2h²)
+            sb_h = self.single_block_config.hidden_size
+            fl_h = self.final_layer_config.hidden_size
+            nparams_mod_per_sample = (
+                12 * db_h * db_h * self.depth
+                + 3 * sb_h * sb_h * self.depth_single_blocks
+                + 2 * fl_h * fl_h
             )
-            return nparams, 1
+            num_flops_per_token -= 6 * nparams_mod_per_sample * (seq_len - 1) // seq_len
+
+            # Add non-parameterized self-attention FLOPs (QK^T and attn*V).
+            # Per PaLM convention: 6 * hidden_size * seq_len per token per
+            # layer (covers 2 matmuls × fwd+bwd × multiply-add).
+            num_flops_per_token += (
+                6 * sb_h * seq_len * self.depth_single_blocks
+                + 6 * db_h * seq_len * self.depth
+            )
+
+            return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()
