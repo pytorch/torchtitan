@@ -25,13 +25,13 @@ try:
         sys.modules["triton.language"] = MagicMock()
 
     from torchtitan.models.common import (
+        compute_ffn_hidden_dim,
         Embedding,
         FeedForward,
         GQAttention,
         Linear,
         RMSNorm,
         RoPE,
-        compute_ffn_hidden_dim,
     )
     from torchtitan.models.llama3 import Llama3Model, Llama3TransformerBlock
 
