@@ -254,8 +254,11 @@ def _reshape_for_broadcast_cos_sin(
     """Reshape cos/sin RoPE tensor for broadcasting.
 
     rope_cache: (max_seqlen, head_dim * 2) where first half is cos, second is sin
+                OR (bsz, seqlen, 1, head_dim * 2) pre-computed MRoPE tensor
     x: (bsz, seqlen, n_heads, head_dim) real
     """
+    if rope_cache.ndim == 4:
+        return rope_cache  # Pre-computed per-batch MRoPE
     ndim = x.ndim
     assert ndim > 1
     bz, seqlen, _, head_dim = x.shape
