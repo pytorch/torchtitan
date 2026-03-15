@@ -19,7 +19,7 @@ This step will download the autoencoder model from HuggingFace and save it to th
 
 Run the following command to train the debug model on a single GPU:
 ```bash
-MODULE=flux CONFIG=flux_debugmodel .run_train.sh
+MODULE=flux CONFIG=flux_debugmodel ./run_train.sh
 ```
 
 If you want to train with other configs, run the following command:
