@@ -84,6 +84,12 @@ class MXFP8Converter(QuantizationConverter):
                 "torch.compile enablement is required for highest performance of MXFP8 dynamic quantization."
             )
 
+        if parallel_dims.tp > 1:
+            logger.warning(
+                "TP support for MXFP8 linears is still in progress. "
+                "Any linear layers with TP applied will use default precision, not MXFP8."
+            )
+
         self.config = config
         self.enabled = True
         logger.info("MXFP8 MoE training enabled")
