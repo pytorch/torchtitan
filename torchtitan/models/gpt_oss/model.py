@@ -250,9 +250,8 @@ class GptOssModel(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layer.attention.n_heads
-                n_kv_heads = (
-                    self.layer.attention.n_kv_heads
-                )  # pyrefly: ignore [missing-attribute]
+                # pyrefly: ignore [missing-attribute]
+                n_kv_heads = self.layer.attention.n_kv_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
