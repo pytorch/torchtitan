@@ -216,12 +216,10 @@ class VLLMGenerator(Actor, Configurable):
 
         self.policy_version = 0
 
-        try:
-            from monarch.rdma import RDMABuffer  # noqa: F401
+        from monarch.rdma import is_rdma_available
 
-            self._use_direct_rdma = True
-        except ImportError:
-            self._use_direct_rdma = False
+        self._use_direct_rdma = is_rdma_available()
+        if not self._use_direct_rdma:
             logger.warning("RDMA not available, falling back to RPC based weight sync")
 
         logger.info("Generator initialized with vLLM engine")
@@ -327,6 +325,7 @@ class VLLMGenerator(Actor, Configurable):
         await ts.get_state_dict(
             "policy_weights",
             user_state_dict=model_sd,
+            strict=False,
             direct_rdma=self._use_direct_rdma,
         )
         self.policy_version = version

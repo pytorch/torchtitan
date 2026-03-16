@@ -133,12 +133,10 @@ class PolicyTrainer(Actor, Configurable):
         self._weights_pushed = False
         self.generator: Any | None = None
 
-        try:
-            from monarch.rdma import RDMABuffer  # noqa: F401
+        from monarch.rdma import is_rdma_available
 
-            self._use_direct_rdma = True
-        except ImportError:
-            self._use_direct_rdma = False
+        self._use_direct_rdma = is_rdma_available()
+        if not self._use_direct_rdma:
             logger.warning("RDMA not available, falling back to RPC based weight sync")
 
         # Data parallelism: determine this rank's shard of the batch.
@@ -246,7 +244,10 @@ class PolicyTrainer(Actor, Configurable):
         else:
             state_dict = self.model.state_dict()
         await ts.put_state_dict(
-            state_dict, "policy_weights", direct_rdma=self._use_direct_rdma
+            state_dict,
+            "policy_weights",
+            direct_rdma=self._use_direct_rdma,
+            transfer_dtype=torch.bfloat16,
         )
         self._weights_pushed = True
 

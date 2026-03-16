@@ -223,10 +223,10 @@ class RLTrainer(Configurable):
             self.task.reward_function,
         )
 
-        # Initialize TorchStore for RDMA handle exchange
-        await ts.initialize()
+        # Initialize TorchStore
+        await ts.initialize(num_storage_volumes=2, strategy=ts.LocalRankStrategy())
 
-        # Publish RDMA handles on trainer, then initial weight pull
+        # push weights from trainer
         self.trainer.push_weights.call().get()
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_weights.call(0).get()
@@ -340,7 +340,8 @@ class RLTrainer(Configurable):
 
             # 4. Trainer updates policy using episodes with advantages
             metrics = self.trainer.step.call(episodes).get().item(gpus=0)
-            # 5. Sync weights via direct RDMA
+            
+            # 5. Sync weights
             t0 = time.perf_counter()
             self.trainer.push_weights.call().get()
             t_push = time.perf_counter() - t0
