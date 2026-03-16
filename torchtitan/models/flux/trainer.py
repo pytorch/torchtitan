@@ -71,11 +71,11 @@ class FluxTrainer(Trainer):
             random_init=config.encoder.random_init,
         )
 
-        self.clip_encoder = FluxEmbedder.load(
+        self.clip_encoder = FluxEmbedder(
             version=config.encoder.clip_encoder,
             random_init=config.encoder.random_init,
         ).to(device=self.device, dtype=self._dtype)
-        self.t5_encoder = FluxEmbedder.load(
+        self.t5_encoder = FluxEmbedder(
             version=config.encoder.t5_encoder,
             random_init=config.encoder.random_init,
         ).to(device=self.device, dtype=self._dtype)
