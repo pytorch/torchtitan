@@ -6,7 +6,6 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -20,6 +19,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.observability.metrics_processor import MetricsProcessor
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.profiling import ProfilingConfig
 from torchtitan.trainer import Trainer
