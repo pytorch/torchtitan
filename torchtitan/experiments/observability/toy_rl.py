@@ -172,8 +172,9 @@ class TrainerActor(Actor):
         init_observability(source="trainer", output_dir=OUTPUT_DIR, rank=rank)
         mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "tp"))
         self.dp_rank = mesh["dp"].get_local_rank()
-        # Controller owns the logging subprocess — trainer has no backends/console.
-        mp_config = MetricsProcessor.Config(enable_wandb=False)
+        # Controller handles flushing — trainer has no backends/console.
+        # log_freq=1 is set because it determines freq to call metrics that need .item() or collectives
+        mp_config = MetricsProcessor.Config(log_freq=1, enable_wandb=False)
         self.trainer = ToyTrainer(
             self.device, mesh["dp"], mesh["tp"], OUTPUT_DIR, mp_config=mp_config
         )
@@ -187,6 +188,7 @@ class TrainerActor(Actor):
     @endpoint
     async def train_step(self, tokens, labels, loss_mask):
         """Train one step on generated completions."""
+        self.trainer.metrics_processor.reset_training_counters()
         # Slice this DP rank's shard from the full batch.
         start = self.dp_rank * BATCH_SIZE
         end = start + BATCH_SIZE
@@ -257,6 +259,8 @@ async def main():
                 "training/loss_mean",
                 "training/grad_norm_max",
                 "training/lr",
+                "trainer_throughput/tps_mean",
+                "trainer_memory/reserved_gib_max",
                 "rl/reward_mean",
                 "rl/completion_len_mean",
             ],
@@ -307,7 +311,8 @@ async def main():
             with record_span("rl_time/training_s", EventType.FWD_BWD):
                 await trainer.train_step.call(tokens, labels, loss_mask)
 
-            log_queue.put(step)
+            is_validation = False
+            log_queue.put((step, is_validation))
 
     await run_training()
 
