@@ -591,9 +591,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        # TODO: improve the logic on obtaining attention masks
+        # TODO: remove this guard once RoPE handles DTensor+positions.
+        # The positions!=None path in RoPE uses torch.gather which fails
+        # with DTensor+FSDP. For now, only pass positions through when
+        # using flex/varlen + block_causal (where it's needed and works).
         layer = getattr(self.model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
+        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
+        if attn_mask_type != "block_causal":
+            extra_inputs.pop("positions", None)
+
         attn_backend = getattr(attn_config, "attn_backend", "sdpa")
         if attn_backend in ["flex", "varlen"]:
             assert (
