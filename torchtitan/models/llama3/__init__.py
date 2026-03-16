@@ -44,7 +44,8 @@ llama3_configs = {
             ),
             attention=GQAttention.Config(
                 n_heads=16,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -57,6 +58,7 @@ llama3_configs = {
             scaling="llama",
         ),
     ),
+    # TODO: now identical to "debugmodel", can be removed
     "debugmodel_flex_attn": Llama3Model.Config(
         dim=256,
         n_layers=6,
@@ -130,7 +132,8 @@ llama3_configs = {
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -142,6 +145,7 @@ llama3_configs = {
             scaling="llama",
         ),
     ),
+    # TODO: now identical to "8B", can be removed
     "8B_flex": Llama3Model.Config(
         dim=4096,
         n_layers=32,
@@ -219,7 +223,8 @@ llama3_configs = {
             attention=GQAttention.Config(
                 n_heads=64,
                 n_kv_heads=8,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -248,7 +253,8 @@ llama3_configs = {
             attention=GQAttention.Config(
                 n_heads=128,
                 n_kv_heads=8,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),

@@ -47,6 +47,11 @@ class BaseDataLoader(Stateful, ABC, Configurable):
         dataset: str = ""
         dataset_path: str | None = None
 
+    @property
+    def is_packed(self) -> bool:
+        """Whether the underlying dataset packs multiple documents per sequence."""
+        return getattr(self.dataset, "is_packed", False)
+
     @abstractmethod
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         ...
