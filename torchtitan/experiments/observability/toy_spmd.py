@@ -38,7 +38,10 @@ from torchtitan.observability import (
     add_step_tag,
     EventType,
     init_observability,
+    MaxMetric,
+    NoOpMetric,
     record_event,
+    record_metric,
     record_span,
 )
 from torchtitan.observability.analysis import generate_gantt_trace
@@ -57,6 +60,7 @@ BATCH_SIZE = 8
 DP_SIZE = 2
 LR = 1e-3
 IGNORE_INDEX = -100
+ENABLE_WANDB = True
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "outputs", "toy_spmd")
 
 
@@ -155,7 +159,9 @@ class ToyTrainer:
     - train: owns the training loop
     """
 
-    def __init__(self, device, parallel_dims: ParallelDims, output_dir):
+    def __init__(
+        self, device, parallel_dims: ParallelDims, output_dir, *, mp_config=None
+    ):
         self.device = device
         self.parallel_dims = parallel_dims
         dp_mesh = parallel_dims.get_mesh("fsdp")
@@ -165,7 +171,11 @@ class ToyTrainer:
         self.output_dir = output_dir
         self.step = 0
 
-        self.metrics_processor = MetricsProcessor()
+        if mp_config is None:
+            mp_config = MetricsProcessor.Config()
+        self.metrics_processor = mp_config.build(
+            parallel_dims=parallel_dims, dump_folder=output_dir
+        )
 
         torch.manual_seed(0)
         with record_span("setup/model_build", EventType.BUILD_MODEL):
@@ -277,14 +287,12 @@ class ToyTrainer:
         dist.all_reduce(
             loss_scalar, op=dist.ReduceOp.SUM, group=self.dp_mesh.get_group()
         )
+        record_metric("training/loss_mean", NoOpMetric(value=loss_scalar.item()))
+        record_metric("training/grad_norm_max", MaxMetric(value=grad_norm.item()))
+        record_metric("training/lr", NoOpMetric(value=LR))
         record_event(
             {"train.loss": loss_scalar.item(), "train.grad_norm": grad_norm.item()}
         )
-        if self.rank == 0:
-            print(
-                f"step: {self.step}  loss: {loss_scalar.item():.5f}  "
-                f"grad_norm: {grad_norm.item():.5f}"
-            )
 
     def validate(self, tokens, labels, loss_mask):
         """Run one forward pass for validation (no backward)."""
@@ -298,8 +306,7 @@ class ToyTrainer:
         dist.all_reduce(
             val_loss_scalar, op=dist.ReduceOp.SUM, group=self.dp_mesh.get_group()
         )
-        if self.rank == 0:
-            print(f"  val loss: {val_loss_scalar.item():.4f}")
+        record_metric("validation/loss_mean", NoOpMetric(value=val_loss_scalar.item()))
 
     def train(self, num_steps):
         """Full training loop. Mirrors Trainer.train structure."""
@@ -323,6 +330,8 @@ class ToyTrainer:
                 add_step_tag("eval")
                 with record_span("trainer_time/validation_s", EventType.EVAL):
                     self.validate(tokens, labels, loss_mask)
+
+            self.metrics_processor.log(step)
 
     def close(self):
         """Cleanup."""
@@ -360,7 +369,15 @@ def main():
     if rank == 0:
         print(f"Toy SPMD: {world_size} GPUs, 2DPx2TP, {NUM_STEPS} steps")
 
-    trainer = ToyTrainer(device, parallel_dims, OUTPUT_DIR)
+    mp_config = MetricsProcessor.Config(
+        enable_wandb=ENABLE_WANDB,
+        console_log_metric_keys=[
+            "training/loss_mean",
+            "training/grad_norm_max",
+            "training/lr",
+        ],
+    )
+    trainer = ToyTrainer(device, parallel_dims, OUTPUT_DIR, mp_config=mp_config)
     trainer.train(NUM_STEPS)
     trainer.close()
 
