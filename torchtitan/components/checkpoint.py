@@ -637,7 +637,7 @@ class CheckpointManager(Configurable):
                 self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
-    def save(self, curr_step: int, last_step: bool = False) -> None:
+    def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
         This function will save the checkpoint for the current step. If ``last_step`` is
@@ -650,14 +650,14 @@ class CheckpointManager(Configurable):
             last_step (bool, optional): Whether this is the last step of training.
 
         Returns:
-            None
+            True if a checkpoint was saved, False otherwise.
         """
 
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 
         if not self._should_save(curr_step, last_step):
-            return
+            return False
 
         begin = time.monotonic()
         if not self.enable_ft_dataloader_checkpoints or (
@@ -673,7 +673,7 @@ class CheckpointManager(Configurable):
             # freed until _async_wait()
             if last_step:
                 self._save_last_step(curr_step)
-                return
+                return True
 
             states = self._flattened_model_states_sd()
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -715,6 +715,7 @@ class CheckpointManager(Configurable):
                 # pyrefly: ignore [missing-attribute]
                 self.ft_manager.participating_rank(),
             )
+        return True
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
