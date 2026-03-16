@@ -14,7 +14,6 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -134,6 +133,14 @@ class PolicyTrainer(Actor, Configurable):
         self._weights_pushed = False
         self.generator: Any | None = None
 
+        try:
+            from monarch.rdma import RDMABuffer  # noqa: F401
+
+            self._use_direct_rdma = True
+        except ImportError:
+            self._use_direct_rdma = False
+            logger.warning("RDMA not available, falling back to RPC based weight sync")
+
         # Data parallelism: determine this rank's shard of the batch.
         self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
         self.dp_rank = dist.get_rank() // self.parallel_dims.non_data_parallel_size
@@ -234,20 +241,14 @@ class PolicyTrainer(Actor, Configurable):
         staging buffers for non-contiguous params (contiguous params are
         updated in-place by the optimizer and need no refresh).
         """
-        state_dict = self.model.state_dict() if not self._weights_pushed else None
+        if self._use_direct_rdma:
+            state_dict = self.model.state_dict() if not self._weights_pushed else None
+        else:
+            state_dict = self.model.state_dict()
         await ts.put_state_dict(
-            state_dict, "policy_weights", direct_rdma=True
+            state_dict, "policy_weights", direct_rdma=self._use_direct_rdma
         )
         self._weights_pushed = True
-
-    @endpoint
-    async def get_weight_checksums(self) -> dict[str, float]:
-        """Return per-param checksums for weight sync verification."""
-        checksums = {}
-        for name, param in self.model.state_dict().items():
-            t = param.full_tensor() if isinstance(param, DTensor) else param
-            checksums[name] = t.to(torch.float64).sum().item()
-        return checksums
 
     @endpoint
     async def step(self, episodes: list[Episode]) -> dict:

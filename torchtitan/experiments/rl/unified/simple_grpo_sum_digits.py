@@ -338,7 +338,6 @@ class RLTrainer(Configurable):
             if self.config.log_samples:
                 _log_samples(episodes)
 
-
             # 4. Trainer updates policy using episodes with advantages
             metrics = self.trainer.step.call(episodes).get().item(gpus=0)
             # 5. Sync weights via direct RDMA
@@ -348,34 +347,6 @@ class RLTrainer(Configurable):
             self.generator.pull_weights.call(metrics["policy_version"]).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
-
-            # Verify weight sync after first training step
-            if step == 0:
-                trainer_checksums = (
-                    self.trainer.get_weight_checksums.call().get().item(gpus=0)
-                )
-                gen_checksums = (
-                    self.generator.get_weight_checksums.call().get().item(gpus=0)
-                )
-                mismatches = []
-                for name in trainer_checksums:
-                    if name not in gen_checksums:
-                        mismatches.append(f"  {name}: MISSING in generator")
-                    elif abs(trainer_checksums[name] - gen_checksums[name]) > 1e-4:
-                        mismatches.append(
-                            f"  {name}: trainer={trainer_checksums[name]:.6f}, "
-                            f"gen={gen_checksums[name]:.6f}, "
-                            f"diff={abs(trainer_checksums[name] - gen_checksums[name]):.6e}"
-                        )
-                if mismatches:
-                    logger.warning(
-                        f"Post-step weight sync mismatch ({len(mismatches)} params):\n"
-                        + "\n".join(mismatches[:20])
-                    )
-                else:
-                    logger.info(
-                        f"Post-step weight sync verified: all {len(trainer_checksums)} params match"
-                    )
 
             t_step = time.perf_counter() - step_start
 

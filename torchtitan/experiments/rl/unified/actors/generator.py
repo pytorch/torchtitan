@@ -12,7 +12,6 @@ from typing import Literal
 import torch
 import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -217,6 +216,14 @@ class VLLMGenerator(Actor, Configurable):
 
         self.policy_version = 0
 
+        try:
+            from monarch.rdma import RDMABuffer  # noqa: F401
+
+            self._use_direct_rdma = True
+        except ImportError:
+            self._use_direct_rdma = False
+            logger.warning("RDMA not available, falling back to RPC based weight sync")
+
         logger.info("Generator initialized with vLLM engine")
 
     def _get_model(self):
@@ -306,31 +313,21 @@ class VLLMGenerator(Actor, Configurable):
         return episodes
 
     @endpoint
-    async def get_weight_checksums(self) -> dict[str, float]:
-        """Return per-param checksums for weight sync verification."""
-        checksums = {}
-        for name, param in self._get_model().model.state_dict().items():
-            if isinstance(param, DTensor):
-                t = param.full_tensor()
-            else:
-                t = param
-            checksums[name] = t.to(torch.float64).sum().item()
-        return checksums
-
-    @endpoint
     async def pull_weights(self, version: int) -> None:
         """Pull latest weights via direct RDMA from trainer memory.
 
         On the first call, fetches and caches RDMA handles from
         TorchStore and builds a transfer plan. Subsequent calls reuse
         cached handles/plan and just re-read the data.
-   
+
         Args:
             version: New policy version number.
         """
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
-            "policy_weights", user_state_dict=model_sd, direct_rdma=True
+            "policy_weights",
+            user_state_dict=model_sd,
+            direct_rdma=self._use_direct_rdma,
         )
         self.policy_version = version
         logger.debug(
