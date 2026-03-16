@@ -6,13 +6,13 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.validate import Validator
 from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.observability.metrics_processor import MetricsProcessor
 from torchtitan.tools.profiling import ProfilingConfig
 
 from . import model_registry
