@@ -14,7 +14,8 @@ import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
-from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.observability.metrics_processor import MetricsProcessor
+from torchtitan.observability import NoOpMetric, record_metric
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -230,7 +231,7 @@ class Validator(BaseValidator):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            self.metrics_processor.val_ntokens_since_reset += labels.numel()
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
             labels = labels.to(device_type)
@@ -307,7 +308,11 @@ class Validator(BaseValidator):
         else:
             global_avg_loss = loss.item()
 
-        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+        # Only record loss on ranks that computed it (last PP stage).
+        if not self.parallel_dims.pp_enabled or self.pp_has_last_stage:
+            record_metric("validation/loss_mean", NoOpMetric(value=global_avg_loss))
+        self.metrics_processor.record_throughput(is_validation=True)
+        self.metrics_processor.record_memory(is_validation=True)
 
         # Set model back to train mode
         for model in model_parts:
