@@ -18,7 +18,16 @@ from contextlib import ContextDecorator
 from timeit import default_timer as timer
 from typing import Any
 
-from torchtitan.observability._constants import SYSTEM_LOGGER_NAME
+from torchtitan.observability._constants import (
+    EXPERIMENT_LOGGER_NAME,
+    SYSTEM_LOGGER_NAME,
+)
+from torchtitan.observability.metrics import (
+    ExperimentJSONFormatter,
+    ExperimentLoggingHandler,
+    MeanMetric,
+    record_metric,
+)
 from torchtitan.observability.step_state import get_step, get_step_tags
 
 MAX_MESSAGE_SIZE: int = 1000
@@ -294,7 +303,7 @@ class StructuredLoggingHandler(logging.FileHandler):
 class InflightEventTrackingHandler(logging.Handler):
     """Tracks the last structured event for crash forensics.
 
-    On crash, ``handler.last_event`` tells you what phase the process was in::
+    On crash, ``handler.last_event`` tells you what phase the process was in:
 
         handler = InflightEventTrackingHandler()
         sys_logger.addHandler(handler)
@@ -367,6 +376,23 @@ def init_observability(source: str, output_dir: str, rank: int | None = None) ->
         if sys_logger.level == logging.NOTSET or sys_logger.level > logging.INFO:
             sys_logger.setLevel(logging.INFO)
 
+    # --- Experiment handler (record_metric → per-rank JSONL) ---
+    exp_logger = logging.getLogger(EXPERIMENT_LOGGER_NAME)
+    # Skip if already initialized (idempotent)
+    if not any(isinstance(h, ExperimentLoggingHandler) for h in exp_logger.handlers):
+        exp_path = os.path.join(
+            output_dir,
+            "experiment_logs",
+            f"{source}_rank_{rank}_experiment.jsonl",
+        )
+        handler = ExperimentLoggingHandler(filepath=exp_path)
+        handler.setFormatter(ExperimentJSONFormatter(rank=rank, source=source))
+        exp_logger.addHandler(handler)
+    # Don't propagate to root logger (avoids duplicate console output)
+    exp_logger.propagate = False
+    if exp_logger.level == logging.NOTSET or exp_logger.level > logging.INFO:
+        exp_logger.setLevel(logging.INFO)
+
 
 # ---------------------------------------------------------------------------
 # Public API: record_event, record_span
@@ -398,8 +424,9 @@ def record_event(metrics: dict[str, float | int]) -> None:
 class record_span(ContextDecorator):  # noqa: N801
     """Context manager/decorator for timing phases.
 
-    Logs START event on enter, END event (with duration) on exit to system
-    JSONL. Step is read from the global set by ``set_step()``.
+    Logs START/END events to system JSONL. When ``log_to_metrics=True``
+    (default), also records the duration as a MeanMetric (seconds) to
+    experiment JSONL via ``record_metric``.
 
     Args:
         description (str): Human-readable label for log messages and metric key.
@@ -409,6 +436,8 @@ class record_span(ContextDecorator):  # noqa: N801
         event_type Optional([EventType,str]): Optional categorization for analysis tools. Can be an
             ``EventType`` enum for standardized phases, or any string.
             When omitted, the description is used as the event type.
+        log_to_metrics: If True, record duration to experiment JSONL.
+            Default True.
 
     Usage::
         with record_span("trainer_time/forward_backward_s", EventType.FWD_BWD):
@@ -420,8 +449,15 @@ class record_span(ContextDecorator):  # noqa: N801
             rollouts = generate(prompts)
     """
 
-    def __init__(self, description: str, event_type: EventType | str | None = None):
+    def __init__(
+        self,
+        description: str,
+        event_type: EventType | str | None = None,
+        *,
+        log_to_metrics: bool = True,
+    ):
         self.description = description
+        self.log_to_metrics = log_to_metrics
         self.start_time: float = 0.0
 
         # Derive _start/_end type names from event_type or description.
@@ -456,4 +492,7 @@ class record_span(ContextDecorator):  # noqa: N801
             ),
             stacklevel=2,
         )
+        if self.log_to_metrics and step is not None:
+            # stacklevel=3 adds to the metadata the actual call site, e.g. trainer.py:537
+            record_metric(self.description, MeanMetric(sum=duration_s), _stacklevel=3)
         return False  # Don't suppress exceptions
