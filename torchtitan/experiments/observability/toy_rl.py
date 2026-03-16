@@ -47,6 +47,7 @@ from torchtitan.observability import (
     MeanMetric,
     record_metric,
     record_span,
+    RolloutLogger,
     set_step,
 )
 from torchtitan.observability.analysis import generate_gantt_trace
@@ -106,6 +107,20 @@ def rollouts_to_train_batch(
         torch.stack([r.labels for r in rollouts]),
         torch.stack([r.loss_mask for r in rollouts]),
     )
+
+
+def filter_top_bottom(
+    records: list[dict], key: str = "reward", k: int = 1
+) -> list[dict]:
+    """Keep top-k and bottom-k records by a key.
+
+    If fewer than 2*k records, returns all records.
+    """
+    sorted_recs = sorted(records, key=lambda r: r.get(key, 0))
+    k = min(k, len(sorted_recs) // 2) if sorted_recs else 0
+    if k == 0:
+        return sorted_recs
+    return sorted_recs[:k] + sorted_recs[-k:]
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +191,8 @@ class TrainerActor(Actor):
         # log_freq=1 is set because it determines freq to call metrics that need .item() or collectives
         mp_config = MetricsProcessor.Config(log_freq=1, enable_wandb=False)
         self.trainer = ToyTrainer(
-            self.device, mesh["dp"], mesh["tp"], OUTPUT_DIR, mp_config=mp_config
+            self.device, mesh["dp"], mesh["tp"], OUTPUT_DIR,
+            mp_config=mp_config,
         )
 
     @endpoint
@@ -287,6 +303,12 @@ async def main():
     actors = [rollouter, trainer, reward_actor]
     logger.info("Actors spawned.")
 
+    rollout_dir = os.path.join(OUTPUT_DIR, "rollouts")
+    rollout_logger = RolloutLogger(
+        output_dir=rollout_dir,
+        filter_fn=lambda records: filter_top_bottom(records, key="reward", k=2),
+    )
+
     # Dummy prompts for the rollouter.
     prompts = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LEN))
 
@@ -305,6 +327,13 @@ async def main():
                 result = await reward_actor.score.call(rollouts)
                 rollouts = next(iter(result.values()))
 
+            # Logging is synchronous here but could be overlapped with
+            # the train_step call below since it's just file I/O.
+            rollout_logger.log(
+                [r.to_logging_dict() for r in rollouts],
+                metadata={"step": step},
+            )
+
             with record_span("rl_time/rollouts_to_train_batch_s"):
                 tokens, labels, loss_mask = rollouts_to_train_batch(rollouts)
 
@@ -317,6 +346,7 @@ async def main():
     await run_training()
 
     # ---- Cleanup ----
+    rollout_logger.close()
     log_queue.put(None)
     log_process.join(timeout=10)
     await trainer.teardown.call()
