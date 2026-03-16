@@ -91,7 +91,9 @@ def generate_gantt_trace(log_dir: str, output_path: str) -> dict:
             type_name = event_type.removesuffix("_start")
             display_name = type_name or normal.get("event_name", type_name)
             pending_starts[(type_name, pid, rank)] = {
-                "ts": time_us, "step": step, "display_name": display_name,
+                "ts": time_us,
+                "step": step,
+                "display_name": display_name,
             }
         elif event_type.endswith("_end"):
             type_name = event_type.removesuffix("_end")

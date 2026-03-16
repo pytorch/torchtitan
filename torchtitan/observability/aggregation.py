@@ -224,6 +224,8 @@ def _build_metric_logger(
     save_tb_folder: str = "tb",
     config_dict: dict[str, Any] | None = None,
     tag: str | None = None,
+    ft_enable: bool = False,
+    ft_replica_id: int = 0,
 ) -> BaseLogger:
     """Build WandB/TB logger for the logging subprocess."""
     container = LoggerContainer()
@@ -231,6 +233,8 @@ def _build_metric_logger(
         tb_dir = os.path.join(
             dump_folder, save_tb_folder, datetime.now().strftime("%Y%m%d-%H%M")
         )
+        if ft_enable:
+            tb_dir = os.path.join(tb_dir, f"replica_{ft_replica_id}")
         container.add_logger(TensorBoardLogger(log_dir=tb_dir, tag=tag))
     if enable_wandb:
         container.add_logger(
@@ -255,6 +259,8 @@ def logging_worker(
     tag: str | None = None,
     console_log_metric_keys: list[str] | None = None,
     console_log_validation_keys: list[str] | None = None,
+    ft_enable: bool = False,
+    ft_replica_id: int = 0,
     queue_timeout_s: float = _QUEUE_TIMEOUT_S,
 ) -> None:
     """Background process that reads experiment JSONL, aggregates across
@@ -276,6 +282,8 @@ def logging_worker(
         console_log_metric_keys: Training metric keys for console each step.
         console_log_validation_keys: Validation metric keys for console
             (only printed on validation steps).
+        ft_enable: Whether fault tolerance is enabled.
+        ft_replica_id: Fault tolerance replica ID (used for TB dir).
         queue_timeout_s: Seconds to wait for a signal before assuming
             training crashed. Default 600 (10 min).
     """
@@ -297,6 +305,8 @@ def logging_worker(
         save_tb_folder=save_tb_folder,
         config_dict=config_dict,
         tag=tag,
+        ft_enable=ft_enable,
+        ft_replica_id=ft_replica_id,
     )
     logger.info("[logging process] started, reading from %s", log_dir)
 
