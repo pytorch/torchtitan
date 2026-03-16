@@ -22,6 +22,7 @@ from torchtitan.models.flux.utils import (
     preprocess_data,
 )
 from torchtitan.observability import (
+    EventType,
     NoOpMetric,
     record_event,
     record_metric,
@@ -241,18 +242,20 @@ class FluxTrainer(Trainer):
         # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
+        with record_span("trainer_time/forward_backward_s", EventType.FWD_BWD):
+            loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=parallel_dims.get_optional_mesh("pp"),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
-        self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+        with record_span("trainer_time/optimizer_s", EventType.OPTIM):
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.config.training.max_norm,
+                foreach=True,
+                pp_mesh=parallel_dims.get_optional_mesh("pp"),
+                ep_enabled=parallel_dims.ep_enabled,
+            )
+            self.checkpointer.maybe_wait_for_staging()
+            self.optimizers.step()
+            self.lr_schedulers.step()
 
         # log metrics
         if self.metrics_processor.should_log(self.step):
