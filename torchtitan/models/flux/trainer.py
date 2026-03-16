@@ -11,10 +11,11 @@ import torch
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.models.flux.configs import Encoder, Inference, Validation
+from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.parallelize import parallelize_encoders
+from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -26,8 +27,12 @@ from torchtitan.trainer import Trainer
 class FluxTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
-        encoder: Encoder = field(default_factory=Encoder)
-        validation: Validation = field(default_factory=Validation)
+        # Overwrite parent class tokenizer
+        tokenizer: FluxTokenizerContainer.Config = (  # pyrefly: ignore [bad-override]
+            field(default_factory=FluxTokenizerContainer.Config)
+        )
+        encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
+        """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
 
     def __init__(self, config: Config):
@@ -58,28 +63,24 @@ class FluxTrainer(Trainer):
         model_args = config.model_spec.model
 
         self.autoencoder = load_ae(
-            # pyrefly: ignore [missing-attribute]
             config.encoder.autoencoder_path,
             # pyrefly: ignore [missing-attribute]
             model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
-            # pyrefly: ignore [missing-attribute]
-            random_init=config.encoder.test_mode,
+            random_init=config.encoder.random_init,
         )
 
         self.clip_encoder = FluxEmbedder(
-            # pyrefly: ignore [missing-attribute]
             version=config.encoder.clip_encoder,
-            # pyrefly: ignore [missing-attribute]
-            random_init=config.encoder.test_mode,
+            random_init=config.encoder.random_init,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
-            # pyrefly: ignore [missing-attribute]
             version=config.encoder.t5_encoder,
-            # pyrefly: ignore [missing-attribute]
-            random_init=config.encoder.test_mode,
+            random_init=config.encoder.random_init,
         ).to(device=self.device, dtype=self._dtype)
+
+        # Apply FSDP
 
         # Apply FSDP to the T5 model / CLIP model
         # pyrefly: ignore [bad-assignment]
@@ -98,7 +99,7 @@ class FluxTrainer(Trainer):
                 autoencoder=self.autoencoder,
                 t5_encoder=self.t5_encoder,
                 clip_encoder=self.clip_encoder,
-                trainer_config=config,
+                dump_folder=config.dump_folder,
             )
 
     def forward_backward_step(
