@@ -9,7 +9,7 @@ import os
 import torch
 
 from torchtitan.config import ConfigManager
-from torchtitan.observability import init_observability
+from torchtitan.observability import EventType, init_observability, record_span
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer
 
@@ -67,7 +67,10 @@ def main() -> None:
     else:
         trainer.close()
         if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+            with record_span(
+                "trainer_time/teardown_s", EventType.TORCH_DISTRIBUTED_TEARDOWN
+            ):
+                torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
 
 

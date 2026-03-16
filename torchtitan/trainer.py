@@ -42,6 +42,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import (
+    add_step_tag,
     EventType,
     NoOpMetric,
     record_event,
@@ -238,44 +239,49 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build tokenizer
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        with record_span("init/tokenizer_s", EventType.TOKENIZER_INIT):
+            self.tokenizer = config.tokenizer.build(
+                tokenizer_path=config.hf_assets_path
+            )
 
         # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
-        )
+        with record_span("init/dataloader_s", EventType.DATA_ITERATOR_INIT):
+            self.dataloader = config.dataloader.build(
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
+                tokenizer=self.tokenizer,
+                seq_len=config.training.seq_len,
+                local_batch_size=config.training.local_batch_size,
+            )
 
         # build model (using meta init)
-        model_config = model_spec.model
-        # set the model args from training job configs
-        model_config.update_from_config(
-            trainer_config=config,
-        )
-        self.model_config = model_config
+        with record_span("init/model_build_s", EventType.BUILD_MODEL):
+            model_config = model_spec.model
+            # set the model args from training job configs
+            model_config.update_from_config(
+                trainer_config=config,
+            )
+            self.model_config = model_config
 
-        logger.info(
-            f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
-        )
-        with (
-            torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
-        ):
-            model = model_config.build()
+            logger.info(
+                f"Building {model_spec.name} {model_spec.flavor} "
+                f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
+            )
+            with (
+                torch.device("meta"),
+                utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+            ):
+                model = model_config.build()
 
-        # Build the collection of model converters. No-op if converters empty
-        model_compile_enabled = (
-            config.compile.enable and "model" in config.compile.components
-        )
-        model_converters = config.model_converters.build(
-            parallel_dims=parallel_dims,
-            model_compile_enabled=model_compile_enabled,
-        )
-        model_converters.convert(model)
+            # Build the collection of model converters. No-op if converters empty
+            model_compile_enabled = (
+                config.compile.enable and "model" in config.compile.components
+            )
+            model_converters = config.model_converters.build(
+                parallel_dims=parallel_dims,
+                model_compile_enabled=model_compile_enabled,
+            )
+            model_converters.convert(model)
 
         # Check if any converter uses quantization (FP8, MX, etc.)
         has_quantization = any(
@@ -340,62 +346,63 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert self.gradient_accumulation_steps > 0
 
         # apply parallelisms and initialization
-        if parallel_dims.pp_enabled:
-            if not model_spec.pipelining_fn:
-                raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {model_spec.name} "
-                    f"does not support pipelining"
+        with record_span("init/parallelism_s", EventType.MODEL_PARALLELISM_INIT):
+            if parallel_dims.pp_enabled:
+                if not model_spec.pipelining_fn:
+                    raise RuntimeError(
+                        f"Pipeline Parallel is enabled but {model_spec.name} "
+                        f"does not support pipelining"
+                    )
+
+                # apply both Pipeline Parallel and SPMD-style scaling techniques
+                (
+                    self.pp_schedule,
+                    self.model_parts,
+                    self.pp_has_first_stage,
+                    self.pp_has_last_stage,
+                ) = model_spec.pipelining_fn(
+                    model,
+                    parallel_dims=parallel_dims,
+                    training=config.training,
+                    model_converters=config.model_converters,
+                    parallelism=config.parallelism,
+                    compile_config=config.compile,
+                    ac_config=config.activation_checkpoint,
+                    dump_folder=config.dump_folder,
+                    device=self.device,
+                    model_config=model_config,
+                    parallelize_fn=model_spec.parallelize_fn,
+                    loss_fn=self.loss_fn,
+                )
+                # when PP is enabled, `model` obj is no longer used after this point,
+                # model_parts is used instead
+                del model
+
+                for m in self.model_parts:
+                    m.to_empty(device=init_device)
+                    with torch.no_grad():
+                        cast(Decoder, m).init_weights(buffer_device=buffer_device)
+                    m.train()
+
+            else:
+                # apply Tensor/Context/Expert Parallel, activation checkpointing, torch.compile, Data Parallel
+                model = model_spec.parallelize_fn(
+                    model,
+                    parallel_dims=parallel_dims,
+                    training=config.training,
+                    model_converters=config.model_converters,
+                    parallelism=config.parallelism,
+                    compile_config=config.compile,
+                    ac_config=config.activation_checkpoint,
+                    dump_folder=config.dump_folder,
                 )
 
-            # apply both Pipeline Parallel and SPMD-style scaling techniques
-            (
-                self.pp_schedule,
-                self.model_parts,
-                self.pp_has_first_stage,
-                self.pp_has_last_stage,
-            ) = model_spec.pipelining_fn(
-                model,
-                parallel_dims=parallel_dims,
-                training=config.training,
-                model_converters=config.model_converters,
-                parallelism=config.parallelism,
-                compile_config=config.compile,
-                ac_config=config.activation_checkpoint,
-                dump_folder=config.dump_folder,
-                device=self.device,
-                model_config=model_config,
-                parallelize_fn=model_spec.parallelize_fn,
-                loss_fn=self.loss_fn,
-            )
-            # when PP is enabled, `model` obj is no longer used after this point,
-            # model_parts is used instead
-            del model
-
-            for m in self.model_parts:
-                m.to_empty(device=init_device)
+                model.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(Decoder, m).init_weights(buffer_device=buffer_device)
-                m.train()
+                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                model.train()
 
-        else:
-            # apply Tensor/Context/Expert Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = model_spec.parallelize_fn(
-                model,
-                parallel_dims=parallel_dims,
-                training=config.training,
-                model_converters=config.model_converters,
-                parallelism=config.parallelism,
-                compile_config=config.compile,
-                ac_config=config.activation_checkpoint,
-                dump_folder=config.dump_folder,
-            )
-
-            model.to_empty(device=init_device)
-            with torch.no_grad():
-                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-            model.train()
-
-            self.model_parts = [model]
+                self.model_parts = [model]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -409,11 +416,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build optimizer after applying parallelisms to the model
-        self.optimizers = config.optimizer.build(model_parts=self.model_parts)
-        if model_spec.post_optimizer_build_fn is not None:
-            model_spec.post_optimizer_build_fn(
-                self.optimizers, self.model_parts, parallel_dims
-            )
+        with record_span("init/optimizer_s", EventType.OPTIMIZER_INIT):
+            self.optimizers = config.optimizer.build(model_parts=self.model_parts)
+            if model_spec.post_optimizer_build_fn is not None:
+                model_spec.post_optimizer_build_fn(
+                    self.optimizers, self.model_parts, parallel_dims
+                )
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
@@ -426,24 +434,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts
             )
         )
+
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
 
-        self.checkpointer = config.checkpoint.build(
-            dataloader=self.dataloader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
-            base_folder=config.dump_folder,
-        )
+        with record_span("init/checkpoint_s", EventType.CHECKPOINT_INIT):
+            self.checkpointer = config.checkpoint.build(
+                dataloader=self.dataloader,
+                model_parts=self.model_parts,
+                optimizers=self.optimizers,
+                lr_schedulers=self.lr_schedulers,
+                states={"train_state": self},
+                sd_adapter=(
+                    model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+                    if model_spec.state_dict_adapter
+                    else None
+                ),
+                base_folder=config.dump_folder,
+            )
 
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
@@ -708,32 +718,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = local_valid_tokens.float()
 
         # Process each microbatch: move to GPU, forward/backward, then free
-        accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
+        with record_span("trainer_time/forward_backward_s", EventType.FWD_BWD):
+            accumulated_losses = []
+            for input_dict, labels in microbatches:
+                # Move tensors to GPU
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
 
-            loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                # pyrefly: ignore [bad-argument-type]
-                global_valid_tokens=global_valid_tokens,
+                loss = self.forward_backward_step(
+                    input_dict=input_dict,
+                    labels=labels,
+                    # pyrefly: ignore [bad-argument-type]
+                    global_valid_tokens=global_valid_tokens,
+                )
+                accumulated_losses.append(loss.detach())
+
+        with record_span("trainer_time/optimizer_s", EventType.OPTIM):
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.config.training.max_norm,
+                foreach=True,
+                pp_mesh=parallel_dims.get_optional_mesh("pp"),
+                ep_enabled=parallel_dims.ep_enabled,
             )
-            accumulated_losses.append(loss.detach())
-
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=parallel_dims.get_optional_mesh("pp"),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
-        self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+            self.checkpointer.maybe_wait_for_staging()
+            self.optimizers.step()
+            self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
@@ -801,7 +813,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def train(self):
         config = self.config
 
-        self.checkpointer.load(step=config.checkpoint.load_step)
+        with record_span("trainer_time/checkpoint_load_s", EventType.CHECKPOINT_LOAD):
+            self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
         with (
@@ -828,20 +841,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.metrics_processor.set_step(self.step, force_log=is_validation)
                 self.metrics_processor.reset_training_counters()
 
-                self.gc_handler.run(self.step)
-                try:
-                    self.train_step(data_iterator)
-                except DataloaderExhaustedError:
-                    logger.warning("Ran out of data; last step was canceled.")
-                    break
+                with record_span("trainer_time/gc_collect_s", EventType.GC_COLLECT):
+                    if self.gc_handler.run(self.step):
+                        add_step_tag("gc")
 
-                self.checkpointer.save(
-                    self.step, last_step=(self.step == config.training.steps)
-                )
+                with record_span("trainer_time/step_s", EventType.STEP):
+                    try:
+                        self.train_step(data_iterator)
+                    except DataloaderExhaustedError:
+                        logger.warning("Ran out of data; last step was canceled.")
+                        break
+
+                with record_span("trainer_time/checkpoint_s", EventType.CHECKPOINT):
+                    saved = self.checkpointer.save(
+                        self.step, last_step=(self.step == config.training.steps)
+                    )
+                    if saved:
+                        add_step_tag("checkpoint")
 
                 if is_validation:
+                    add_step_tag("eval")
                     self.metrics_processor.reset_val_counters()
-                    self.validator.validate(self.model_parts, self.step)
+                    with record_span("trainer_time/validation_s", EventType.EVAL):
+                        self.validator.validate(self.model_parts, self.step)
 
                 if self.metrics_processor.should_log(self.step):
                     self.metrics_processor.log(self.step, is_validation=is_validation)
