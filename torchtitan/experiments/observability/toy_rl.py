@@ -21,6 +21,7 @@ process that spawns GPU workers via Monarch's this_host().spawn_procs().
 
 import asyncio
 import logging
+import multiprocessing
 import os
 import shutil
 import socket
@@ -30,6 +31,7 @@ from dataclasses import dataclass
 import torch
 from monarch.actor import Actor, current_rank, endpoint, this_host
 from torch.distributed.device_mesh import init_device_mesh
+from torchtitan.experiments.observability.metrics_processor import MetricsProcessor
 from torchtitan.experiments.observability.toy_spmd import (
     BATCH_SIZE,
     DP_SIZE,
@@ -41,6 +43,9 @@ from torchtitan.experiments.observability.toy_spmd import (
 from torchtitan.observability import (
     EventType,
     init_observability,
+    logging_worker,
+    MeanMetric,
+    record_metric,
     record_span,
     set_step,
 )
@@ -145,6 +150,8 @@ class RollouterActor(Actor):
                 )
                 for i in range(len(self.dataset.tokens))
             ]
+        total_completion_len = sum(len(r.completion_text) for r in rollouts)
+        record_metric("rl/completion_len_mean", MeanMetric(sum=total_completion_len, weight=len(rollouts)))
         return rollouts
 
 
@@ -165,7 +172,11 @@ class TrainerActor(Actor):
         init_observability(source="trainer", output_dir=OUTPUT_DIR, rank=rank)
         mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "tp"))
         self.dp_rank = mesh["dp"].get_local_rank()
-        self.trainer = ToyTrainer(self.device, mesh["dp"], mesh["tp"], OUTPUT_DIR)
+        # Controller owns the logging subprocess — trainer has no backends/console.
+        mp_config = MetricsProcessor.Config(enable_wandb=False)
+        self.trainer = ToyTrainer(
+            self.device, mesh["dp"], mesh["tp"], OUTPUT_DIR, mp_config=mp_config
+        )
 
     @endpoint
     async def set_step(self, step: int):
@@ -214,6 +225,8 @@ class RewardActor(Actor):
         with record_span("reward_time/scoring_s"):
             for rollout in rollouts:
                 rollout.reward = 1.0  # dummy constant reward
+        reward_sum = sum(r.reward for r in rollouts)
+        record_metric("rl/reward_mean", MeanMetric(sum=reward_sum, weight=len(rollouts)))
         return rollouts
 
 
@@ -231,6 +244,26 @@ async def main():
 
     init_logger()
     init_observability(source="controller", output_dir=OUTPUT_DIR, rank=0)
+
+    # logging_worker reads experiment JSONL from all actors, aggregates
+    # metrics, and flushes to WandB/TB/console. Runs in a separate process.
+    log_queue = multiprocessing.Queue()
+    log_process = multiprocessing.Process(
+        target=logging_worker,
+        args=(log_queue, OUTPUT_DIR),
+        kwargs={
+            "enable_wandb": True,
+            "console_log_metric_keys": [
+                "training/loss_mean",
+                "training/grad_norm_max",
+                "training/lr",
+                "rl/reward_mean",
+                "rl/completion_len_mean",
+            ],
+        },
+        daemon=True,
+    )
+    log_process.start()
 
     # ---- Setup ----
     host = this_host()
@@ -274,13 +307,13 @@ async def main():
             with record_span("rl_time/training_s", EventType.FWD_BWD):
                 await trainer.train_step.call(tokens, labels, loss_mask)
 
-            rewards = [r.reward for r in rollouts]
-            reward_mean = sum(rewards) / len(rewards)
-            logger.info(f"step: {step}  reward_mean: {reward_mean:.5f}")
+            log_queue.put(step)
 
     await run_training()
 
     # ---- Cleanup ----
+    log_queue.put(None)
+    log_process.join(timeout=10)
     await trainer.teardown.call()
 
     sys_logs = os.path.join(OUTPUT_DIR, "system_logs")
