@@ -23,6 +23,12 @@ from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.manager import FTManager, maybe_semi_sync_training
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.observability import (
+    NoOpMetric,
+    record_event,
+    record_metric,
+    record_span,
+)
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -133,12 +139,10 @@ class FaultTolerantTrainer(Trainer):
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
             dump_folder=config.dump_folder,
-            pp_schedule=config.parallelism.pipeline_parallel_schedule,
             ft_enable=config.fault_tolerance.enable,
             ft_replica_id=config.fault_tolerance.replica_id,
             config_dict=config.to_dict(),
         )
-        color = self.metrics_processor.color
 
         # calculate model size and flops per token
         (
@@ -146,6 +150,7 @@ class FaultTolerantTrainer(Trainer):
             self.metrics_processor.num_flops_per_token,
         ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
 
+        color = utils.Color()
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
@@ -191,8 +196,6 @@ class FaultTolerantTrainer(Trainer):
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
-            from torchtitan.components.metrics import ensure_pp_loss_visible
-
             if not model_spec.pipelining_fn:
                 raise RuntimeError(
                     f"Pipeline Parallel is enabled but {model_spec.name} "
@@ -229,12 +232,6 @@ class FaultTolerantTrainer(Trainer):
                     cast(Decoder, m).init_weights(buffer_device=buffer_device)
                 m.train()
 
-            # confirm that user will be able to view loss metrics on the console
-            ensure_pp_loss_visible(
-                parallel_dims=parallel_dims,
-                pp_schedule=config.parallelism.pipeline_parallel_schedule,
-                color=color,
-            )
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = model_spec.parallelize_fn(
@@ -293,9 +290,6 @@ class FaultTolerantTrainer(Trainer):
                 self.model_parts
             )
         )
-        self.metrics_processor.optimizers = self.optimizers
-        self.metrics_processor.model_parts = self.model_parts
-
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
@@ -411,6 +405,7 @@ class FaultTolerantTrainer(Trainer):
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        record_metric("training/lr", NoOpMetric(value=lr))
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -465,51 +460,64 @@ class FaultTolerantTrainer(Trainer):
         loss = torch.sum(torch.stack(accumulated_losses))
 
         # log metrics
-        if not self.metrics_processor.should_log(self.step):
-            return
+        if self.metrics_processor.should_log(self.step):
+            with record_span("trainer_time/collect_dist_metrics_s"):
+                if parallel_dims.dp_cp_enabled:
+                    loss = loss.detach()
+                    # FT addition: use ft_manager.loss_sync_pg
+                    ft_pg = self.ft_manager.loss_sync_pg
+                    loss_mesh = parallel_dims.get_optional_mesh("loss")
 
-        if parallel_dims.dp_cp_enabled:
-            loss = loss.detach()
-            # FT addition: use ft_manager.loss_sync_pg for extra process group
-            ft_pg = self.ft_manager.loss_sync_pg
-            loss_mesh = parallel_dims.get_optional_mesh("loss")
+                    # For global_avg_loss, we want the average loss across all ranks:
+                    # loss = local_loss_sum / global_valid_tokens
+                    # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
+                    #                 = sum(loss)
+                    #
+                    # For global_max_loss, we want the max of local average losses:
+                    # local_avg_loss = local_loss_sum / local_valid_tokens
+                    #                = (loss * global_valid_tokens) / local_valid_tokens
+                    # global_max_loss = max(local_avg_loss)
+                    local_avg_loss = loss * global_valid_tokens / local_valid_tokens
+                    global_avg_loss, global_max_loss, global_ntokens_seen = (
+                        dist_utils.dist_sum(loss, loss_mesh, ft_pg),
+                        dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
+                        dist_utils.dist_sum(
+                            torch.tensor(
+                                self.ntokens_seen,
+                                dtype=torch.int64,
+                                device=self.device,
+                            ),
+                            loss_mesh,
+                            ft_pg,
+                        ),
+                    )
+                else:
+                    global_avg_loss = global_max_loss = loss.detach().item()
+                    global_ntokens_seen = self.ntokens_seen
 
-            # For global_avg_loss, we want the average loss across all ranks:
-            # loss = local_loss_sum / global_valid_tokens
-            # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
-            #                 = sum(loss)
-            #
-            # For global_max_loss, we want the max of local average losses across ranks:
-            # local_avg_loss = local_loss_sum / local_valid_tokens
-            #                = (loss * global_valid_tokens) / local_valid_tokens
-            # global_max_loss = max(local_avg_loss)
-            local_avg_loss = loss * global_valid_tokens / local_valid_tokens
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
-                dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
-                dist_utils.dist_sum(
-                    torch.tensor(
-                        self.ntokens_seen, dtype=torch.int64, device=self.device
-                    ),
-                    loss_mesh,
-                    ft_pg,
-                ),
-            )
-        else:
-            global_avg_loss = global_max_loss = loss.detach().item()
-            global_ntokens_seen = self.ntokens_seen
+                if not parallel_dims.pp_enabled or self.pp_has_last_stage:
+                    record_metric(
+                        "training/loss_mean", NoOpMetric(value=global_avg_loss)
+                    )
+                    record_metric(
+                        "training/loss_max", NoOpMetric(value=global_max_loss)
+                    )
+                record_metric(
+                    "training/grad_norm_max", NoOpMetric(value=grad_norm.item())
+                )
+                record_metric(
+                    "training/n_tokens_sum", NoOpMetric(value=global_ntokens_seen)
+                )
+                record_event(
+                    {
+                        "train.loss": global_avg_loss,
+                        "train.max_loss": global_max_loss,
+                        "train.grad_norm": grad_norm.item(),
+                    }
+                )
 
-        extra_metrics = {
-            "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
-        }
-        self.metrics_processor.log(
-            self.step,
-            global_avg_loss,
-            global_max_loss,
-            grad_norm.item(),
-            extra_metrics=extra_metrics,
-        )
+        self.metrics_processor.record_memory()
+        self.metrics_processor.record_throughput()
 
     @record
     def train(self):
@@ -558,6 +566,15 @@ class FaultTolerantTrainer(Trainer):
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
+                # Reset metric training counters and force logging
+                # this step if validation step
+                is_validation = (
+                    self.config.validator.enable
+                    and self.validator.should_validate(self.step)
+                )
+                self.metrics_processor.set_step(self.step, force_log=is_validation)
+                self.metrics_processor.reset_training_counters()
+
                 self.gc_handler.run(self.step)
                 try:
                     self.train_step(data_iterator)
@@ -569,11 +586,12 @@ class FaultTolerantTrainer(Trainer):
                     self.step, last_step=(self.step == config.training.steps)
                 )
 
-                # Run validation if validator is available
-                if self.config.validator.enable and self.validator.should_validate(
-                    self.step
-                ):
+                if is_validation:
+                    self.metrics_processor.reset_val_counters()
                     self.validator.validate(self.model_parts, self.step)
+
+                if self.metrics_processor.should_log(self.step):
+                    self.metrics_processor.log(self.step, is_validation=is_validation)
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:

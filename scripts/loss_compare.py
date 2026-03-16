@@ -75,7 +75,7 @@ from typing import Any
 LOG_PREFIX = "[LOSS_COMPARE]"
 
 # TensorBoard scalar tag used to extract loss values
-TB_LOSS_TAG = "loss_metrics/global_avg_loss"
+TB_LOSS_TAG = "training/loss_mean"
 
 # Fixed options that are always appended
 FIXED_OPTIONS = "--debug.deterministic --debug.seed=42 --metrics.enable_tensorboard --metrics.log_freq=1"
