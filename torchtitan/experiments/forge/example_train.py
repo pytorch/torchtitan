@@ -21,6 +21,8 @@ from torchtitan.config import ConfigManager
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.observability import (
+    add_step_tag,
+    EventType,
     init_observability,
     NoOpMetric,
     record_event,
@@ -152,16 +154,16 @@ class Trainer(ForgeEngine):
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
-        device_type = utils.device_type
         data_iterator = iter(data_iterable)
 
         while True:
-            try:
-                batch = next(data_iterator)
-            except StopIteration as ex:
-                # If data runs out during gradient accumulation, that
-                # entire step will not be executed.
-                raise DataloaderExhaustedError() from ex
+            with record_span("trainer_time/data_loading_s", EventType.FETCHING_BATCH):
+                try:
+                    batch = next(data_iterator)
+                except StopIteration as ex:
+                    # If data runs out during gradient accumulation, that
+                    # entire step will not be executed.
+                    raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             ntokens_batch = labels.numel()
             self.ntokens_seen += ntokens_batch  # cumulative total for the run
@@ -298,31 +300,33 @@ class Trainer(ForgeEngine):
             global_valid_tokens = local_valid_tokens.float()
 
         # Process each microbatch: move to GPU, forward/backward, then free
-        accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
+        with record_span("trainer_time/forward_backward_s", EventType.FWD_BWD):
+            accumulated_losses = []
+            for input_dict, labels in microbatches:
+                # Move tensors to GPU
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
 
-            loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                global_valid_tokens=global_valid_tokens,
+                loss = self.forward_backward_step(
+                    input_dict=input_dict,
+                    labels=labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
+                accumulated_losses.append(loss.detach())
+
+        with record_span("trainer_time/optimizer_s", EventType.OPTIM):
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.config.training.max_norm,
+                foreach=True,
+                pp_mesh=parallel_dims.get_optional_mesh("pp"),
+                ep_enabled=parallel_dims.ep_enabled,
             )
-            accumulated_losses.append(loss.detach())
-
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=parallel_dims.get_optional_mesh("pp"),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
-        self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+            self.checkpointer.maybe_wait_for_staging()
+            self.optimizers.step()
+            self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
@@ -415,20 +419,29 @@ class Trainer(ForgeEngine):
                 self.metrics_processor.set_step(self.step, force_log=is_validation)
                 self.metrics_processor.reset_training_counters()
 
-                self.gc_handler.run(self.step)
-                try:
-                    self.train_step(data_iterator)
-                except DataloaderExhaustedError:
-                    logger.warning("Ran out of data; last step was canceled.")
-                    break
+                with record_span("trainer_time/gc_collect_s", EventType.GC_COLLECT):
+                    if self.gc_handler.run(self.step):
+                        add_step_tag("gc")
 
-                self.checkpointer.save(
-                    self.step, last_step=(self.step == config.training.steps)
-                )
+                with record_span("trainer_time/step_s", EventType.STEP):
+                    try:
+                        self.train_step(data_iterator)
+                    except DataloaderExhaustedError:
+                        logger.warning("Ran out of data; last step was canceled.")
+                        break
+
+                with record_span("trainer_time/checkpoint_s", EventType.CHECKPOINT):
+                    saved = self.checkpointer.save(
+                        self.step, last_step=(self.step == config.training.steps)
+                    )
+                    if saved:
+                        add_step_tag("checkpoint")
 
                 if is_validation:
+                    add_step_tag("eval")
                     self.metrics_processor.reset_val_counters()
-                    self.validator.validate(self.model_parts, self.step)
+                    with record_span("trainer_time/validation_s", EventType.EVAL):
+                        self.validator.validate(self.model_parts, self.step)
 
                 if self.metrics_processor.should_log(self.step):
                     self.metrics_processor.log(self.step, is_validation=is_validation)
