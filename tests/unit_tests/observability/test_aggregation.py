@@ -73,7 +73,7 @@ class TestLoggingWorkerBasic:
             kwargs={"queue_timeout_s": 5},
         )
         p.start()
-        queue.put(1)
+        queue.put((1, False))
         queue.put(None)  # shutdown
         p.join(timeout=10)
         assert p.exitcode == 0
@@ -103,7 +103,7 @@ class TestLoggingWorkerBasic:
                 '{"key": "loss", "reduce": "NoOpMetric", "value": 0.5, "step": 51}\n'
             )
 
-        queue.put(51)
+        queue.put((51, False))
         queue.put(None)
         p.join(timeout=10)
         assert p.exitcode == 0
@@ -127,7 +127,7 @@ class TestLoggingWorkerBasic:
             kwargs={"queue_timeout_s": 5},
         )
         p.start()
-        queue.put(1)
+        queue.put((1, False))
         queue.put(None)
         p.join(timeout=10)
         assert p.exitcode == 0
