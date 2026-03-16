@@ -14,7 +14,10 @@ import time
 import pytest
 
 from torchtitan.observability import step_state
-from torchtitan.observability._constants import SYSTEM_LOGGER_NAME
+from torchtitan.observability._constants import (
+    EXPERIMENT_LOGGER_NAME,
+    SYSTEM_LOGGER_NAME,
+)
 from torchtitan.observability.step_state import (
     add_step_tag,
     clear_step_tags,
@@ -59,15 +62,13 @@ def reset_context():
 @pytest.fixture
 def system_logger():
     """Provide a clean system logger for testing."""
-    logger = logging.getLogger(SYSTEM_LOGGER_NAME)
-    original_handlers = logger.handlers[:]
-    original_level = logger.level
-    original_propagate = logger.propagate
-    yield logger
-    # Restore
-    logger.handlers = original_handlers
-    logger.level = original_level
-    logger.propagate = original_propagate
+    sys_log = logging.getLogger(SYSTEM_LOGGER_NAME)
+    exp_log = logging.getLogger(EXPERIMENT_LOGGER_NAME)
+    sys_orig = (sys_log.handlers[:], sys_log.level, sys_log.propagate)
+    exp_orig = (exp_log.handlers[:], exp_log.level, exp_log.propagate)
+    yield sys_log
+    sys_log.handlers, sys_log.level, sys_log.propagate = sys_orig
+    exp_log.handlers, exp_log.level, exp_log.propagate = exp_orig
 
 
 # ---------------------------------------------------------------------------

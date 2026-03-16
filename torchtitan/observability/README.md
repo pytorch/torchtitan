@@ -98,9 +98,9 @@ add_step_tag("eval")      # annotate: validation ran this step
 clear_step_tags()         # reset tags (called at the start of each step)
 ```
 
-Step and tags are stored as `ContextVar`s — isolated between concurrent asyncio
-tasks (for Monarch actor endpoints in RL) with no overhead in SPMD. These tags and steps
-could be used for custom aggregation, e.g. in RL aggregate scores per policy version.
+Step and tags are stored as module-level globals — one value per process.
+These tags and steps could be used for custom aggregation, e.g. in RL
+aggregate scores per policy version.
 
 ## 4. Experiment Metrics: record_metric
 
@@ -341,7 +341,7 @@ Example output from toy_rl (view in chrome://tracing or https://ui.perfetto.dev)
 <<<<<<< Updated upstream
 observability/
     __init__.py             # Public API re-exports
-    step_state.py           # ContextVars: _STEP, _STEP_TAGS, set_step, add_step_tag, clear_step_tags
+    step_state.py           # Globals: _STEP, _STEP_TAGS, set_step, add_step_tag, clear_step_tags
     _constants.py           # Logger names, metric entry markers (import cycle breaker)
     structured_logging.py   # System pipeline: init_observability, record_span, record_event, EventType
     metrics.py              # Experiment pipeline: record_metric, MetricValue types, REDUCE_REGISTRY
