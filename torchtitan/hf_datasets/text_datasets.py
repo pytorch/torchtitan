@@ -96,6 +96,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         # Variables for checkpointing
         self._sample_idx = 0
         self._token_buffer: list[int] = []
+        self._position_buffer: list[int] = []
 
     def _get_data_iter(self):
         # For map-style datasets, resume by skipping to the correct index
@@ -119,15 +120,19 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     sample_text, add_bos=True, add_eos=True
                 )
                 self._token_buffer.extend(sample_tokens)
+                self._position_buffer.extend(range(len(sample_tokens)))
                 self._sample_idx += 1
 
                 while len(self._token_buffer) >= max_buffer_token_len:
                     x = torch.LongTensor(self._token_buffer[:max_buffer_token_len])
-                    # update tokens to the remaining tokens
+                    pos = torch.LongTensor(self._position_buffer[:max_buffer_token_len])
+                    # update buffers to the remaining tokens
                     self._token_buffer = self._token_buffer[max_buffer_token_len:]
+                    self._position_buffer = self._position_buffer[max_buffer_token_len:]
                     input = x[:-1]
                     label = x[1:]
-                    yield {"input": input}, label
+                    positions = pos[:-1]
+                    yield {"input": input, "positions": positions}, label
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
@@ -145,6 +150,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._token_buffer = state_dict["token_buffer"]
+        self._position_buffer = state_dict.get("position_buffer", [])
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
@@ -153,7 +159,10 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
             self._data.load_state_dict(state_dict["data"])
 
     def state_dict(self):
-        _state_dict: dict[str, Any] = {"token_buffer": self._token_buffer}
+        _state_dict: dict[str, Any] = {
+            "token_buffer": self._token_buffer,
+            "position_buffer": self._position_buffer,
+        }
 
         if isinstance(self._data, Dataset):
             _state_dict["sample_idx"] = self._sample_idx
