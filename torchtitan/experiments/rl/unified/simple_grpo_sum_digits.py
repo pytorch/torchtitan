@@ -340,7 +340,7 @@ class RLTrainer(Configurable):
 
             # 4. Trainer updates policy using episodes with advantages
             metrics = self.trainer.step.call(episodes).get().item(gpus=0)
-            
+
             # 5. Sync weights
             t0 = time.perf_counter()
             self.trainer.push_weights.call().get()
