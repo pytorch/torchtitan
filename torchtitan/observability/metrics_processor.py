@@ -7,30 +7,48 @@
 """MetricsProcessor: step context, derived metrics, and logging subprocess."""
 
 import multiprocessing
+import time
 from dataclasses import dataclass, field
 
 import torch
 
+from torchtitan.components.metrics import build_device_memory_monitor
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.observability.aggregation import logging_worker
+from torchtitan.observability.logging_boundary import EveryNSteps
+from torchtitan.observability.metrics import (
+    MaxMetric,
+    MeanMetric,
+    record_metric,
+    SumMetric,
+)
 from torchtitan.observability.step_state import set_step
 from torchtitan.observability.structured_logging import record_event
+from torchtitan.tools import utils
 
 
 class MetricsProcessor(Configurable):
-    """Step context and logging subprocess.
+    """Step context, derived metrics, and logging subprocess.
 
     Records training metrics to experiment JSONL via record_metric.
     A non-blocking background subprocess reads JSONL, aggregates across ranks,
     and writes to WandB/TB/console.
     """
 
+    # Prefix for throughput and memory metric keys (e.g., "trainer_memory/...")
+    _TRAIN_PREFIX = "trainer"
+    _VAL_PREFIX = "validator"
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        log_freq: int = 10
+        """How often to log to backends (e.g. wandb). Also gates expensive
+        metrics computation (.item(), collectives)."""
         enable_wandb: bool = True
         enable_tensorboard: bool = False
         console_log_metric_keys: list[str] = field(default_factory=list)
+        console_log_validation_keys: list[str] = field(default_factory=list)
 
     def __init__(
         self,
@@ -39,8 +57,25 @@ class MetricsProcessor(Configurable):
         parallel_dims: ParallelDims,
         dump_folder: str,
     ):
+        self.config = config
         self._step: int = 0
         self.parallel_dims = parallel_dims
+        self._force_log = False
+
+        # Schedule: log on step 1 + every log_freq steps
+        self._log_schedule = EveryNSteps(every_n=config.log_freq, additional_steps={1})
+
+        # Device memory monitor
+        self.device_memory_monitor = build_device_memory_monitor()
+
+        # TFLOPS/MFU: set by trainer after construction (-1 = skip)
+        self.num_flops_per_token: int = -1
+        self._gpu_peak_flops = utils.get_peak_flops(
+            self.device_memory_monitor.device_name
+        )
+
+        self.reset_training_counters()
+        self.reset_val_counters()
 
         # Rank 0 runs a background process that reads experiment JSONL
         # from all ranks, reduces metrics, and logs to WandB/TB/console.
@@ -60,18 +95,99 @@ class MetricsProcessor(Configurable):
                     "enable_wandb": config.enable_wandb,
                     "enable_tensorboard": config.enable_tensorboard,
                     "console_log_metric_keys": config.console_log_metric_keys,
+                    "console_log_validation_keys": config.console_log_validation_keys,
                 },
                 daemon=True,
             )
             self._log_process.start()
 
-    def set_step(self, step: int) -> None:
-        """Set the current training step."""
+    # ----
+    # Step management
+    # ----
+
+    def set_step(self, step: int, force_log: bool = False) -> None:
+        """Set current step. Call before train_step().
+
+        force_log: For example, can be used to ensure loss is computed
+        on validation steps.
+        """
         self._step = step
+        self._force_log = force_log
         set_step(step)
         record_event({"train.step": step})
 
-    def log(self, step: int) -> None:
+    # ----
+    # Schedule queries
+    # ----
+
+    def should_log(self, step: int) -> bool:
+        """Returns True on log steps or when force_log was set."""
+        return self._log_schedule(step) or self._force_log
+
+    # ----
+    # Counter resets
+    # ----
+
+    def reset_training_counters(self) -> None:
+        """Reset throughput/memory counters for a new training measurement."""
+        self._time_at_reset = time.perf_counter()
+        self.ntokens_since_reset = 0
+        self.device_memory_monitor.reset_peak_stats()
+
+    def reset_val_counters(self) -> None:
+        """Reset throughput/memory counters for a new validation measurement."""
+        self._val_time_at_reset = time.perf_counter()
+        self.val_ntokens_since_reset = 0
+        self.device_memory_monitor.reset_peak_stats()
+
+    # ----
+    # Derived metrics (called every step, outside should_log gate)
+    # ----
+
+    def record_throughput(self, is_validation: bool = False) -> None:
+        """Compute and record throughput from tokens since last reset."""
+        if is_validation:
+            time_delta = time.perf_counter() - self._val_time_at_reset
+            ntokens = self.val_ntokens_since_reset
+            prefix = self._VAL_PREFIX
+        else:
+            time_delta = time.perf_counter() - self._time_at_reset
+            ntokens = self.ntokens_since_reset
+            prefix = self._TRAIN_PREFIX
+
+        ndp = self.parallel_dims.non_data_parallel_size
+        tps = ntokens / (time_delta * ndp) if time_delta > 0 else 0
+        record_metric(f"{prefix}_throughput/tps_mean", MeanMetric(sum=tps))
+
+        if self.num_flops_per_token > 0:
+            tflops = self.num_flops_per_token * tps / 1e12
+            record_metric(f"{prefix}_throughput/tflops_mean", MeanMetric(sum=tflops))
+            if self._gpu_peak_flops > 0:
+                mfu = 100 * self.num_flops_per_token * tps / self._gpu_peak_flops
+                record_metric(f"{prefix}_throughput/mfu_pct_mean", MeanMetric(sum=mfu))
+
+    def record_memory(self, is_validation: bool = False) -> None:
+        """Record GPU memory peak stats since last reset."""
+        prefix = self._VAL_PREFIX if is_validation else self._TRAIN_PREFIX
+        mem = self.device_memory_monitor.get_peak_stats()
+        record_metric(
+            f"{prefix}_memory/reserved_gib_max",
+            MaxMetric(value=mem.max_reserved_gib),
+        )
+        record_metric(
+            f"{prefix}_memory/active_gib_max",
+            MaxMetric(value=mem.max_active_gib),
+        )
+        record_metric(
+            f"{prefix}_memory/alloc_retries_sum",
+            SumMetric(value=mem.num_alloc_retries),
+        )
+
+    # ----
+    # Flush
+    # ----
+
+    def log(self, step: int, is_validation: bool = False) -> None:
         """Signal the logging subprocess to aggregate and write.
 
         All ranks participate in the barrier so the subprocess can read
@@ -79,7 +195,7 @@ class MetricsProcessor(Configurable):
         """
         torch.distributed.barrier()
         if self._log_queue is not None:
-            self._log_queue.put(step)
+            self._log_queue.put((step, is_validation))
 
     def close(self) -> None:
         """Shut down the logging subprocess."""

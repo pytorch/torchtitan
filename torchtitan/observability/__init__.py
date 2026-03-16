@@ -7,6 +7,7 @@
 """TorchTitan Observability Library."""
 
 from torchtitan.observability.aggregation import aggregate, logging_worker
+from torchtitan.observability.logging_boundary import EveryNSteps
 from torchtitan.observability.metrics import (
     MaxMetric,
     MeanMetric,
@@ -39,4 +40,5 @@ __all__ = [
     "NoOpMetric",
     "aggregate",
     "logging_worker",
+    "EveryNSteps",
 ]
