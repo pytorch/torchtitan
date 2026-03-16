@@ -7,7 +7,7 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 
-from .module import Module
+from .module import Module, verify_all_module_protocol
 
 
 class BaseModel(Module):
@@ -19,6 +19,14 @@ class BaseModel(Module):
 
     All models must implement ``init_weights`` (from Module).
     """
+
+    def verify_module_protocol(self) -> None:
+        """Verify all submodules satisfy the ``Module`` protocol.
+
+        Override in models that wrap third-party ``nn.Module`` trees where
+        internal modules cannot conform to the ``Module`` protocol.
+        """
+        verify_all_module_protocol(self)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):

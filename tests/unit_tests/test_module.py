@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -274,6 +275,74 @@ class TestVerifyAllModuleProtocol(unittest.TestCase):
         model = BadModel()
         with self.assertRaises(RuntimeError):
             verify_all_module_protocol(model)
+
+
+class TestVerifyModuleProtocol(unittest.TestCase):
+    """Tests for BaseModel.verify_module_protocol virtual method."""
+
+    def test_default_delegates_to_verify_all(self):
+        """Default verify_module_protocol delegates to verify_all_module_protocol."""
+        from torchtitan.protocols.model import BaseModel
+
+        class GoodModel(BaseModel):
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseModel.Config):
+                def update_from_config(self, *, trainer_config, **kwargs):
+                    pass
+
+                def get_nparams_and_flops(self, model, seq_len):
+                    return (0, 0)
+
+            def __init__(self):
+                super().__init__()
+                self.linear = Linear.Config().build(in_features=4, out_features=4)
+
+        model = GoodModel()
+        model.verify_module_protocol()  # should not raise
+
+    def test_default_raises_for_plain_nn_module(self):
+        """Default verify_module_protocol raises when plain nn.Module child exists."""
+        from torchtitan.protocols.model import BaseModel
+
+        class BadModel(BaseModel):
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseModel.Config):
+                def update_from_config(self, *, trainer_config, **kwargs):
+                    pass
+
+                def get_nparams_and_flops(self, model, seq_len):
+                    return (0, 0)
+
+            def __init__(self):
+                super().__init__()
+                self.plain = nn.Linear(4, 4)
+
+        model = BadModel()
+        with self.assertRaises(RuntimeError):
+            model.verify_module_protocol()
+
+    def test_override_skips_verification(self):
+        """Subclass can override verify_module_protocol to skip verification."""
+        from torchtitan.protocols.model import BaseModel
+
+        class ThirdPartyModel(BaseModel):
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseModel.Config):
+                def update_from_config(self, *, trainer_config, **kwargs):
+                    pass
+
+                def get_nparams_and_flops(self, model, seq_len):
+                    return (0, 0)
+
+            def __init__(self):
+                super().__init__()
+                self.plain = nn.Linear(4, 4)  # third-party module
+
+            def verify_module_protocol(self) -> None:
+                pass  # skip for third-party internals
+
+        model = ThirdPartyModel()
+        model.verify_module_protocol()  # should not raise
 
 
 if __name__ == "__main__":
