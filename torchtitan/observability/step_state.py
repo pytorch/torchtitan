@@ -14,7 +14,7 @@ def set_step(step: int) -> None:
     """Set the current training step. All subsequent JSONL records will
     include this step number. Clears step tags from the previous step.
 
-    Example::
+    Example:
 
         for step in range(1, num_steps + 1):
             set_step(step)
@@ -38,7 +38,7 @@ def get_step_tags() -> tuple[str, ...]:
 def add_step_tag(tag: str) -> None:
     """Annotate the current step. Tags appear in system JSONL for filtering.
 
-    Example::
+    Example:
 
         if gc_happened:
             add_step_tag("gc")
