@@ -168,7 +168,11 @@ class ToyTrainer:
 
         if mp_config is None:
             mp_config = MetricsProcessor.Config()
-        self.metrics_processor = mp_config.build(dump_folder=output_dir, rank=self.rank)
+        self.metrics_processor = mp_config.build(
+            dump_folder=output_dir,
+            rank=self.rank,
+            non_data_parallel_size=tp_mesh.size(),
+        )
 
         torch.manual_seed(0)
         with record_span("setup/model_build", EventType.BUILD_MODEL):
@@ -258,6 +262,8 @@ class ToyTrainer:
 
     def train_step(self, tokens, labels, loss_mask):
         """One training step."""
+        self.metrics_processor.ntokens_since_reset += labels.numel()
+
         with record_span("trainer_time/forward_backward_s", EventType.FWD_BWD):
             with loss_parallel():
                 logits = self.model(tokens)
@@ -274,19 +280,30 @@ class ToyTrainer:
             grad_norm = clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
-        # Report globally-reduced loss. Each DP rank has
-        # local_loss_sum / global_valid_tokens; SUM gives the global loss.
-        loss_scalar = loss.detach().full_tensor().clone()
-        dist.all_reduce(
-            loss_scalar, op=dist.ReduceOp.SUM, group=self.dp_mesh.get_group()
-        )
-        record_metric("training/loss_mean", NoOpMetric(value=loss_scalar.item()))
-        record_metric("training/grad_norm_max", MaxMetric(value=grad_norm.item()))
+        # Derived metrics recorded every step (cheap, outside should_log gate)
+        self.metrics_processor.record_throughput()
+        self.metrics_processor.record_memory()
         record_metric("training/lr", NoOpMetric(value=LR))
-        record_event({"train.loss": loss_scalar.item(), "train.grad_norm": grad_norm.item()})
+
+        # Loss/grad_norm only on log steps (.item() triggers GPU→CPU sync)
+        if self.metrics_processor.should_log(self.step):
+            with record_span(
+                "trainer_time/collect_dist_metrics_s"
+            ):
+                # Each DP rank has local_loss_sum / global_valid_tokens.
+                # SUM across DP ranks gives global_loss_sum / global_valid_tokens.
+                loss_scalar = loss.detach().full_tensor().clone()
+                dist.all_reduce(loss_scalar, op=dist.ReduceOp.SUM, group=self.dp_mesh.get_group())
+                loss_val = loss_scalar.item()
+                grad_norm_val = grad_norm.item()
+                record_metric("training/loss_mean", NoOpMetric(value=loss_val))
+                record_metric("training/grad_norm_max", MaxMetric(value=grad_norm_val))
+                record_event({"train.loss": loss_val, "train.grad_norm": grad_norm_val})
 
     def validate(self, tokens, labels, loss_mask):
         """Run one forward pass for validation (no backward)."""
+        self.metrics_processor.val_ntokens_since_reset += labels.numel()
+
         with torch.no_grad(), loss_parallel():
             logits = self.model(tokens)
             loss_sum, valid_tokens = self.compute_loss(logits, labels, loss_mask)
@@ -298,6 +315,8 @@ class ToyTrainer:
             val_loss_scalar, op=dist.ReduceOp.SUM, group=self.dp_mesh.get_group()
         )
         record_metric("validation/loss_mean", NoOpMetric(value=val_loss_scalar.item()))
+        self.metrics_processor.record_throughput(is_validation=True)
+        self.metrics_processor.record_memory(is_validation=True)
 
     def train(self, num_steps):
         """Full training loop. Mirrors Trainer.train structure."""
@@ -307,22 +326,27 @@ class ToyTrainer:
 
         for step in range(1, num_steps + 1):
             self.step = step
-            self.metrics_processor.set_step(step)
+            is_validation = step % EVAL_FREQ == 0
+            self.metrics_processor.set_step(step, force_log=is_validation)
 
             # Simulate GC on every 5th step (mirrors gc_handler.run)
             if step % 5 == 0:
                 add_step_tag("gc")
 
+            self.metrics_processor.reset_training_counters()
+
             with record_span("trainer_time/step_s", EventType.STEP):
                 tokens, labels, loss_mask = next(data_iterator)
                 self.train_step(tokens, labels, loss_mask)
 
-            if step % EVAL_FREQ == 0:
+            if is_validation:
                 add_step_tag("eval")
+                self.metrics_processor.reset_val_counters()
                 with record_span("trainer_time/validation_s", EventType.EVAL):
                     self.validate(tokens, labels, loss_mask)
 
-            self.metrics_processor.log(step)
+            if self.metrics_processor.should_log(step):
+                self.metrics_processor.log(step, is_validation=is_validation)
 
     def close(self):
         """Cleanup."""
@@ -351,11 +375,18 @@ def main():
         print(f"Toy SPMD: {world_size} GPUs, 2DPx2TP, {NUM_STEPS} steps")
 
     mp_config = MetricsProcessor.Config(
+        log_freq=5,
         enable_wandb=ENABLE_WANDB,
         console_log_metric_keys=[
             "training/loss_mean",
             "training/grad_norm_max",
-            "training/lr",
+            "trainer_memory/reserved_gib_max",
+            "trainer_throughput/tps_mean",
+        ],
+        console_log_validation_keys=[
+            "validation/loss_mean",
+            "validator_memory/reserved_gib_max",
+            "validator_throughput/tps_mean",
         ],
     )
     trainer = ToyTrainer(

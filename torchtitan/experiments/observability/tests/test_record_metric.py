@@ -84,3 +84,35 @@ class TestExperimentJSONL:
         assert reduce_by_key.get("training/loss_mean") == "NoOpMetric"
         assert reduce_by_key.get("training/grad_norm_max") == "MaxMetric"
         assert reduce_by_key.get("training/lr") == "NoOpMetric"
+        assert reduce_by_key.get("trainer_throughput/tps_mean") == "MeanMetric"
+        assert reduce_by_key.get("validation/loss_mean") == "NoOpMetric"
+
+    def test_validation_metrics_have_validator_prefix(self, experiment_logs_dir):
+        files = glob(os.path.join(experiment_logs_dir, "*.jsonl"))
+        keys = set()
+        for fp in files:
+            with open(fp) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    keys.add(record.get("key"))
+        assert "validation/loss_mean" in keys, f"Missing validation loss. Found: {keys}"
+
+    def test_log_frequency_not_every_step(self, experiment_logs_dir):
+        """With log_freq=5, loss should not appear on every step."""
+        files = glob(os.path.join(experiment_logs_dir, "*.jsonl"))
+        loss_steps = set()
+        for fp in files:
+            with open(fp) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    if record.get("key") == "training/loss_mean":
+                        loss_steps.add(record["step"])
+        # With log_freq=5 and 20 steps, loss appears on steps {1, 5, 10, 15, 20}
+        assert loss_steps, "No loss entries found"
+        assert 2 not in loss_steps, f"Step 2 should not have loss (log_freq=5). Steps: {loss_steps}"
