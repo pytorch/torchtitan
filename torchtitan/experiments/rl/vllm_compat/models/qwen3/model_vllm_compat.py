@@ -19,11 +19,13 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
 )
 
 from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.linear import Linear
 
 # Import from main torchtitan
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
@@ -101,7 +103,7 @@ class VLLMRMSNorm(Module):
         # Use vLLM's RMSNorm with gradient support for training
         return rms_norm_with_gradients(x, self.weight, self.eps)
 
-    def reset_parameters(self):
+    def init_weights(self, **kwargs) -> None:
         nn.init.ones_(self.weight)
 
 
@@ -118,11 +120,14 @@ class FeedForwardVLLMCompat(Module):
     ):
         super().__init__()
 
+        linear_config = Linear.Config(bias=False)
         # Merged gate and up projections (like vLLM's gate_up_proj)
-        self.gate_up_proj = nn.Linear(dim, hidden_dim * 2, bias=False)
+        self.gate_up_proj = linear_config.build(
+            in_features=dim, out_features=hidden_dim * 2
+        )
 
         # Down projection (like vLLM's down_proj)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
+        self.down_proj = linear_config.build(in_features=hidden_dim, out_features=dim)
 
     def forward(self, x):
         # Project to gate and up in one go
@@ -162,13 +167,18 @@ class Attention(Module):
         self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
 
         # QKV projections
-        self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
+        linear_config = Linear.Config(bias=False)
+        self.wq = linear_config.build(
+            in_features=model_args.dim, out_features=model_args.n_heads * self.head_dim
         )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(
-            model_args.n_heads * self.head_dim, model_args.dim, bias=False
+        self.wk = linear_config.build(
+            in_features=model_args.dim, out_features=self.n_kv_heads * self.head_dim
+        )
+        self.wv = linear_config.build(
+            in_features=model_args.dim, out_features=self.n_kv_heads * self.head_dim
+        )
+        self.wo = linear_config.build(
+            in_features=model_args.n_heads * self.head_dim, out_features=model_args.dim
         )
 
         # Always use vLLM compatible flash attention
@@ -181,9 +191,9 @@ class Attention(Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.q_norm is not None:
-            self.q_norm.reset_parameters()
+            self.q_norm.init_weights()
         if self.k_norm is not None:
-            self.k_norm.reset_parameters()
+            self.k_norm.init_weights()
 
     def forward(
         self,
@@ -273,7 +283,7 @@ class TransformerBlock(Module):
 
     def init_weights(self, **kwargs) -> None:
         for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
+            norm.init_weights()
         self.attention.init_weights(init_std=self.weight_init_std)
         self.feed_forward.init_weights(init_std=self.weight_init_std)
 
@@ -292,18 +302,22 @@ class Qwen3VLLMCompatModel(BaseModel):
         self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
 
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.tok_embeddings = Embedding.Config().build(
+            num_embeddings=model_args.vocab_size, embedding_dim=model_args.dim
+        )
 
         self.register_buffer(
             "rope_cache", self._precompute_rope_cache(), persistent=False
         )
 
-        self.layers = torch.nn.ModuleDict()
+        self.layers = ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
         self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.output = Linear.Config(bias=False).build(
+            in_features=model_args.dim, out_features=model_args.vocab_size
+        )
 
         # IMPORTANT: To match vLLM's behavior and Qwen3's config
         # (tie_word_embeddings: true), tie output layer weights to
@@ -311,10 +325,8 @@ class Qwen3VLLMCompatModel(BaseModel):
         # both update together
         self.output.weight = self.tok_embeddings.weight
 
-    def init_weights(
-        self,
-        buffer_device: torch.device | None = None,
-    ):
+    def init_weights(self, **kwargs) -> None:
+        buffer_device: torch.device | None = kwargs.get("buffer_device")
         buffer_device = buffer_device or self.rope_cache.device
         with torch.device(buffer_device):
             self.rope_cache = self._precompute_rope_cache()
@@ -324,7 +336,7 @@ class Qwen3VLLMCompatModel(BaseModel):
             if layer is not None:
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
-            self.norm.reset_parameters()
+            self.norm.init_weights()
         final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
 

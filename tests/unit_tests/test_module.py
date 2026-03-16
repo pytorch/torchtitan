@@ -9,7 +9,15 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import (
+    create_module_class,
+    Module,
+    ModuleDict,
+    ModuleList,
+    Sequential,
+    verify_all_module_protocol,
+)
 
 
 class TestModuleInitWeights(unittest.TestCase):
@@ -36,7 +44,9 @@ class TestModuleInitWeights(unittest.TestCase):
         class GoodModule(Module):
             def __init__(self):
                 super().__init__()
-                self.linear = nn.Linear(4, 4)
+                self.linear = Linear.Config(bias=True).build(
+                    in_features=4, out_features=4
+                )
 
             def init_weights(self, **kwargs):
                 nn.init.zeros_(self.linear.weight)
@@ -110,11 +120,13 @@ class TestDiamondInheritance(unittest.TestCase):
     def test_module_hierarchy_is_flat(self):
         """Diamond embedding adds no extra layer to the module tree."""
 
-        class Model(nn.Module):
+        class Model(Module):
             def __init__(self):
                 super().__init__()
                 self.embed = TestDiamondInheritance.TestEmbedding(100, 32)
-                self.linear = nn.Linear(32, 16)
+                self.linear = Linear.Config(bias=True).build(
+                    in_features=32, out_features=16
+                )
 
         model = Model()
         param_names = {name for name, _ in model.named_parameters()}
@@ -136,6 +148,132 @@ class TestDiamondInheritance(unittest.TestCase):
             self.assertEqual(call_count, 1)
         finally:
             nn.Module.__init__ = orig_init
+
+
+class TestCreateModuleClass(unittest.TestCase):
+    """Tests for create_module_class utility."""
+
+    def test_is_subclass(self):
+        """Created class is subclass of both original and Module."""
+        Conv2d = create_module_class(nn.Conv2d)
+        self.assertTrue(issubclass(Conv2d, nn.Conv2d))
+        self.assertTrue(issubclass(Conv2d, Module))
+
+    def test_isinstance(self):
+        """Instance satisfies isinstance checks for both original and Module."""
+        Conv2d = create_module_class(nn.Conv2d)
+        m = Conv2d(3, 16, 3)
+        self.assertIsInstance(m, nn.Conv2d)
+        self.assertIsInstance(m, Module)
+
+    def test_init_weights_calls_reset_parameters(self):
+        """For classes with reset_parameters, init_weights delegates to it."""
+        LayerNorm = create_module_class(nn.LayerNorm)
+        m = LayerNorm(32)
+        # Manually set weight to zeros, then init_weights should reset
+        nn.init.zeros_(m.weight)
+        m.init_weights()
+        # After reset_parameters, weight should be ones for LayerNorm
+        self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
+
+    def test_init_weights_noop_for_parameterless(self):
+        """For classes without reset_parameters, init_weights is a no-op."""
+        GELU = create_module_class(nn.GELU)
+        m = GELU()
+        m.init_weights()  # should not raise
+
+    def test_cache(self):
+        """Repeated calls return the same class object."""
+        cls1 = create_module_class(nn.Conv2d)
+        cls2 = create_module_class(nn.Conv2d)
+        self.assertIs(cls1, cls2)
+
+    def test_forward_unchanged(self):
+        """Forward output is identical to original class."""
+        LayerNorm = create_module_class(nn.LayerNorm)
+        torch.manual_seed(42)
+        orig = nn.LayerNorm(16)
+        wrapped = LayerNorm(16)
+        # Copy weights
+        wrapped.load_state_dict(orig.state_dict())
+        x = torch.randn(2, 16)
+        torch.testing.assert_close(orig(x), wrapped(x))
+
+    def test_state_dict_unchanged(self):
+        """state_dict keys and values match the original class."""
+        Conv2d = create_module_class(nn.Conv2d)
+        orig = nn.Conv2d(3, 16, 3)
+        wrapped = Conv2d(3, 16, 3)
+        wrapped.load_state_dict(orig.state_dict())
+        for key in orig.state_dict():
+            self.assertIn(key, wrapped.state_dict())
+            torch.testing.assert_close(
+                orig.state_dict()[key], wrapped.state_dict()[key]
+            )
+
+
+class TestContainerInitWeights(unittest.TestCase):
+    """Tests for ModuleList, ModuleDict, Sequential init_weights."""
+
+    def test_module_list_init_weights(self):
+        """ModuleList.init_weights calls init_weights on each child."""
+        LayerNorm = create_module_class(nn.LayerNorm)
+        norms = ModuleList([LayerNorm(8) for _ in range(3)])
+        for n in norms:
+            nn.init.zeros_(n.weight)
+        norms.init_weights()
+        for n in norms:
+            self.assertTrue(torch.allclose(n.weight, torch.ones(8)))
+
+    def test_module_dict_init_weights(self):
+        """ModuleDict.init_weights calls init_weights on each child."""
+        LayerNorm = create_module_class(nn.LayerNorm)
+        norms = ModuleDict({"a": LayerNorm(8), "b": LayerNorm(8)})
+        for n in norms.values():
+            nn.init.zeros_(n.weight)
+        norms.init_weights()
+        for n in norms.values():
+            self.assertTrue(torch.allclose(n.weight, torch.ones(8)))
+
+    def test_sequential_init_weights(self):
+        """Sequential.init_weights calls init_weights on each child."""
+        linear = Linear.Config(bias=False).build(in_features=4, out_features=4)
+        GELU = create_module_class(nn.GELU)
+        seq = Sequential(linear, GELU())
+        seq.init_weights()  # should not raise
+
+    def test_containers_are_module(self):
+        """Container instances satisfy Module protocol."""
+        self.assertIsInstance(ModuleList(), Module)
+        self.assertIsInstance(ModuleDict(), Module)
+        self.assertIsInstance(Sequential(), Module)
+
+
+class TestVerifyAllModuleProtocol(unittest.TestCase):
+    """Tests for verify_all_module_protocol."""
+
+    def test_passes_for_all_module(self):
+        """No error when all submodules are Module instances."""
+
+        class MyModel(Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = Linear.Config().build(in_features=4, out_features=4)
+
+        model = MyModel()
+        verify_all_module_protocol(model)  # should not raise
+
+    def test_fails_for_plain_nn_module(self):
+        """Raises RuntimeError when a plain nn.Module child exists."""
+
+        class BadModel(Module):
+            def __init__(self):
+                super().__init__()
+                self.plain = nn.Linear(4, 4)  # plain nn.Linear, not Module
+
+        model = BadModel()
+        with self.assertRaises(RuntimeError):
+            verify_all_module_protocol(model)
 
 
 if __name__ == "__main__":

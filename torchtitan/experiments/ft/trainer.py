@@ -24,6 +24,7 @@ from torchtitan.experiments.ft.manager import FTManager, maybe_semi_sync_trainin
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
+from torchtitan.protocols.module import verify_all_module_protocol
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
@@ -128,6 +129,9 @@ class FaultTolerantTrainer(Trainer):
             model_compile_enabled=model_compile_enabled,
         )
         model_converters.convert(model)
+
+        # Verify all submodules satisfy the Module protocol
+        verify_all_module_protocol(model)
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(

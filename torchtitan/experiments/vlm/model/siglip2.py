@@ -18,9 +18,13 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.protocols.module import Module
+from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import create_module_class, Module, ModuleDict
 
 from .args import Siglip2Config
+
+LayerNorm = create_module_class(nn.LayerNorm)
 
 
 def resize_positional_embeddings(
@@ -75,16 +79,18 @@ def resize_positional_embeddings(
 class VisionEmbeddings(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
-        self.patch_embedding = nn.Linear(
+        self.patch_embedding = Linear.Config(bias=True).build(
             in_features=args.n_channels * args.patch_size * args.patch_size,
             out_features=args.dim,
         )
-        self.position_embedding = nn.Embedding(args.n_pos_embs**2, args.dim)
+        self.position_embedding = Embedding.Config().build(
+            num_embeddings=args.n_pos_embs**2, embedding_dim=args.dim
+        )
         self.n_pos_embs = args.n_pos_embs
 
     def init_weights(self, **kwargs) -> None:
-        nn.init.trunc_normal_(self.patch_embedding.weight, mean=0.0, std=0.02)
-        nn.init.normal_(self.position_embedding.weight)
+        self.patch_embedding.init_weights()
+        self.position_embedding.init_weights()
 
     def forward(self, pixels_NLD: torch.Tensor, grid_hw: torch.Tensor) -> torch.Tensor:
         # Apply patch embeddings to already patchified pixel values
@@ -129,10 +135,11 @@ class Attention(Module):
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
 
-        self.q_proj = nn.Linear(self.dim, self.dim)
-        self.k_proj = nn.Linear(self.dim, self.dim)
-        self.v_proj = nn.Linear(self.dim, self.dim)
-        self.out_proj = nn.Linear(self.dim, self.dim)
+        linear_config = Linear.Config(bias=True)
+        self.q_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
+        self.k_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
+        self.v_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
+        self.out_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
 
         self.inner_attention = FlexAttentionWrapper()
 
@@ -154,14 +161,15 @@ class Attention(Module):
 
     def init_weights(self, **kwargs) -> None:
         for linear in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+            linear.init_weights()
 
 
 class FeedForward(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
-        self.fc1 = nn.Linear(args.dim, args.ffn_dim)
-        self.fc2 = nn.Linear(args.ffn_dim, args.dim)
+        linear_config = Linear.Config(bias=True)
+        self.fc1 = linear_config.build(in_features=args.dim, out_features=args.ffn_dim)
+        self.fc2 = linear_config.build(in_features=args.ffn_dim, out_features=args.dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
@@ -170,16 +178,16 @@ class FeedForward(Module):
         return x
 
     def init_weights(self, **kwargs) -> None:
-        nn.init.trunc_normal_(self.fc1.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.fc2.weight, mean=0.0, std=0.02)
+        self.fc1.init_weights()
+        self.fc2.init_weights()
 
 
 class TransformerLayer(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
-        self.layer_norm1 = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
+        self.layer_norm1 = LayerNorm(args.dim, eps=args.layer_norm_eps)
         self.self_attn = Attention(args)
-        self.layer_norm2 = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
+        self.layer_norm2 = LayerNorm(args.dim, eps=args.layer_norm_eps)
         self.mlp = FeedForward(args)
 
     def forward(
@@ -190,8 +198,8 @@ class TransformerLayer(Module):
         return x
 
     def init_weights(self, **kwargs) -> None:
-        self.layer_norm1.reset_parameters()
-        self.layer_norm2.reset_parameters()
+        self.layer_norm1.init_weights()
+        self.layer_norm2.init_weights()
         self.self_attn.init_weights()
         self.mlp.init_weights()
 
@@ -203,10 +211,10 @@ class VisionTransformer(Module):
         self.eos_id = 11
 
         self.embeddings = VisionEmbeddings(args)
-        self.layers = nn.ModuleDict(
+        self.layers = ModuleDict(
             {str(idx): TransformerLayer(args) for idx in range(args.n_layers)}
         )
-        self.post_layernorm = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
+        self.post_layernorm = LayerNorm(args.dim, eps=args.layer_norm_eps)
 
     def get_attention_masks(
         self,
@@ -256,4 +264,4 @@ class VisionTransformer(Module):
         self.embeddings.init_weights()
         for layer in self.layers.values():
             layer.init_weights()
-        self.post_layernorm.reset_parameters()
+        self.post_layernorm.init_weights()

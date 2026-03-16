@@ -12,17 +12,10 @@ from einops import rearrange
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import create_module_class, Module, ModuleList
 
-
-class _ModuleContainer(Module):
-    """Lightweight container for grouping sub-modules as named attributes.
-
-    Use instead of bare ``nn.Module()`` when you need an attribute namespace
-    that properly participates in the Module protocol.
-    """
-
-    pass
+Conv2d = create_module_class(nn.Conv2d)
+GroupNorm = create_module_class(nn.GroupNorm)
 
 
 @dataclass
@@ -47,14 +40,14 @@ class AttnBlock(Module):
         super().__init__()
         self.in_channels = in_channels
 
-        self.norm = nn.GroupNorm(
+        self.norm = GroupNorm(
             num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
         )
 
-        self.q = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.k = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.v = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.proj_out = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.q = Conv2d(in_channels, in_channels, kernel_size=1)
+        self.k = Conv2d(in_channels, in_channels, kernel_size=1)
+        self.v = Conv2d(in_channels, in_channels, kernel_size=1)
+        self.proj_out = Conv2d(in_channels, in_channels, kernel_size=1)
 
     def attention(self, h_: Tensor) -> Tensor:
         h_ = self.norm(h_)
@@ -81,20 +74,20 @@ class ResnetBlock(Module):
         out_channels = in_channels if out_channels is None else out_channels
         self.out_channels = out_channels
 
-        self.norm1 = nn.GroupNorm(
+        self.norm1 = GroupNorm(
             num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
         )
-        self.conv1 = nn.Conv2d(
+        self.conv1 = Conv2d(
             in_channels, out_channels, kernel_size=3, stride=1, padding=1
         )
-        self.norm2 = nn.GroupNorm(
+        self.norm2 = GroupNorm(
             num_groups=32, num_channels=out_channels, eps=1e-6, affine=True
         )
-        self.conv2 = nn.Conv2d(
+        self.conv2 = Conv2d(
             out_channels, out_channels, kernel_size=3, stride=1, padding=1
         )
         if self.in_channels != self.out_channels:
-            self.nin_shortcut = nn.Conv2d(
+            self.nin_shortcut = Conv2d(
                 in_channels, out_channels, kernel_size=1, stride=1, padding=0
             )
 
@@ -118,9 +111,7 @@ class Downsample(Module):
     def __init__(self, in_channels: int):
         super().__init__()
         # no asymmetric padding in torch conv, must do it ourselves
-        self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=2, padding=0
-        )
+        self.conv = Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
 
     def forward(self, x: Tensor):
         pad = (0, 1, 0, 1)
@@ -132,9 +123,7 @@ class Downsample(Module):
 class Upsample(Module):
     def __init__(self, in_channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.conv = Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x: Tensor):
         x = nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
@@ -159,24 +148,22 @@ class Encoder(Module):
         self.resolution = resolution
         self.in_channels = in_channels
         # downsampling
-        self.conv_in = nn.Conv2d(
-            in_channels, self.ch, kernel_size=3, stride=1, padding=1
-        )
+        self.conv_in = Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
 
         curr_res = resolution
         in_ch_mult = (1,) + tuple(ch_mult)
         self.in_ch_mult = in_ch_mult
-        self.down = nn.ModuleList()
+        self.down = ModuleList()
         block_in = self.ch
         for i_level in range(self.num_resolutions):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
+            block = ModuleList()
+            attn = ModuleList()
             block_in = ch * in_ch_mult[i_level]
             block_out = ch * ch_mult[i_level]
             for _ in range(self.num_res_blocks):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-            down = _ModuleContainer()
+            down = Module()
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions - 1:
@@ -185,16 +172,16 @@ class Encoder(Module):
             self.down.append(down)
 
         # middle
-        self.mid = _ModuleContainer()
+        self.mid = Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
 
         # end
-        self.norm_out = nn.GroupNorm(
+        self.norm_out = GroupNorm(
             num_groups=32, num_channels=block_in, eps=1e-6, affine=True
         )
-        self.conv_out = nn.Conv2d(
+        self.conv_out = Conv2d(
             block_in, 2 * z_channels, kernel_size=3, stride=1, padding=1
         )
 
@@ -254,26 +241,24 @@ class Decoder(Module):
         self.z_shape = (1, z_channels, curr_res, curr_res)
 
         # z to block_in
-        self.conv_in = nn.Conv2d(
-            z_channels, block_in, kernel_size=3, stride=1, padding=1
-        )
+        self.conv_in = Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
 
         # middle
-        self.mid = _ModuleContainer()
+        self.mid = Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
 
         # upsampling
-        self.up = nn.ModuleList()
+        self.up = ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
+            block = ModuleList()
+            attn = ModuleList()
             block_out = ch * ch_mult[i_level]
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
-            up = _ModuleContainer()
+            up = Module()
             up.block = block
             up.attn = attn
             if i_level != 0:
@@ -282,10 +267,10 @@ class Decoder(Module):
             self.up.insert(0, up)  # prepend to get consistent order
 
         # end
-        self.norm_out = nn.GroupNorm(
+        self.norm_out = GroupNorm(
             num_groups=32, num_channels=block_in, eps=1e-6, affine=True
         )
-        self.conv_out = nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
+        self.conv_out = Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
 
     def forward(self, z: Tensor) -> Tensor:
         # get dtype for proper tracing

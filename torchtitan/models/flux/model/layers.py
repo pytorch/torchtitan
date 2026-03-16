@@ -14,7 +14,11 @@ from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import create_module_class, Module, Sequential
+
+LayerNorm = create_module_class(nn.LayerNorm)
+GELU = create_module_class(nn.GELU)
+SiLU = create_module_class(nn.SiLU)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -104,7 +108,7 @@ class MLPEmbedder(Module):
         self.in_layer = config.in_layer.build(
             in_features=config.in_dim, out_features=config.hidden_dim
         )
-        self.silu = nn.SiLU()
+        self.silu = SiLU()
         self.out_layer = config.out_layer.build(
             in_features=config.hidden_dim, out_features=config.hidden_dim
         )
@@ -216,42 +220,42 @@ class DoubleStreamBlock(Module):
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
         self.img_mod = Modulation(dim=config.hidden_size, double=True)
-        self.img_norm1 = nn.LayerNorm(
+        self.img_norm1 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.img_attn = SelfAttention(
             dim=config.hidden_size, num_heads=config.num_heads, qkv_bias=config.qkv_bias
         )
 
-        self.img_norm2 = nn.LayerNorm(
+        self.img_norm2 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.img_mlp = nn.Sequential(
+        self.img_mlp = Sequential(
             config.img_mlp_in.build(
                 in_features=config.hidden_size, out_features=mlp_hidden_dim
             ),
-            nn.GELU(approximate="tanh"),
+            GELU(approximate="tanh"),
             config.img_mlp_out.build(
                 in_features=mlp_hidden_dim, out_features=config.hidden_size
             ),
         )
 
         self.txt_mod = Modulation(dim=config.hidden_size, double=True)
-        self.txt_norm1 = nn.LayerNorm(
+        self.txt_norm1 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.txt_attn = SelfAttention(
             dim=config.hidden_size, num_heads=config.num_heads, qkv_bias=config.qkv_bias
         )
 
-        self.txt_norm2 = nn.LayerNorm(
+        self.txt_norm2 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.txt_mlp = nn.Sequential(
+        self.txt_mlp = Sequential(
             config.txt_mlp_in.build(
                 in_features=config.hidden_size, out_features=mlp_hidden_dim
             ),
-            nn.GELU(approximate="tanh"),
+            GELU(approximate="tanh"),
             config.txt_mlp_out.build(
                 in_features=mlp_hidden_dim, out_features=config.hidden_size
             ),
@@ -276,9 +280,9 @@ class DoubleStreamBlock(Module):
         for layer in (self.img_attn, self.img_mod, self.txt_attn, self.txt_mod):
             layer.init_weights()
 
-        # Reset parameters for Normalization layers
+        # Initialize Normalization layers
         for norm in (self.txt_norm1, self.txt_norm2, self.img_norm1, self.img_norm2):
-            norm.reset_parameters()
+            norm.init_weights()
 
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
@@ -366,11 +370,11 @@ class SingleStreamBlock(Module):
         self.norm = QKNorm(dim=head_dim)
 
         self.hidden_size = config.hidden_size
-        self.pre_norm = nn.LayerNorm(
+        self.pre_norm = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
 
-        self.mlp_act = nn.GELU(approximate="tanh")
+        self.mlp_act = GELU(approximate="tanh")
         self.modulation = Modulation(dim=config.hidden_size, double=False)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
@@ -379,7 +383,7 @@ class SingleStreamBlock(Module):
             nn.init.xavier_uniform_(layer.weight)
             nn.init.constant_(layer.bias, 0)
         self.norm.init_weights()
-        self.pre_norm.reset_parameters()
+        self.pre_norm.init_weights()
         self.modulation.init_weights()
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
@@ -413,15 +417,15 @@ class LastLayer(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.norm_final = nn.LayerNorm(
+        self.norm_final = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.linear = config.linear.build(
             in_features=config.hidden_size,
             out_features=config.patch_size * config.patch_size * config.out_channels,
         )
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
+        self.adaLN_modulation = Sequential(
+            SiLU(),
             config.adaln_linear.build(
                 in_features=config.hidden_size, out_features=2 * config.hidden_size
             ),
@@ -434,7 +438,7 @@ class LastLayer(Module):
         nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.linear.weight, 0)
         nn.init.constant_(self.linear.bias, 0)
-        self.norm_final.reset_parameters()
+        self.norm_final.init_weights()
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)

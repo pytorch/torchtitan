@@ -45,6 +45,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import verify_all_module_protocol
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
@@ -269,6 +270,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_compile_enabled=model_compile_enabled,
         )
         model_converters.convert(model)
+
+        # Verify all submodules satisfy the Module protocol
+        verify_all_module_protocol(model)
 
         # Check if any converter uses quantization (FP8, MX, etc.)
         has_quantization = any(
