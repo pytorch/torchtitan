@@ -39,6 +39,14 @@ from torchtitan.experiments.observability.toy_spmd import (
     ToyTrainer,
     VOCAB_SIZE,
 )
+from torchtitan.observability import (
+    EventType,
+    init_observability,
+    record_span,
+    set_step,
+)
+from torchtitan.observability.analysis import generate_gantt_trace
+from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -106,13 +114,16 @@ class RollouterActor(Actor):
 
     @endpoint
     async def setup(self):
+        rank = current_rank().rank
+        init_logger()
+        init_observability(source="rollouter", output_dir=OUTPUT_DIR, rank=rank)
         dataset = setup_data(batch_size=DP_SIZE * BATCH_SIZE)
         self.dataset = dataset
 
     @endpoint
     async def set_step(self, step: int):
         """Receive step from controller."""
-        pass
+        set_step(step)
 
     @endpoint
     async def do_rollouts(self, prompts: torch.Tensor) -> list[RolloutOutput]:
@@ -122,18 +133,19 @@ class RollouterActor(Actor):
         the model would generate completions and the tokenizer would
         decode them into text.
         """
-        rollouts = [
-            RolloutOutput(
-                prompt_tokens=self.dataset.tokens[i].tolist(),
-                completion_tokens=self.dataset.tokens[i].tolist(),
-                prompt_text=f"What is {i}+{i}?",
-                completion_text=f"The answer is {i + i}.",
-                tokens=self.dataset.tokens[i],
-                labels=self.dataset.labels[i],
-                loss_mask=self.dataset.loss_mask[i],
-            )
-            for i in range(len(self.dataset.tokens))
-        ]
+        with record_span("rollouter_time/generate_s"):
+            rollouts = [
+                RolloutOutput(
+                    prompt_tokens=self.dataset.tokens[i].tolist(),
+                    completion_tokens=self.dataset.tokens[i].tolist(),
+                    prompt_text=f"What is {i}+{i}?",
+                    completion_text=f"The answer is {i + i}.",
+                    tokens=self.dataset.tokens[i],
+                    labels=self.dataset.labels[i],
+                    loss_mask=self.dataset.loss_mask[i],
+                )
+                for i in range(len(self.dataset.tokens))
+            ]
         return rollouts
 
 
@@ -150,6 +162,8 @@ class TrainerActor(Actor):
             torch.distributed.init_process_group(
                 backend="nccl", rank=rank, world_size=world_size
             )
+        init_logger()
+        init_observability(source="trainer", output_dir=OUTPUT_DIR, rank=rank)
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=DP_SIZE,
@@ -166,8 +180,9 @@ class TrainerActor(Actor):
 
     @endpoint
     async def set_step(self, step: int):
-        """Receive step from controller."""
+        """Receive step from controller. Sets step on trainer."""
         self.trainer.step = step
+        self.trainer.metrics_processor.set_step(step)
 
     @endpoint
     async def train_step(self, tokens, labels, loss_mask):
@@ -195,18 +210,21 @@ class RewardActor(Actor):
 
     @endpoint
     async def setup(self):
-        pass
+        rank = current_rank().rank
+        init_logger()
+        init_observability(source="reward", output_dir=OUTPUT_DIR, rank=rank)
 
     @endpoint
     async def set_step(self, step: int):
         """Receive step from controller."""
-        pass
+        set_step(step)
 
     @endpoint
     async def score(self, rollouts: list[RolloutOutput]) -> list[RolloutOutput]:
         """Score rollouts. Fills in reward field and returns them."""
-        for rollout in rollouts:
-            rollout.reward = 1.0  # dummy constant reward
+        with record_span("reward_time/scoring_s"):
+            for rollout in rollouts:
+                rollout.reward = 1.0  # dummy constant reward
         return rollouts
 
 
@@ -221,6 +239,9 @@ async def main():
     if os.path.exists(OUTPUT_DIR):
         shutil.rmtree(OUTPUT_DIR)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    init_logger()
+    init_observability(source="controller", output_dir=OUTPUT_DIR, rank=0)
 
     # ---- Setup ----
     host = this_host()
@@ -246,18 +267,23 @@ async def main():
     # ---- Training loop ----
     async def run_training():
         for step in range(1, NUM_STEPS + 1):
+            set_step(step)
             for actor in actors:
                 await actor.set_step.call(step)
 
-            result = await rollouter.do_rollouts.call(prompts)
-            rollouts = next(iter(result.values()))
+            with record_span("rl_time/rollout_s", EventType.RL_ROLLOUT):
+                result = await rollouter.do_rollouts.call(prompts)
+                rollouts = next(iter(result.values()))
 
-            result = await reward_actor.score.call(rollouts)
-            rollouts = next(iter(result.values()))
+            with record_span("rl_time/scoring_s", EventType.RL_GRADING):
+                result = await reward_actor.score.call(rollouts)
+                rollouts = next(iter(result.values()))
 
-            tokens, labels, loss_mask = rollouts_to_train_batch(rollouts)
+            with record_span("rl_time/rollouts_to_train_batch_s"):
+                tokens, labels, loss_mask = rollouts_to_train_batch(rollouts)
 
-            await trainer.train_step.call(tokens, labels, loss_mask)
+            with record_span("rl_time/training_s", EventType.FWD_BWD):
+                await trainer.train_step.call(tokens, labels, loss_mask)
 
             rewards = [r.reward for r in rollouts]
             reward_mean = sum(rewards) / len(rewards)
@@ -267,6 +293,11 @@ async def main():
 
     # ---- Cleanup ----
     await trainer.teardown.call()
+
+    sys_logs = os.path.join(OUTPUT_DIR, "system_logs")
+    trace_path = os.path.join(OUTPUT_DIR, "analysis", "system_metrics_gantt.json")
+    generate_gantt_trace(sys_logs, trace_path)
+
     logger.info(f"Done in {time.time() - t0:.1f}s. Output: {OUTPUT_DIR}")
 
 
