@@ -37,8 +37,8 @@ class Llama3TransformerBlock(TransformerBlock):
         self.attention = config.attention.build(dim=dim)
         assert config.feed_forward is not None
         self.feed_forward = config.feed_forward.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
+        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         if config.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -60,7 +60,7 @@ class Llama3TransformerBlock(TransformerBlock):
 
     def init_weights(self, **kwargs):
         for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
+            norm.init_weights()
         self.attention.init_weights(self.weight_init_std)
         self.feed_forward.init_weights(self.weight_init_std)
 
@@ -107,6 +107,20 @@ class Llama3Model(Decoder):
                     f"Got attn_backend='{self.layer.attention.attn_backend}'. "
                     f"Varlen attention is not supported with CP."
                 )
+
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layer.attention.n_heads
+                # pyrefly: ignore [missing-attribute]
+                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

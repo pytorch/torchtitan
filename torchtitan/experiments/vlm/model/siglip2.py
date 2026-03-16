@@ -11,7 +11,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -19,6 +18,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
+from torchtitan.protocols.module import Module
 
 from .args import Siglip2Config
 
@@ -72,7 +72,7 @@ def resize_positional_embeddings(
     return resized_embs_BLD
 
 
-class VisionEmbeddings(nn.Module):
+class VisionEmbeddings(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
         self.patch_embedding = nn.Linear(
@@ -82,8 +82,8 @@ class VisionEmbeddings(nn.Module):
         self.position_embedding = nn.Embedding(args.n_pos_embs**2, args.dim)
         self.n_pos_embs = args.n_pos_embs
 
-    def init_weights(self):
-        trunc_normal_(self.patch_embedding.weight, mean=0.0, std=0.02)
+    def init_weights(self, **kwargs) -> None:
+        nn.init.trunc_normal_(self.patch_embedding.weight, mean=0.0, std=0.02)
         nn.init.normal_(self.position_embedding.weight)
 
     def forward(self, pixels_NLD: torch.Tensor, grid_hw: torch.Tensor) -> torch.Tensor:
@@ -107,7 +107,7 @@ class VisionEmbeddings(nn.Module):
         return embeddings
 
 
-class Attention(nn.Module):
+class Attention(Module):
     """
     Multi-head attention module.
 
@@ -152,12 +152,12 @@ class Attention(nn.Module):
 
         return self.out_proj(output)
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         for linear in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
 
 
-class FeedForward(nn.Module):
+class FeedForward(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
         self.fc1 = nn.Linear(args.dim, args.ffn_dim)
@@ -169,12 +169,12 @@ class FeedForward(nn.Module):
         x = self.fc2(x)
         return x
 
-    def init_weights(self):
-        trunc_normal_(self.fc1.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.fc2.weight, mean=0.0, std=0.02)
+    def init_weights(self, **kwargs) -> None:
+        nn.init.trunc_normal_(self.fc1.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.fc2.weight, mean=0.0, std=0.02)
 
 
-class TransformerLayer(nn.Module):
+class TransformerLayer(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
         self.layer_norm1 = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
@@ -189,14 +189,14 @@ class TransformerLayer(nn.Module):
         x = x + self.mlp(self.layer_norm2(x))
         return x
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         self.layer_norm1.reset_parameters()
         self.layer_norm2.reset_parameters()
         self.self_attn.init_weights()
         self.mlp.init_weights()
 
 
-class VisionTransformer(nn.Module):
+class VisionTransformer(Module):
     def __init__(self, args: Siglip2Config):
         super().__init__()
         self.args = args
@@ -252,7 +252,7 @@ class VisionTransformer(nn.Module):
 
         return h
 
-    def init_weights(self):
+    def init_weights(self, **kwargs) -> None:
         self.embeddings.init_weights()
         for layer in self.layers.values():
             layer.init_weights()

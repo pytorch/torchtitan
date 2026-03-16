@@ -11,12 +11,13 @@ from torch.distributed.tensor import DTensor
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
+from torchtitan.protocols.module import Module
 from vllm.model_executor.layers.attention import Attention
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMAttention(torch.nn.Module):
+class VLLMAttention(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -89,6 +90,11 @@ class VLLMAttention(torch.nn.Module):
         Returns:
             ``(batch, num_heads, seq_len, head_dim)``
         """
+        # Capture the original symbolic seq_len from the input BEFORE
+        # to_local() so that the symbol is the same one GQAttention uses
+        # in its .view(bs, seqlen, -1) call.
+        batch_size, _, seq_len, head_dim = q.shape
+
         # Unwrap DTensor inputs to local tensors for attention computation
         device_mesh = None
         placements = None
@@ -99,33 +105,28 @@ class VLLMAttention(torch.nn.Module):
             k = k.to_local()
             v = v.to_local()
 
-        # Input is (batch, num_heads, seq_len, head_dim)
         # TODO: may be good to use einops in future as we can explicitly reshape
         # with dimension names - see https://github.com/arogozhnikov/einops
-        batch_size, num_heads, seq_len, head_dim = q.shape
-        _, num_kv_heads, _, _ = k.shape
+        # Convert from (batch, num_heads, seq_len, head_dim)
+        #   to (batch*seq_len, num_heads (or num_kv_heads), head_dim) for vLLM Attn
+        q = q.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
+        k = k.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
+        v = v.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
 
-        # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        # TODO: reimplement as a 4d tensor once vLLM fix has landed
-        # Then flatten batch and seq_len: (batch * seq_len, num_heads, head_dim)
-        q = q.reshape(batch_size * seq_len, num_heads, head_dim)
-        k = k.reshape(batch_size * seq_len, num_kv_heads, head_dim)
-        v = v.reshape(batch_size * seq_len, num_kv_heads, head_dim)
-
-        # vLLM attention returns (num_tokens, hidden_size) where hidden_size = num_heads * head_dim
+        # vLLM attention returns (num_tokens, num_heads/num_kv_heads * head_dim)
         output_flat = self.vllm_attn(q, k, v)
 
-        # Output is (batch * seq_len, num_heads * head_dim), reshape to (batch, seq_len, num_heads, head_dim)
-        output = output_flat.view(batch_size, seq_len, num_heads, head_dim)
+        # vLLM's flash attention backend may pad the token count (e.g.
+        # round up to an even number), which introduces a new symbolic
+        # shape under torch.compile.  Narrow to trim this padding
+        # NOTE: this error only happens when batch_size and seq_len are 1
+        # which happens with cudagraph capture for dummy input
+        output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
+        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
+        output = output_flat.view(batch_size, seq_len, -1, head_dim)
         output = output.transpose(1, 2)
 
-        # Wrap output back as DTensor if inputs were DTensors
         if device_mesh is not None:
             output = DTensor.from_local(
                 output, device_mesh=device_mesh, placements=placements

@@ -1,0 +1,408 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+Compiler passes for graph_trainer training.
+
+This module provides various compiler passes that can be applied to graph modules
+during compilation. Passes can be selected and configured via job config.
+
+Pass Types:
+- Joint custom passes: Applied to the joint forward-backward graph before partitioning
+- Compiler passes: Applied to the partitioned forward/backward graphs
+"""
+import operator
+from collections.abc import Sequence
+from typing import Any
+
+import torch
+from torch._functorch.aot_autograd import JointWithDescriptors
+from torch._inductor.compile_fx import compile_fx_inner
+from torch._inductor.fx_passes.bucketing import (
+    is_all_gather_into_tensor as is_all_gather,
+)
+from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
+from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch.fx.passes.regional_inductor import regional_inductor
+from torch.utils.checkpoint import CheckpointPolicy
+
+from torchtitan.experiments.graph_trainer.reshard_after_forward import (
+    annotate_fsdp_all_gather,
+)
+from torchtitan.tools.logging import logger
+
+
+def autobucketing_reordering_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """
+    Apply autobucketing and reordering optimization.
+
+    This pass applies schedule_overlap_bucketing with collective_bucketing enabled
+    to optimize comm/compute overlap patterns in the graph.
+    """
+    schedule_overlap_bucketing(gm, collective_bucketing=True)
+    gm.recompile()
+    return gm
+
+
+def transformer_block_bucketing_reordering_pass(
+    gm: torch.fx.GraphModule, example_inputs, fsdp_manual_buckets
+) -> torch.fx.GraphModule:
+    """
+    Apply aten-level manual bucketing and reordering optimization.
+    """
+    manual_overlap_bucketing(
+        gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+    )
+    gm.recompile()
+    return gm
+
+
+def regional_inductor_pass(
+    gm: torch.fx.GraphModule, example_inputs
+) -> torch.fx.GraphModule:
+    """
+    Apply regional inductor compilation based on user annotation.
+    """
+    return regional_inductor(gm, example_inputs)
+
+
+def cudagraph_pass(
+    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+) -> torch.fx.GraphModule:
+    """
+    Apply cudagraph.
+
+    This pass wraps the forward function with cudagraph during compilation and does
+    not record cudagraph until runtime.
+    - For the first run, it will warm up operators such as nccl.
+    - For the second run, it will record cudagraph and replay cudagraph.
+    - For the following runs, it will replay cudagraph.
+    """
+    # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
+    # which must happen after torch.cuda.set_device(local_rank).
+    from torchtitan.experiments.graph_trainer.cudagraph import (
+        CUDAGraphWrapper,
+        get_static_input_indices,
+    )
+
+    static_input_indices = get_static_input_indices(gm, is_forward)
+    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    return gm
+
+
+def validate_flex_attn_annotation_pass(
+    gm: torch.fx.GraphModule,
+) -> torch.fx.GraphModule:
+    """Verify user annotations show up in the graph."""
+    for node in gm.graph.nodes:
+        if node.target in {
+            torch.ops.higher_order.flex_attention,
+            torch.ops.higher_order.flex_attention_backward,
+        }:
+            assert "compile_with_inductor" in node.meta.get("custom", {})
+    return gm
+
+
+def _get_default_sac_save_ops() -> set:
+    """Build the default set of ops whose outputs should be saved (not recomputed)
+    during activation checkpointing.
+
+    Compute-intensive ops are obtained dynamically from PyTorch's partitioner
+    (``get_default_op_list``) so the list stays in sync with upstream changes.
+    """
+    from torch._functorch.partitioners import get_default_op_list
+
+    # Compute-intensive ops from PyTorch's partitioner
+    compute_intensive_ops = {
+        op.default for op in get_default_op_list().compute_intensive_ops
+    }
+
+    # attention variants
+    scaled_dot_product_attention_ops = {
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+        torch.ops.aten._scaled_dot_product_attention_math.default,
+        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+    }
+
+    higher_order_ops = {
+        torch._higher_order_ops.flex_attention,
+        torch._higher_order_ops.inductor_compiled_code,
+    }
+
+    communication_intensive_ops = {
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        torch.ops._c10d_functional.all_to_all_single.default,
+    }
+
+    return (
+        compute_intensive_ops
+        | scaled_dot_product_attention_ops
+        | higher_order_ops
+        | communication_intensive_ops
+    )
+
+
+def apply_sac_pass(
+    gm: torch.fx.GraphModule,
+    op_list_to_save: set | None = None,
+) -> torch.fx.GraphModule:
+    """
+    Apply selective activation checkpointing on the joint graph.
+
+    This pass iterates over all call_function nodes in the joint graph and annotates
+    each with a CheckpointPolicy. Ops in ``op_list_to_save`` are marked MUST_SAVE
+    (their outputs are kept as activations for the backward pass), while all other
+    ops are marked PREFER_RECOMPUTE (their outputs may be discarded and recomputed
+    during backward).
+
+    To reduce memory further, every second ``mm`` op is marked PREFER_RECOMPUTE
+    instead of MUST_SAVE, matching the behavior of the eager selective AC policy
+    in ``torchtitan.distributed.activation_checkpoint``.
+
+    The annotations are later consumed by the min-cut partitioner
+    (``min_cut_rematerialization_partition``) to split the joint graph into separate
+    forward and backward graphs.
+
+    Usage: set ``--compile.joint_passes apply_sac``.
+
+    Args:
+        gm: The joint forward-backward graph module
+        op_list_to_save: Set of op targets whose outputs should be saved.
+            Defaults to ``_get_default_sac_save_ops()`` if None.
+
+    Returns:
+        The annotated graph module
+    """
+    if op_list_to_save is None:
+        op_list_to_save = _get_default_sac_save_ops()
+
+    mm_count = 0
+
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+
+        if node.target in (
+            operator.getitem,
+            torch.ops._c10d_functional.wait_tensor.default,
+        ):
+            # Propagate recompute tag from the parent node:
+            # - getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa),
+            #   it is followed by getitem nodes that extract individual elements.
+            #   They inherit the parent's recompute tag, otherwise they will be
+            #   exposed as graph outputs and saved for backwards unnecessarily.
+            # - wait_tensor: Semantically tied to its parent async collective
+            #   (e.g., reduce_scatter_tensor, all_gather_into_tensor) and must
+            #   share the same save/recompute decision.
+            parent = node.args[0]
+            if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
+                node.meta["recompute"] = parent.meta["recompute"]
+                node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
+            continue
+
+        node.meta["ac_graph_id"] = 0
+
+        if node.target is torch.ops.aten.mm.default:
+            mm_count += 1
+            # Save every odd mm, recompute every even mm
+            if mm_count % 2 == 0:
+                node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            else:
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        elif node.target in op_list_to_save:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        else:
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+
+    gm.recompile()
+    logger.info(
+        "Applied selective activation checkpointing (SAC) graph pass "
+        f"({mm_count} mm ops found, {mm_count - mm_count // 2} saved)"
+    )
+    return gm
+
+
+# Apply activation checkpointing on joint graph before partitioner
+def fsdp_reshard_after_fwd_pass(
+    gm: torch.fx.GraphModule, reshard_after_forward: bool
+) -> torch.fx.GraphModule:
+    # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
+    # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
+    #   to CheckpointPolicy.MUST_RECOMPUTE.
+    # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
+    #   to CheckpointPolicy.MUST_SAVE.
+    gm = annotate_fsdp_all_gather(gm, reshard_after_forward)
+    gm.recompile()
+    return gm
+
+
+def inductor_decomposition_pass(
+    gm: torch.fx.GraphModule,
+    joint_with_descriptors: JointWithDescriptors,
+) -> torch.fx.GraphModule:
+    """
+    Apply Inductor decompositions to the joint graph.
+
+    This pass applies decompositions to the joint forward-backward graph using make_fx.
+    It reads fake tensor inputs from placeholder metadata and retraces the graph with
+    decompositions applied, while preserving metadata required by the partitioner.
+
+    Args:
+        gm: The joint graph module
+        joint_with_descriptors: The joint graph with descriptors
+
+    Returns:
+        The joint graph with decompositions applied
+    """
+    from torch._inductor.decomposition import select_decomp_table
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    logger.info("Applying decompositions to joint graph")
+
+    decomp_table = select_decomp_table()
+
+    # Build fake inputs directly from the joint graph placeholders' metadata.
+    # This handles all inputs including effect tokens (e.g. from MoE load
+    # balancing copy_ mutations) that AOT Autograd prepends as placeholders.
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    all_inputs = []
+    for ph in placeholders:
+        val = ph.meta.get("val")
+        if val is None:
+            raise RuntimeError(f"Placeholder {ph.target} has no 'val' metadata")
+        all_inputs.append(val)
+
+    # The joint graph forward() takes (primals, tangents) as two list args.
+    # Split based on traced_tangents count from fw_metadata.
+    fw_metadata = joint_with_descriptors._aot_state.fw_metadata
+    num_tangents = len(fw_metadata.traced_tangents)
+    primals_fake = all_inputs[: len(all_inputs) - num_tangents]
+    tangents_fake = all_inputs[len(all_inputs) - num_tangents :]
+
+    # Get the FakeTensorMode from the original joint graph
+    fake_mode = None
+    for node in gm.graph.nodes:
+        if node.op == "placeholder" and "val" in node.meta:
+            val = node.meta["val"]
+            if hasattr(val, "fake_mode"):
+                fake_mode = val.fake_mode
+                break
+
+    if fake_mode is None:
+        from torch._guards import detect_fake_mode
+
+        fake_mode = detect_fake_mode(all_inputs)
+
+    # Use make_fx with the original fake mode to retrace with decompositions
+    with fake_mode:
+        decomposed_gm = make_fx(
+            gm,
+            decomposition_table=decomp_table,
+            _allow_non_fake_inputs=False,
+        )(primals_fake, tangents_fake)
+
+    # Copy metadata from original placeholders to decomposed placeholders
+    orig_placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    decomp_placeholders = [
+        n for n in decomposed_gm.graph.nodes if n.op == "placeholder"
+    ]
+
+    if len(orig_placeholders) != len(decomp_placeholders):
+        raise RuntimeError(
+            f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
+        )
+
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
+        # Copy all metadata from original to decomposed
+        for key, value in orig.meta.items():
+            if key not in decomp.meta:
+                decomp.meta[key] = value
+
+        # Rename decomposed placeholder to match original name
+        decomp.target = orig.target
+        decomp.name = orig.name
+
+    decomposed_gm.recompile()
+    logger.info("Decompositions applied successfully to joint graph")
+
+    return decomposed_gm
+
+
+def full_inductor_compilation_pass(
+    gm: torch.fx.GraphModule, example_inputs
+) -> torch.fx.GraphModule:
+    """
+    Apply full Inductor compilation with code generation.
+
+    This pass uses compile_fx_inner to generate optimized code for the graph.
+
+    Args:
+        gm: The graph module (forward or backward)
+        example_inputs: Example inputs for compilation
+
+    Returns:
+        The compiled graph module
+    """
+    return compile_fx_inner(gm, example_inputs)
+
+
+def reassign_to_pg_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs,
+    source_pg_name: str,
+    target_pg_name: str,
+) -> torch.fx.GraphModule:
+    """
+    Reassign all-gather nodes from one process group to another.
+
+    This pass rewrites all-gather nodes whose PG matches ``source_pg_name`` to use
+    ``target_pg_name`` instead.  Since each NCCL PG gets its own CUDA stream, this
+    can be used to separate AG and RS onto different streams (e.g. for AG/RS
+    overlap in the backward pass).
+
+    Must be applied BEFORE bucketing passes so that bucketed all-gathers inherit
+    the new PG name.
+
+    Args:
+        gm: The graph module (forward or backward)
+        example_inputs: Example inputs (unused, required by pass interface)
+        source_pg_name: The group_name of the process group to match
+        target_pg_name: The group_name of the process group to assign
+    """
+    count = 0
+    for node in gm.graph.nodes:
+        if is_all_gather(node):
+            # AG args: (input_tensor, group_size, group_name)
+            if node.args[2] == source_pg_name:
+                node.args = (node.args[0], node.args[1], target_pg_name)
+                count += 1
+    if count > 0:
+        logger.info(
+            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
+            f"to PG {target_pg_name}"
+        )
+    gm.recompile()
+    return gm
+
+
+# Registry mapping pass names to pass functions (for AOT mode fwd/bwd passes)
+AVAILABLE_COMPILER_PASSES = {
+    "auto_bucketing": autobucketing_reordering_pass,
+    "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
+    "regional_inductor": regional_inductor_pass,
+    "cudagraph": cudagraph_pass,
+    "full_inductor_compilation": full_inductor_compilation_pass,
+}
+
+# Registry for joint custom passes (applied before partitioning, AOT mode only)
+AVAILABLE_JOINT_PASSES = {
+    "inductor_decomposition": inductor_decomposition_pass,
+    "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
+    "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
+    "apply_sac": apply_sac_pass,
+}

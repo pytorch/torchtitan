@@ -7,6 +7,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 import torchstore as ts
@@ -21,12 +22,71 @@ from torchtitan.experiments.rl.unified.plugin import (
 from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, CompilationConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(kw_only=True, slots=True)
+class GeneratorCompileConfig:
+    """Compilation and CUDA graph settings for the vLLM generator."""
+
+    backend: Literal["none", "eager", "inductor"] = "eager"
+    """torch.compile backend for vLLM
+    When set to a value other than "none", enables compilation with the specified backend.
+    See https://docs.vllm.ai/en/stable/api/vllm/config/#vllm.config.CompilationConfig.backend
+    NOTE: "eager" means compile with dynamo backend (like torch.compile(backend="eager"))
+    NOTE: inductor will offer the best performance, but will impact numerics - use eager for
+    bitwise identical results."""
+
+    cudagraph_mode: Literal[
+        "none", "piecewise", "full", "full_and_piecewise"
+    ] = "piecewise"
+    """CUDA graph capture mode for vLLM.
+    Piecewise capture supports dynamic sizes and splits cudagraphs around non capturable
+      ops like attention
+    Full capture captures one graph at the expense of less dynamism and requires full
+      capturability
+    full_and_piecewise does both and selects which to use based on dynamism
+    NOTE: Piecewise graph capture requires torch.compile for graph capture and splitting
+    See https://docs.vllm.ai/en/latest/design/cuda_graphs/#cudagraphmodes for more details."""
+
+    def __post_init__(self) -> None:
+        if self.backend == "none" and self.cudagraph_mode in (
+            "piecewise",
+            "full_and_piecewise",
+        ):
+            raise ValueError(
+                f"cudagraph_mode='{self.cudagraph_mode}' requires piecewise graph "
+                "capture which depends on torch.compile. Set backend "
+                "to 'eager' or 'inductor'."
+            )
+
+    @property
+    def is_eager(self) -> bool:
+        """Inferred from backend and cudagraph_mode."""
+        return self.backend == "none" and self.cudagraph_mode == "none"
+
+    def get_vllm_compilation_config(self) -> CompilationConfig | None:
+        """Build a vLLM ``CompilationConfig``, or return ``None`` when both
+        compilation and CUDA graphs are disabled.
+        """
+        if self.is_eager:
+            return None
+
+        kwargs: dict = dict(cudagraph_mode=self.cudagraph_mode)
+        if self.backend == "none":
+            # Disable torch.compile but keep CUDA graphs (e.g. full mode).
+            # mode=0 (CompilationMode.NONE) prevents vLLM from inferring
+            # VLLM_COMPILE based on the default optimization level.
+            kwargs["mode"] = 0
+        else:
+            kwargs["backend"] = self.backend
+
+        return CompilationConfig(**kwargs)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -80,8 +140,8 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        enforce_eager: bool = True
-        """Disable CUDA graphs in vLLM (use eager execution)."""
+        compile: GeneratorCompileConfig = field(default_factory=GeneratorCompileConfig)
+        """Compilation and CUDA graph settings for the vLLM engine."""
 
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
@@ -124,6 +184,7 @@ class VLLMGenerator(Actor, Configurable):
         self.model_path = model_path
         self.max_new_tokens = config.sampling.max_tokens
         self.temperature = config.sampling.temperature
+        self.top_p = config.sampling.top_p
         self.num_samples_per_prompt = config.num_samples_per_prompt
 
         # Build vLLM engine
@@ -136,14 +197,16 @@ class VLLMGenerator(Actor, Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.enforce_eager,
-            # Disable vLLM logging to avoid noisy logs on every step
-            disable_log_stats=True,
+            enforce_eager=config.compile.is_eager,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum[config.attention_backend],
             ),
+            disable_log_stats=True,
         )
+        vllm_compilation_config = config.compile.get_vllm_compilation_config()
+        if vllm_compilation_config is not None:
+            engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.seed is not None:
             engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
@@ -163,12 +226,22 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self, prompt_texts: list[str]) -> list[Episode]:
-        """Generate episodes and return list of Episode (one per prompt).
-        Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
+    async def generate(
+        self,
+        prompt_texts: list[str],
+        expected_answers: list[str],
+    ) -> list[Episode]:
+        """Generate completions and return a flat list of Episodes.
+
+        Each prompt produces ``num_samples_per_prompt`` Episodes. Episodes
+        from the same prompt share a ``group_id`` so the controller can
+        compute group-level advantages later.
 
         Args:
             prompt_texts: List of prompt strings for which to generate completions.
+            expected_answers: List of expected answers, one per prompt.
+                They are copied into each Episode so downstream graders can use them
+                for reward computation and generator doesn't use this field.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -178,6 +251,7 @@ class VLLMGenerator(Actor, Configurable):
             # Generate samples using vLLM
             sampling_params = SamplingParams(
                 temperature=self.temperature,
+                top_p=self.top_p,
                 max_tokens=self.max_new_tokens,
                 n=self.num_samples_per_prompt,
                 seed=self.config.seed,
@@ -195,32 +269,36 @@ class VLLMGenerator(Actor, Configurable):
                 request_outputs = self._engine.step()
                 all_outputs.extend(request_outputs)
 
-            # Build one Episode per prompt
-            episodes = []
-            for output in all_outputs:
-                prompt_token_ids = output.prompt_token_ids
+            # Sort outputs by request_id to guarantee prompt ordering,
+            # since vLLM may return completed requests out of order.
+            all_outputs.sort(key=lambda o: int(o.request_id))
 
-                completions = []
+            # Build flat list of Episodes; assign a group_id per prompt.
+            # TODO: Assigning group_id here is GRPO-specific and should be
+            # decoupled from the generator in the future.
+            episodes: list[Episode] = []
+            for idx, output in enumerate(all_outputs):
+                prompt_token_ids = output.prompt_token_ids
+                gid = f"{os.getpid()}_{self.policy_version}_{idx}"
+
                 for sample in output.outputs:
                     per_token_log_probs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    completions.append(
-                        Episode.Completion(
+                    episodes.append(
+                        Episode(
+                            policy_version=self.policy_version,
+                            prompt_token_ids=prompt_token_ids,
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_log_probs=per_token_log_probs,
+                            expected_answer=expected_answers[idx]
+                            if expected_answers
+                            else "",
+                            group_id=gid,
                         )
                     )
-
-                episodes.append(
-                    Episode(
-                        policy_version=self.policy_version,
-                        prompt_token_ids=prompt_token_ids,
-                        completions=completions,
-                    )
-                )
 
         logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
@@ -246,7 +324,7 @@ class VLLMGenerator(Actor, Configurable):
         On the first call, fetches and caches RDMA handles from
         TorchStore and builds a transfer plan. Subsequent calls reuse
         cached handles/plan and just re-read the data.
-
+   
         Args:
             version: New policy version number.
         """

@@ -18,12 +18,12 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
     silu_and_mul_with_gradients,
 )
 
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import AttentionMasksType
 
 # Import from main torchtitan
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.module import Module
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
@@ -83,7 +83,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-class VLLMRMSNorm(nn.Module):
+class VLLMRMSNorm(Module):
     """
     RMSNorm using vLLM's exact Triton kernel for bitwise determinism.
     Compatible with PyTorch's nn.RMSNorm interface but uses vLLM's implementation.
@@ -105,7 +105,7 @@ class VLLMRMSNorm(nn.Module):
         nn.init.ones_(self.weight)
 
 
-class FeedForwardVLLMCompat(nn.Module):
+class FeedForwardVLLMCompat(Module):
     """
     FeedForward module compatible with vLLM implementation.
     Uses merged gate_up projection like vLLM.
@@ -133,13 +133,14 @@ class FeedForwardVLLMCompat(nn.Module):
         output = self.down_proj(activated)
         return output
 
-    def init_weights(self, init_std: float):
-        # Initialize like vLLM
-        trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
+        nn.init.trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
 
 
-class Attention(nn.Module):
+class Attention(Module):
     """
     Multi-head attention module compatible with vLLM.
     """
@@ -156,13 +157,9 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
 
-        # QK norm (Qwen3 specific) - use vLLM's RMSNorm
-        if model_args.qk_norm:
-            self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
-            self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        # QK norm (Qwen3 always uses QK norm) - use vLLM's RMSNorm
+        self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
+        self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
 
         # QKV projections
         self.wq = nn.Linear(
@@ -177,10 +174,12 @@ class Attention(nn.Module):
         # Always use vLLM compatible flash attention
         self.inner_attention = VLLMCompatibleFlashAttention()
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         for linear in (self.wq, self.wk, self.wv):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.q_norm is not None:
             self.q_norm.reset_parameters()
         if self.k_norm is not None:
@@ -231,7 +230,7 @@ class Attention(nn.Module):
         return self.wo(output)
 
 
-class TransformerBlock(nn.Module):
+class TransformerBlock(Module):
     """
     TransformerBlock with vLLM-compatible FFN.
     """
@@ -248,8 +247,8 @@ class TransformerBlock(nn.Module):
             dim=model_args.dim, hidden_dim=model_args.hidden_dim
         )
 
-        self.attention_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.attention_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
+        self.ffn_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -272,11 +271,11 @@ class TransformerBlock(nn.Module):
 
         return x
 
-    def init_weights(self, buffer_device: torch.device):
+    def init_weights(self, **kwargs) -> None:
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        self.attention.init_weights(init_std=self.weight_init_std)
+        self.feed_forward.init_weights(init_std=self.weight_init_std)
 
 
 class Qwen3VLLMCompatModel(BaseModel):
@@ -303,7 +302,7 @@ class Qwen3VLLMCompatModel(BaseModel):
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
-        self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
         # IMPORTANT: To match vLLM's behavior and Qwen3's config
@@ -323,14 +322,14 @@ class Qwen3VLLMCompatModel(BaseModel):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_weights(buffer_device)
+                layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
 
         if self.output is not None:
-            trunc_normal_(
+            nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,

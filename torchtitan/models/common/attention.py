@@ -10,7 +10,6 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -22,11 +21,12 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
 )
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
 
@@ -60,7 +60,7 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class VarlenAttentionWrapper(torch.nn.Module):
+class VarlenAttentionWrapper(Module):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
@@ -87,6 +87,13 @@ class VarlenAttentionWrapper(torch.nn.Module):
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
 
+        # Some operators can upcast under AMP, but varlen attention currently only
+        # supports bf16/fp16 inputs. If this changes, or fp16 training support
+        # is added, this may need to be revisited.
+        xq_packed = xq_packed.to(torch.bfloat16)
+        xk_packed = xk_packed.to(torch.bfloat16)
+        xv_packed = xv_packed.to(torch.bfloat16)
+
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
             xk_packed,
@@ -107,10 +114,10 @@ class VarlenAttentionWrapper(torch.nn.Module):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-        )
+        ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(torch.nn.Module):
+class FlexAttentionWrapper(Module):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -166,7 +173,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         )
 
 
-class ScaledDotProductAttentionWrapper(torch.nn.Module):
+class ScaledDotProductAttentionWrapper(Module):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
@@ -406,15 +413,20 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        q_norm: RMSNorm.Config | None = None
+        k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        qk_norm: bool = False
-        norm_eps: float = 1e-5
-        bias: bool = False
+        linear_bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+
+        def __post_init__(self):
+            BaseAttention.Config.__post_init__(self)
+            if (self.q_norm is None) != (self.k_norm is None):
+                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
@@ -430,26 +442,31 @@ class GQAttention(BaseAttention):
         self.rope_backend = config.rope_backend
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm: nn.RMSNorm | None = None
-        self.k_norm: nn.RMSNorm | None = None
-        if config.qk_norm:
-            self.q_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
-            self.k_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
+        self.q_norm: RMSNorm | None = None
+        self.k_norm: RMSNorm | None = None
+        if config.q_norm is not None and config.k_norm is not None:
+            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
+            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        self.wq = nn.Linear(dim, self.n_heads * self.head_dim, bias=config.bias)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=config.bias)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=config.bias)
-        self.wo = nn.Linear(self.n_heads * self.head_dim, dim, bias=config.bias)
+        linear_config = Linear.Config(bias=config.linear_bias)
+        self.wq = linear_config.build(
+            in_features=dim, out_features=self.n_heads * self.head_dim
+        )
+        self.wk = linear_config.build(
+            in_features=dim, out_features=self.n_kv_heads * self.head_dim
+        )
+        self.wv = linear_config.build(
+            in_features=dim, out_features=self.n_kv_heads * self.head_dim
+        )
+        self.wo = linear_config.build(
+            in_features=self.n_heads * self.head_dim, out_features=dim
+        )
 
         self.attn_backend = config.attn_backend
-        self.inner_attention: nn.Module
+        self.inner_attention: Module
         match self.attn_backend:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
@@ -545,13 +562,9 @@ class GQAttention(BaseAttention):
 
     def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
         for linear in (self.wq, self.wk, self.wv):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-            if linear.bias is not None:
-                trunc_normal_(linear.bias, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        if self.wo.bias is not None:
-            trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            linear.init_weights()
+        self.wo.init_weights(init_std=init_std)
         if self.q_norm is not None:
-            self.q_norm.reset_parameters()
+            self.q_norm.init_weights()
         if self.k_norm is not None:
-            self.k_norm.reset_parameters()
+            self.k_norm.init_weights()
