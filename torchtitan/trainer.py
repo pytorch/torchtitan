@@ -255,6 +255,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.model_config = model_config
 
+        # Validate that packed dataloaders use block_causal attention
+        if self.dataloader.is_packed:
+            attn_config = self._get_attn_config()
+            if attn_config is None:
+                logger.warning(
+                    "Packed dataloader is used but model has no standard "
+                    "attention config. Cannot validate attention mask type."
+                )
+            elif (
+                attn_config.attn_backend == "sdpa"
+                or attn_config.attn_mask_type != "block_causal"
+            ):
+                raise ValueError(
+                    "Packed dataloader requires attn_backend='flex' or 'varlen' "
+                    "with attn_mask_type='block_causal' for document isolation. "
+                    f"Got attn_backend='{attn_config.attn_backend}', "
+                    f"attn_mask_type='{attn_config.attn_mask_type}'."
+                )
+
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
@@ -597,8 +616,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_kwargs: dict[str, Any] = {}
 
         # TODO: improve the logic on obtaining attention masks
-        layer = getattr(self.model_config, "layer", None)
-        attn_config = getattr(layer, "attention", None) if layer else None
+        attn_config = self._get_attn_config()
         attn_backend = getattr(attn_config, "attn_backend", "sdpa")
         if attn_backend in ["flex", "varlen"]:
             assert (
@@ -850,6 +868,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             time.sleep(2)
 
         logger.info("Training completed")
+
+    def _get_attn_config(self):
+        """Extract attention config from model config, or None if not available."""
+        layer = getattr(self.model_config, "layer", None)
+        return getattr(layer, "attention", None) if layer else None
 
     def should_continue_training(self) -> bool:
         return self.step < self.config.training.steps

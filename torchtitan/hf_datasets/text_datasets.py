@@ -68,6 +68,8 @@ def _validate_dataset(
 
 
 class HuggingFaceTextDataset(IterableDataset, Stateful):
+    is_packed: bool = True
+
     def __init__(
         self,
         dataset_name: str,
@@ -177,8 +179,10 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 class HuggingFaceTextDataLoader(ParallelAwareDataloader):
     """Configurable text dataloader that wraps HuggingFaceTextDataset.
 
-    This dataloader can be used for both training and validation by
-    configuring the appropriate dataset, seq_len, batch_size, etc.
+    This dataloader packs multiple documents into each sequence by
+    concatenating tokenized documents into a continuous stream and
+    slicing fixed-size chunks. Use with block_causal attention to
+    prevent cross-document attention leakage.
     """
 
     @dataclass(kw_only=True, slots=True)
