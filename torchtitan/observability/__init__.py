@@ -8,6 +8,7 @@
 
 from torchtitan.observability.aggregation import aggregate, logging_worker
 from torchtitan.observability.logging_boundary import EveryNSteps
+from torchtitan.observability.rollout_logger import RolloutLogger
 from torchtitan.observability.metrics import (
     MaxMetric,
     MeanMetric,
@@ -41,4 +42,5 @@ __all__ = [
     "aggregate",
     "logging_worker",
     "EveryNSteps",
+    "RolloutLogger",
 ]
