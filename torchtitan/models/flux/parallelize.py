@@ -135,12 +135,16 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     Apply torch.compile to each DoubleStreamBlock and SingleStreamBlock, which
     makes compilation efficient due to repeated structure.
     """
+    # pyrefly: ignore [missing-attribute]
     for block_id, block in model.double_blocks.named_children():
         block = torch.compile(block, backend=compile_config.backend, fullgraph=True)
+        # pyrefly: ignore [missing-attribute]
         model.double_blocks.register_module(block_id, block)
 
+    # pyrefly: ignore [missing-attribute]
     for block_id, block in model.single_blocks.named_children():
         block = torch.compile(block, backend=compile_config.backend, fullgraph=True)
+        # pyrefly: ignore [missing-attribute]
         model.single_blocks.register_module(block_id, block)
 
     logger.info(
@@ -272,10 +276,10 @@ def apply_compile_to_encoders(
 
     # Compile each CLIP encoder layer
     # pyrefly: ignore [missing-attribute]
-    for layer_id, layer in clip_model.hf_module.text_model.encoder.layers.named_children():
+    clip_encoder_layers = clip_model.hf_module.text_model.encoder.layers
+    for layer_id, layer in clip_encoder_layers.named_children():
         layer = torch.compile(layer, backend=compile_config.backend)
-        # pyrefly: ignore [missing-attribute]
-        clip_model.hf_module.text_model.encoder.layers.register_module(layer_id, layer)
+        clip_encoder_layers.register_module(layer_id, layer)
 
     logger.info(
         "Compiling T5 encoder blocks and CLIP encoder layers with torch.compile"
