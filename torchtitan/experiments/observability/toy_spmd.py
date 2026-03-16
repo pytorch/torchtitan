@@ -18,7 +18,6 @@ Run:
 
 import os
 import shutil
-import time
 
 import torch
 import torch.distributed as dist
@@ -35,6 +34,16 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.distributed.utils import clip_grad_norm_
+from torchtitan.experiments.observability.metrics_processor import MetricsProcessor
+from torchtitan.observability import (
+    add_step_tag,
+    EventType,
+    init_observability,
+    record_event,
+    record_span,
+)
+from torchtitan.observability.analysis import generate_gantt_trace
+from torchtitan.tools.logging import init_logger
 
 # ---- Config ----
 NUM_STEPS = 20
@@ -153,11 +162,14 @@ class ToyTrainer:
         self.output_dir = output_dir
         self.step = 0
 
+        self.metrics_processor = MetricsProcessor()
+
         torch.manual_seed(0)
-        model = TinyModel().to(device)
-        self._apply_tp(model, tp_mesh)
-        self._apply_compile(model)
-        self._apply_fsdp(model, dp_mesh)
+        with record_span("setup/model_build", EventType.BUILD_MODEL):
+            model = TinyModel().to(device)
+            self._apply_tp(model, tp_mesh)
+            self._apply_compile(model)
+            self._apply_fsdp(model, dp_mesh)
         self.model = model
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
@@ -215,10 +227,12 @@ class ToyTrainer:
         fully_shard(model, mesh=dp_mesh)
 
     def batch_generator(self, data_iterable):
-        """Wraps a dataloader into an iterator."""
+        """Wraps a dataloader into an iterator with data loading timing."""
         data_iterator = iter(data_iterable)
         while True:
-            yield next(data_iterator)
+            with record_span("trainer_time/data_loading_s", EventType.FETCHING_BATCH):
+                batch = next(data_iterator)
+            yield batch
 
     def compute_loss(self, logits, labels, loss_mask):
         """Compute cross-entropy loss with masking under loss_parallel.
@@ -238,24 +252,27 @@ class ToyTrainer:
 
     def train_step(self, tokens, labels, loss_mask):
         """One training step."""
-        with loss_parallel():
-            logits = self.model(tokens)
-            loss_sum, valid_tokens = self.compute_loss(logits, labels, loss_mask)
-            # Globally-normalized loss: each token contributes equally to
-            # gradients regardless of which DP rank it's on (matches titan).
-            global_valid_tokens = valid_tokens.detach().clone().float()
-            dist.all_reduce(global_valid_tokens, group=self.dp_mesh.get_group())
+        with record_span("trainer_time/forward_backward_s", EventType.FWD_BWD):
+            with loss_parallel():
+                logits = self.model(tokens)
+                loss_sum, valid_tokens = self.compute_loss(logits, labels, loss_mask)
+                # Globally-normalized loss: each token contributes equally to
+                # gradients regardless of which DP rank it's on (matches titan).
+                global_valid_tokens = valid_tokens.detach().clone().float()
+                dist.all_reduce(global_valid_tokens, group=self.dp_mesh.get_group())
+                loss = loss_sum / global_valid_tokens
+                self.optimizer.zero_grad()
+                loss.backward()
 
-            loss = loss_sum / global_valid_tokens
-            self.optimizer.zero_grad()
-            loss.backward()
-        grad_norm = clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
+        with record_span("trainer_time/optimizer_s", EventType.OPTIM):
+            grad_norm = clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
 
         # Report globally-reduced loss. Each DP rank has
         # local_loss_sum / global_valid_tokens; SUM gives the global loss.
         loss_scalar = loss.detach().full_tensor().clone()
         dist.all_reduce(loss_scalar, op=dist.ReduceOp.SUM, group=self.dp_mesh.get_group())
+        record_event({"train.loss": loss_scalar.item(), "train.grad_norm": grad_norm.item()})
         if self.rank == 0:
             print(
                 f"step: {self.step}  loss: {loss_scalar.item():.5f}  "
@@ -283,15 +300,24 @@ class ToyTrainer:
 
         for step in range(1, num_steps + 1):
             self.step = step
-            tokens, labels, loss_mask = next(data_iterator)
-            self.train_step(tokens, labels, loss_mask)
+            self.metrics_processor.set_step(step)
+
+            # Simulate GC on every 5th step (mirrors gc_handler.run)
+            if step % 5 == 0:
+                add_step_tag("gc")
+
+            with record_span("trainer_time/step_s", EventType.STEP):
+                tokens, labels, loss_mask = next(data_iterator)
+                self.train_step(tokens, labels, loss_mask)
 
             if step % EVAL_FREQ == 0:
-                self.validate(tokens, labels, loss_mask)
+                add_step_tag("eval")
+                with record_span("trainer_time/validation_s", EventType.EVAL):
+                    self.validate(tokens, labels, loss_mask)
 
     def close(self):
-        """Cleanup. Subclasses override to close writers, profilers, etc."""
-        pass
+        """Cleanup."""
+        self.metrics_processor.close()
 
 
 def main():
@@ -307,6 +333,9 @@ def main():
     dist.barrier()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    init_logger()
+    init_observability(source="trainer", output_dir=OUTPUT_DIR, rank=rank)
+
     mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "tp"))
 
     if rank == 0:
@@ -317,7 +346,10 @@ def main():
     trainer.close()
 
     if rank == 0:
-        print(f"Done. Output: {OUTPUT_DIR}")
+        sys_logs = os.path.join(OUTPUT_DIR, "system_logs")
+        trace_path = os.path.join(OUTPUT_DIR, "analysis", "system_metrics_gantt.json")
+        generate_gantt_trace(sys_logs, trace_path)
+        print(f"\nDone. Output: {OUTPUT_DIR}")
     dist.destroy_process_group()
 
 
