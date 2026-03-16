@@ -205,8 +205,8 @@ class RLTrainer(Configurable):
         # Initialize TorchStore for RDMA handle exchange
         await ts.initialize()
 
-        # Register RDMA handles on trainer, then initial weight pull
-        self.trainer.register_rdma_handles.call().get()
+        # Publish RDMA handles on trainer, then initial weight pull
+        self.trainer.push_weights.call().get()
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_weights.call(0).get()
 
@@ -323,11 +323,11 @@ class RLTrainer(Configurable):
             metrics = self.trainer.step.call(scored_episodes).get().item(gpus=0)
             # 4. Sync weights via direct RDMA
             t0 = time.perf_counter()
-            self.trainer.refresh_weights.call().get()
-            t_refresh = time.perf_counter() - t0
+            self.trainer.push_weights.call().get()
+            t_push = time.perf_counter() - t0
             self.generator.pull_weights.call(metrics["policy_version"]).get()
             t_total = time.perf_counter() - t0
-            logger.info(f"Weight sync: refresh={t_refresh:.3f}s, total={t_total:.3f}s")
+            logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
             # Verify weight sync after first training step
             if step == 0:

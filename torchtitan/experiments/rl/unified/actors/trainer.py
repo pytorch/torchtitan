@@ -19,7 +19,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torchstore.direct_weight_sync import DirectWeightSyncSource, RDMA_KEY_PREFIX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
@@ -132,8 +131,8 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         self.policy_version = 0
+        self._weights_pushed = False
         self.generator: Any | None = None
-        self._rdma_source = DirectWeightSyncSource()
 
         # Data parallelism: determine this rank's shard of the batch.
         self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
@@ -221,31 +220,19 @@ class PolicyTrainer(Actor, Configurable):
         return model
 
     @endpoint
-    async def register_rdma_handles(self) -> None:
-        """Register RDMA handles for all model parameters.
+    async def push_weights(self) -> None:
+        """Publish model weights for generator consumption via direct RDMA.
 
-        Each rank creates handles pointing at its local shard memory
-        (or staging buffers for non-contiguous shards) and stores
-        them in TorchStore for the generator to discover.
-
-        Call once at setup. After optimizer steps, call
-        :meth:`refresh_weights` instead.
+        On the first call, registers RDMA handles for all model parameters
+        and stores them in TorchStore. On subsequent calls, refreshes
+        staging buffers for non-contiguous params (contiguous params are
+        updated in-place by the optimizer and need no refresh).
         """
-        rank = dist.get_rank()
-        handles = self._rdma_source.register(self.model.state_dict(), rank=rank)
-        await ts.put(f"{RDMA_KEY_PREFIX}/rank_{rank}", handles)
-        if rank == 0:
-            await ts.put(f"{RDMA_KEY_PREFIX}/num_ranks", dist.get_world_size())
-
-    @endpoint
-    async def refresh_weights(self) -> None:
-        """Refresh staging buffers after optimizer.step().
-
-        For contiguous params this is a no-op (RDMA handles point
-        directly at param memory). For non-contiguous params, re-copies
-        the updated values into the staging buffers.
-        """
-        self._rdma_source.refresh()
+        state_dict = self.model.state_dict() if not self._weights_pushed else None
+        await ts.put_state_dict(
+            state_dict, "policy_weights", direct_rdma=True
+        )
+        self._weights_pushed = True
 
     @endpoint
     async def get_weight_checksums(self) -> dict[str, float]:
