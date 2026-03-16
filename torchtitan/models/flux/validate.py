@@ -14,11 +14,12 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import ValidationContext, Validator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.observability import NoOpMetric, record_metric
+from torchtitan.observability.metrics_processor import MetricsProcessor
 from torchtitan.tools.logging import logger
 
 from .flux_datasets import FluxDataLoader
@@ -227,7 +228,7 @@ class FluxValidator(Validator):
                 stratified_timesteps = input_dict.pop("timestep")
 
             # Note the tps may be inaccurate due to the generating image step not being counted
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            self.metrics_processor.val_ntokens_since_reset += labels.numel()
 
             # Apply timesteps here and update our bsz to efficiently compute all timesteps and samples in a single forward pass
             with torch.no_grad(), torch.device(self.device):
@@ -296,7 +297,9 @@ class FluxValidator(Validator):
         else:
             global_avg_loss = loss.item()
 
-        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+        record_metric("validation/loss_mean", NoOpMetric(value=global_avg_loss))
+        self.metrics_processor.record_throughput(is_validation=True)
+        self.metrics_processor.record_memory(is_validation=True)
 
         # Set model back to train mode
         model.train()
