@@ -140,6 +140,8 @@ class BenchmarkConfig:
     use_compile_cudagraph: bool = (
         False  # True = compile(eager) + piecewise cudagraph; False = fully eager
     )
+    # NCCL tuning
+    nccl_algo: str | None = None  # e.g. "Tree" to force tree-based all-reduce
     # Profiling options
     profile: bool = False
     profile_dir: str = "./profiler_traces"
@@ -982,6 +984,13 @@ class BenchmarkRunner:
             benchmark = benchmark_cls(self.config)
             benchmark.setup()
 
+            # Set NCCL algorithm after setup to avoid breaking broadcast
+            # during DTensor weight replication. NCCL picks this up for
+            # new communicators / operations created after this point.
+            if self.config.nccl_algo:
+                os.environ["NCCL_ALGO"] = self.config.nccl_algo
+                print(f"Set NCCL_ALGO={self.config.nccl_algo} (post-setup)")
+
             prompts = self.load_prompts()
 
             is_vllm_benchmark = key.startswith("vllm_")
@@ -1302,6 +1311,13 @@ def main():
         help="Enable compile(eager) + piecewise cudagraph for vLLM engine. "
         "Default is fully eager (no compile, no cudagraph).",
     )
+    parser.add_argument(
+        "--nccl-algo",
+        type=str,
+        default=None,
+        help="NCCL algorithm to use for all-reduce (e.g. 'Tree'). "
+        "Set after model setup to avoid breaking broadcast during init.",
+    )
     args = parser.parse_args()
 
     # Parse test cases
@@ -1338,6 +1354,7 @@ def main():
         profile_warmup=args.profile_warmup,
         profile_active=args.profile_active,
         use_compile_cudagraph=args.use_compile_cudagraph,
+        nccl_algo=args.nccl_algo,
     )
 
     runner = BenchmarkRunner(config)
