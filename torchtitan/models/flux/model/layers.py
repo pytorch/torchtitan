@@ -14,11 +14,11 @@ from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.protocols.module import create_module_class, Module, Sequential
+from torchtitan.protocols.module import Module, Sequential
 
-LayerNorm = create_module_class(nn.LayerNorm)
-GELU = create_module_class(nn.GELU)
-SiLU = create_module_class(nn.SiLU)
+LayerNorm = Module.from_nn_module(nn.LayerNorm)
+GELU = Module.from_nn_module(nn.GELU)
+SiLU = Module.from_nn_module(nn.SiLU)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:

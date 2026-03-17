@@ -20,11 +20,11 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import create_module_class, Module, ModuleDict
+from torchtitan.protocols.module import Module, ModuleDict
 
 from .args import Siglip2Config
 
-LayerNorm = create_module_class(nn.LayerNorm)
+LayerNorm = Module.from_nn_module(nn.LayerNorm)
 
 
 def resize_positional_embeddings(

@@ -7,7 +7,7 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 
-from .module import Module, verify_all_module_protocol
+from .module import Module
 
 
 class BaseModel(Module):
@@ -23,10 +23,23 @@ class BaseModel(Module):
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.
 
-        Override in models that wrap third-party ``nn.Module`` trees where
-        internal modules cannot conform to the ``Module`` protocol.
+        Catches non-``Module`` submodules early with a clear error message,
+        preventing obscure failures when the ``Module`` protocol is being
+        used later.
+
+        Override in models where some internal ``nn.Module`` submodules
+        cannot conform to the ``Module`` protocol.
         """
-        verify_all_module_protocol(self)
+        failures: list[tuple[str, str]] = []
+        for fqn, mod in self.named_modules():
+            if not isinstance(mod, Module):
+                failures.append((fqn, type(mod).__name__))
+        if failures:
+            details = ", ".join(f"'{fqn}' ({cls})" for fqn, cls in failures)
+            raise RuntimeError(
+                f"The following modules do not satisfy the Module protocol: "
+                f"{details}"
+            )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
