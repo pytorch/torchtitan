@@ -311,19 +311,15 @@ class VLLMGenerator(Actor, Configurable):
         return episodes
 
     @endpoint
-    async def pull_weights(self, version: int) -> None:
-        """Pull latest weights via direct RDMA from trainer memory.
-
-        On the first call, fetches and caches RDMA handles from
-        TorchStore and builds a transfer plan. Subsequent calls reuse
-        cached handles/plan and just re-read the data.
+    async def pull_model_state_dict(self, version: int) -> None:
+        """Pull latest weights from TorchStore.
 
         Args:
             version: New policy version number.
         """
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
-            "policy_weights",
+            "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
             direct_rdma=self._use_direct_rdma,

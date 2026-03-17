@@ -223,13 +223,20 @@ class RLTrainer(Configurable):
             self.task.reward_function,
         )
 
-        # Initialize TorchStore
+        # Initialize TorchStore for weight sync between trainer and generator.
+        # num_storage_volumes: intermediate storage nodes that hold tensor data
+        #   in the non-RDMA (RPC) path. 2 volumes distributes the load so no
+        #   single volume is a bottleneck.
+        # LocalRankStrategy: routes each process to a storage volume based on
+        #   LOCAL_RANK, so colocated processes share the same volume and data
+        #   stays node-local when possible.
+        # https://github.com/meta-pytorch/torchstore
         await ts.initialize(num_storage_volumes=2, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
-        self.trainer.push_weights.call().get()
+        self.trainer.push_model_state_dict.call().get()
         # pull weights for policy version 0 (initial weights)
-        self.generator.pull_weights.call(0).get()
+        self.generator.pull_model_state_dict.call(0).get()
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -343,9 +350,9 @@ class RLTrainer(Configurable):
 
             # 5. Sync weights
             t0 = time.perf_counter()
-            self.trainer.push_weights.call().get()
+            self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
-            self.generator.pull_weights.call(metrics["policy_version"]).get()
+            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
