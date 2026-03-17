@@ -114,7 +114,7 @@ class QATConverter(Configurable):
         'int8_dynamic_act_intx_weight', 'float8_dynamic_act_float8_weight',
         'float8_dynamic_act_int4_weight', 'nvfp4', 'mx'."""
 
-        group_size: int = 256
+        group_size: int = 128
         """Group size for per-group weight quantization.
         Used by schemes that support per-group granularity
         (int4_weight_only, intx_weight_only, int8_dynamic_act_intx_weight).
@@ -144,6 +144,12 @@ class QATConverter(Configurable):
 
         base_config = _build_base_config(self.scheme, self.group_size)
         quantize_(model, QATConfig(base_config, step=QATStep.PREPARE))
+
+        # Store QAT config on the model so downstream converters (e.g. LoRA)
+        # can apply the same QAT to newly created modules.
+        model._qat_scheme = self.scheme  # type: ignore[attr-defined]
+        model._qat_group_size = self.group_size  # type: ignore[attr-defined]
+
         logger.info(
             f"Applied QAT fake quantization (scheme={self.scheme}, "
             f"group_size={self.group_size})"

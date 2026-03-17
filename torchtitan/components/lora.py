@@ -98,15 +98,6 @@ class LoRAConverter(Configurable):
         "merged" folds adapters into base weights (base + alpha/rank * B @ A)
         and saves a standard checkpoint with no LoRA keys."""
 
-        adapter_qat_scheme: str = ""
-        """QAT scheme for adapter weights. Empty = no adapter QAT.
-        Must match a supported QATConverter scheme."""
-
-        adapter_qat_group_size: int = 8
-        """Group size for adapter weight quantization.
-        Must divide rank (i.e. rank % group_size == 0).
-        Only used by schemes that support per-group granularity."""
-
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
@@ -116,32 +107,6 @@ class LoRAConverter(Configurable):
                 f"LoRA save_format must be 'dcp', 'peft', or 'merged', "
                 f"got '{self.save_format}'"
             )
-
-        self.adapter_qat_scheme = config.adapter_qat_scheme
-        self.adapter_qat_group_size = config.adapter_qat_group_size
-        if self.adapter_qat_scheme:
-            from torchtitan.components.quantization.qat import (
-                _SCHEMES_WITH_GROUP_SIZE,
-                _SUPPORTED_SCHEMES,
-            )
-
-            if self.adapter_qat_scheme not in _SUPPORTED_SCHEMES:
-                raise ValueError(
-                    f"Unknown adapter QAT scheme '{self.adapter_qat_scheme}'. "
-                    f"Supported: {_SUPPORTED_SCHEMES}"
-                )
-            if self.adapter_qat_scheme in _SCHEMES_WITH_GROUP_SIZE:
-                if self.rank % self.adapter_qat_group_size != 0:
-                    raise ValueError(
-                        f"LoRA rank ({self.rank}) must be divisible by "
-                        f"adapter_qat_group_size ({self.adapter_qat_group_size})"
-                    )
-            else:
-                logger.warning(
-                    f"Adapter QAT scheme '{self.adapter_qat_scheme}' does not use "
-                    f"group_size, ignoring adapter_qat_group_size="
-                    f"{self.adapter_qat_group_size}"
-                )
 
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
 
@@ -184,8 +149,13 @@ class LoRAConverter(Configurable):
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
 
-        if self.adapter_qat_scheme:
-            self._apply_adapter_qat(model)
+        # If QATConverter was applied before LoRA, apply the same QAT to
+        # the newly created adapter linears. QATConverter stores its config
+        # on the model as _qat_scheme / _qat_group_size.
+        qat_scheme = getattr(model, "_qat_scheme", None)
+        if qat_scheme is not None:
+            qat_group_size = getattr(model, "_qat_group_size", 128)
+            self._apply_adapter_qat(model, qat_scheme, qat_group_size)
 
         # Wire up checkpoint filtering so ModelWrapper knows which keys
         # are adapter keys and how to save them.
@@ -199,16 +169,25 @@ class LoRAConverter(Configurable):
         if self.save_format == "merged":
             model.converter_export_sd_fn = self._make_merge_fn()  # type: ignore[attr-defined]
 
-    def _apply_adapter_qat(self, model: nn.Module) -> None:
+    def _apply_adapter_qat(
+        self, model: nn.Module, scheme: str, group_size: int
+    ) -> None:
+        from torchtitan.components.quantization.qat import _SCHEMES_WITH_GROUP_SIZE
+
+        # Validate group_size against LoRA rank
+        if scheme in _SCHEMES_WITH_GROUP_SIZE and self.rank % group_size != 0:
+            raise ValueError(
+                f"QAT group_size ({group_size}) does not divide LoRA rank "
+                f"({self.rank}). Use a smaller group_size or larger rank."
+            )
+
         from torchao.quantization import quantize_
         from torchao.quantization.qat import QATConfig
         from torchao.quantization.qat.api import QATStep
 
         from torchtitan.components.quantization.qat import _build_base_config
 
-        base_config = _build_base_config(
-            self.adapter_qat_scheme, self.adapter_qat_group_size
-        )
+        base_config = _build_base_config(scheme, group_size)
 
         def _is_lora_linear(mod: nn.Module, fqn: str) -> bool:
             return isinstance(mod, nn.Linear) and (
@@ -222,8 +201,7 @@ class LoRAConverter(Configurable):
         )
         logger.info(
             f"Applied adapter QAT fake quantization "
-            f"(scheme={self.adapter_qat_scheme}, "
-            f"group_size={self.adapter_qat_group_size})"
+            f"(scheme={scheme}, group_size={group_size})"
         )
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
