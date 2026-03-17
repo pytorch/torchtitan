@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -88,20 +89,39 @@ class LoRAConverter(Configurable):
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
 
-        save_adapter_only: bool = True
-        """If True, only save LoRA adapter weights in checkpoints.
-        Requires base model to be loaded from HF/initial_load_path on resume.
-        Set to False to save full model weights for debugging without pretrained base."""
+        save_format: str = "dcp"
+        """Format for saving adapter weights at the last training step.
+        "dcp" saves adapter weights via DCP (default, supports resumption).
+        "peft" saves adapter_model.safetensors + adapter_config.json for
+        compatibility with HuggingFace PEFT."""
 
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
-        self.save_adapter_only = config.save_adapter_only
+        self.save_format = config.save_format
+        if self.save_format not in ("dcp", "peft"):
+            raise ValueError(
+                f"LoRA save_format must be 'dcp' or 'peft', got '{self.save_format}'"
+            )
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
+
+    @staticmethod
+    def _is_lora_key(key: str) -> bool:
+        """Check if a state dict key belongs to a LoRA adapter."""
+        return ".lora_a." in key or ".lora_b." in key
 
     def convert(self, model: nn.Module) -> None:
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
+
+        # Wire up checkpoint filtering so ModelWrapper knows which keys
+        # are adapter keys.
+        model.converter_key_filter = self._is_lora_key  # type: ignore[attr-defined]
+        model.lora_save_format = self.save_format  # type: ignore[attr-defined]
+        model.lora_config = {  # type: ignore[attr-defined]
+            "rank": self.rank,
+            "alpha": self.alpha,
+        }
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         for _, child in list(module.named_modules()):
@@ -110,3 +130,95 @@ class LoRAConverter(Configurable):
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
+
+
+def remap_lora_keys_to_hf(
+    adapter_sd: dict[str, Any], from_hf_map: dict[str, str | None]
+) -> dict[str, Any]:
+    """Remap torchtitan LoRA keys to HF PEFT naming for saving.
+
+    Converts keys like ``layers.0.attention.wq.lora_a.weight`` to
+    ``base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight``.
+    """
+    to_hf_map = {v: k for k, v in from_hf_map.items() if v is not None}
+    remapped = {}
+    for key, value in adapter_sd.items():
+        lora_suffix = None
+        base_key = key
+        for suffix in (".lora_a.weight", ".lora_b.weight"):
+            if key.endswith(suffix):
+                lora_suffix = suffix
+                base_key = key[: -len(suffix)] + ".weight"
+                break
+        if lora_suffix is None:
+            remapped[key] = value
+            continue
+
+        abstract_base = re.sub(r"(?<=\.)\d+(?=\.)", "{}", base_key, count=1)
+        layer_match = re.search(r"(?<=\.)\d+(?=\.)", base_key)
+        layer_num = layer_match.group(0) if layer_match else None
+
+        if abstract_base in to_hf_map:
+            hf_abstract = to_hf_map[abstract_base]
+            hf_base = hf_abstract.format(layer_num) if layer_num else hf_abstract
+            hf_base_no_weight = hf_base.rsplit(".weight", 1)[0]
+            peft_suffix = lora_suffix.replace(".lora_a.", ".lora_A.").replace(
+                ".lora_b.", ".lora_B."
+            )
+            hf_key = f"base_model.model.{hf_base_no_weight}{peft_suffix}"
+        else:
+            hf_key = f"base_model.model.{key}"
+            hf_key = hf_key.replace(".lora_a.", ".lora_A.").replace(
+                ".lora_b.", ".lora_B."
+            )
+            logger.warning(
+                f"No HF mapping for base key '{abstract_base}', using '{hf_key}'"
+            )
+        remapped[hf_key] = value
+    return remapped
+
+
+def remap_lora_keys_from_hf(
+    adapter_sd: dict[str, Any], from_hf_map: dict[str, str | None]
+) -> dict[str, Any]:
+    """Remap HF PEFT keys to torchtitan naming for loading.
+
+    Converts keys like ``base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight``
+    to ``layers.0.attention.wq.lora_a.weight``.
+    """
+    remapped = {}
+    for key, value in adapter_sd.items():
+        stripped = key
+        if stripped.startswith("base_model.model."):
+            stripped = stripped[len("base_model.model.") :]
+        stripped = stripped.replace(".lora_A.", ".lora_a.").replace(
+            ".lora_B.", ".lora_b."
+        )
+
+        lora_suffix = None
+        hf_base_key = stripped
+        for suffix in (".lora_a.weight", ".lora_b.weight"):
+            if stripped.endswith(suffix):
+                lora_suffix = suffix
+                hf_base_key = stripped[: -len(suffix)] + ".weight"
+                break
+        if lora_suffix is None:
+            remapped[stripped] = value
+            continue
+
+        abstract_hf = re.sub(r"(?<=\.)\d+(?=\.)", "{}", hf_base_key, count=1)
+        layer_match = re.search(r"(?<=\.)\d+(?=\.)", hf_base_key)
+        layer_num = layer_match.group(0) if layer_match else None
+
+        if abstract_hf in from_hf_map and from_hf_map[abstract_hf] is not None:
+            tt_abstract = from_hf_map[abstract_hf]
+            tt_base = tt_abstract.format(layer_num) if layer_num else tt_abstract
+            tt_base_no_weight = tt_base.rsplit(".weight", 1)[0]
+            tt_key = f"{tt_base_no_weight}{lora_suffix}"
+        else:
+            tt_key = stripped
+            logger.warning(
+                f"No torchtitan mapping for HF key '{abstract_hf}', using '{tt_key}'"
+            )
+        remapped[tt_key] = value
+    return remapped
