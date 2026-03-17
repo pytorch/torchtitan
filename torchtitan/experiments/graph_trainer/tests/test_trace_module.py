@@ -5,11 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from collections import Counter
 
 import torch
 import torch.nn as nn
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    _copy_fwd_metadata_to_bw_nodes,
+    _patch_engine_run_backward,
     run_traced_module,
     trace_module,
 )
@@ -253,6 +256,100 @@ class TestTraceDTensor(unittest.TestCase):
         self.assertTrue(torch.equal(loss_ref.full_tensor(), loss_tr.full_tensor()))
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr.full_tensor(), gt.full_tensor()))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestMetadataPropagation(unittest.TestCase):
+    """Tests for _patch_engine_run_backward and _copy_fwd_metadata_to_bw_nodes."""
+
+    DEVICE = "cuda"
+    DTYPE = torch.float32
+
+    def setUp(self):
+        torch.manual_seed(42)
+
+    def test_backward_nodes_have_seq_nr(self):
+        """Verify that backward FX nodes get seq_nr metadata via the patched engine."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        train_step = TrainStepModule(model, get_loss)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        traced_result = trace_module(train_step, (tokens, labels))
+
+        # Collect seq_nr values from all call_function nodes
+        seq_nrs = []
+        for node in traced_result.gm.graph.nodes:
+            if node.op == "call_function" and "seq_nr" in node.meta:
+                seq_nrs.append(node.meta["seq_nr"])
+
+        # There should be seq_nr values present (both fwd and bwd nodes)
+        self.assertGreater(len(seq_nrs), 0, "No seq_nr metadata found on any node")
+
+        # There should be duplicate seq_nrs (fwd and bwd nodes sharing seq_nr)
+        counts = Counter(seq_nrs)
+        shared = [nr for nr, cnt in counts.items() if cnt > 1]
+        self.assertGreater(
+            len(shared),
+            0,
+            "Expected some seq_nr values shared between fwd and bwd nodes",
+        )
+
+    def test_copy_fwd_metadata_propagates_custom(self):
+        """Verify _copy_fwd_metadata_to_bw_nodes copies custom metadata to bwd nodes."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+
+        # Use annotate to set custom metadata on forward nodes, then trace
+        # with backward to verify it propagates
+        train_step = TrainStepModule(model, get_loss)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        traced_result = trace_module(train_step, (tokens, labels))
+        gm = traced_result.gm
+
+        # Manually set custom metadata on the first fwd node for each seq_nr
+        # to test that _copy_fwd_metadata_to_bw_nodes works
+        seq_nr_first: dict[int, torch.fx.Node] = {}
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and "seq_nr" in node.meta:
+                seq_nr = node.meta["seq_nr"]
+                if seq_nr not in seq_nr_first:
+                    seq_nr_first[seq_nr] = node
+                    node.meta["custom"] = {"test_key": "test_value"}
+
+        # Run the copy pass again
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        # Check that bwd nodes with shared seq_nr got the custom metadata
+        for node in gm.graph.nodes:
+            if node.op != "call_function" or "seq_nr" not in node.meta:
+                continue
+            seq_nr = node.meta["seq_nr"]
+            if node is not seq_nr_first.get(seq_nr):
+                # This is a backward node
+                custom = node.meta.get("custom")
+                self.assertIsNotNone(
+                    custom,
+                    f"Backward node {node.name} with seq_nr={seq_nr} missing custom metadata",
+                )
+                self.assertEqual(custom.get("test_key"), "test_value")
+
+    def test_patch_engine_restores_original(self):
+        """Verify that _patch_engine_run_backward restores the original function."""
+        import torch.autograd
+        import torch.autograd.graph
+
+        orig_fn = torch.autograd.graph._engine_run_backward
+
+        with _patch_engine_run_backward():
+            # Inside the context, it should be patched
+            self.assertIsNot(torch.autograd.graph._engine_run_backward, orig_fn)
+            self.assertIsNot(torch.autograd._engine_run_backward, orig_fn)
+
+        # After the context, it should be restored
+        self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
+        self.assertIs(torch.autograd._engine_run_backward, orig_fn)
 
 
 if __name__ == "__main__":
