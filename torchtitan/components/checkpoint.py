@@ -113,6 +113,16 @@ class ModelWrapper(Stateful):
             return {k: v for k, v in full_sd.items() if self._is_converter_key(k)}
         return full_sd
 
+    def export_state_dict(self) -> dict[str, Any]:
+        """State dict for final export. Converters may customize this
+        (e.g. to merge converter weights into base weights)."""
+        full_sd = self._get_state_dict()
+        for part in self.model:
+            fn = getattr(part, "converter_export_sd_fn", None)
+            if fn is not None:
+                return fn(full_sd)
+        return self.state_dict_to_save()
+
     def base_state_dict(self) -> dict[str, Any]:
         """Return state dict with only the original model keys (before converters)."""
         full_sd = self._get_state_dict()
@@ -1055,7 +1065,7 @@ class CheckpointManager(Configurable):
         # is not the same as the export dtype at the end of the training.
 
         if self.last_save_model_only:
-            states = self.states[MODEL].state_dict_to_save()
+            states = self.states[MODEL].export_state_dict()
 
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
