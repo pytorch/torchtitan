@@ -7,11 +7,11 @@
 import logging
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention.attention import Attention
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +94,13 @@ class VLLMAttention(torch.nn.Module):
         # in its .view(bs, seqlen, -1) call.
         batch_size, _, seq_len, head_dim = q.shape
 
-        # Unwrap DTensor inputs to local tensors for attention computation
+        # Unwrap DTensor inputs to local tensors for attention computation.
+        # After vLLM attention, we always re-wrap with Shard(1) because
+        # ColwiseParallel on wq/wk/wv shards heads across TP ranks, so the
+        # output is always head-sharded on dim=1 of (batch, heads, seq, head_dim).
         device_mesh = None
-        placements = None
         if isinstance(q, DTensor):
             device_mesh = q.device_mesh
-            placements = q.placements
             q = q.to_local()
             k = k.to_local()
             v = v.to_local()
@@ -128,7 +129,7 @@ class VLLMAttention(torch.nn.Module):
 
         if device_mesh is not None:
             output = DTensor.from_local(
-                output, device_mesh=device_mesh, placements=placements
+                output, device_mesh=device_mesh, placements=(Shard(1),)
             )
 
         return output

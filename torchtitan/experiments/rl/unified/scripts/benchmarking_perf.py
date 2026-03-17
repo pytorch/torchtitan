@@ -6,10 +6,11 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Benchmark script to compare inference performance across three approaches:
+Benchmark script to compare inference performance across approaches:
 1. vLLM engine with native Qwen3 model (HuggingFace)
-2. vLLM engine with TorchTitan Qwen3 model wrapper
-3. Direct TorchTitan Qwen3 model inference
+2. vLLM native with compile(eager) + cudagraph (TARGET for multi-GPU ablation)
+3. vLLM engine with TorchTitan Qwen3 model wrapper
+4. Direct TorchTitan Qwen3 model inference
 
 Adapted for the current branch which uses parallelize_qwen3(enable_sp=...) to
 switch between TP+SP and TP-only parallelism modes.
@@ -27,9 +28,9 @@ Usage:
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
         --model-path /path/to/Qwen3-1.7B --tp 2 --test-cases vllm-torchtitan
 
-    # Run with TP+SP enabled
+    # Run with SP disabled (TP-only)
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
-        --model-path /path/to/Qwen3-1.7B --tp 2 --enable-sp
+        --model-path /path/to/Qwen3-1.7B --tp 2 --disable-sp
 
     # Run with profiling
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
@@ -39,6 +40,21 @@ Usage:
     torchrun --nproc_per_node=2 -m torchtitan.experiments.rl.unified.scripts.benchmarking_perf \\
         --model-path /path/to/Qwen3-1.7B --tp 2 --test-cases vllm-native,vllm-torchtitan,torchtitan-native \\
         --torchtitan-checkpoint /path/to/checkpoint
+
+    # Multi-GPU ablation study (run each step separately, same test case, different configs):
+    # Target: vLLM native with compile+cudagraph
+    torchrun --nproc_per_node=4 ... --tp 4 --use-compile-cudagraph --test-cases vllm-native
+
+    # Baseline: TorchTitan eager + SP
+    torchrun --nproc_per_node=4 ... --tp 4 --test-cases vllm-torchtitan
+
+    # Ablation 1: + compile(eager) + cudagraph
+    torchrun --nproc_per_node=4 ... --tp 4 --use-compile-cudagraph --test-cases vllm-torchtitan
+
+    # Ablation 2: + disable SP
+    torchrun --nproc_per_node=4 ... --tp 4 --disable-sp --use-compile-cudagraph --test-cases vllm-torchtitan
+
+    # Ablation 3: + custom model definition (fused kernels) -- requires code changes
 """
 
 from __future__ import annotations
@@ -64,6 +80,18 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.profiler import profile, ProfilerActivity, schedule
 
 from torchtitan.experiments.rl import unified  # noqa: F401
+
+
+def _get_rl_config(model_size: str):
+    """Get RL config with the specified model size from the registry."""
+    from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_1_7b
+    from torchtitan.models.qwen3 import model_registry
+
+    rl_config = rl_grpo_qwen3_1_7b()
+    if model_size != "1.7B":
+        rl_config.model_spec = model_registry(model_size)
+    return rl_config
+
 
 # Must set spawn method before any CUDA operations or vLLM imports
 # CUDA cannot be re-initialized in forked subprocesses
@@ -96,11 +124,12 @@ class BenchmarkConfig:
 
     model_path: str
     prompts_file: str
+    model_size: str = "1.7B"  # Model size key for registry (e.g. "0.6B", "1.7B", "4B", "8B", "14B", "32B")
     torchtitan_checkpoint_path: str = None
     torchtitan_config_path: str = None
     from_hf: bool = True
     tp: int = 1
-    enable_sp: bool = False  # TP+SP vs TP-only
+    disable_sp: bool = False  # When True, use TP-only (no SP); default is TP+SP
     batch_size: int = 1
     max_tokens: int = 512
     num_runs: int = 5
@@ -108,7 +137,9 @@ class BenchmarkConfig:
     temperature: float | None = None  # None = use gen_config default
     top_p: float | None = None  # None = use gen_config default
     device: str = "cuda"
-    use_compile_cudagraph: bool = False  # True = compile(eager) + piecewise cudagraph; False = fully eager
+    use_compile_cudagraph: bool = (
+        False  # True = compile(eager) + piecewise cudagraph; False = fully eager
+    )
     # Profiling options
     profile: bool = False
     profile_dir: str = "./profiler_traces"
@@ -205,18 +236,19 @@ class VLLMNativeBenchmark:
 
     def setup(self):
         try:
-            from torchtitan.experiments.rl.unified.config_registry import (
-                rl_grpo_qwen3_1_7b,
-            )
             from vllm import LLM, SamplingParams
 
             # ── 1. Load RL config (same source of truth as VLLMTorchTitanBenchmark) ──
-            rl_config = rl_grpo_qwen3_1_7b()
+            rl_config = _get_rl_config(self.config.model_size)
             gen_config = rl_config.generator
             model_path = self.config.model_path or rl_config.hf_assets_path
 
             use_compile = self.config.use_compile_cudagraph
-            mode_str = "compile(eager) + piecewise cudagraph" if use_compile else "eager (no compile, no cudagraph)"
+            mode_str = (
+                "compile(eager) + piecewise cudagraph"
+                if use_compile
+                else "eager (no compile, no cudagraph)"
+            )
 
             print("Loading vLLM with native Qwen3 model from HuggingFace...")
             print(f"Model: {model_path}")
@@ -224,13 +256,32 @@ class VLLMNativeBenchmark:
             print(f"Mode: {mode_str}")
 
             if self.config.profile:
-                self.profile_dir = Path(self.config.profile_dir) / "vllm_native"
+                profile_name = (
+                    f"vllm_native_{self.config.model_size}"
+                    f"_tp{self.config.tp}"
+                    f"_bsz{self.config.batch_size}"
+                    f"_maxtok{self.config.max_tokens}"
+                )
+                self.profile_dir = Path(self.config.profile_dir) / profile_name
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
                 os.environ["VLLM_TORCH_PROFILER_DIR"] = str(self.profile_dir)
                 self.profiling_enabled = True
                 print(
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
                 )
+
+            # Build profiler_config for vLLM versions that require it
+            profiler_config_kwargs = {}
+            if self.profiling_enabled:
+                try:
+                    from vllm.config import ProfilerConfig
+
+                    profiler_config_kwargs["profiler_config"] = ProfilerConfig(
+                        profiler="torch",
+                        torch_profiler_dir=str(self.profile_dir.resolve()),
+                    )
+                except ImportError:
+                    pass  # older vLLM, env var fallback
 
             # ── 2. Build engine kwargs (identical to VLLMTorchTitanBenchmark) ──
             engine_kwargs = dict(
@@ -244,14 +295,16 @@ class VLLMNativeBenchmark:
             )
 
             if use_compile:
-                vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+                vllm_compilation_config = (
+                    gen_config.compile.get_vllm_compilation_config()
+                )
                 if vllm_compilation_config is not None:
                     engine_kwargs["compilation_config"] = vllm_compilation_config
 
             if gen_config.seed is not None:
                 engine_kwargs["seed"] = gen_config.seed
 
-            self.engine = LLM(**engine_kwargs)
+            self.engine = LLM(**engine_kwargs, **profiler_config_kwargs)
 
             # ── 3. Sampling params (same as VLLMTorchTitanBenchmark) ──
             sampling = gen_config.sampling
@@ -309,8 +362,13 @@ class VLLMNativeBenchmark:
         memory_reserved = torch.cuda.memory_reserved() / 1e9
         peak_memory = torch.cuda.max_memory_allocated() / 1e9
 
+        approach_name = (
+            "vLLM Native [TARGET: compile+cudagraph]"
+            if self.config.use_compile_cudagraph
+            else "vLLM Native"
+        )
         return BenchmarkMetrics(
-            approach="vLLM Native",
+            approach=approach_name,
             total_time=total_time,
             tokens_generated=total_tokens,
             prefill_time=0.0,
@@ -348,11 +406,6 @@ class VLLMTorchTitanBenchmark:
 
     def setup(self):
         try:
-            from functools import partial
-
-            from torchtitan.experiments.rl.unified.config_registry import (
-                rl_grpo_qwen3_1_7b,
-            )
             from torchtitan.experiments.rl.unified.models.parallelize import (
                 parallelize_qwen3,
             )
@@ -364,22 +417,36 @@ class VLLMTorchTitanBenchmark:
             from vllm import LLM, SamplingParams
 
             # ── 1. Load RL config (same as inference_example.py) ──
-            rl_config = rl_grpo_qwen3_1_7b()
+            rl_config = _get_rl_config(self.config.model_size)
             gen_config = rl_config.generator
             # CLI --model-path overrides the config's hf_assets_path
             model_path = self.config.model_path or rl_config.hf_assets_path
 
             use_compile = self.config.use_compile_cudagraph
-            mode_str = "compile(eager) + piecewise cudagraph" if use_compile else "eager (no compile, no cudagraph)"
+            mode_str = (
+                "compile(eager) + piecewise cudagraph"
+                if use_compile
+                else "eager (no compile, no cudagraph)"
+            )
 
-            sp_mode = "TP+SP" if self.config.enable_sp else "TP-only"
+            sp_mode = "TP+SP" if not self.config.disable_sp else "TP-only"
             print(f"Loading vLLM with TorchTitan Qwen3 model ({sp_mode})...")
             print(f"Model: {model_path}")
             print(f"Tensor Parallel Size: {self.config.tp}")
             print(f"Mode: {mode_str}")
 
             if self.config.profile:
-                self.profile_dir = Path(self.config.profile_dir) / "vllm_torchtitan"
+                sp_tag = "tp_sp" if not self.config.disable_sp else "tp_only"
+                compile_tag = (
+                    "compile_cg" if self.config.use_compile_cudagraph else "eager"
+                )
+                profile_name = (
+                    f"vllm_torchtitan_{self.config.model_size}"
+                    f"_tp{self.config.tp}_{sp_tag}_{compile_tag}"
+                    f"_bsz{self.config.batch_size}"
+                    f"_maxtok{self.config.max_tokens}"
+                )
+                self.profile_dir = Path(self.config.profile_dir) / profile_name
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
                 os.environ["VLLM_TORCH_PROFILER_DIR"] = str(self.profile_dir)
                 self.profiling_enabled = True
@@ -387,11 +454,35 @@ class VLLMTorchTitanBenchmark:
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
                 )
 
+            # Build profiler_config for vLLM versions that require it
+            profiler_config_kwargs = {}
+            if self.profiling_enabled:
+                try:
+                    from vllm.config import ProfilerConfig
+
+                    profiler_config_kwargs["profiler_config"] = ProfilerConfig(
+                        profiler="torch",
+                        torch_profiler_dir=str(self.profile_dir.resolve()),
+                    )
+                except ImportError:
+                    pass  # older vLLM, env var fallback
+
             # ── 2. Patch model_spec parallelize_fn (same as inference_example.py) ──
-            rl_config.model_spec.parallelize_fn = partial(
-                parallelize_qwen3,
-                enable_sp=self.config.enable_sp,
-            )
+            # Wrap parallelize_qwen3 to propagate --disable-sp to the
+            # ParallelismConfig created inside vllm_wrapper (which doesn't
+            # know about our CLI flags).
+            disable_sp = self.config.disable_sp
+
+            def parallelize_qwen3_wrapper(model, parallel_dims, parallelism, **kwargs):
+                parallelism.enable_sequence_parallel = not disable_sp
+                return parallelize_qwen3(
+                    model=model,
+                    parallel_dims=parallel_dims,
+                    parallelism=parallelism,
+                    **kwargs,
+                )
+
+            rl_config.model_spec.parallelize_fn = parallelize_qwen3_wrapper
             register_model_to_vllm_model_registry(rl_config.model_spec)
 
             # ── 3. Build engine kwargs (mirroring inference_example.py) ──
@@ -407,14 +498,16 @@ class VLLMTorchTitanBenchmark:
             )
 
             if use_compile:
-                vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+                vllm_compilation_config = (
+                    gen_config.compile.get_vllm_compilation_config()
+                )
                 if vllm_compilation_config is not None:
                     engine_kwargs["compilation_config"] = vllm_compilation_config
 
             if gen_config.seed is not None:
                 engine_kwargs["seed"] = gen_config.seed
 
-            self.engine = LLM(**engine_kwargs)
+            self.engine = LLM(**engine_kwargs, **profiler_config_kwargs)
 
             # ── 4. Sampling params (from gen_config, with CLI overrides) ──
             sampling = gen_config.sampling
@@ -467,9 +560,12 @@ class VLLMTorchTitanBenchmark:
         memory_reserved = torch.cuda.memory_reserved() / 1e9
         peak_memory = torch.cuda.max_memory_allocated() / 1e9
 
-        sp_mode = "TP+SP" if self.config.enable_sp else "TP-only"
+        sp_mode = "TP+SP" if not self.config.disable_sp else "TP-only"
+        compile_mode = (
+            "compile+cudagraph" if self.config.use_compile_cudagraph else "eager"
+        )
         return BenchmarkMetrics(
-            approach=f"vLLM TorchTitan ({sp_mode})",
+            approach=f"vLLM TorchTitan ({sp_mode}, {compile_mode})",
             total_time=total_time,
             tokens_generated=total_tokens,
             prefill_time=0.0,
@@ -533,7 +629,7 @@ class TorchTitanNativeBenchmark:
 
             world_size = self.config.tp
 
-            sp_mode = "TP+SP" if self.config.enable_sp else "TP-only"
+            sp_mode = "TP+SP" if not self.config.disable_sp else "TP-only"
             print(
                 f"TP={self.config.tp}, Parallelism={sp_mode}, "
                 f"World Size: {world_size}, Local Rank: {local_rank}"
@@ -626,12 +722,13 @@ class TorchTitanNativeBenchmark:
                 print(f"Applying {sp_mode} parallelism with TP={world_size}")
                 from torchtitan.config import ParallelismConfig
 
-                parallelism_config = ParallelismConfig()
+                parallelism_config = ParallelismConfig(
+                    enable_sequence_parallel=not self.config.disable_sp,
+                )
                 parallelize_qwen3(
                     self.model,
                     parallel_dims=parallel_dims,
                     parallelism=parallelism_config,
-                    enable_sp=self.config.enable_sp,
                 )
 
             # Materialize model
@@ -803,7 +900,7 @@ class TorchTitanNativeBenchmark:
         memory_reserved = torch.cuda.memory_reserved() / 1e9
         peak_memory = torch.cuda.max_memory_allocated() / 1e9
 
-        sp_mode = "TP+SP" if self.config.enable_sp else "TP-only"
+        sp_mode = "TP+SP" if not self.config.disable_sp else "TP-only"
         return BenchmarkMetrics(
             approach=f"TorchTitan Native ({sp_mode})",
             total_time=total_time,
@@ -860,13 +957,21 @@ class BenchmarkRunner:
                 "How does a neural network work?",
             ]
 
-        return prompts[: self.config.batch_size]
+        # Repeat prompts to fill batch size for benchmarking
+        batch_size = self.config.batch_size
+        if len(prompts) < batch_size:
+            prompts = (prompts * ((batch_size // len(prompts)) + 1))[:batch_size]
+        return prompts[:batch_size]
 
     def run_benchmark(self, benchmark_cls, key: str):
         print(f"\n{'=' * 60}")
         print(f"Benchmarking: {key}")
-        sp_mode = "TP+SP" if self.config.enable_sp else "TP-only"
+        sp_mode = "TP+SP" if not self.config.disable_sp else "TP-only"
         print(f"Parallelism: {sp_mode}")
+        if self.config.use_compile_cudagraph:
+            print("Mode: compile(eager) + piecewise cudagraph")
+        else:
+            print("Mode: eager (no compile, no cudagraph)")
         if self.config.profile:
             print(
                 f"Profiling ENABLED - traces will be saved to: {self.config.profile_dir}"
@@ -1082,6 +1187,12 @@ def main():
         help="Path to Qwen3 model from HuggingFace (default: Qwen/Qwen3-1.7B)",
     )
     parser.add_argument(
+        "--model-size",
+        type=str,
+        default="1.7B",
+        help="Model size key for registry (e.g. 0.6B, 1.7B, 4B, 8B, 14B, 32B). Default: 1.7B",
+    )
+    parser.add_argument(
         "--torchtitan-checkpoint",
         type=str,
         default=None,
@@ -1096,7 +1207,7 @@ def main():
     parser.add_argument(
         "--prompts",
         type=str,
-        default="scripts/prompts.txt",
+        default="torchtitan/experiments/rl/unified/scripts/prompts.txt",
         help="File containing prompts (one per line)",
     )
     parser.add_argument(
@@ -1150,10 +1261,10 @@ def main():
         help="Tensor parallelism size (default: 1)",
     )
     parser.add_argument(
-        "--enable-sp",
+        "--disable-sp",
         action="store_true",
         default=False,
-        help="Enable sequence parallelism on top of TP (default: TP-only, no SP)",
+        help="Disable sequence parallelism, use TP-only (default: TP+SP enabled)",
     )
     # Profiling options
     parser.add_argument(
@@ -1210,12 +1321,13 @@ def main():
 
     config = BenchmarkConfig(
         model_path=args.model_path,
+        model_size=args.model_size,
         torchtitan_checkpoint_path=args.torchtitan_checkpoint,
         torchtitan_config_path=args.torchtitan_config,
         prompts_file=args.prompts,
         from_hf=args.from_hf,
         tp=args.tp,
-        enable_sp=args.enable_sp,
+        disable_sp=args.disable_sp,
         batch_size=args.batch_size,
         max_tokens=args.max_tokens,
         num_runs=args.num_runs,

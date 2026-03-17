@@ -25,6 +25,7 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.tensor_parallel import NoParallel
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,6 @@ def parallelize_qwen3(
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
     has_position_id: bool = False,
-    enable_sp: bool = True,
 ):
     """
     Apply tensor parallelism to the Qwen3 dense model for RL training/inference.
@@ -48,36 +48,41 @@ def parallelize_qwen3(
         has_position_id: Whether position IDs are passed as an explicit argument
             to the attention module. True for vLLM inference (generator),
             False for training (trainer).
-        enable_sp: Whether to enable sequence parallelism on top of tensor
-            parallelism. When False, only tensor parallelism is applied
-            (activations are Replicate across TP ranks instead of Shard on
-            the sequence dimension). Defaults to True.
     """
 
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
-        if enable_sp:
-            _apply_non_moe_tp_sp(
-                model,
-                tp_mesh,
-                has_position_id=has_position_id,
-            )
-        else:
-            _apply_tp_only(
-                model,
-                tp_mesh,
-                has_position_id=has_position_id,
-            )
+        apply_non_moe_tp(
+            model,
+            tp_mesh,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
+            enable_float8_tensorwise_tp=False,
+            enable_async_tp=parallelism.enable_async_tensor_parallel,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_position_id=has_position_id,
+        )
 
     return model
 
 
-def _apply_non_moe_tp_sp(
+def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
+    enable_loss_parallel: bool,
+    enable_float8_tensorwise_tp: bool,
+    enable_async_tp: bool,
+    enable_sp: bool = True,
     has_position_id: bool = False,
 ):
-    """Apply tensor parallelism with sequence parallelism."""
+    """Apply tensor parallelism to the Qwen3 dense model.
+
+    This is a temporary TP plan used while we resolve composability issues in the
+    main torchtitan codebase. Once DTensor is fully supported across the TP
+    region, this separate plan should be removed.
+    """
+
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
 
     parallelize_module(
         model,
@@ -85,52 +90,53 @@ def _apply_non_moe_tp_sp(
         {
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1),
+                output_layouts=sp_layout,
                 use_local_output=False,
             ),
-            "norm": SequenceParallel(
-                use_local_output=False,
-            ),
+            "norm": norm_plan,
             "output": ColwiseParallel(
-                input_layouts=Shard(1),
+                input_layouts=sp_layout,
                 output_layouts=Replicate(),
-                use_local_output=True,
+                use_local_output=True,  # return logits and plain tensor
             ),
         },
     )
 
-    if has_position_id:
-        attention_module_plan = PrepareModuleInput(
-            input_layouts=(Shard(1), Replicate(), None, Replicate()),
-            desired_input_layouts=(Replicate(), Replicate(), None, Replicate()),
-        )
-    else:
-        attention_module_plan = PrepareModuleInput(
-            input_layouts=(Shard(1), Replicate(), None, None),
-            desired_input_layouts=(Replicate(), Replicate(), None, None),
-        )
+    # Apply tensor + sequence parallelism to every transformer block
+    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
+    #       by folding (and unfolding) the batch dimension and the sequence dimension.
+    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    positions_layout = Replicate() if has_position_id else None
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=False)
         layer_plan = {
-            "attention_norm": SequenceParallel(use_local_output=False),
-            "attention": attention_module_plan,
+            "attention_norm": norm_plan,
+            "attention": PrepareModuleInput(
+                input_layouts=(
+                    sp_layout,
+                    Replicate(),
+                    None,
+                    positions_layout,
+                ),
+                desired_input_layouts=(
+                    Replicate(),
+                    Replicate(),
+                    None,
+                    positions_layout,
+                ),
+            ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
-            "attention.q_norm": SequenceParallel(
-                sequence_dim=2,
-                use_local_output=False,
-            ),
-            "attention.k_norm": SequenceParallel(
-                sequence_dim=2,
-                use_local_output=False,
-            ),
+            "attention.q_norm": qk_norm_plan,
+            "attention.k_norm": qk_norm_plan,
             "attention.wo": RowwiseParallel(
-                output_layouts=Shard(1),
+                output_layouts=sp_layout,
                 use_local_output=False,
             ),
-            "ffn_norm": SequenceParallel(use_local_output=False),
+            "ffn_norm": norm_plan,
         }
 
         # pyrefly: ignore [missing-attribute]
@@ -138,12 +144,13 @@ def _apply_non_moe_tp_sp(
             layer_plan.update(
                 {
                     "feed_forward": PrepareModuleInput(
-                        input_layouts=(Shard(1),),
+                        input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
                     "feed_forward.w1": ColwiseParallel(use_local_output=False),
                     "feed_forward.w2": RowwiseParallel(
-                        output_layouts=Shard(1), use_local_output=False
+                        output_layouts=sp_layout,
+                        use_local_output=False,
                     ),
                     "feed_forward.w3": ColwiseParallel(use_local_output=False),
                 }
@@ -160,80 +167,3 @@ def _apply_non_moe_tp_sp(
             # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
-
-    logger.info("Applied Tensor Parallelism with Sequence Parallelism to the model")
-
-
-def _apply_tp_only(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    has_position_id: bool = False,
-):
-    """Apply tensor parallelism without sequence parallelism.
-
-    Activations stay Replicate across TP ranks. RowwiseParallel performs
-    all-reduce (instead of reduce-scatter) so the output is Replicate.
-    """
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Replicate(),
-                use_local_output=False,
-            ),
-            "output": ColwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Replicate(),
-                use_local_output=True,
-            ),
-        },
-    )
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        layer_plan = {
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
-            "attention.q_norm": SequenceParallel(
-                sequence_dim=2,
-                use_local_output=False,
-            ),
-            "attention.k_norm": SequenceParallel(
-                sequence_dim=2,
-                use_local_output=False,
-            ),
-            "attention.wo": RowwiseParallel(
-                output_layouts=Replicate(),
-                use_local_output=False,
-            ),
-        }
-
-        # pyrefly: ignore [missing-attribute]
-        if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward.w1": ColwiseParallel(use_local_output=False),
-                    "feed_forward.w2": RowwiseParallel(
-                        output_layouts=Replicate(), use_local_output=False
-                    ),
-                    "feed_forward.w3": ColwiseParallel(use_local_output=False),
-                }
-            )
-        else:
-            raise ValueError(
-                "Running vLLM inference with torchtitan Qwen3 MoE model is not supported yet."
-            )
-
-        parallelize_module(
-            # pyrefly: ignore [bad-argument-type]
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
-            parallelize_plan=layer_plan,
-        )
-
-    logger.info("Applied Tensor Parallelism (TP-only, no SP) to the model")
