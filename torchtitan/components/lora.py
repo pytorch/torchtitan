@@ -94,15 +94,18 @@ class LoRAConverter(Configurable):
         """Format for saving adapter weights at the last training step.
         "dcp" saves adapter weights via DCP (default, supports resumption).
         "peft" saves adapter_model.safetensors + adapter_config.json for
-        compatibility with HuggingFace PEFT."""
+        compatibility with HuggingFace PEFT.
+        "merged" folds adapters into base weights (base + alpha/rank * B @ A)
+        and saves a standard checkpoint with no LoRA keys."""
 
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
         self.save_format = config.save_format
-        if self.save_format not in ("dcp", "peft"):
+        if self.save_format not in ("dcp", "peft", "merged"):
             raise ValueError(
-                f"LoRA save_format must be 'dcp' or 'peft', got '{self.save_format}'"
+                f"LoRA save_format must be 'dcp', 'peft', or 'merged', "
+                f"got '{self.save_format}'"
             )
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
 
@@ -110,6 +113,36 @@ class LoRAConverter(Configurable):
     def _is_lora_key(key: str) -> bool:
         """Check if a state dict key belongs to a LoRA adapter."""
         return ".lora_a." in key or ".lora_b." in key
+
+    def _make_merge_fn(self):
+        """Return a function that merges LoRA adapters into base weights.
+
+        The returned function takes a full state dict (base + adapter keys)
+        and returns a new dict with standard FQNs where each base weight
+        has been replaced by ``base + (alpha / rank) * B @ A``.
+        """
+        scaling = self.alpha / self.rank
+
+        def merge(state_dict: dict[str, Any]) -> dict[str, Any]:
+            merged: dict[str, Any] = {}
+            lora_a: dict[str, Any] = {}
+            lora_b: dict[str, Any] = {}
+            for key, value in state_dict.items():
+                if ".lora_a." in key:
+                    lora_a[key.split(".lora_a.")[0]] = value
+                elif ".lora_b." in key:
+                    lora_b[key.split(".lora_b.")[0]] = value
+                else:
+                    merged[key] = value
+            for prefix in lora_a:
+                base_key = prefix + ".weight"
+                if base_key in merged:
+                    merged[base_key] = merged[base_key] + scaling * (
+                        lora_b[prefix] @ lora_a[prefix]
+                    )
+            return merged
+
+        return merge
 
     def convert(self, model: nn.Module) -> None:
         model.requires_grad_(False)
@@ -123,6 +156,9 @@ class LoRAConverter(Configurable):
             "rank": self.rank,
             "alpha": self.alpha,
         }
+
+        if self.save_format == "merged":
+            model.converter_export_sd_fn = self._make_merge_fn()  # type: ignore[attr-defined]
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         for _, child in list(module.named_modules()):
