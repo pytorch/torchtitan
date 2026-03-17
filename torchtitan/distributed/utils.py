@@ -47,7 +47,14 @@ def _dist_reduce(
     """
     is_partial = False
     if isinstance(x, DTensor):
-        # functional collectives do not support DTensor inputs
+        # functional collectives do not support DTensor inputs.
+        # When the DTensor has Partial placement (e.g. loss output in full
+        # DTensor mode), full_tensor() performs an all-reduce across the
+        # DTensor's SPMD mesh — which covers exactly the same DP ranks as
+        # `mesh`. Skipping the subsequent mesh all-reduce avoids double-
+        # counting.  This is safe because full_dtensor currently only
+        # supports FSDP/HSDP (no TP/PP/EP/CP), so the DTensor mesh and
+        # the caller's mesh span the same ranks.
         is_partial = is_tensor_partial(x._spec)
         x = x.full_tensor()
 

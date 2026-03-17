@@ -67,8 +67,10 @@ def _get_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
     CP>1 is not yet supported with full DTensor. validate_config() must be called
     before this to ensure CP is not enabled.
     """
+    # TP is not yet supported with full DTensor (validate_config rejects it),
+    # so the mesh only includes DP dimensions.
     mesh_names = [
-        n for n in ["dp_replicate", "fsdp", "tp"] if parallel_dims.get_optional_mesh(n)
+        n for n in ["dp_replicate", "fsdp"] if parallel_dims.get_optional_mesh(n)
     ]
     return parallel_dims.get_mesh(mesh_names)
 
@@ -144,18 +146,28 @@ def _restore_tied_parameters(
             module._parameters[name] = canonical_param
 
 
-def prepare_for_fsdp(
+def resolve_fsdp_mesh(
     model: nn.Module,
     parallel_dims: ParallelDims,
-) -> tuple[DeviceMesh, DataParallelMeshDims]:
-    """Distribute model as full DTensors and return FSDP config.
+    full_dtensor: bool,
+) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
+    """Select the FSDP mesh and optional DataParallelMeshDims.
 
-    Combines distribute_model() and get_dp_mesh_dims() into a single call.
-    Returns (spmd_mesh, dp_mesh_dims) to pass to the model's apply_fsdp().
+    In full DTensor mode, distributes model parameters as DTensors on the SPMD
+    mesh and returns DataParallelMeshDims telling FSDP which dims are data-parallel.
+    In standard mode, returns the conventional dp_mesh and None.
+
+    Returns (dp_mesh, dp_mesh_dims) to pass to the model's apply_fsdp().
     """
-    spmd_mesh = distribute_model(model, parallel_dims)
-    dp_mesh_dims = get_dp_mesh_dims(parallel_dims)
-    return spmd_mesh, dp_mesh_dims
+    if full_dtensor:
+        spmd_mesh = distribute_model(model, parallel_dims)
+        dp_mesh_dims = get_dp_mesh_dims(parallel_dims)
+        return spmd_mesh, dp_mesh_dims
+    else:
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        return parallel_dims.get_mesh(names), None
 
 
 def distribute_model(
@@ -214,7 +226,13 @@ def convert_buffers_to_dtensor(
             parent = model
             for part in parts[:-1]:
                 parent = getattr(parent, part)
-            parent.register_buffer(parts[-1], dtensor_buf, persistent=False)
+            # Preserve the original buffer's persistence flag
+            persistent = parts[-1] in parent._buffers and parts[-1] not in (
+                parent._non_persistent_buffers_set
+                if hasattr(parent, "_non_persistent_buffers_set")
+                else set()
+            )
+            parent.register_buffer(parts[-1], dtensor_buf, persistent=persistent)
 
     logger.info("Converted remaining plain tensor buffers to DTensors")
 
@@ -224,13 +242,13 @@ def parallelize_inputs(
 ) -> tuple[DTensor, DTensor]:
     """Convert inputs and labels to DTensors on the SPMD mesh."""
     mesh = _get_spmd_mesh(parallel_dims)
+    # Each DP dimension shards inputs along batch (dim 0).
+    # TP is not yet supported (validate_config rejects it).
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))
     if parallel_dims.dp_shard_enabled:
         placements.append(Shard(0))
-    if parallel_dims.tp_enabled:
-        placements.append(Replicate())
 
     assert mesh.ndim == len(placements)
     return DTensor.from_local(inputs, mesh, placements), DTensor.from_local(
