@@ -188,6 +188,7 @@ def flux_schnell() -> FluxTrainer.Config:
         ),
     )
 
+
 def flux_schnell_mxfp8() -> FluxTrainer.Config:
     """Flux schnell with MXFP8 quantization and torch.compile.
     Requires SM100+ (B200/B100) and torchao nightly."""
@@ -196,8 +197,15 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             MXFP8Converter.Config(
-                fqns=["double_blocks", "single_blocks", "img_in", "txt_in",
-                      "time_in", "vector_in", "final_layer"],
+                fqns=[
+                    "double_blocks",
+                    "single_blocks",
+                    "img_in",
+                    "txt_in",
+                    "time_in",
+                    "vector_in",
+                    "final_layer",
+                ],
             ),
         ],
     )
@@ -212,8 +220,15 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             MXFP8Converter.Config(
-                fqns=["double_blocks", "single_blocks", "img_in", "txt_in",
-                      "time_in", "vector_in", "final_layer"],
+                fqns=[
+                    "double_blocks",
+                    "single_blocks",
+                    "img_in",
+                    "txt_in",
+                    "time_in",
+                    "vector_in",
+                    "final_layer",
+                ],
             ),
         ],
     )
