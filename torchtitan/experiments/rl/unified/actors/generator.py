@@ -216,15 +216,6 @@ class VLLMGenerator(Actor, Configurable):
 
         self.policy_version = 0
 
-        # Weight sync transport: if RDMA is available, use GPUDirect RDMA for
-        # one-hop GPU-to-GPU transfer. Otherwise, fall back to TorchStore's
-        # default RPC-based transport (two-hop via StorageVolumes).
-        from monarch.rdma import is_rdma_available
-
-        self._use_direct_rdma = is_rdma_available()
-        if not self._use_direct_rdma:
-            logger.warning("RDMA not available, falling back to RPC based weight sync")
-
         logger.info("Generator initialized with vLLM engine")
 
     def _get_model(self):
@@ -317,15 +308,21 @@ class VLLMGenerator(Actor, Configurable):
     async def pull_model_state_dict(self, version: int) -> None:
         """Pull latest weights from TorchStore.
 
+        Uses GPUDirect RDMA for one-hop GPU-to-GPU transfer when available,
+        otherwise falls back to TorchStore's RPC-based transport (two-hop
+        via StorageVolumes).
+
         Args:
             version: New policy version number.
         """
+        from monarch.rdma import is_rdma_available
+
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=self._use_direct_rdma,
+            direct_rdma=is_rdma_available(),
         )
         self.policy_version = version
         logger.debug(

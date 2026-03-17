@@ -132,15 +132,6 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Any | None = None
 
-        # Weight sync transport: if RDMA is available, use GPUDirect RDMA for
-        # one-hop GPU-to-GPU transfer. Otherwise, fall back to TorchStore's
-        # default RPC-based transport (two-hop via StorageVolumes).
-        from monarch.rdma import is_rdma_available
-
-        self._use_direct_rdma = is_rdma_available()
-        if not self._use_direct_rdma:
-            logger.warning("RDMA not available, falling back to RPC based weight sync")
-
         # Data parallelism: determine this rank's shard of the batch.
         self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
         self.dp_rank = dist.get_rank() // self.parallel_dims.non_data_parallel_size
@@ -234,11 +225,18 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def push_model_state_dict(self) -> None:
-        """Publish model weights for generator consumption via TorchStore."""
+        """Publish model weights for generator consumption via TorchStore.
+
+        Uses GPUDirect RDMA for one-hop GPU-to-GPU transfer when available,
+        otherwise falls back to TorchStore's RPC-based transport (two-hop
+        via StorageVolumes).
+        """
+        from monarch.rdma import is_rdma_available
+
         await ts.put_state_dict(
             self.model.state_dict(),
             "model_state_dict",
-            direct_rdma=self._use_direct_rdma,
+            direct_rdma=is_rdma_available(),
             transfer_dtype=torch.bfloat16,
         )
 
