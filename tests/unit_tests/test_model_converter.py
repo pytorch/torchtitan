@@ -284,30 +284,6 @@ def test_lora_moe_freeze_and_trainability():
     assert model.experts.lora_b_w3.shape == (num_experts, 4, hidden_dim)
 
 
-def test_qat_preserves_weight_dtype():
-    """QAT converter should not change weight dtype (fake quantization happens in forward)."""
-    pytest.importorskip("torchao")
-
-    model = nn.Sequential(
-        OrderedDict(
-            [
-                ("fc1", nn.Linear(64, 64)),
-                ("relu", nn.ReLU()),
-                ("fc2", nn.Linear(64, 64)),
-            ]
-        )
-    )
-    original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
-
-    converter = QATConverter(QATConverter.Config(group_size=64))
-    converter.convert(model)
-
-    for name, param in model.named_parameters():
-        assert (
-            param.dtype == original_dtypes[name]
-        ), f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
-
-
 @pytest.mark.parametrize(
     "scheme, group_size, expected_linear_cls",
     [
@@ -321,7 +297,8 @@ def test_qat_preserves_weight_dtype():
     ],
 )
 def test_qat_all_schemes(scheme, group_size, expected_linear_cls):
-    """Each QAT scheme should replace nn.Linear with the correct fake-quantized class."""
+    """Each QAT scheme should replace nn.Linear with the correct fake-quantized
+    class and preserve weight dtype (fake quantization happens in forward)."""
     pytest.importorskip("torchao")
 
     model = nn.Sequential(
@@ -333,6 +310,7 @@ def test_qat_all_schemes(scheme, group_size, expected_linear_cls):
             ]
         )
     )
+    original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
 
     config_kwargs = {"scheme": scheme}
     if group_size is not None:
@@ -347,6 +325,12 @@ def test_qat_all_schemes(scheme, group_size, expected_linear_cls):
     assert (
         type(model.fc2).__name__ == expected_linear_cls
     ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc2).__name__}"
+
+    # Weight dtype should be preserved
+    for name, param in model.named_parameters():
+        assert (
+            param.dtype == original_dtypes[name]
+        ), f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
 
 
 def test_qat_unknown_scheme_raises():
@@ -367,3 +351,60 @@ def test_qat_group_size_warning_for_unsupported_scheme(caplog):
             )
         )
     assert "does not use group_size" in caplog.text
+
+
+def test_qat_lora_adapter_qat():
+    """QAT + LoRA: base and adapter weights are both fake-quantized.
+    Also tests that group_size > rank errors out."""
+    pytest.importorskip("torchao")
+    from torchao.quantization.qat.linear import FakeQuantizedLinear
+
+    # --- group_size > rank should error ---
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(128, 128)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(128, 128)),
+            ]
+        )
+    )
+    qat_converter = QATConverter(
+        QATConverter.Config(scheme="intx_weight_only", group_size=128)
+    )
+    qat_converter.convert(model)
+    with pytest.raises(ValueError, match="does not divide LoRA rank"):
+        LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0)).convert(model)
+
+    # --- Compatible group_size should work ---
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
+    qat_converter = QATConverter(
+        QATConverter.Config(scheme="intx_weight_only", group_size=8)
+    )
+    qat_converter.convert(model)
+
+    assert isinstance(model.fc1, FakeQuantizedLinear)
+
+    lora_converter = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_converter.convert(model)
+
+    # Base linears are LoRA-wrapped FakeQuantizedLinear
+    assert isinstance(model.fc1, FakeQuantizedLinear)
+    # Adapter linears are also FakeQuantizedLinear
+    assert isinstance(model.fc1.lora_a, FakeQuantizedLinear)
+    assert isinstance(model.fc1.lora_b, FakeQuantizedLinear)
+
+    # Forward pass should succeed
+    x = torch.randn(4, 64)
+    out = model(x)
+    assert out.shape == (4, 64)
+
+
