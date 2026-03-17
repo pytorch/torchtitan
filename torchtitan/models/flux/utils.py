@@ -14,6 +14,7 @@ from .model.hf_embedder import FluxEmbedder
 PATCH_HEIGHT, PATCH_WIDTH = 2, 2
 LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 16, 8
 
+
 def preprocess_data(
     # arguments from the recipe
     device: torch.device,

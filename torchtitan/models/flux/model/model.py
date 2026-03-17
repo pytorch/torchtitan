@@ -100,10 +100,8 @@ class FluxModel(BaseModel):
             )
         )
 
-
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass
-
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

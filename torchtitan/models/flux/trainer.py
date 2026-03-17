@@ -20,11 +20,11 @@ from torchtitan.models.flux.parallelize import parallelize_encoders
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
+    IMAGE_LATENT_SIZE_RATIO,
     pack_latents,
-    preprocess_data,
     PATCH_HEIGHT,
     PATCH_WIDTH,
-    IMAGE_LATENT_SIZE_RATIO,
+    preprocess_data,
 )
 from torchtitan.trainer import Trainer
 
@@ -119,7 +119,6 @@ class FluxTrainer(Trainer):
                 clip_encoder=self.clip_encoder,
                 dump_folder=config.dump_folder,
             )
-
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
