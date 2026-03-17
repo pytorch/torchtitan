@@ -37,12 +37,12 @@ gptoss_configs = {
                 num_experts=8,
                 num_shared_experts=0,
                 score_before_experts=False,
-                load_balance_coeff=1e-3,
                 router=TokenChoiceTopKRouter.Config(
                     score_func="softmax",
                     route_norm=True,
                     gate=Linear.Config(bias=True),
                     top_k=4,
+                    load_balance_coeff=1e-3,
                 ),
             ),
             attention=Attention.Config(
@@ -74,12 +74,12 @@ gptoss_configs = {
                 num_experts=32,
                 num_shared_experts=0,
                 score_before_experts=False,
-                load_balance_coeff=1e-3,
                 router=TokenChoiceTopKRouter.Config(
                     score_func="softmax",
                     route_norm=True,
                     gate=Linear.Config(bias=True),
                     top_k=4,
+                    load_balance_coeff=1e-3,
                 ),
             ),
             attention=Attention.Config(
@@ -111,12 +111,12 @@ gptoss_configs = {
                 num_experts=128,
                 num_shared_experts=0,
                 score_before_experts=False,
-                load_balance_coeff=1e-3,
                 router=TokenChoiceTopKRouter.Config(
                     score_func="softmax",
                     route_norm=True,
                     gate=Linear.Config(bias=True),
                     top_k=4,
+                    load_balance_coeff=1e-3,
                 ),
             ),
             attention=Attention.Config(

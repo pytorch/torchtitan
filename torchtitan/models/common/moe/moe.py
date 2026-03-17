@@ -189,6 +189,7 @@ class TokenChoiceTopKRouter(Module):
         route_norm: bool = False
         route_scale: float = 1.0
         gate: Linear.Config
+        load_balance_coeff: float | None = None
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -204,6 +205,26 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm = config.route_norm
         self.route_scale = config.route_scale
         self._debug_force_load_balance = config._debug_force_load_balance
+
+        # Auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
+        # tokens_per_expert is accumulated in the model forward pass.
+        # expert_bias is updated outside the model in an optimizer step pre hook
+        # to work with gradient accumulation.
+        self.load_balance_coeff = config.load_balance_coeff
+        if self.load_balance_coeff is not None:
+            assert self.load_balance_coeff > 0.0
+            self.register_buffer(
+                "expert_bias",
+                torch.zeros(config.num_experts, dtype=torch.float32),
+                persistent=True,
+            )
+        else:
+            self.expert_bias = None
+        self.register_buffer(
+            "tokens_per_expert",
+            torch.zeros(config.num_experts, dtype=torch.float32),
+            persistent=False,
+        )
 
     def _debug_force_load_balance_routing(
         self, scores: torch.Tensor
@@ -265,13 +286,11 @@ class TokenChoiceTopKRouter(Module):
         return scores_for_choice
 
     def forward(
-        self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
+        self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
-            expert_bias (torch.Tensor | None, optional): Optional bias tensor for experts with shape ``(num_experts,)``.
-                Used for load balancing. Defaults to None.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -296,7 +315,7 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice = scores if expert_bias is None else scores + expert_bias
+        scores_for_choice = scores if self.expert_bias is None else scores + self.expert_bias
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
             scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
@@ -329,12 +348,30 @@ class TokenChoiceTopKRouter(Module):
             max=self.num_experts,
         )
 
+        # Accumulate tokens_per_expert for load balancing and expert usage tracking.
+        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
+        #       first in the forward pass, and then in the backward pass. However, this has no
+        #       effect on the expert bias update thanks to the torch.sign() operator.
+        with torch.no_grad():
+            self.tokens_per_expert.add_(num_tokens_per_expert)
+
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, **kwargs) -> None:
         init_std = kwargs.get("init_std")
+        buffer_device: torch.device | None = kwargs.get("buffer_device")
         assert init_std is not None
         self.gate.init_weights(init_std=init_std)
+
+        if buffer_device is not None:
+            with torch.device(buffer_device):
+                self.tokens_per_expert = torch.zeros(
+                    self.num_experts, dtype=torch.float32
+                )
+                if self.load_balance_coeff is not None:
+                    self.expert_bias = torch.zeros(
+                        self.num_experts, dtype=torch.float32
+                    )
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -421,7 +458,6 @@ class MoE(Module):
         num_experts: int = 8
         num_shared_experts: int = 1
         score_before_experts: bool = True
-        load_balance_coeff: float | None = 1e-3
         # Expert hidden dimension (replaces old moe_inter_dim)
         hidden_dim: int = 0
         experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
@@ -447,27 +483,6 @@ class MoE(Module):
             else None
         )
         self.score_before_experts = config.score_before_experts
-
-        # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
-        # NOTE: tokens_per_expert is accumulated in the model forward pass.
-        #       expert_bias is updated outside the model in an optimizer step pre hook
-        #       to work with gradient accumulation.
-        self.load_balance_coeff = config.load_balance_coeff
-        if self.load_balance_coeff is not None:
-            assert self.load_balance_coeff > 0.0
-            self.register_buffer(
-                "expert_bias",
-                torch.zeros(num_experts, dtype=torch.float32),
-                persistent=True,
-            )
-        else:
-            self.expert_bias = None
-        # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
-        self.register_buffer(
-            "tokens_per_expert",
-            torch.zeros(num_experts, dtype=torch.float32),
-            persistent=False,
-        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -509,20 +524,12 @@ class MoE(Module):
             top_scores,
             selected_experts_indices,
             num_tokens_per_expert,
-        ) = self.router(x, self.expert_bias)
-
-        # tokens_per_expert will be used to update the expert bias for load balancing.
-        # and also to count the expert usage
-        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
-        #       first in the forward pass, and then in the backward pass. However, this has no
-        #       effect on the expert bias update thanks to the torch.sign() operator.
-        with torch.no_grad():
-            self.tokens_per_expert.add_(num_tokens_per_expert)
+        ) = self.router(x)
 
         # top_scores_experts_sorted and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
         # NOTE: the reason we need to compute num_tokens_per_expert again is:
-        #       1st computation in router is to update self.tokens_per_expert
+        #       1st computation in router is to update self.router.tokens_per_expert
         #       which would be the same across all TP ranks.
         #       2nd computation in reorderer is for the actual routing and experts computation
         #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
@@ -583,15 +590,6 @@ class MoE(Module):
         assert isinstance(buffer_device, torch.device)
 
         self.experts.init_weights(init_std=init_std)
-        self.router.init_weights(init_std=init_std)
+        self.router.init_weights(init_std=init_std, buffer_device=buffer_device)
         if self.shared_experts is not None:
             self.shared_experts.init_weights(init_std)
-
-        with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
-            )
-            if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
-                )

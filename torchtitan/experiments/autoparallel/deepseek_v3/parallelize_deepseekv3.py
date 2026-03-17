@@ -174,7 +174,7 @@ def moe_forward(self, x: torch.Tensor) -> torch.Tensor:
     out, num_tokens_per_expert = _moe_forward(
         x,
         self.router.gate.weight,
-        self.expert_bias,
+        self.router.expert_bias,
         self.experts.w1,
         self.experts.w3,
         self.experts.w2,
@@ -192,7 +192,7 @@ def moe_forward(self, x: torch.Tensor) -> torch.Tensor:
     #       first in the forward pass, and then in the backward pass. However, this has no
     #       effect on the expert bias update thanks to the torch.sign() operator.
     with torch.no_grad():
-        self.tokens_per_expert.add_(num_tokens_per_expert)
+        self.router.tokens_per_expert.add_(num_tokens_per_expert)
     return out
 
 
@@ -441,8 +441,8 @@ def _preserve_moe_attributes(original_model, parallel_model):
     # This is fine to do since these attributes are read only
     for orig_moe, par_moe in zip(original_moe_modules, parallel_moe_modules):
         if hasattr(orig_moe, "moe_enabled"):
-            par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+            par_moe.router.load_balance_coeff = orig_moe.router.load_balance_coeff
 
         # Copy load_balance_coeff
-        if hasattr(orig_moe, "load_balance_coeff"):
-            par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+        if hasattr(orig_moe, "router") and hasattr(orig_moe.router, "load_balance_coeff"):
+            par_moe.router.load_balance_coeff = orig_moe.router.load_balance_coeff

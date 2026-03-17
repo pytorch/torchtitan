@@ -249,7 +249,7 @@ def register_moe_load_balancing_hook(
                 if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
                     # pyrefly: ignore [missing-attribute]
-                    return bool(transformer_block.moe.load_balance_coeff)
+                    return bool(transformer_block.moe.router.load_balance_coeff)
         return False
 
     # for MoE auxiliary-loss-free load balancing
@@ -271,10 +271,10 @@ def register_moe_load_balancing_hook(
                 if not transformer_block.moe_enabled:
                     continue
                 # pyrefly: ignore [missing-attribute]
-                if transformer_block.moe.load_balance_coeff is None:
+                if transformer_block.moe.router.load_balance_coeff is None:
                     return
                 # pyrefly: ignore [missing-attribute]
-                tokens_per_expert = transformer_block.moe.tokens_per_expert
+                tokens_per_expert = transformer_block.moe.router.tokens_per_expert
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
                     # This does not affect to expert choice, but affects the experts usage metrics.
@@ -308,7 +308,7 @@ def register_moe_load_balancing_hook(
                 for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
-                    moe = transformer_block.moe
+                    router = transformer_block.moe.router
 
                     tokens_per_expert = tokens_per_expert_by_layer[
                         moe_layer_idx
@@ -318,14 +318,14 @@ def register_moe_load_balancing_hook(
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     # pyrefly: ignore [missing-attribute]
-                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                    expert_bias_delta = router.load_balance_coeff * torch.sign(
                         tokens_per_expert.mean() - tokens_per_expert
                     )
                     expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
                     # pyrefly: ignore [missing-attribute]
-                    moe.expert_bias.add_(expert_bias_delta)
+                    router.expert_bias.add_(expert_bias_delta)
                     # pyrefly: ignore [missing-attribute]
-                    moe.tokens_per_expert.zero_()
+                    router.tokens_per_expert.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
