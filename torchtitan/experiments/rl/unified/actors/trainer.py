@@ -130,7 +130,6 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         self.policy_version = 0
-        self._rdma_registered = False
         self.generator: Any | None = None
 
         from monarch.rdma import is_rdma_available
@@ -233,17 +232,12 @@ class PolicyTrainer(Actor, Configurable):
     @endpoint
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generator consumption via TorchStore."""
-        if self._use_direct_rdma:
-            state_dict = self.model.state_dict() if not self._rdma_registered else None
-        else:
-            state_dict = self.model.state_dict()
         await ts.put_state_dict(
-            state_dict,
+            self.model.state_dict(),
             "model_state_dict",
             direct_rdma=self._use_direct_rdma,
             transfer_dtype=torch.bfloat16,
         )
-        self._rdma_registered = True
 
     @endpoint
     async def step(self, episodes: list[Episode]) -> dict:
