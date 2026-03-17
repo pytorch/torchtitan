@@ -329,7 +329,7 @@ class VLLMGenerator(Actor, Configurable):
         )
         self.policy_version = version
         logger.debug(
-            f"{os.getpid()=} Generator pulled weights via RDMA for policy v{version}"
+            f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
 
     def __del__(self):

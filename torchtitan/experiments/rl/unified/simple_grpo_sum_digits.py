@@ -224,14 +224,12 @@ class RLTrainer(Configurable):
         )
 
         # Initialize TorchStore for weight sync between trainer and generator.
-        # num_storage_volumes: intermediate storage nodes that hold tensor data
-        #   in the non-RDMA (RPC) path. 2 volumes distributes the load so no
-        #   single volume is a bottleneck.
+        # StorageVolumes are spawned on the trainer mesh so they are colocated
+        # with the weight source for faster data access in the non-RDMA path.
         # LocalRankStrategy: routes each process to a storage volume based on
-        #   LOCAL_RANK, so colocated processes share the same volume and data
-        #   stays node-local when possible.
+        #   LOCAL_RANK, so colocated processes share the same volume.
         # https://github.com/meta-pytorch/torchstore
-        await ts.initialize(num_storage_volumes=2, strategy=ts.LocalRankStrategy())
+        await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
         self.trainer.push_model_state_dict.call().get()
