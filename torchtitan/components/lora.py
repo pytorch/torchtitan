@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+
 from torchtitan.config import Configurable
 from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
@@ -115,10 +116,10 @@ class LoRAConverter(Configurable):
         self._replace_linears_with_lora(model)
 
         # Wire up checkpoint filtering so ModelWrapper knows which keys
-        # are adapter keys.
+        # are adapter keys and how to save them.
         model.converter_key_filter = self._is_lora_key  # type: ignore[attr-defined]
-        model.lora_save_format = self.save_format  # type: ignore[attr-defined]
-        model.lora_config = {  # type: ignore[attr-defined]
+        model.converter_save_format = self.save_format  # type: ignore[attr-defined]
+        model.converter_config = {  # type: ignore[attr-defined]
             "rank": self.rank,
             "alpha": self.alpha,
         }
