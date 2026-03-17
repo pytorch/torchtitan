@@ -54,7 +54,8 @@ Usage:
     # Ablation 2: + disable SP
     torchrun --nproc_per_node=4 ... --tp 4 --disable-sp --use-compile-cudagraph --test-cases vllm-torchtitan
 
-    # Ablation 3: + custom model definition (fused kernels) -- requires code changes
+    # Ablation 3: + fused vLLM kernels (QKV, RoPE, FFN, attention)
+    torchrun --nproc_per_node=4 ... --tp 4 --disable-sp --use-compile-cudagraph --use-fused-kernels --test-cases vllm-torchtitan
 """
 
 from __future__ import annotations
@@ -140,6 +141,7 @@ class BenchmarkConfig:
     use_compile_cudagraph: bool = (
         False  # True = compile(eager) + piecewise cudagraph; False = fully eager
     )
+    use_fused_kernels: bool = False  # True = fused QKV/RoPE/FFN/attention kernels
     # NCCL tuning
     nccl_algo: str | None = None  # e.g. "Tree" to force tree-based all-reduce
     # Profiling options
@@ -424,12 +426,20 @@ class VLLMTorchTitanBenchmark:
             # CLI --model-path overrides the config's hf_assets_path
             model_path = self.config.model_path or rl_config.hf_assets_path
 
+            # Set fused kernels flag before engine creation (vllm_wrapper reads it)
+            if self.config.use_fused_kernels:
+                from torchtitan.experiments.rl.unified.models import vllm_wrapper
+
+                vllm_wrapper.fused_kernels_enabled = True
+
             use_compile = self.config.use_compile_cudagraph
             mode_str = (
                 "compile(eager) + piecewise cudagraph"
                 if use_compile
                 else "eager (no compile, no cudagraph)"
             )
+            if self.config.use_fused_kernels:
+                mode_str += " + fused kernels"
 
             sp_mode = "TP+SP" if not self.config.disable_sp else "TP-only"
             print(f"Loading vLLM with TorchTitan Qwen3 model ({sp_mode})...")
@@ -442,6 +452,8 @@ class VLLMTorchTitanBenchmark:
                 compile_tag = (
                     "compile_cg" if self.config.use_compile_cudagraph else "eager"
                 )
+                if self.config.use_fused_kernels:
+                    compile_tag += "_fused"
                 profile_name = (
                     f"vllm_torchtitan_{self.config.model_size}"
                     f"_tp{self.config.tp}_{sp_tag}_{compile_tag}"
@@ -566,6 +578,8 @@ class VLLMTorchTitanBenchmark:
         compile_mode = (
             "compile+cudagraph" if self.config.use_compile_cudagraph else "eager"
         )
+        if self.config.use_fused_kernels:
+            compile_mode += "+fused"
         return BenchmarkMetrics(
             approach=f"vLLM TorchTitan ({sp_mode}, {compile_mode})",
             total_time=total_time,
@@ -1312,6 +1326,12 @@ def main():
         "Default is fully eager (no compile, no cudagraph).",
     )
     parser.add_argument(
+        "--use-fused-kernels",
+        action="store_true",
+        help="Enable fused vLLM kernels (QKV, RoPE, FFN, attention) for TorchTitan model. "
+        "Bypasses DTensor dispatch with direct local weight ops and vllm::all_reduce.",
+    )
+    parser.add_argument(
         "--nccl-algo",
         type=str,
         default=None,
@@ -1354,6 +1374,7 @@ def main():
         profile_warmup=args.profile_warmup,
         profile_active=args.profile_active,
         use_compile_cudagraph=args.use_compile_cudagraph,
+        use_fused_kernels=args.use_fused_kernels,
         nccl_algo=args.nccl_algo,
     )
 
