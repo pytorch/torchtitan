@@ -24,9 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.experiments.rl.models.attention import (
-    replace_with_vllm_attention,
-)
+from torchtitan.experiments.rl.models.attention import replace_with_vllm_attention
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile

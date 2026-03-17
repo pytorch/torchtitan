@@ -21,10 +21,10 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
-
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
+
+from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
 
 
 logger = init_logger(__name__)

@@ -35,13 +35,14 @@ import torch
 import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
+
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
 from torchtitan.experiments.rl.rl_types import Episode
+from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -141,9 +142,7 @@ class RLTrainer(Configurable):
 
         # Patch model_spec to use the RL-specific parallelize function.
         # TODO: Switch to canonical Qwen3 parallel plan
-        from torchtitan.experiments.rl.models.parallelize import (
-            parallelize_qwen3,
-        )
+        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 
         config.model_spec.parallelize_fn = parallelize_qwen3
 

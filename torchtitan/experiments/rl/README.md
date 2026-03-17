@@ -1,14 +1,13 @@
-# Run vLLM inference with TorchTitan Qwen3 Model
+# RL Training with TorchTitan and vLLM
 
-This directory contains code to run a single canonical model definition (TorchTitan model definition) with vLLM inference engine (not batch-invariant yet, working in progress). This work is actively developing and only supports inference for now.
-
-This work is inspired by https://github.com/vllm-project/vllm/pull/28685.
+This directory contains code for RL training using TorchTitan model definitions with vLLM inference engine for fast rollout generation.
 
 ## Overview
-The integration consists of two main components:
+The integration consists of the following components:
 
-1. **Model Adapter** (`model/qwen3.py`): A custom model class that extends vLLM's `Qwen3ForCausalLM` to handle TorchTitan checkpoint naming conventions
-2. **Inference Script** (`inference_example.py`): A simple script to register the model and run inference
+1. **vLLM Model Wrapper** (`models/vllm_wrapper.py`): Adapts TorchTitan models for vLLM's inference engine
+2. **RL Training Loop** (`simple_grpo_sum_digits.py`): GRPO-based RL training with Monarch actors
+3. **Inference Script** (`inference_example.py`): Standalone inference using the vLLM engine
 
 
 ## Quick Start
