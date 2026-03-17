@@ -189,7 +189,7 @@ class TokenChoiceTopKRouter(Module):
         route_norm: bool = False
         route_scale: float = 1.0
         gate: Linear.Config
-        load_balance_coeff: float | None = None
+        load_balance_coeff: float | None = 1e-3
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -315,7 +315,9 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice = scores if self.expert_bias is None else scores + self.expert_bias
+        scores_for_choice = (
+            scores if self.expert_bias is None else scores + self.expert_bias
+        )
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
             scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)

@@ -42,7 +42,6 @@ gptoss_configs = {
                     route_norm=True,
                     gate=Linear.Config(bias=True),
                     top_k=4,
-                    load_balance_coeff=1e-3,
                 ),
             ),
             attention=Attention.Config(
@@ -79,7 +78,6 @@ gptoss_configs = {
                     route_norm=True,
                     gate=Linear.Config(bias=True),
                     top_k=4,
-                    load_balance_coeff=1e-3,
                 ),
             ),
             attention=Attention.Config(
@@ -116,7 +114,6 @@ gptoss_configs = {
                     route_norm=True,
                     gate=Linear.Config(bias=True),
                     top_k=4,
-                    load_balance_coeff=1e-3,
                 ),
             ),
             attention=Attention.Config(

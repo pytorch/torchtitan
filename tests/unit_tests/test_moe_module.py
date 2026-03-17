@@ -114,6 +114,20 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
         self.assertEqual(router.score_func, "sigmoid")
         self.assertFalse(router.route_norm)
         self.assertEqual(router.route_scale, 1.0)
+        self.assertEqual(router.load_balance_coeff, 1e-3)
+        self.assertEqual(router.tokens_per_expert.shape, torch.Size([8]))
+        self.assertIsNotNone(router.expert_bias)
+        self.assertEqual(router.expert_bias.shape, torch.Size([8]))
+
+    def test_load_balance_coeff_none_no_expert_bias(self):
+        """load_balance_coeff=None means no expert_bias buffer."""
+        config = TokenChoiceTopKRouter.Config(
+            gate=Linear.Config(), load_balance_coeff=None
+        )
+        router = config.build(dim=32, num_experts=8)
+        self.assertIsNone(router.load_balance_coeff)
+        self.assertIsNone(router.expert_bias)
+        self.assertEqual(router.tokens_per_expert.shape, torch.Size([8]))
 
     def test_config_build_with_custom_params(self):
         """Config respects custom routing parameters."""
@@ -171,27 +185,34 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_forward(self):
-        """Forward pass returns correct shapes."""
-        config = TokenChoiceTopKRouter.Config(top_k=2, score_func="softmax", gate=Linear.Config())
+        """Forward pass returns correct shapes and accumulates tokens_per_expert."""
+        config = TokenChoiceTopKRouter.Config(
+            top_k=2, score_func="softmax", gate=Linear.Config()
+        )
         router = config.build(dim=32, num_experts=8).cuda()
-        router.init_weights(init_std=0.02)
+        router.init_weights(init_std=0.02, buffer_device=torch.device("cuda"))
 
+        self.assertTrue(torch.all(router.tokens_per_expert == 0))
         x = torch.randn(10, 32, device="cuda")
         top_scores, selected_experts, num_tokens_per_expert = router(x)
         self.assertEqual(top_scores.shape, torch.Size([10, 2]))
         self.assertEqual(selected_experts.shape, torch.Size([10, 2]))
         self.assertEqual(num_tokens_per_expert.shape, torch.Size([8]))
+        # tokens_per_expert should have been accumulated
+        self.assertTrue(torch.all(router.tokens_per_expert == num_tokens_per_expert))
 
     def test_init_weights(self):
-        """init_weights delegates to gate.init_weights."""
+        """init_weights delegates to gate.init_weights and reinits buffers."""
         config = TokenChoiceTopKRouter.Config(gate=Linear.Config())
         router = config.build(dim=16, num_experts=4)
 
         with torch.no_grad():
             torch.nn.init.zeros_(router.gate.weight)
             self.assertTrue(torch.all(router.gate.weight == 0))
-            router.init_weights(init_std=0.02)
+            router.init_weights(init_std=0.02, buffer_device=torch.device("cpu"))
             self.assertFalse(torch.all(router.gate.weight == 0))
+            self.assertEqual(router.tokens_per_expert.shape, torch.Size([4]))
+            self.assertEqual(router.expert_bias.shape, torch.Size([4]))
 
     def test_shared_config_builds_independent_instances(self):
         """A single Config can build multiple independent routers."""

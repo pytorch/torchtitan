@@ -444,5 +444,7 @@ def _preserve_moe_attributes(original_model, parallel_model):
             par_moe.router.load_balance_coeff = orig_moe.router.load_balance_coeff
 
         # Copy load_balance_coeff
-        if hasattr(orig_moe, "router") and hasattr(orig_moe.router, "load_balance_coeff"):
+        if hasattr(orig_moe, "router") and hasattr(
+            orig_moe.router, "load_balance_coeff"
+        ):
             par_moe.router.load_balance_coeff = orig_moe.router.load_balance_coeff
