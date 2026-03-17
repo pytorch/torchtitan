@@ -89,31 +89,27 @@ class ModelWrapper(Stateful):
             for part in self.model
         )
 
-    def _save_converter_keys_only(self) -> bool:
-        """Save only converter-added weights when a converter is present."""
-        return self.has_converter_keys()
-
     @property
-    def lora_save_format(self) -> str:
-        """Return the LoRA save format from the first model part that has one."""
+    def converter_save_format(self) -> str:
+        """Return the save format from the first model part that has one."""
         for part in self.model:
-            fmt = getattr(part, "lora_save_format", None)
+            fmt = getattr(part, "converter_save_format", None)
             if fmt is not None:
                 return fmt
         return "dcp"
 
     @property
-    def lora_config(self) -> dict[str, Any] | None:
-        """Return LoRA config metadata from the first model part that has it."""
+    def converter_config(self) -> dict[str, Any] | None:
+        """Return converter config metadata from the first model part that has it."""
         for part in self.model:
-            cfg = getattr(part, "lora_config", None)
+            cfg = getattr(part, "converter_config", None)
             if cfg is not None:
                 return cfg
         return None
 
     def state_dict_to_save(self) -> dict[str, Any]:
         full_sd = self._get_state_dict()
-        if self._save_converter_keys_only():
+        if self.has_converter_keys():
             return {k: v for k, v in full_sd.items() if self._is_converter_key(k)}
         return full_sd
 
@@ -661,7 +657,7 @@ class CheckpointManager(Configurable):
     def dcp_load(
         self,
         state_dict: dict[str, Any],
-        checkpoint_id: str | list[str],
+        checkpoint_ids: list[str],
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
@@ -669,7 +665,7 @@ class CheckpointManager(Configurable):
 
         Args:
             state_dict (dict): The state dict to load.
-            checkpoint_id (str | list[str]): The checkpoint id(s) to load.
+            checkpoint_ids (list[str]): The checkpoint ids to load.
                 The first checkpoint is treated as the primary checkpoint.
                 Additional checkpoints are in DCP format (default) or PEFT
                 safetensors format when ``additional_load_in_hf`` is True.
@@ -677,9 +673,6 @@ class CheckpointManager(Configurable):
                 HuggingFace safetensors format.
             from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
         """
-        checkpoint_ids = (
-            [checkpoint_id] if isinstance(checkpoint_id, str) else checkpoint_id
-        )
         needs_partial = (
             len(checkpoint_ids) > 1 or self.states[MODEL].has_converter_keys()
         )
@@ -691,9 +684,10 @@ class CheckpointManager(Configurable):
             if is_primary:
                 if from_hf:
                     # HF format: model only, training states from additional checkpoints
-                    assert (
-                        self.sd_adapter is not None
-                    ), "Trying to load HF safetensors but sd_adapter is not provided."
+                    if self.sd_adapter is None:
+                        raise ValueError(
+                            "Trying to load HF safetensors but sd_adapter is not provided."
+                        )
                     hf_state_dict = self.sd_adapter.to_hf(
                         self.states[MODEL].base_state_dict()
                     )
@@ -922,7 +916,7 @@ class CheckpointManager(Configurable):
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
-            checkpoint_id=[checkpoint_id] + self.additional_load_paths,
+            checkpoint_ids=[checkpoint_id] + self.additional_load_paths,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
@@ -1082,10 +1076,10 @@ class CheckpointManager(Configurable):
         model_wrapper = self.states[MODEL]
         if (
             self.last_save_model_only
-            and model_wrapper.lora_save_format == "peft"
+            and model_wrapper.converter_save_format == "peft"
             and model_wrapper.has_converter_keys()
         ):
-            self._save_peft(states, curr_step, model_wrapper.lora_config)
+            self._save_peft(states, curr_step, model_wrapper.converter_config)
             return
 
         self.dcp_save(
@@ -1106,7 +1100,7 @@ class CheckpointManager(Configurable):
         self,
         states: dict[str, Any],
         curr_step: int,
-        lora_config: dict[str, Any] | None,
+        converter_config: dict[str, Any] | None,
     ) -> None:
         """Save adapter weights in PEFT-compatible format.
 
@@ -1116,9 +1110,17 @@ class CheckpointManager(Configurable):
         """
         from safetensors.torch import save_file
 
+        if converter_config is None:
+            raise ValueError(
+                "converter_config is required for PEFT save format. "
+                "Ensure the model converter sets converter_config on the model."
+            )
+
         checkpoint_dir = self._create_checkpoint_id(curr_step)
 
-        # Collect full tensors from DTensors
+        # Collect full tensors from DTensors on CPU.
+        # LoRA adapter weights are Replicate-placed DTensors after parallelization,
+        # so full_tensor() returns the complete tensor on every rank.
         cpu_states = {}
         for k, v in states.items():
             if hasattr(v, "full_tensor"):
@@ -1157,8 +1159,8 @@ class CheckpointManager(Configurable):
             )
             config_dict = {
                 "peft_type": "LORA",
-                "r": lora_config["rank"] if lora_config else 8,
-                "lora_alpha": lora_config["alpha"] if lora_config else 16.0,
+                "r": converter_config["rank"],
+                "lora_alpha": converter_config["alpha"],
                 "target_modules": target_modules,
             }
             config_path = os.path.join(checkpoint_dir, "adapter_config.json")
