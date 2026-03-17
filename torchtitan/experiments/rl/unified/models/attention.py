@@ -11,7 +11,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention.layer import Attention
 
 logger = logging.getLogger(__name__)
 
