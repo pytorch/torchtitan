@@ -157,6 +157,33 @@ def llama3_debugmodel_qat_lora() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_qat_lora_merged() -> Trainer.Config:
+    """QAT + LoRA with merged save — QAT is applied to both base weights and
+    LoRA adapters, then adapters are folded into base weights at save time."""
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(scheme="intx_weight_only", group_size=8),
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+                save_format="merged",
+            ),
+        ],
+    )
+    config.checkpoint = CheckpointManager.Config(
+        enable=True,
+        interval=5,
+        last_save_model_only=True,
+    )
+    config.training = TrainingConfig(
+        local_batch_size=8,
+        seq_len=2048,
+        steps=20,
+    )
+    return config
+
+
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-8B",
