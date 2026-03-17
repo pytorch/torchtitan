@@ -187,10 +187,12 @@ class Validator(BaseValidator):
 
         # TODO: deduplicate with Trainer.post_dataloading_process which has
         # the same logic; extract a shared function to prevent further drift.
-        # TODO: remove this guard once RoPE handles DTensor+positions.
-        # The positions!=None path in RoPE uses torch.gather which fails
-        # with DTensor+FSDP. For now, only pass positions through when
-        # using flex/varlen + block_causal (where it's needed and works).
+        # Per-document position IDs are only needed for block_causal
+        # attention, where each packed document gets its own RoPE reset.
+        # For causal attention the whole sequence is one document, so
+        # sequential positions (the positions=None path) are correct.
+        # Passing them through would also OOB the RoPE cache, since
+        # individual document lengths can exceed max_seq_len.
         model_config = getattr(model_parts[0], "config", None)
         layer = getattr(model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
