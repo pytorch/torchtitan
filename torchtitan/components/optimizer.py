@@ -308,6 +308,7 @@ def register_moe_load_balancing_hook(
                 for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
+                    # pyrefly: ignore [missing-attribute]
                     router = transformer_block.moe.router
 
                     tokens_per_expert = tokens_per_expert_by_layer[
