@@ -132,6 +132,9 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Any | None = None
 
+        # Weight sync transport: if RDMA is available, use GPUDirect RDMA for
+        # one-hop GPU-to-GPU transfer. Otherwise, fall back to TorchStore's
+        # default RPC-based transport (two-hop via StorageVolumes).
         from monarch.rdma import is_rdma_available
 
         self._use_direct_rdma = is_rdma_available()
