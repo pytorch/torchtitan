@@ -51,7 +51,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
             "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
             "model.layers.{}.mlp.shared_experts.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
-            "model.layers.{}.mlp.gate.e_score_correction_bias": "layers.{}.moe.expert_bias",
+            "model.layers.{}.mlp.gate.e_score_correction_bias": "layers.{}.moe.router.expert_bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }

@@ -16,7 +16,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 
@@ -51,7 +51,10 @@ llama4_configs = {
                 attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
-            moe=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
+            moe=MoE.Config(
+                hidden_dim=compute_moe_hidden_dim(256),
+                router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+            ),
         ),
         rope=RoPE.Config(
             dim=256 // 16,
@@ -83,6 +86,7 @@ llama4_configs = {
                     top_k=1,
                     num_shared_experts=1,
                 ),
+                router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
@@ -126,6 +130,7 @@ llama4_configs = {
                     top_k=1,
                     num_shared_experts=1,
                 ),
+                router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(

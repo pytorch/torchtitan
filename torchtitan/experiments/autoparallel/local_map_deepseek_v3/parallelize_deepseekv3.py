@@ -188,8 +188,10 @@ def _preserve_moe_attributes(original_model, parallel_model):
     # This is fine to do since these attributes are read only
     for orig_moe, par_moe in zip(original_moe_modules, parallel_moe_modules):
         if hasattr(orig_moe, "moe_enabled"):
-            par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+            par_moe.router.load_balance_coeff = orig_moe.router.load_balance_coeff
 
         # Copy load_balance_coeff
-        if hasattr(orig_moe, "load_balance_coeff"):
-            par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+        if hasattr(orig_moe, "router") and hasattr(
+            orig_moe.router, "load_balance_coeff"
+        ):
+            par_moe.router.load_balance_coeff = orig_moe.router.load_balance_coeff

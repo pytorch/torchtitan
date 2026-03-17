@@ -9,6 +9,7 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe.moe import TokenChoiceTopKRouter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 
@@ -38,10 +39,12 @@ deepseekv3_configs = {
                 hidden_dim=256,
                 num_experts=8,
                 num_shared_experts=2,
-                top_k=3,
-                score_func="softmax",
-                route_norm=False,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=3,
+                    score_func="softmax",
+                    gate=Linear.Config(),
+                ),
             ),
             attention=Attention.Config(
                 q_norm=RMSNorm.Config(),
@@ -86,10 +89,12 @@ deepseekv3_configs = {
                 hidden_dim=256,
                 num_experts=8,
                 num_shared_experts=2,
-                top_k=3,
-                score_func="softmax",
-                route_norm=False,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=3,
+                    score_func="softmax",
+                    gate=Linear.Config(),
+                ),
             ),
             attention=Attention.Config(
                 q_norm=RMSNorm.Config(),
@@ -136,10 +141,12 @@ deepseekv3_configs = {
                 hidden_dim=1408,
                 num_experts=64,
                 num_shared_experts=2,
-                top_k=6,
-                score_func="softmax",
-                route_norm=False,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=6,
+                    score_func="softmax",
+                    gate=Linear.Config(),
+                ),
             ),
             attention=Attention.Config(
                 q_norm=RMSNorm.Config(),
@@ -186,13 +193,15 @@ deepseekv3_configs = {
                 hidden_dim=1536,
                 num_experts=160,
                 num_shared_experts=2,
-                top_k=6,
-                num_expert_groups=8,
-                num_limited_groups=3,
-                score_func="softmax",
-                route_norm=False,
-                route_scale=16.0,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=6,
+                    num_expert_groups=8,
+                    num_limited_groups=3,
+                    score_func="softmax",
+                    route_scale=16.0,
+                    gate=Linear.Config(),
+                ),
             ),
             attention=Attention.Config(
                 q_norm=RMSNorm.Config(),
@@ -239,13 +248,16 @@ deepseekv3_configs = {
                 hidden_dim=2048,
                 num_experts=256,
                 num_shared_experts=1,
-                top_k=8,
-                num_expert_groups=8,
-                num_limited_groups=4,
-                score_func="sigmoid",
-                route_norm=True,
-                route_scale=2.5,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=8,
+                    num_expert_groups=8,
+                    num_limited_groups=4,
+                    score_func="sigmoid",
+                    route_norm=True,
+                    route_scale=2.5,
+                    gate=Linear.Config(),
+                ),
             ),
             attention=Attention.Config(
                 q_norm=RMSNorm.Config(),
