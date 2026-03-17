@@ -780,6 +780,38 @@ class TestCheckpointManager(unittest.TestCase):
 class TestModelWrapperConverterKeys(unittest.TestCase):
     """Tests for ModelWrapper.has_converter_keys() and its effect on load planner."""
 
+    def _create_manager(self, mock_save, mock_load, model, temp_dir):
+        """Create a CheckpointManager with mocked dcp.save/load."""
+        mock_save.side_effect = lambda *a, **kw: os.makedirs(
+            kw.get("checkpoint_id", a[1] if len(a) > 1 else ""), exist_ok=True
+        )
+        mock_load.side_effect = lambda *a, **kw: None
+
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="disabled",
+            folder="",
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=None,
+            initial_load_model_only=False,
+        )
+        with mock.patch("torch.distributed.new_group", return_value="pg"):
+            return CheckpointManager(
+                dataloader=FakeDataLoader(),
+                model_parts=[model],
+                optimizers=FakeOptimizersContainer(),
+                lr_schedulers=FakeLRSchedulersContainer(),
+                states={},
+                config=cfg,
+                sd_adapter=None,
+                base_folder=temp_dir,
+                ft_manager=DummyFTManager(),
+            )
+
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
@@ -787,38 +819,10 @@ class TestModelWrapperConverterKeys(unittest.TestCase):
         self, mock_save, mock_load, mock_rank
     ):
         """Without converter keys, dcp.load is called with allow_partial_load=False."""
-        mock_save.side_effect = lambda *a, **kw: os.makedirs(
-            kw.get("checkpoint_id", a[1] if len(a) > 1 else ""), exist_ok=True
-        )
-        mock_load.side_effect = lambda *a, **kw: None
-
         temp_dir = tempfile.mkdtemp()
         try:
             model = nn.Linear(2, 2)
-            cfg = CheckpointManager.Config(
-                enable=True,
-                async_mode="disabled",
-                folder="",
-                interval=1,
-                keep_latest_k=0,
-                last_save_model_only=False,
-                export_dtype="float32",
-                exclude_from_loading=[],
-                initial_load_path=None,
-                initial_load_model_only=False,
-            )
-            with mock.patch("torch.distributed.new_group", return_value="pg"):
-                manager = CheckpointManager(
-                    dataloader=FakeDataLoader(),
-                    model_parts=[model],
-                    optimizers=FakeOptimizersContainer(),
-                    lr_schedulers=FakeLRSchedulersContainer(),
-                    states={},
-                    config=cfg,
-                    sd_adapter=None,
-                    base_folder=temp_dir,
-                    ft_manager=DummyFTManager(),
-                )
+            manager = self._create_manager(mock_save, mock_load, model, temp_dir)
             manager.save(curr_step=1)
             manager.load(step=1)
 
@@ -836,41 +840,13 @@ class TestModelWrapperConverterKeys(unittest.TestCase):
         self, mock_save, mock_load, mock_rank
     ):
         """With converter keys on the model, dcp.load is called with allow_partial_load=True."""
-        mock_save.side_effect = lambda *a, **kw: os.makedirs(
-            kw.get("checkpoint_id", a[1] if len(a) > 1 else ""), exist_ok=True
-        )
-        mock_load.side_effect = lambda *a, **kw: None
-
         temp_dir = tempfile.mkdtemp()
         try:
             model = nn.Linear(2, 2)
             object.__setattr__(
                 model, "converter_key_filter", lambda key: ".lora_a." in key
             )
-            cfg = CheckpointManager.Config(
-                enable=True,
-                async_mode="disabled",
-                folder="",
-                interval=1,
-                keep_latest_k=0,
-                last_save_model_only=False,
-                export_dtype="float32",
-                exclude_from_loading=[],
-                initial_load_path=None,
-                initial_load_model_only=False,
-            )
-            with mock.patch("torch.distributed.new_group", return_value="pg"):
-                manager = CheckpointManager(
-                    dataloader=FakeDataLoader(),
-                    model_parts=[model],
-                    optimizers=FakeOptimizersContainer(),
-                    lr_schedulers=FakeLRSchedulersContainer(),
-                    states={},
-                    config=cfg,
-                    sd_adapter=None,
-                    base_folder=temp_dir,
-                    ft_manager=DummyFTManager(),
-                )
+            manager = self._create_manager(mock_save, mock_load, model, temp_dir)
             manager.save(curr_step=1)
             manager.load(step=1)
 
