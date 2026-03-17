@@ -175,6 +175,35 @@ def test_lora_trains_base_frozen():
     assert any_lora_changed, "No LoRA param changed after 5 training steps"
 
 
+<<<<<<< HEAD
+def test_lora_key_remap_roundtrip():
+    """Remap torchtitan LoRA keys to HF and back, verify roundtrip."""
+    from torchtitan.components.lora import (
+        remap_lora_keys_from_hf,
+        remap_lora_keys_to_hf,
+    )
+
+    from_hf_map = {
+        "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+        "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+    }
+
+    tt_sd = {
+        "layers.0.attention.wq.lora_a.weight": torch.randn(8, 64),
+        "layers.0.attention.wq.lora_b.weight": torch.randn(64, 8),
+        "layers.2.feed_forward.w1.lora_a.weight": torch.randn(8, 64),
+    }
+
+    hf_sd = remap_lora_keys_to_hf(tt_sd, from_hf_map)
+    assert "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight" in hf_sd
+    assert "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight" in hf_sd
+    assert "base_model.model.model.layers.2.mlp.gate_proj.lora_A.weight" in hf_sd
+
+    rt_sd = remap_lora_keys_from_hf(hf_sd, from_hf_map)
+    assert set(rt_sd.keys()) == set(tt_sd.keys())
+    for k in tt_sd:
+        assert torch.equal(rt_sd[k], tt_sd[k])
+=======
 def test_qlora_base_weights_quantized_adapters_full_precision():
     """After first forward: base weights are NF4, LoRA adapters remain full precision."""
     torchao = pytest.importorskip("torchao")
@@ -214,3 +243,4 @@ def test_qlora_base_weights_quantized_adapters_full_precision():
         assert (
             layer.lora_b.weight.dtype == torch.float32
         ), f"{name}.lora_b.weight should be float32"
+>>>>>>> 695a256c (support qlora)
