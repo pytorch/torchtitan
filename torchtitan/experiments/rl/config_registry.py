@@ -8,19 +8,19 @@
 Config entry points for the RL/unified experiment.
 
 Each function returns a complete ``RLTrainer.Config`` and is discoverable by
-``ConfigManager`` via ``--module rl.unified --config <function_name>``.
+``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
-from torchtitan.experiments.rl.unified.actors.generator import (
+from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
     VLLMGenerator,
 )
-from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.simple_grpo_sum_digits import RLTrainer
+from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -89,6 +89,46 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+            attention_backend="FLASH_ATTN",
+        ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_tp1() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-0.6B with TP=1 (2 GPUs: 1 gen + 1 train)."""
+    return RLTrainer.Config(
+        model_spec=model_registry("0.6B"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=10,
+        batch_invariant_mode=True,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=1,
+                data_parallel_replicate_degree=1,
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,

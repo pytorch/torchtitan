@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.experiments.rl.unified.types import Episode
+from torchtitan.experiments.rl.rl_types import Episode
 
 logger = logging.getLogger(__name__)
 

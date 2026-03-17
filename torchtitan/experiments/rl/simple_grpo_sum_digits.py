@@ -17,8 +17,8 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-python3 torchtitan/experiments/rl/unified/simple_grpo_sum_digits.py \
-    --module rl.unified --config rl_grpo_qwen3_0_6b \
+python3 torchtitan/experiments/rl/simple_grpo_sum_digits.py \
+    --module rl --config rl_grpo_qwen3_0_6b \
     --hf_assets_path=<path_to_model_checkpoint>
 """
 
@@ -37,11 +37,11 @@ from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
-from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
-from torchtitan.experiments.rl.unified.actors.grader import Grader
-from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.unified.types import Episode
+from torchtitan.experiments.rl.actors.generator import VLLMGenerator
+from torchtitan.experiments.rl.actors.grader import Grader
+from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
+from torchtitan.experiments.rl.rl_types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ class RLTrainer(Configurable):
 
         # Patch model_spec to use the RL-specific parallelize function.
         # TODO: Switch to canonical Qwen3 parallel plan
-        from torchtitan.experiments.rl.unified.models.parallelize import (
+        from torchtitan.experiments.rl.models.parallelize import (
             parallelize_qwen3,
         )
 

@@ -12,7 +12,7 @@ This script uses the RL unified config_registry to configure both
 the vLLM engine and sampling parameters.
 
 Run: torchrun --nproc_per_node=2 \
-      torchtitan/experiments/rl/unified/infer.py
+      torchtitan/experiments/rl/inference_example.py
 """
 import os
 
@@ -21,7 +21,7 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
+from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
@@ -38,12 +38,12 @@ def generate():
 
     # Patch model_spec to use the RL-specific parallelize function.
     # TODO: Switch to canonical Qwen3 parallel plan
-    from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
+    from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 
     config.model_spec.parallelize_fn = parallelize_qwen3
 
     # Register TorchTitan model with vLLM before engine creation
-    from torchtitan.experiments.rl.unified.plugin import (
+    from torchtitan.experiments.rl.plugin import (
         register_model_to_vllm_model_registry,
         VLLM_MODEL_NAME,
     )
