@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -88,116 +89,136 @@ class LoRAConverter(Configurable):
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
 
-        save_adapter_only: bool = True
-        """If True, only save LoRA adapter weights in checkpoints.
-        Requires base model to be loaded from HF/initial_load_path on resume.
-        Set to False to save full model weights for debugging without pretrained base."""
-
-        quantize_base: str = ""
-        """Quantize base (non-LoRA) weights. "" = no quantization, "nf4" = NF4 (QLoRA).
-        NF4 quantization reduces base weight memory ~4x while keeping LoRA adapters in full precision."""
-
-        nf4_scaler_block_size: int = 128
-        """Scaler block size for NF4 quantization. Default 128 works with debugmodel on 8 GPUs.
-        The default torchao value (256) may be too large for sharded tensors."""
+        save_format: str = "dcp"
+        """Format for saving adapter weights at the last training step.
+        "dcp" saves adapter weights via DCP (default, supports resumption).
+        "peft" saves adapter_model.safetensors + adapter_config.json for
+        compatibility with HuggingFace PEFT."""
 
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
-        self.save_adapter_only = config.save_adapter_only
-        self.quantize_base = config.quantize_base
-        self.nf4_scaler_block_size = config.nf4_scaler_block_size
-        if self.quantize_base and self.quantize_base != "nf4":
+        self.save_format = config.save_format
+        if self.save_format not in ("dcp", "peft"):
             raise ValueError(
-                f"Unsupported quantize_base value: '{self.quantize_base}'. "
-                "Supported values: '' (none), 'nf4'."
+                f"LoRA save_format must be 'dcp' or 'peft', got '{self.save_format}'"
             )
-        logger.info(
-            f"LoRA training active with rank={self.rank}, alpha={self.alpha}"
-            + (f", quantize_base={self.quantize_base}" if self.quantize_base else "")
-        )
+        logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
+
+    @staticmethod
+    def _is_lora_key(key: str) -> bool:
+        """Check if a state dict key belongs to a LoRA adapter."""
+        return ".lora_a." in key or ".lora_b." in key
 
     def convert(self, model: nn.Module) -> None:
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
+
+        # Wire up checkpoint filtering so ModelWrapper knows which keys
+        # are adapter keys.
+        model.converter_key_filter = self._is_lora_key  # type: ignore[attr-defined]
+        model.lora_save_format = self.save_format  # type: ignore[attr-defined]
+        model.lora_config = {  # type: ignore[attr-defined]
+            "rank": self.rank,
+            "alpha": self.alpha,
+        }
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         for _, child in list(module.named_modules()):
             if isinstance(child, nn.Linear):
                 apply_lora(child, self.rank, self.alpha)
 
-        # Expose a key filter and flag on the module so ModelWrapper can
-        # partition the state dict without knowing about LoRA internals.
-        def converter_key_filter(key: str) -> bool:
-            """Return True if key was added by this converter (LoRA adapter weights)."""
-            return ".lora_a." in key or ".lora_b." in key
-
-        object.__setattr__(module, "converter_key_filter", converter_key_filter)
-        object.__setattr__(module, "save_converter_keys_only", self.save_adapter_only)
-
-        # Register a one-shot forward pre-hook to quantize base weights after
-        # checkpoint load but before the first forward pass (QLoRA).
-        # TODO: Prototype — move to torchao as a proper QuantizationConverter.
-        # to_nf4 on local tensors loses DTensor grad info, fine here since
-        # base weights are frozen and only LoRA adapters receive gradients.
-        if self.quantize_base == "nf4":
-            from torch.distributed.tensor import DTensor
-
-            try:
-                from torchao.dtypes.nf4tensor import to_nf4
-            except ImportError as err:
-                raise ImportError(
-                    "QLoRA requires torchao. Install with: pip install torchao"
-                ) from err
-
-            lora_classes = tuple(_lora_class_cache.values())
-            nf4_scaler_block_size = self.nf4_scaler_block_size
-
-            def _to_nf4_tensor(weight: torch.Tensor) -> torch.Tensor:
-                """Convert weight to NF4, handling both regular tensors and DTensors."""
-                nf4_block_size = 64  # NF4 default block size
-                is_dtensor = isinstance(weight, DTensor)
-                local_weight = weight.to_local() if is_dtensor else weight
-
-                num_scalers = local_weight.numel() // nf4_block_size
-                if num_scalers % nf4_scaler_block_size != 0:
-                    raise ValueError(
-                        f"NF4 quantization failed: num_scalers ({num_scalers}) is not "
-                        f"divisible by nf4_scaler_block_size ({nf4_scaler_block_size}). "
-                        f"Try a smaller nf4_scaler_block_size in LoRAConverter.Config "
-                        f"(e.g., 64, 32, or 1)."
-                    )
-
-                nf4_local = to_nf4(
-                    local_weight, scaler_block_size=nf4_scaler_block_size
-                )
-
-                if is_dtensor:
-                    return DTensor.from_local(
-                        nf4_local,  # pyrefly: ignore [bad-argument-type]
-                        weight.device_mesh,
-                        weight.placements,
-                    )
-                return nf4_local  # pyrefly: ignore [bad-return]
-
-            def _quantize_hook(
-                mod: nn.Module, args: Any, handle: torch.utils.hooks.RemovableHandle
-            ) -> None:
-                for sub in mod.modules():
-                    if isinstance(sub, lora_classes):
-                        sub.weight = nn.Parameter(
-                            _to_nf4_tensor(sub.weight.data), requires_grad=False
-                        )
-                logger.info("QLoRA: quantized base weights to NF4")
-                handle.remove()
-
-            # Use a list to allow the closure to reference the handle before it exists
-            handle_ref: list[torch.utils.hooks.RemovableHandle] = []
-            handle_ref.append(
-                module.register_forward_pre_hook(
-                    lambda mod, args: _quantize_hook(mod, args, handle_ref[0])
-                )
-            )
-
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
+
+
+def remap_lora_keys_to_hf(
+    adapter_sd: dict[str, Any], from_hf_map: dict[str, str | None]
+) -> dict[str, Any]:
+    """Remap torchtitan LoRA keys to HF PEFT naming for saving.
+
+    Converts keys like ``layers.0.attention.wq.lora_a.weight`` to
+    ``base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight``.
+    """
+    to_hf_map = {v: k for k, v in from_hf_map.items() if v is not None}
+    remapped = {}
+    for key, value in adapter_sd.items():
+        lora_suffix = None
+        base_key = key
+        for suffix in (".lora_a.weight", ".lora_b.weight"):
+            if key.endswith(suffix):
+                lora_suffix = suffix
+                base_key = key[: -len(suffix)] + ".weight"
+                break
+        if lora_suffix is None:
+            remapped[key] = value
+            continue
+
+        abstract_base = re.sub(r"(?<=\.)\d+(?=\.)", "{}", base_key, count=1)
+        layer_match = re.search(r"(?<=\.)\d+(?=\.)", base_key)
+        layer_num = layer_match.group(0) if layer_match else None
+
+        if abstract_base in to_hf_map:
+            hf_abstract = to_hf_map[abstract_base]
+            hf_base = hf_abstract.format(layer_num) if layer_num else hf_abstract
+            hf_base_no_weight = hf_base.rsplit(".weight", 1)[0]
+            peft_suffix = lora_suffix.replace(".lora_a.", ".lora_A.").replace(
+                ".lora_b.", ".lora_B."
+            )
+            hf_key = f"base_model.model.{hf_base_no_weight}{peft_suffix}"
+        else:
+            hf_key = f"base_model.model.{key}"
+            hf_key = hf_key.replace(".lora_a.", ".lora_A.").replace(
+                ".lora_b.", ".lora_B."
+            )
+            logger.warning(
+                f"No HF mapping for base key '{abstract_base}', using '{hf_key}'"
+            )
+        remapped[hf_key] = value
+    return remapped
+
+
+def remap_lora_keys_from_hf(
+    adapter_sd: dict[str, Any], from_hf_map: dict[str, str | None]
+) -> dict[str, Any]:
+    """Remap HF PEFT keys to torchtitan naming for loading.
+
+    Converts keys like ``base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight``
+    to ``layers.0.attention.wq.lora_a.weight``.
+    """
+    remapped = {}
+    for key, value in adapter_sd.items():
+        stripped = key
+        if stripped.startswith("base_model.model."):
+            stripped = stripped[len("base_model.model.") :]
+        stripped = stripped.replace(".lora_A.", ".lora_a.").replace(
+            ".lora_B.", ".lora_b."
+        )
+
+        lora_suffix = None
+        hf_base_key = stripped
+        for suffix in (".lora_a.weight", ".lora_b.weight"):
+            if stripped.endswith(suffix):
+                lora_suffix = suffix
+                hf_base_key = stripped[: -len(suffix)] + ".weight"
+                break
+        if lora_suffix is None:
+            remapped[stripped] = value
+            continue
+
+        abstract_hf = re.sub(r"(?<=\.)\d+(?=\.)", "{}", hf_base_key, count=1)
+        layer_match = re.search(r"(?<=\.)\d+(?=\.)", hf_base_key)
+        layer_num = layer_match.group(0) if layer_match else None
+
+        if abstract_hf in from_hf_map and from_hf_map[abstract_hf] is not None:
+            tt_abstract = from_hf_map[abstract_hf]
+            tt_base = tt_abstract.format(layer_num) if layer_num else tt_abstract
+            tt_base_no_weight = tt_base.rsplit(".weight", 1)[0]
+            tt_key = f"{tt_base_no_weight}{lora_suffix}"
+        else:
+            tt_key = stripped
+            logger.warning(
+                f"No torchtitan mapping for HF key '{abstract_hf}', using '{tt_key}'"
+            )
+        remapped[tt_key] = value
+    return remapped
