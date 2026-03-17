@@ -120,9 +120,7 @@ class Qwen3Model(Decoder):
             self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
 
             if self.layer.moe is not None:
-                self.layer.moe.router._debug_force_load_balance = (
-                    debug.moe_force_load_balance
-                )
+                self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
 
             if (
                 parallelism.context_parallel_degree > 1

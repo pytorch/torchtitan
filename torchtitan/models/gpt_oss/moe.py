@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -17,7 +17,6 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.moe.utils import _permute, _unpermute
-from torchtitan.protocols.module import Module
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -179,23 +178,19 @@ def _run_experts_grouped_mm(
     return h
 
 
-class GptOssGroupedExperts(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        swiglu_limit: float = 7.0
-        use_grouped_mm: bool = True
-        dim: int = field(init=False)
-        hidden_dim: int = field(init=False)
-        num_experts: int = field(init=False)
-
-    def __init__(self, config: Config):
+class GptOssGroupedExperts(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        num_experts: int,
+        swiglu_limit: float,
+        use_grouped_mm: bool,
+    ):
         super().__init__()
-        dim = config.dim
-        hidden_dim = config.hidden_dim
-        num_experts = config.num_experts
         self.num_experts = num_experts
-        self.use_grouped_mm = config.use_grouped_mm
-        self.swiglu_limit = config.swiglu_limit
+        self.use_grouped_mm = use_grouped_mm
+        self.swiglu_limit = swiglu_limit
 
         self.mlp1_weight = nn.Parameter(
             torch.empty((num_experts, hidden_dim * 2, dim))
@@ -268,9 +263,7 @@ class GptOssGroupedExperts(Module):
                 tp_degree,
             )
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
+    def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
@@ -290,11 +283,10 @@ class GptOssMoE(MoE):
 
         # Override the base GroupedExperts with GptOssGroupedExperts
         # pyrefly: ignore [bad-assignment]
-        self.experts = GptOssGroupedExperts.Config(
-            swiglu_limit=config.swiglu_limit,
-            use_grouped_mm=config.experts.use_grouped_mm,
-        ).build(
+        self.experts = GptOssGroupedExperts(
             dim=dim,
             hidden_dim=config.hidden_dim,
             num_experts=config.num_experts,
+            swiglu_limit=config.swiglu_limit,
+            use_grouped_mm=config.use_grouped_mm,
         )
