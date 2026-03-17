@@ -236,9 +236,7 @@ class GptOssModel(Decoder):
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             assert self.layer.moe is not None
-            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(
-                9, 0
-            ):
+            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported on SM90 or later",
                 )

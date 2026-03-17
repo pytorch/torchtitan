@@ -372,9 +372,7 @@ class MoE(Module):
         load_balance_coeff: float | None = 1e-3
         # Expert hidden dimension (replaces old moe_inter_dim)
         hidden_dim: int = 0
-        experts: GroupedExperts.Config = field(
-            default_factory=GroupedExperts.Config
-        )
+        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
         router: TokenChoiceTopKRouter.Config = field(
             default_factory=TokenChoiceTopKRouter.Config
         )
@@ -387,9 +385,7 @@ class MoE(Module):
         self.experts = config.experts.build(
             dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
-        self.router = config.router.build(
-            dim=dim, num_experts=num_experts
-        )
+        self.router = config.router.build(dim=dim, num_experts=num_experts)
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
