@@ -94,16 +94,55 @@ class LoRAConverter(Configurable):
         """Format for saving adapter weights at the last training step.
         "dcp" saves adapter weights via DCP (default, supports resumption).
         "peft" saves adapter_model.safetensors + adapter_config.json for
-        compatibility with HuggingFace PEFT."""
+        compatibility with HuggingFace PEFT.
+        "merged" folds adapters into base weights (base + alpha/rank * B @ A)
+        and saves a standard checkpoint with no LoRA keys."""
+
+        adapter_qat_scheme: str = ""
+        """QAT scheme for adapter weights. Empty = no adapter QAT.
+        Must match a supported QATConverter scheme."""
+
+        adapter_qat_group_size: int = 8
+        """Group size for adapter weight quantization.
+        Must divide rank (i.e. rank % group_size == 0).
+        Only used by schemes that support per-group granularity."""
 
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
         self.save_format = config.save_format
-        if self.save_format not in ("dcp", "peft"):
+        if self.save_format not in ("dcp", "peft", "merged"):
             raise ValueError(
-                f"LoRA save_format must be 'dcp' or 'peft', got '{self.save_format}'"
+                f"LoRA save_format must be 'dcp', 'peft', or 'merged', "
+                f"got '{self.save_format}'"
             )
+
+        self.adapter_qat_scheme = config.adapter_qat_scheme
+        self.adapter_qat_group_size = config.adapter_qat_group_size
+        if self.adapter_qat_scheme:
+            from torchtitan.components.quantization.qat import (
+                _SCHEMES_WITH_GROUP_SIZE,
+                _SUPPORTED_SCHEMES,
+            )
+
+            if self.adapter_qat_scheme not in _SUPPORTED_SCHEMES:
+                raise ValueError(
+                    f"Unknown adapter QAT scheme '{self.adapter_qat_scheme}'. "
+                    f"Supported: {_SUPPORTED_SCHEMES}"
+                )
+            if self.adapter_qat_scheme in _SCHEMES_WITH_GROUP_SIZE:
+                if self.rank % self.adapter_qat_group_size != 0:
+                    raise ValueError(
+                        f"LoRA rank ({self.rank}) must be divisible by "
+                        f"adapter_qat_group_size ({self.adapter_qat_group_size})"
+                    )
+            else:
+                logger.warning(
+                    f"Adapter QAT scheme '{self.adapter_qat_scheme}' does not use "
+                    f"group_size, ignoring adapter_qat_group_size="
+                    f"{self.adapter_qat_group_size}"
+                )
+
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
 
     @staticmethod
@@ -111,9 +150,42 @@ class LoRAConverter(Configurable):
         """Check if a state dict key belongs to a LoRA adapter."""
         return ".lora_a." in key or ".lora_b." in key
 
+    def _make_merge_fn(self):
+        """Return a function that merges LoRA adapters into base weights.
+
+        The returned function takes a full state dict (base + adapter keys)
+        and returns a new dict with standard FQNs where each base weight
+        has been replaced by ``base + (alpha / rank) * B @ A``.
+        """
+        scaling = self.alpha / self.rank
+
+        def merge(state_dict: dict[str, Any]) -> dict[str, Any]:
+            merged: dict[str, Any] = {}
+            lora_a: dict[str, Any] = {}
+            lora_b: dict[str, Any] = {}
+            for key, value in state_dict.items():
+                if ".lora_a." in key:
+                    lora_a[key.split(".lora_a.")[0]] = value
+                elif ".lora_b." in key:
+                    lora_b[key.split(".lora_b.")[0]] = value
+                else:
+                    merged[key] = value
+            for prefix in lora_a:
+                base_key = prefix + ".weight"
+                if base_key in merged:
+                    merged[base_key] = merged[base_key] + scaling * (
+                        lora_b[prefix] @ lora_a[prefix]
+                    )
+            return merged
+
+        return merge
+
     def convert(self, model: nn.Module) -> None:
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
+
+        if self.adapter_qat_scheme:
+            self._apply_adapter_qat(model)
 
         # Wire up checkpoint filtering so ModelWrapper knows which keys
         # are adapter keys and how to save them.
@@ -123,6 +195,36 @@ class LoRAConverter(Configurable):
             "rank": self.rank,
             "alpha": self.alpha,
         }
+
+        if self.save_format == "merged":
+            model.converter_export_sd_fn = self._make_merge_fn()  # type: ignore[attr-defined]
+
+    def _apply_adapter_qat(self, model: nn.Module) -> None:
+        from torchao.quantization import quantize_
+        from torchao.quantization.qat import QATConfig
+        from torchao.quantization.qat.api import QATStep
+
+        from torchtitan.components.quantization.qat import _build_base_config
+
+        base_config = _build_base_config(
+            self.adapter_qat_scheme, self.adapter_qat_group_size
+        )
+
+        def _is_lora_linear(mod: nn.Module, fqn: str) -> bool:
+            return isinstance(mod, nn.Linear) and (
+                fqn.endswith(".lora_a") or fqn.endswith(".lora_b")
+            )
+
+        quantize_(
+            model,
+            QATConfig(base_config, step=QATStep.PREPARE),
+            filter_fn=_is_lora_linear,
+        )
+        logger.info(
+            f"Applied adapter QAT fake quantization "
+            f"(scheme={self.adapter_qat_scheme}, "
+            f"group_size={self.adapter_qat_group_size})"
+        )
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         for _, child in list(module.named_modules()):
