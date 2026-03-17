@@ -38,6 +38,7 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
 )
+from torchtitan.distributed.full_dtensor import prepare_for_fsdp
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama3.parallelize import apply_replicate
@@ -154,42 +155,58 @@ def parallelize_gptoss(
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
-
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            edp_mesh=edp_mesh,
-        )
-
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
+        if training.full_dtensor:
+            dp_mesh, dp_mesh_dims = prepare_for_fsdp(model, parallel_dims)
+            apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                pp_enabled=parallel_dims.pp_enabled,
+                cpu_offload=training.enable_cpu_offload,
+                reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+                dp_mesh_dims=dp_mesh_dims,
+            )
+            logger.info("Applied FSDP with full DTensor (SPMD mesh) to the model")
         else:
-            logger.info("Applied FSDP to the model")
+            # apply FSDP or HSDP, potentially with Context Parallel
+            dp_mesh_names = (
+                ["dp_replicate", "fsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["fsdp"]
+            )
+            dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
+            # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
+            apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                pp_enabled=parallel_dims.pp_enabled,
+                cpu_offload=training.enable_cpu_offload,
+                reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+                ep_degree=parallel_dims.ep,
+                edp_mesh=edp_mesh,
+            )
+
+            if parallel_dims.dp_replicate_enabled:
+                logger.info("Applied HSDP to the model")
+            else:
+                logger.info("Applied FSDP to the model")
+
+            if parallel_dims.cp_enabled:
+                logger.info("Applied Context Parallel to the model")
+
+            if training.enable_cpu_offload:
+                logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         apply_replicate(
             model,

@@ -13,7 +13,12 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -24,6 +29,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.full_dtensor import prepare_for_fsdp
 from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -47,23 +53,37 @@ def parallelize_flux(
         apply_cp(model, parallel_dims.get_mesh("cp"))
 
     if parallel_dims.fsdp_enabled:
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-
-        dp_mesh = parallel_dims.get_mesh(names)
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            cpu_offload=training.enable_cpu_offload,
-        )
-
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
+        if training.full_dtensor:
+            dp_mesh, dp_mesh_dims = prepare_for_fsdp(model, parallel_dims)
+            apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                cpu_offload=training.enable_cpu_offload,
+                dp_mesh_dims=dp_mesh_dims,
+            )
+            logger.info("Applied FSDP with full DTensor (SPMD mesh) to the model")
         else:
-            logger.info("Applied FSDP to the model")
+            names = (
+                ["dp_replicate", "fsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["fsdp"]
+            )
+
+            dp_mesh = parallel_dims.get_mesh(names)
+            apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                cpu_offload=training.enable_cpu_offload,
+            )
+
+            if parallel_dims.dp_replicate_enabled:
+                logger.info("Applied HSDP to the model")
+            else:
+                logger.info("Applied FSDP to the model")
 
     return model
 
@@ -74,6 +94,7 @@ def apply_fsdp(
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -84,9 +105,13 @@ def apply_fsdp(
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
+        dp_mesh_dims (DataParallelMeshDims | None, optional): When provided (full DTensor path),
+            tells FSDP which dims of the SPMD mesh are data-parallel. Defaults to None.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -123,7 +148,9 @@ def apply_fsdp(
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
 
-    # Disable FSDP's automatic gradient division for all FSDP modules
+    # Disable FSDP's automatic gradient division for all FSDP modules.
+    # We handle gradient scaling ourselves in the training loop with
+    # global token count (loss / global_valid_tokens before backward).
     disable_fsdp_gradient_division(model)
 
 

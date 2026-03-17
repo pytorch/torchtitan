@@ -12,7 +12,12 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._composable.replicate_with_fsdp import replicate
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -34,6 +39,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.full_dtensor import prepare_for_fsdp
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -139,28 +145,44 @@ def parallelize_llama(
         apply_compile(model, compile_config)
 
     if parallel_dims.fsdp_enabled:
-        # dp_mesh is the mesh for FSDP/HSDP
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(names)
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        )
-
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
+        if training.full_dtensor:
+            dp_mesh, dp_mesh_dims = prepare_for_fsdp(model, parallel_dims)
+            apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                pp_enabled=parallel_dims.pp_enabled,
+                cpu_offload=training.enable_cpu_offload,
+                reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+                dp_mesh_dims=dp_mesh_dims,
+            )
+            logger.info("Applied FSDP with full DTensor (SPMD mesh) to the model")
         else:
-            logger.info("Applied FSDP to the model")
+            # dp_mesh is the mesh for FSDP/HSDP
+            names = (
+                ["dp_replicate", "fsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["fsdp"]
+            )
+            dp_mesh = parallel_dims.get_mesh(names)
+            apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                pp_enabled=parallel_dims.pp_enabled,
+                cpu_offload=training.enable_cpu_offload,
+                reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            )
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
+            if parallel_dims.dp_replicate_enabled:
+                logger.info("Applied HSDP to the model")
+            else:
+                logger.info("Applied FSDP to the model")
+
+            if training.enable_cpu_offload:
+                logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         apply_replicate(
             model,
@@ -309,6 +331,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -325,10 +348,15 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
+        dp_mesh_dims (DataParallelMeshDims | None, optional): When provided (full DTensor path),
+            tells FSDP which dims of the SPMD mesh are data-parallel. Defaults to None.
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        # pyrefly: ignore[bad-typed-dict-key]
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
@@ -363,7 +391,9 @@ def apply_fsdp(
 
     fully_shard(model, **fsdp_config)
 
-    # Disable FSDP's automatic gradient division for all FSDP modules
+    # Disable FSDP's automatic gradient division for all FSDP modules.
+    # We handle gradient scaling ourselves in the training loop with
+    # global token count (loss / global_valid_tokens before backward).
     disable_fsdp_gradient_division(model)
 
 
