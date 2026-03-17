@@ -185,8 +185,8 @@ class GptOssGroupedExperts(Module):
         dim: int = field(init=False)
         hidden_dim: int = field(init=False)
         num_experts: int = field(init=False)
-        swiglu_limit: float
-        use_grouped_mm: bool
+        use_grouped_mm: bool = True
+        swiglu_limit: float = 7.0
 
     def __init__(self, config: Config):
         super().__init__()

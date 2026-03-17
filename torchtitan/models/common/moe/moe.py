@@ -151,16 +151,16 @@ class TokenChoiceTopKRouter(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        dim: int = field(init=False)
+        num_experts: int = field(init=False)
+        num_expert_groups: int | None = None  # must be a divisor of num_experts
+        num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
         gate: Linear.Config = field(default_factory=Linear.Config)
-        num_expert_groups: int | None = None  # must be a divisor of num_experts
-        num_limited_groups: int | None = None
         _debug_force_load_balance: bool = False
-        dim: int = field(init=False)
-        num_experts: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
