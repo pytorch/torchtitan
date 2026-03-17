@@ -131,27 +131,6 @@ def llama3_debugmodel_lora() -> Trainer.Config:
     return config
 
 
-def llama3_8b_lora() -> Trainer.Config:
-    config = llama3_8b()
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
-            LoRAConverter.Config(
-                rank=128,
-                alpha=32.0,
-                save_format="peft",
-            ),
-        ],
-    )
-    config.checkpoint = CheckpointManager.Config(
-        enable=True,
-        interval=500,
-        initial_load_in_hf=True,
-        initial_load_model_only=True,
-        additional_load_in_hf=True,
-    )
-    return config
-
-
 def llama3_debugmodel_qat() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(
@@ -208,6 +187,27 @@ def llama3_8b() -> Trainer.Config:
             steps=1200,
         ),
     )
+
+
+def llama3_8b_lora() -> Trainer.Config:
+    config = llama3_8b()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            LoRAConverter.Config(
+                rank=128,
+                alpha=32.0,
+                save_format="peft",
+            ),
+        ],
+    )
+    config.checkpoint = CheckpointManager.Config(
+        enable=True,
+        interval=500,
+        initial_load_in_hf=True,
+        initial_load_model_only=True,
+        additional_load_in_hf=True,
+    )
+    return config
 
 
 def llama3_70b() -> Trainer.Config:
