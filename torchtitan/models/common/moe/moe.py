@@ -188,7 +188,7 @@ class TokenChoiceTopKRouter(Module):
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
-        gate: Linear.Config = field(default_factory=Linear.Config)
+        gate: Linear.Config
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -340,7 +340,8 @@ class TokenChoiceTopKRouter(Module):
 # NOTE: the reason we make this a stateless module is to support
 #       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
 class TokenReorderer(Module):
-    """Reorders token indices to match the order of experts, enabling
+    """
+    This module reorders token indices to match the order of experts, enabling
     efficient parallel processing of tokens by experts.
 
     ``num_experts`` and ``top_k`` use ``field(init=False)`` so they are
@@ -424,9 +425,7 @@ class MoE(Module):
         # Expert hidden dimension (replaces old moe_inter_dim)
         hidden_dim: int = 0
         experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
-        router: TokenChoiceTopKRouter.Config = field(
-            default_factory=TokenChoiceTopKRouter.Config
-        )
+        router: TokenChoiceTopKRouter.Config
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()

@@ -43,6 +43,7 @@ deepseekv3_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     top_k=3,
                     score_func="softmax",
+                    gate=Linear.Config(),
                 ),
             ),
             attention=Attention.Config(
@@ -92,6 +93,7 @@ deepseekv3_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     top_k=3,
                     score_func="softmax",
+                    gate=Linear.Config(),
                 ),
             ),
             attention=Attention.Config(
@@ -143,6 +145,7 @@ deepseekv3_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     top_k=6,
                     score_func="softmax",
+                    gate=Linear.Config(),
                 ),
             ),
             attention=Attention.Config(
@@ -197,6 +200,7 @@ deepseekv3_configs = {
                     num_limited_groups=3,
                     score_func="softmax",
                     route_scale=16.0,
+                    gate=Linear.Config(),
                 ),
             ),
             attention=Attention.Config(
@@ -252,6 +256,7 @@ deepseekv3_configs = {
                     score_func="sigmoid",
                     route_norm=True,
                     route_scale=2.5,
+                    gate=Linear.Config(),
                 ),
             ),
             attention=Attention.Config(

@@ -105,7 +105,7 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
 
     def test_config_build(self):
         """TokenChoiceTopKRouter.Config.build() creates a working instance."""
-        config = TokenChoiceTopKRouter.Config()
+        config = TokenChoiceTopKRouter.Config(gate=Linear.Config())
         router = config.build(dim=32, num_experts=8)
         self.assertIsInstance(router, TokenChoiceTopKRouter)
         self.assertIsInstance(router, Module)
@@ -122,6 +122,7 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
             score_func="softmax",
             route_norm=True,
             route_scale=2.5,
+            gate=Linear.Config(),
         )
         router = config.build(dim=64, num_experts=16)
         self.assertEqual(router.top_k, 4)
@@ -140,19 +141,19 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
 
     def test_config_build_default_gate_no_bias(self):
         """Default gate config has no bias."""
-        config = TokenChoiceTopKRouter.Config()
+        config = TokenChoiceTopKRouter.Config(gate=Linear.Config())
         router = config.build(dim=32, num_experts=8)
         self.assertIsNone(router.gate.bias)
 
     def test_config_build_without_fields_raises(self):
         """build() raises when required fields are not provided."""
-        config = TokenChoiceTopKRouter.Config()
+        config = TokenChoiceTopKRouter.Config(gate=Linear.Config())
         with self.assertRaises(TypeError):
             config.build()
 
     def test_gate_shape(self):
         """Gate linear layer has correct shape (dim -> num_experts)."""
-        config = TokenChoiceTopKRouter.Config()
+        config = TokenChoiceTopKRouter.Config(gate=Linear.Config())
         router = config.build(dim=64, num_experts=16)
         self.assertIsInstance(router.gate, Linear)
         self.assertEqual(router.gate.weight.shape, torch.Size([16, 64]))
@@ -162,6 +163,7 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
         config = TokenChoiceTopKRouter.Config(
             num_expert_groups=4,
             num_limited_groups=2,
+            gate=Linear.Config(),
         )
         router = config.build(dim=32, num_experts=16)
         self.assertEqual(router.num_expert_groups, 4)
@@ -170,7 +172,7 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_forward(self):
         """Forward pass returns correct shapes."""
-        config = TokenChoiceTopKRouter.Config(top_k=2, score_func="softmax")
+        config = TokenChoiceTopKRouter.Config(top_k=2, score_func="softmax", gate=Linear.Config())
         router = config.build(dim=32, num_experts=8).cuda()
         router.init_weights(init_std=0.02)
 
@@ -182,7 +184,7 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
 
     def test_init_weights(self):
         """init_weights delegates to gate.init_weights."""
-        config = TokenChoiceTopKRouter.Config()
+        config = TokenChoiceTopKRouter.Config(gate=Linear.Config())
         router = config.build(dim=16, num_experts=4)
 
         with torch.no_grad():
@@ -193,7 +195,7 @@ class TestTokenChoiceTopKRouter(unittest.TestCase):
 
     def test_shared_config_builds_independent_instances(self):
         """A single Config can build multiple independent routers."""
-        config = TokenChoiceTopKRouter.Config(top_k=2)
+        config = TokenChoiceTopKRouter.Config(top_k=2, gate=Linear.Config())
         r1 = config.build(dim=32, num_experts=8)
         r2 = config.build(dim=64, num_experts=16)
         self.assertIsNot(r1, r2)
@@ -249,7 +251,10 @@ class TestMoEConfig(unittest.TestCase):
 
     def test_config_build_defaults(self):
         """MoE.Config.build() with defaults creates a working MoE."""
-        config = MoE.Config(hidden_dim=64)
+        config = MoE.Config(
+            hidden_dim=64,
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+        )
         moe = config.build(dim=32)
         self.assertIsInstance(moe, MoE)
         self.assertIsInstance(moe, Module)
@@ -265,6 +270,7 @@ class TestMoEConfig(unittest.TestCase):
                 top_k=4,
                 score_func="softmax",
                 route_norm=True,
+                gate=Linear.Config(),
             ),
         )
         moe = config.build(dim=32)
@@ -278,6 +284,7 @@ class TestMoEConfig(unittest.TestCase):
         config = MoE.Config(
             hidden_dim=64,
             experts=GroupedExperts.Config(use_grouped_mm=False),
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
         )
         moe = config.build(dim=32)
         self.assertFalse(moe.experts.use_grouped_mm)
@@ -295,7 +302,11 @@ class TestMoEConfig(unittest.TestCase):
 
     def test_num_experts_propagated(self):
         """num_experts from MoE.Config propagates to experts and router."""
-        config = MoE.Config(hidden_dim=64, num_experts=16)
+        config = MoE.Config(
+            hidden_dim=64,
+            num_experts=16,
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+        )
         moe = config.build(dim=32)
         self.assertEqual(moe.experts.num_experts, 16)
         self.assertEqual(moe.router.num_experts, 16)
@@ -303,14 +314,22 @@ class TestMoEConfig(unittest.TestCase):
 
     def test_hidden_dim_propagated(self):
         """hidden_dim from MoE.Config propagates to experts."""
-        config = MoE.Config(hidden_dim=128, num_experts=4)
+        config = MoE.Config(
+            hidden_dim=128,
+            num_experts=4,
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+        )
         moe = config.build(dim=32)
         self.assertEqual(moe.experts.w1.shape, torch.Size([4, 128, 32]))
         self.assertEqual(moe.experts.w2.shape, torch.Size([4, 32, 128]))
 
     def test_init_weights(self):
         """MoE.init_weights initializes experts and router weights."""
-        config = MoE.Config(hidden_dim=64, num_experts=4)
+        config = MoE.Config(
+            hidden_dim=64,
+            num_experts=4,
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+        )
         moe = config.build(dim=32)
 
         with torch.no_grad():
@@ -331,6 +350,7 @@ class TestMoEConfig(unittest.TestCase):
             num_experts=4,
             num_shared_experts=0,
             experts=GroupedExperts.Config(use_grouped_mm=False),
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
         )
         moe = config.build(dim=32).cuda()
         moe.init_weights(init_std=0.02, buffer_device=torch.device("cuda"))
@@ -341,13 +361,21 @@ class TestMoEConfig(unittest.TestCase):
 
     def test_shared_experts(self):
         """MoE with shared experts creates FeedForward."""
-        config = MoE.Config(hidden_dim=64, num_shared_experts=2)
+        config = MoE.Config(
+            hidden_dim=64,
+            num_shared_experts=2,
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+        )
         moe = config.build(dim=32)
         self.assertIsNotNone(moe.shared_experts)
 
     def test_no_shared_experts(self):
         """MoE with num_shared_experts=0 has no shared experts."""
-        config = MoE.Config(hidden_dim=64, num_shared_experts=0)
+        config = MoE.Config(
+            hidden_dim=64,
+            num_shared_experts=0,
+            router=TokenChoiceTopKRouter.Config(gate=Linear.Config()),
+        )
         moe = config.build(dim=32)
         self.assertIsNone(moe.shared_experts)
 

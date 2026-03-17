@@ -291,6 +291,7 @@ qwen3_configs = {
                     top_k=8,
                     score_func="softmax",
                     route_norm=True,
+                    gate=Linear.Config(),
                 ),
             ),
             feed_forward=FeedForward.Config(
@@ -333,6 +334,7 @@ qwen3_configs = {
                     top_k=8,
                     score_func="softmax",
                     route_norm=True,
+                    gate=Linear.Config(),
                 ),
             ),
             feed_forward=FeedForward.Config(
@@ -375,6 +377,7 @@ qwen3_configs = {
                     top_k=8,
                     score_func="softmax",
                     route_norm=True,
+                    gate=Linear.Config(),
                 ),
             ),
             feed_forward=FeedForward.Config(
