@@ -312,13 +312,10 @@ class VLLMNativeBenchmark:
 
             # ── 3. Sampling params (same as VLLMTorchTitanBenchmark) ──
             sampling = gen_config.sampling
+            # Force greedy decoding to eliminate sampling kernel overhead
+            # (_topk_topp_kernel) from throughput measurements.
             self.sampling_params = SamplingParams(
-                temperature=self.config.temperature
-                if self.config.temperature is not None
-                else sampling.temperature,
-                top_p=self.config.top_p
-                if self.config.top_p is not None
-                else sampling.top_p,
+                temperature=0,
                 max_tokens=self.config.max_tokens or sampling.max_tokens,
             )
             print("✓ vLLM native Qwen3 model loaded successfully")
@@ -525,9 +522,10 @@ class VLLMTorchTitanBenchmark:
 
             # ── 4. Sampling params (from gen_config, with CLI overrides) ──
             sampling = gen_config.sampling
+            # Force greedy decoding to eliminate sampling kernel overhead
+            # (_topk_topp_kernel) from throughput measurements.
             self.sampling_params = SamplingParams(
-                temperature=self.config.temperature or sampling.temperature,
-                top_p=self.config.top_p or sampling.top_p,
+                temperature=0,
                 max_tokens=self.config.max_tokens or sampling.max_tokens,
             )
             print(f"✓ vLLM TorchTitan Qwen3 model loaded successfully ({sp_mode})")
