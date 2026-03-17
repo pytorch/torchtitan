@@ -185,6 +185,19 @@ class Validator(BaseValidator):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
+        # TODO: deduplicate with Trainer.post_dataloading_process which has
+        # the same logic; extract a shared function to prevent further drift.
+        # TODO: remove this guard once RoPE handles DTensor+positions.
+        # The positions!=None path in RoPE uses torch.gather which fails
+        # with DTensor+FSDP. For now, only pass positions through when
+        # using flex/varlen + block_causal (where it's needed and works).
+        model_config = getattr(model_parts[0], "config", None)
+        layer = getattr(model_config, "layer", None)
+        attn_config = getattr(layer, "attention", None) if layer else None
+        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
+        if attn_mask_type != "block_causal":
+            extra_inputs.pop("positions", None)
+
         try:
             # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = cast(
