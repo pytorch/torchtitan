@@ -187,12 +187,8 @@ class Validator(BaseValidator):
 
         # TODO: deduplicate with Trainer.post_dataloading_process which has
         # the same logic; extract a shared function to prevent further drift.
-        # Per-document position IDs are only needed for block_causal
-        # attention, where each packed document gets its own RoPE reset.
-        # For causal attention the whole sequence is one document, so
-        # sequential positions (the positions=None path) are correct.
-        # Passing them through would also OOB the RoPE cache, since
-        # individual document lengths can exceed max_seq_len.
+        # For causal attention the whole packed sequence is one document,
+        # so sequential RoPE positions (positions=None) are correct.
         model_config = getattr(model_parts[0], "config", None)
         layer = getattr(model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None

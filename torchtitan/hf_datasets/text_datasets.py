@@ -120,7 +120,15 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     sample_text, add_bos=True, add_eos=True
                 )
                 self._token_buffer.extend(sample_tokens)
-                self._position_buffer.extend(range(len(sample_tokens)))
+                # Per-document positions reset at document boundaries,
+                # matching inference frameworks (e.g. vLLM) that start
+                # positions at 0 per request.  Positions wrap at seq_len
+                # to stay within the RoPE cache, effectively chunking
+                # long documents into seq_len-sized segments.
+                # TODO: make overflow policy configurable (chunk / truncate / drop).
+                self._position_buffer.extend(
+                    i % self.seq_len for i in range(len(sample_tokens))
+                )
                 self._sample_idx += 1
 
                 while len(self._token_buffer) >= max_buffer_token_len:

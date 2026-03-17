@@ -591,12 +591,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        # Per-document position IDs are only needed for block_causal
-        # attention, where each packed document gets its own RoPE reset.
-        # For causal attention the whole sequence is one document, so
-        # sequential positions (the positions=None path) are correct.
-        # Passing them through would also OOB the RoPE cache, since
-        # individual document lengths can exceed max_seq_len.
+        # For causal attention the whole packed sequence is one document,
+        # so sequential RoPE positions (positions=None) are correct.
         layer = getattr(self.model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
         attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
