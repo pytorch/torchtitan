@@ -296,11 +296,13 @@ class DeepSeekV3Model(Decoder):
             )
 
             assert self.layer.moe is not None
-            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
+            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(
+                9, 0
+            ):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported on SM90 or later",
                 )
-                self.layer.moe.use_grouped_mm = False
+                self.layer.moe.experts.use_grouped_mm = False
 
             if (
                 parallelism.context_parallel_degree > 1
@@ -312,12 +314,19 @@ class DeepSeekV3Model(Decoder):
                     f"FlexAttention and varlen attention are not supported with CP."
                 )
 
-            self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
+            self.layer.moe.router._debug_force_load_balance = (
+                debug.moe_force_load_balance
+            )
 
             if parallelism.expert_parallel_comm_backend in ("deepep", "hybridep"):
                 from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
 
-                self.layer.moe = DeepEPMoE.Config(**_dc.asdict(self.layer.moe))
+                init_kwargs = {
+                    f.name: getattr(self.layer.moe, f.name)
+                    for f in _dc.fields(self.layer.moe)
+                    if f.init
+                }
+                self.layer.moe = DeepEPMoE.Config(**init_kwargs)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
