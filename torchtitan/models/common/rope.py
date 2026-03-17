@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.protocols.module import Module
 
@@ -289,6 +290,35 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _maybe_wrap_positions(
+    positions: torch.Tensor | None,
+    freqs_cis: torch.Tensor,
+) -> torch.Tensor | None:
+    """Wrap positions as a DTensor if freqs_cis is a DTensor.
+
+    When TP uses use_local_output=False (DeepSeek V3, Qwen3, GPT-OSS),
+    freqs_cis is a DTensor (Replicate) but positions is a plain tensor.
+    The downstream torch.gather requires both operands to be the same type.
+    Since positions (int64 indices) has no gradient, grad_placements is
+    not needed.
+    """
+    if (
+        positions is not None
+        and isinstance(freqs_cis, DTensor)
+        and not isinstance(positions, DTensor)
+    ):
+        assert all(
+            isinstance(p, Replicate) for p in freqs_cis.placements
+        ), f"Expected Replicate placements on freqs_cis, got {freqs_cis.placements}"
+        positions = DTensor.from_local(
+            positions,
+            freqs_cis.device_mesh,
+            freqs_cis.placements,
+            run_check=False,
+        )
+    return positions
+
+
 # TODO: consolidate apply_rotary_emb_complex and apply_rotary_emb_single_complex
 def apply_rotary_emb_complex(
     xq: torch.Tensor,
@@ -304,6 +334,7 @@ def apply_rotary_emb_complex(
         freqs_cis: (max_seqlen, head_dim // 2) complex
         positions: optional position indices
     """
+    positions = _maybe_wrap_positions(positions, freqs_cis)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
@@ -324,6 +355,7 @@ def apply_rotary_emb_single_complex(
         freqs_cis: (max_seqlen, head_dim // 2) complex
         positions: optional position indices
     """
+    positions = _maybe_wrap_positions(positions, freqs_cis)
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
@@ -345,6 +377,7 @@ def apply_rotary_emb_cos_sin(
         rope_cache: (max_seqlen, head_dim * 2) with cos and sin concatenated
         positions: optional position indices
     """
+    positions = _maybe_wrap_positions(positions, rope_cache)
     head_dim = xq.shape[-1]
     rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
     cos = rope_cache[..., :head_dim].to(device=xq.device)

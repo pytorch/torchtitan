@@ -158,6 +158,14 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._token_buffer = state_dict["token_buffer"]
+        if "position_buffer" not in state_dict:
+            logger.warning(
+                "Checkpoint missing 'position_buffer' key in dataset state. "
+                "Falling back to empty position buffer. This is expected when "
+                "resuming from a checkpoint saved before position tracking was "
+                "added, but may cause incorrect RoPE positions with "
+                "block_causal attention (document packing)."
+            )
         self._position_buffer = state_dict.get("position_buffer", [])
 
         if isinstance(self._data, Dataset):
