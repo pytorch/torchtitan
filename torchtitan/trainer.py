@@ -270,6 +270,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         model_converters.convert(model)
 
+        # Verify all submodules satisfy the Module protocol
+        # TODO: move this to module validate().
+        # This is current put here to verify module build and
+        # converter, which should guanrantee Module protocol.
+        # On the other hand, some parallelism wrappers don't
+        # have this guanrantee, e.g., fully_shard.
+        model.verify_module_protocol()
+
         # Check if any converter uses quantization (FP8, MX, etc.)
         has_quantization = any(
             isinstance(cc, QuantizationConverter.Config)
