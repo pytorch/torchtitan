@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# TODO: This file needs to be deleted after switching to PyTorch's Varlen Attention
 
 import math
 from collections.abc import Callable
