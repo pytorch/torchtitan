@@ -8,19 +8,19 @@
 Config entry points for the RL/unified experiment.
 
 Each function returns a complete ``RLTrainer.Config`` and is discoverable by
-``ConfigManager`` via ``--module rl.unified --config <function_name>``.
+``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
-from torchtitan.experiments.rl.unified.actors.generator import (
+from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
     VLLMGenerator,
 )
-from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.simple_grpo_sum_digits import RLTrainer
+from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 

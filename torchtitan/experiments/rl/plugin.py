@@ -8,7 +8,7 @@
 vLLM plugin for TorchTitan models.
 
 Usage:
-    from torchtitan.experiments.rl.unified.plugin import register_model_to_vllm_model_registry
+    from torchtitan.experiments.rl.plugin import register_model_to_vllm_model_registry
     register_model_to_vllm_model_registry(model_spec)
 """
 
@@ -30,11 +30,10 @@ def register_model_to_vllm_model_registry(
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components
     """
-    from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
-        TorchTitanVLLMModelWrapper,
-    )
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
+
+    from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
 
     logger = init_logger(__name__)
 

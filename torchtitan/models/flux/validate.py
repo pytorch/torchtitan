@@ -300,7 +300,7 @@ class FluxValidator(Validator):
                 loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
-            global_avg_loss = loss.item()
+            global_avg_loss = float(loss.item())
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 

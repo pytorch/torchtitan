@@ -40,7 +40,7 @@ def _process_cc12m_image(
         # resize height to be equal to output_size, then crop
         new_width, new_height = math.ceil(output_size / height * width), output_size
         img = img.resize((new_width, new_height))
-        left = torch.randint(0, new_width - output_size + 1, (1,)).item()
+        left = int(torch.randint(0, new_width - output_size + 1, (1,)).item())
         resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
         # resize width to be equal to output_size, the crop
@@ -49,7 +49,7 @@ def _process_cc12m_image(
             math.ceil(output_size / width * height),
         )
         img = img.resize((new_width, new_height))
-        lower = torch.randint(0, new_height - output_size + 1, (1,)).item()
+        lower = int(torch.randint(0, new_height - output_size + 1, (1,)).item())
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
