@@ -8,12 +8,29 @@ from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
+from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_pytree_node, tree_map
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
+
+_AC_REGION_ID = "ac_region_id"
+
+
+def annotate_ac_regions(model: nn.Module) -> None:
+    """Annotate each transformer block with a unique AC region ID.
+
+    This enables apply_sac_pass to assign different ac_graph_id values
+    per block, creating AC region boundaries between transformer blocks.
+    """
+    layers = model.get_submodule("layers")
+    for layer_id, transformer_block in layers.named_children():
+        transformer_block.forward = annotate_fn({_AC_REGION_ID: int(layer_id)})(
+            transformer_block.forward
+        )
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
