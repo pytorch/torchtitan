@@ -7,9 +7,11 @@
 """MoE with DeepEP backend for efficient expert-parallel communication."""
 
 from dataclasses import dataclass
+from typing import Callable
 
 import torch
 from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.distributed.deepep import sync_combine
 
@@ -42,6 +44,7 @@ class DeepEPMoE(MoE):
         super().__init__(config, dim=dim)
         # DeepEP doesn't use reorderer - routing handled by DeepEPExpertParallel
         self.reorderer = None  # pyrefly: ignore [bad-assignment]
+        self._local_map_fn: Callable | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -52,21 +55,9 @@ class DeepEPMoE(MoE):
         asynchronously, allowing shared_experts to overlap with the
         combine all-to-all communication.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
-        #
-        # Why grad(x) is Partial on the tp_mesh across all parallelism:
-        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
-        #   w1/w3, Rowwise on w2) produce Partial output gradients.
-        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
-        #   each rank's token positions(Partial).
-        #
-        # This holds for all MoE components (router.gate, routed experts, shared
-        # experts) and regardless of score_before_experts.
+        # When x is a DTensor (e.g., from TP with SequenceParallel), use
+        # local_map to convert to local tensors for MoE-internal computation.
+        # See MoE.forward() for detailed gradient placement documentation.
         if isinstance(x, DTensor):
             assert (
                 x.device_mesh.ndim == 1
@@ -74,7 +65,19 @@ class DeepEPMoE(MoE):
             assert x.device_mesh.mesh_dim_names == (
                 "tp",
             ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            x = x.to_local(grad_placements=(Partial(),))
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    self._forward_local,
+                    in_placements=(x.placements,),
+                    out_placements=x.placements,
+                    in_grad_placements=((Partial(),),),
+                    device_mesh=x.device_mesh,
+                )
+            return self._local_map_fn(x)
+        return self._forward_local(x)
+
+    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
+        """DeepEP MoE forward on local (plain) tensors."""
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 

@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
+from typing import Callable, Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -419,6 +420,8 @@ class MoE(Module):
             persistent=False,
         )
 
+        self._local_map_fn: Callable | None = None
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -427,11 +430,15 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
+        # When x is a DTensor (e.g., from TP with SequenceParallel), use
+        # local_map to convert to local tensors for MoE-internal computation.
+        # local_map handles the DTensor↔local boundary, validating placements
+        # and setting gradient placements correctly.
+        #
+        # in_grad_placements=(Partial(),) ensures x.grad is Partial on the
+        # tp_mesh in backward, so gradient reduction (reduce-scatter from
+        # Partial to Shard(1)) happens once at the MoE boundary rather than
+        # being duplicated inside the MoE.
         #
         # Why grad(x) is Partial on the tp_mesh across all parallelism:
         # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
@@ -449,7 +456,26 @@ class MoE(Module):
             assert x.device_mesh.mesh_dim_names == (
                 "tp",
             ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            x = x.to_local(grad_placements=(Partial(),))
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    self._forward_local,
+                    in_placements=(x.placements,),
+                    out_placements=x.placements,
+                    in_grad_placements=((Partial(),),),
+                    device_mesh=x.device_mesh,
+                )
+            return self._local_map_fn(x)
+        return self._forward_local(x)
+
+    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
+        """MoE forward on local (plain) tensors.
+
+        Args:
+            x (torch.Tensor): Input tensor with shape ``(bs, slen, dim)``.
+
+        Returns:
+            out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+        """
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
