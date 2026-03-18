@@ -28,6 +28,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
+from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3.parallelize import apply_replicate
@@ -180,19 +181,23 @@ def parallelize_deepseekv3(
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+            model, parallel_dims, training.full_dtensor
         )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        # EP-specific args only apply in the standard (non-full-dtensor) path
+        ep_kwargs: dict = {}
+        if dp_mesh_dims is None:
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            ep_kwargs = dict(
+                ep_degree=parallel_dims.ep,
+                edp_mesh=parallel_dims.get_optional_mesh(edp_mesh_names),
+                gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+            )
 
         apply_fsdp(
             model,
@@ -202,12 +207,13 @@ def parallelize_deepseekv3(
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            edp_mesh=edp_mesh,
-            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+            dp_mesh_dims=dp_mesh_dims,
+            **ep_kwargs,
         )
 
-        if parallel_dims.dp_replicate_enabled:
+        if dp_mesh_dims is not None:
+            logger.info("Applied FSDP with full DTensor (SPMD mesh) to the model")
+        elif parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
