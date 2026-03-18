@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
+import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import distribute_tensor, DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -305,33 +305,31 @@ class VLLMGenerator(Actor, Configurable):
         return episodes
 
     @endpoint
-    async def update(self, version: int, state_dict: dict) -> None:
-        """Update generator weights.
-        Called by the orchestrator.
+    async def pull_model_state_dict(self, version: int) -> None:
+        """Pull latest weights from TorchStore.
+
+        When ``direct_rdma=True``, weights are read directly from the
+        trainer's GPU memory via one-sided RDMA, bypassing StorageVolumes.
+        When ``False``, data is fetched through StorageVolumes (which may
+        themselves use RDMA as their transport internally).
+
+        See ``push_model_state_dict`` for more details on the distinction.
 
         Args:
-            version: New policy version number
-            state_dict: Full (unsharded) state dict with plain tensors.
+            version: New policy version number.
         """
-        # Reshard full tensors to match this generator's DTensor layout
-        model_state_dict = dict(self._get_model().model.state_dict())
-        for name, tensor in state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                state_dict[name] = distribute_tensor(
-                    tensor.to(target_dtensor.device_mesh.device_type),
-                    device_mesh=target_dtensor.device_mesh,
-                    placements=target_dtensor.placements,
-                )
+        from monarch.rdma import is_rdma_available
 
-        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
+        model_sd = self._get_model().model.state_dict()
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=model_sd,
+            strict=False,
+            direct_rdma=is_rdma_available(),
+        )
         self.policy_version = version
         logger.debug(
-            f"Updated weights into vLLM engine model. "
-            f"Number of parameters: {len(load_weights)}. "
-            f"{os.getpid()=} Generator updating weights to policy v{version}..."
+            f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
 
     def __del__(self):
