@@ -17,7 +17,7 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-python3 torchtitan.experiments.rl.tasks.sum_digits/simple_grpo.py \
+python3 torchtitan/experiments/rl/simple_grpo_sum_digits.py \
     --module rl --config rl_grpo_qwen3_0_6b \
     --hf_assets_path=<path_to_model_checkpoint>
 """
@@ -41,10 +41,7 @@ from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.tasks.sum_digits.task import (
-    extract_answer,
-    SumDigitsTask,
-)
+from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 
