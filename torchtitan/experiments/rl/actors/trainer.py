@@ -31,7 +31,7 @@ from torchtitan.experiments.rl.actors.utils import (
 from torchtitan.experiments.rl.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
-from torchtitan.experiments.rl.rl_types import Episode
+from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 

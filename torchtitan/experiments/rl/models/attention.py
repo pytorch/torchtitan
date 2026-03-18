@@ -12,7 +12,8 @@ from torchtitan.experiments.rl.models.vllm_compat_attention import (
     VLLMCompatibleFlashAttention,
 )
 from torchtitan.protocols.module import Module
-from vllm.attention.layer import Attention
+
+from vllm.model_executor.layers.attention import Attention
 
 logger = logging.getLogger(__name__)
 
