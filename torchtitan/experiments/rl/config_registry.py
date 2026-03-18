@@ -20,7 +20,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
+from torchtitan.experiments.rl.tasks.sum_digits.simple_grpo import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 
