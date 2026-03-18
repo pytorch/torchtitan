@@ -7,7 +7,6 @@
 import operator
 
 import torch
-import torch.nn as nn
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
@@ -25,16 +24,24 @@ from torchtitan.experiments.graph_trainer.passes import (
     reassign_to_pg_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module, ModuleList
 
 
-class ToyModel(nn.Module):
+class ToyModel(Module):
     """A small toy model with multiple linear layers and activation
     checkpointing so that the backward graph recomputes the forward
     all-gathers."""
 
     def __init__(self, dim=16, n_layers=3):
         super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(dim, dim) for _ in range(n_layers)])
+        linear_config = Linear.Config(bias=True)
+        self.layers = ModuleList(
+            [
+                linear_config.build(in_features=dim, out_features=dim)
+                for _ in range(n_layers)
+            ]
+        )
 
     def forward(self, x):
         for layer in self.layers:
