@@ -25,7 +25,7 @@ from torchtitan.models.qwen3 import model_registry
 
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train)."""
+    """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -49,7 +49,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,
