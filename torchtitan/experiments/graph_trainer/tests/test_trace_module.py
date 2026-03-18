@@ -16,6 +16,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _patch_engine_run_backward,
     run_traced_module,
     trace_module,
+    use_uncompiled_flex_attention,
 )
 
 
@@ -407,15 +408,11 @@ class TestTraceModels(unittest.TestCase):
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr)
 
         for step in range(1, num_steps + 1):
-            train_step_r = TrainStepModule(model_ref, get_loss)
-            params_and_buffers_ref = _get_params_and_buffers(train_step_r)
-            wrapped_ref = run_traced_module(
-                traced_result, params_and_buffers_ref, (*fwd_args, labels)
-            )
-            loss_ref = wrapped_ref[0]
-            grads_ref = wrapped_ref[1:]
-            for p, g in zip(model_ref.parameters(), grads_ref, strict=True):
-                p.grad = g
+            with use_uncompiled_flex_attention():
+                logits_ref = model_ref(*fwd_args)
+            loss_ref = get_loss(logits_ref, labels)
+            loss_ref.backward()
+            grads_ref = [p.grad.clone() for p in model_ref.parameters()]
             opt_ref.step()
             opt_ref.zero_grad()
 
@@ -689,15 +686,11 @@ class TestTraceFSDP(FSDPTest):
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3)
 
         for step in range(1, 6):
-            train_step_r = TrainStepModule(model_ref, get_loss)
-            params_and_buffers_ref = _get_params_and_buffers(train_step_r)
-            wrapped_ref = run_traced_module(
-                traced_result, params_and_buffers_ref, (*fwd_args, labels)
-            )
-            loss_ref = wrapped_ref[0]
-            grads_ref = wrapped_ref[1:]
-            for p, g in zip(model_ref.parameters(), grads_ref, strict=True):
-                p.grad = g
+            with use_uncompiled_flex_attention():
+                logits_ref = model_ref(*fwd_args)
+            loss_ref = get_loss(logits_ref, labels)
+            loss_ref.backward()
+            grads_ref = [p.grad.clone() for p in model_ref.parameters()]
             opt_ref.step()
             opt_ref.zero_grad()
 
