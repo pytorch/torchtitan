@@ -6,8 +6,8 @@
 
 """MoE with DeepEP backend for efficient expert-parallel communication."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 from torch.distributed.tensor import DTensor, Partial
