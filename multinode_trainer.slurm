@@ -5,7 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# --- This script is optimized for AWS with EFA
+# --- This script is optimized for AWS with EFA #test
 # --- adjust NCCL_BUFFSIZE if you encounter memory
 # --- constraint issues or to tune for improved performance.
 # ---
