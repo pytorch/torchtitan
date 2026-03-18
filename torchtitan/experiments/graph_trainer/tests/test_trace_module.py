@@ -543,6 +543,69 @@ class TestTraceModels(unittest.TestCase):
             lr=self.LR,
         )
 
+    def test_flex_attention_annotations(self):
+        from torch.fx.traceback import annotate_fn
+        from torch.nn.attention.flex_attention import and_masks
+
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_ac_regions,
+        )
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            FlexAttentionWrapper,
+            get_causal_mask_mod,
+            get_sliding_window_mask_mod,
+        )
+        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss.model import GptOssModel
+
+        config = gptoss_configs["debugmodel"]
+        model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
+
+        FlexAttentionWrapper.forward = annotate_fn(
+            {"compile_with_inductor": "flex_attention"}
+        )(FlexAttentionWrapper.forward)
+        annotate_ac_regions(model)
+
+        tokens = torch.randint(
+            0, config.vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
+        )
+        causal = get_causal_mask_mod()
+        sw_size = config.layer.attention.sliding_window_size
+        basic_mask = create_attention_mask(causal, 1, None, self.SEQ_LEN, self.SEQ_LEN)
+        sliding_window_mask = create_attention_mask(
+            and_masks(causal, get_sliding_window_mask_mod(sw_size)),
+            1,
+            None,
+            self.SEQ_LEN,
+            self.SEQ_LEN,
+        )
+        attn_masks = {
+            "basic_mask": basic_mask,
+            "sliding_window_mask": sliding_window_mask,
+        }
+        traced_result = trace_module(model, (tokens, attn_masks))
+
+        flex_nodes = [
+            n
+            for n in traced_result.gm.graph.nodes
+            if "flex_attention" in str(n.target) and "backward" not in str(n.target)
+        ]
+        self.assertGreater(len(flex_nodes), 0, "No FlexAttentionHOP nodes found")
+
+        for node in flex_nodes:
+            custom = node.meta.get("custom", {})
+            self.assertEqual(
+                custom.get("compile_with_inductor"),
+                "flex_attention",
+                f"{node.name} missing compile_with_inductor annotation",
+            )
+            self.assertIn(
+                "ac_region_id",
+                custom,
+                f"{node.name} missing ac_region_id annotation",
+            )
+
 
 class TestTraceFSDP(FSDPTest):
     @property
