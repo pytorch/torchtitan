@@ -270,7 +270,7 @@ class FluxTrainer(Trainer):
                 ),
             )
         else:
-            global_avg_loss = global_max_loss = loss.detach().item()
+            global_avg_loss = global_max_loss = float(loss.detach().item())
             global_ntokens_seen = self.ntokens_seen
 
         extra_metrics = {
@@ -281,6 +281,6 @@ class FluxTrainer(Trainer):
             self.step,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            float(grad_norm.item()),
             extra_metrics=extra_metrics,
         )
