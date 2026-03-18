@@ -15,9 +15,9 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 from torch.distributed.tensor import distribute_module, DTensor
-from torch.distributed.tensor.placement_types import Placement, Replicate, Shard
 
 from torch.distributed.tensor.experimental import local_map
+from torch.distributed.tensor.placement_types import Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
@@ -153,6 +153,8 @@ def _wrap_inner_attention_with_local_map(model: nn.Module) -> None:
                 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
                     if not isinstance(q, DTensor):
                         return orig_fn(q, k, v, **kwargs)
+
+                    assert isinstance(k, DTensor) and isinstance(v, DTensor)
 
                     # Infer placements from the input DTensors
                     cache_key = (q.placements, k.placements, v.placements)
