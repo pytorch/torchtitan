@@ -6,11 +6,24 @@
 
 """DeepEP distributed communication primitives for MoE."""
 
-from .deepep import combine_tokens, dispatch_tokens, DispatchState, sync_combine
+from .deepep import (
+    autotune_deepep,
+    combine_tokens,
+    dispatch_tokens,
+    DispatchState,
+    get_tuned_configs,
+    run_deepep_autotune_if_enabled,
+    set_tuned_configs,
+    sync_combine,
+)
 
 __all__ = [
-    "dispatch_tokens",
+    "autotune_deepep",
     "combine_tokens",
-    "sync_combine",
+    "dispatch_tokens",
     "DispatchState",
+    "get_tuned_configs",
+    "run_deepep_autotune_if_enabled",
+    "set_tuned_configs",
+    "sync_combine",
 ]

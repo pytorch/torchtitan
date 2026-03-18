@@ -1,0 +1,73 @@
+[job]
+dump_folder = "./outputs"
+description = "Qwen 3 MoE debug model training with DeepEP (2-node internode)"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+save_tb_folder = "tb"
+
+[model]
+name = "qwen3"
+flavor = "debugmodel_moe_deepep"
+hf_assets_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2
+
+[training]
+local_batch_size = 4
+seq_len = 4096
+max_norm = 1.0
+steps = 10
+dataset = "c4_test"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+expert_parallel_degree = 16
+expert_tensor_parallel_degree = 1
+expert_parallel_comm_backend = "deepep"
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 10
+last_save_model_only = false
+export_dtype = "float16"
+async_mode = "disabled"
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = "op"
+
+[compile]
+enable=false
+components = ["model", "loss"]
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
+[deepep]
+sync_comm_stream = false
+fused_weighted_scatter_add = false
+fused_silu_gate_prob = true
+autotune = true
+
+[debug]
+moe_force_load_balance = true

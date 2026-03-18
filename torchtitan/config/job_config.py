@@ -730,6 +730,33 @@ class DeepEP:
     due to different operation ordering (prob applied before w2 matmul vs after).
     """
 
+    autotune: bool = False
+    """
+    Whether to run DeepEP kernel auto-tuning at training startup.
+
+    When enabled, grid-searches DeepEP kernel parameters (num_sms, nvl_chunk,
+    rdma_chunk) by benchmarking buffer.dispatch() / buffer.combine() with
+    synthetic data. Takes ~30-60s at startup.
+    """
+
+    autotune_warmup: int = 5
+    """Number of warmup iterations for each autotune benchmark."""
+
+    autotune_repeat: int = 10
+    """Number of timed iterations for each autotune benchmark."""
+
+    autotune_verbose: bool = False
+    """Whether to print every autotune config result."""
+
+    num_sms: int = 24
+    """Number of SMs to use for DeepEP kernels (used when autotune is disabled)."""
+
+    nvl_buffer_size: int = 256
+    """NVLink buffer size for DeepEP communication."""
+
+    rdma_buffer_size: int = 128
+    """RDMA buffer size for DeepEP internode communication."""
+
 
 @dataclass
 class Checkpoint:
