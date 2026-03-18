@@ -67,6 +67,10 @@ jobs:
           --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
           --index-strategy unsafe-best-match
 
+        # Install torchtitan in editable mode because integration test spawns
+        # python simple_grpo_sum_digits.py as a subprocess
+        uv pip install -e .
+
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 

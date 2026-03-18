@@ -86,8 +86,12 @@ def _build_attn_metadata(num_tokens: int, device) -> FlashAttentionMetadata:
         query_start_loc=query_start_loc,
         max_seq_len=num_tokens,
         seq_lens=torch.tensor([num_tokens], dtype=torch.int32, device=device),
-        block_table=torch.arange(max_blocks, dtype=torch.int32, device=device).unsqueeze(0) + 1,
-        slot_mapping=torch.arange(num_tokens, dtype=torch.int64, device=device) + BLOCK_SIZE,
+        block_table=torch.arange(
+            max_blocks, dtype=torch.int32, device=device
+        ).unsqueeze(0)
+        + 1,
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int64, device=device)
+        + BLOCK_SIZE,
         use_cascade=False,
         common_prefix_len=0,
         cu_prefix_query_lens=None,
@@ -167,6 +171,7 @@ def ctx():
     checkpoint = os.environ.get("MODEL_CHECKPOINT_PATH", DEFAULT_MODEL_CHECKPOINT)
     if not os.path.isdir(checkpoint):
         from huggingface_hub import snapshot_download
+
         checkpoint = snapshot_download(checkpoint)
 
     engine_args = EngineArgs(
@@ -185,8 +190,11 @@ def ctx():
         if not model_parallel_is_initialized():
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             init_distributed_environment(
-                world_size=1, rank=0, distributed_init_method="env://",
-                local_rank=0, backend="nccl",
+                world_size=1,
+                rank=0,
+                distributed_init_method="env://",
+                local_rank=0,
+                backend="nccl",
             )
             initialize_model_parallel(1, 1)
 
@@ -206,7 +214,9 @@ def ctx():
 
     # Shared test inputs
     num_kv_heads = hf_cfg.num_key_value_heads
-    head_dim = getattr(hf_cfg, "head_dim", hf_cfg.hidden_size // hf_cfg.num_attention_heads)
+    head_dim = getattr(
+        hf_cfg, "head_dim", hf_cfg.hidden_size // hf_cfg.num_attention_heads
+    )
     seq_len = 8
 
     torch.manual_seed(42)
@@ -249,19 +259,27 @@ class TestVLLMTorchTitanNumerics:
         """Full forward pass: logits must match within 1e-3."""
         device = ctx["device"]
 
-        _reset_kv_caches(ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device)
+        _reset_kv_caches(
+            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+        )
         with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
-            native_hidden = ctx["native"](input_ids=ctx["tokens"], positions=ctx["positions"])
+            native_hidden = ctx["native"](
+                input_ids=ctx["tokens"], positions=ctx["positions"]
+            )
             native_logits = ctx["native"].compute_logits(native_hidden)
 
-        _reset_kv_caches(ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device)
+        _reset_kv_caches(
+            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+        )
         with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
             tt_hidden = ctx["tt"](input_ids=ctx["tokens"], positions=ctx["positions"])
             tt_logits = ctx["tt"].compute_logits(tt_hidden)
 
         torch.testing.assert_close(
-            native_logits.float(), tt_logits.float(),
-            rtol=1e-3, atol=1e-3,
+            native_logits.float(),
+            tt_logits.float(),
+            rtol=1e-3,
+            atol=1e-3,
             msg="End-to-end logits mismatch",
         )
 
@@ -284,11 +302,15 @@ class TestVLLMTorchTitanNumerics:
         )
         positions = torch.arange(ctx["seq_len"], device=device)
 
-        _reset_kv_caches(ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device)
+        _reset_kv_caches(
+            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+        )
         with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
             native_out = vllm_attn(positions=positions, hidden_states=hidden.clone())
 
-        _reset_kv_caches(ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device)
+        _reset_kv_caches(
+            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+        )
         with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
             freqs_cis = ctx["tt"].model.freqs_cis
             tt_out = tt_attn(
@@ -299,8 +321,10 @@ class TestVLLMTorchTitanNumerics:
             tt_out = tt_out.squeeze(0)
 
         torch.testing.assert_close(
-            native_out.float(), tt_out.float(),
-            rtol=1e-5, atol=1e-5,
+            native_out.float(),
+            tt_out.float(),
+            rtol=1e-5,
+            atol=1e-5,
             msg="Attention module output mismatch",
         )
 
