@@ -41,7 +41,10 @@ from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.tasks.sum_digits.task import extract_answer, SumDigitsTask
+from torchtitan.experiments.rl.tasks.sum_digits.task import (
+    extract_answer,
+    SumDigitsTask,
+)
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 
