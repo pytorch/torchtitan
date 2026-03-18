@@ -19,10 +19,10 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch:
+1. Install Monarch and TorchStore from main:
 ```bash
-uv pip install torchmonarch
-```
+uv pip install torchmonarch==0.3.0
+uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 
 
 2. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
