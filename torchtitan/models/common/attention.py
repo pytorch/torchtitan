@@ -10,7 +10,6 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
