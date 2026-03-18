@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.protocols.module import Module
 
@@ -290,31 +290,41 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def _maybe_to_dtensor(
-    tensor: torch.Tensor | None,
-    like: torch.Tensor,
+def _maybe_wrap_positions(
+    positions: torch.Tensor | None,
+    x: torch.Tensor,
 ) -> torch.Tensor | None:
-    """Convert tensor to a DTensor matching like's mesh and placements.
+    """Wrap positions as a DTensor deriving mesh and placements from x (xq/xk).
+
+    TODO: In a full DTensor rewrite, positions should be made a DTensor
+    in/right after dataloading, together with inputs and labels.
 
     When TP uses use_local_output=False (DeepSeek V3, Qwen3, GPT-OSS),
-    like (xq/xk) is a DTensor but tensor (positions) is a plain tensor.
-    The downstream torch.gather requires both operands to be the same type.
-    Positions should share placements with the input activations rather than
-    freqs_cis, because both are per-token and would be sharded the same way
-    under CP.
+    x is a DTensor but positions is a plain tensor. The downstream
+    torch.gather requires both operands to be the same type.
+
+    Positions (bsz, seqlen) has fewer dimensions than x (bsz, seqlen,
+    n_heads, head_dim), so we only preserve Shard placements for shared
+    dimensions. Shard dims beyond positions' rank (e.g. Shard(2) for TP
+    on heads) become Replicate.
     """
     if (
-        tensor is not None
-        and isinstance(like, DTensor)
-        and not isinstance(tensor, DTensor)
+        positions is not None
+        and isinstance(x, DTensor)
+        and not isinstance(positions, DTensor)
     ):
-        tensor = DTensor.from_local(
-            tensor,
-            like.device_mesh,
-            like.placements,
+        ndim = positions.ndim
+        placements = tuple(
+            p if not isinstance(p, Shard) or p.dim < ndim else Replicate()
+            for p in x.placements
+        )
+        positions = DTensor.from_local(
+            positions,
+            x.device_mesh,
+            placements,
             run_check=False,
         )
-    return tensor
+    return positions
 
 
 # TODO: consolidate apply_rotary_emb_complex and apply_rotary_emb_single_complex
@@ -332,7 +342,7 @@ def apply_rotary_emb_complex(
         freqs_cis: (max_seqlen, head_dim // 2) complex
         positions: optional position indices
     """
-    positions = _maybe_to_dtensor(positions, xq)
+    positions = _maybe_wrap_positions(positions, xq)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
@@ -353,7 +363,7 @@ def apply_rotary_emb_single_complex(
         freqs_cis: (max_seqlen, head_dim // 2) complex
         positions: optional position indices
     """
-    positions = _maybe_to_dtensor(positions, x)
+    positions = _maybe_wrap_positions(positions, x)
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
@@ -375,7 +385,7 @@ def apply_rotary_emb_cos_sin(
         rope_cache: (max_seqlen, head_dim * 2) with cos and sin concatenated
         positions: optional position indices
     """
-    positions = _maybe_to_dtensor(positions, xq)
+    positions = _maybe_wrap_positions(positions, xq)
     head_dim = xq.shape[-1]
     rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
     cos = rope_cache[..., :head_dim].to(device=xq.device)
