@@ -98,25 +98,14 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.use_grouped_mm = config.use_grouped_mm
+        self._local_map_fn: Callable | None = None
+        self._local_map_run_experts_fn: Callable | None = None
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w1, DTensor):
-            # Convert parameters from DTensors to plain Tensors, to work with
-            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1 = self.w1.to_local()
-            # pyrefly: ignore [missing-attribute]
-            w2 = self.w2.to_local()
-            # pyrefly: ignore [missing-attribute]
-            w3 = self.w3.to_local()
-        else:
-            w1 = self.w1
-            w2 = self.w2
-            w3 = self.w3
-
         if self.use_grouped_mm:
             # NOTE: If EP is not used, we need to pad the indices
             #       to prepare for grouped_mm;
@@ -129,9 +118,36 @@ class GroupedExperts(Module):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
-            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+            run_experts_fn = _run_experts_for_loop
+
+        if isinstance(self.w1, DTensor):
+            # Use local_map to convert EP-sharded DTensor weights to local
+            # tensors. The output has a dynamic token dimension that cannot be
+            # wrapped as a DTensor, so we use None out_placements to keep it
+            # as a plain tensor.
+            if (
+                self._local_map_fn is None
+                or self._local_map_run_experts_fn is not run_experts_fn
+            ):
+                self._local_map_fn = local_map(
+                    run_experts_fn,
+                    in_placements=(
+                        self.w1.placements,
+                        self.w2.placements,  # pyrefly: ignore [missing-attribute]
+                        self.w3.placements,  # pyrefly: ignore [missing-attribute]
+                        None,  # x is a plain tensor
+                        None,  # num_tokens_per_expert is a plain tensor
+                    ),
+                    out_placements=None,  # output stays as plain tensor
+                    device_mesh=self.w1.device_mesh,
+                )
+                self._local_map_run_experts_fn = run_experts_fn
+            return self._local_map_fn(
+                self.w1, self.w2, self.w3, x, num_tokens_per_expert
+            )
+        else:
+            return run_experts_fn(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
 
     def init_weights(self, **kwargs) -> None:
         init_std = kwargs.get("init_std")
