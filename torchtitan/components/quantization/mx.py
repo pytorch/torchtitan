@@ -9,10 +9,14 @@ from importlib.util import find_spec
 from typing import ClassVar, Literal
 
 import torch.nn as nn
-from torchtitan.components.quantization import QuantizationConverter
+from torchtitan.components.quantization import (
+    MXFP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe.utils import set_token_group_alignment_size
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -49,15 +53,6 @@ class MXFP8Converter(QuantizationConverter):
         This is a prototype feature that requires the torchao nightly build.
         """
 
-        pad_token_groups_for_grouped_mm: bool = True
-        """
-        Boolean indicating if token group sizes should be padded to multiple of 32 (MXFP8 scaling block size)
-        for compatibility with quantization kernels. Default is true.
-
-        If using HybridEP, set to false. HybridEP automatically performs this padding as part of the
-        all-to-all dispatch step, so running the padding/unpadding kernels would incur unnecessary extra overhead.
-        """
-
     def __init__(
         self,
         config: Config,
@@ -84,15 +79,29 @@ class MXFP8Converter(QuantizationConverter):
                 "torch.compile enablement is required for highest performance of MXFP8 dynamic quantization."
             )
 
+        logger.info("MXFP8 MoE training enabled")
+
+        # Set token group alignment size for MXFP8 grouped GEMMs
+        set_token_group_alignment_size(MXFP8_GROUP_ALIGNMENT_SIZE)
+
+        # If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
+        # as part of the EP implementation.
+        # Otherwise, if EP is not enabled, we need TorchAO to pad the token groups.
+        self.pad_token_groups_for_grouped_mm = not parallel_dims.ep_enabled
+        logger.warning(
+            "For applying MXFP8 to MoE grouped GEMMs, use HybridEP with MXFP8 for best performance. "
+            "This fuses token group padding for MXFP8 grouped GEMM into the all-to-all dispatch, "
+            "substantially improving performance."
+        )
+
         self.config = config
         self.enabled = True
-        logger.info("MXFP8 MoE training enabled")
 
     def convert(self, model: nn.Module):
         """
-        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor.
-        This will use low precision grouped GEMMs with dynamic quantization using the specified MX dtype,
-        rather than the default high precision grouped GEMMs, for the target MoE FQNs.
+        Mutates the model inplace replacing instances of nn.Parameter with MXFP8TrainingWeightWrapperTensor
+        for the target FQNs. This will dispatch linear and grouped_mm ops to the appropriate autograd
+        functions that implement dynamic MXFP8 quantization + MXFP8 linear/grouped_mm ops.
         """
         if not self.enabled:
             return
@@ -119,7 +128,7 @@ class MXFP8Converter(QuantizationConverter):
         recipe = MXFP8TrainingRecipe(self.config.recipe_name)
         mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
         mxfp8_op_config.pad_token_groups_for_grouped_mm = (
-            self.config.pad_token_groups_for_grouped_mm
+            self.pad_token_groups_for_grouped_mm
         )
 
         quantize_(model, config=mxfp8_op_config, filter_fn=module_filter_fn)

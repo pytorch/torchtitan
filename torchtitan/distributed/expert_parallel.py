@@ -22,7 +22,11 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.models.common.moe.utils import _permute, _unpermute
+from torchtitan.models.common.moe.utils import (
+    _permute,
+    _unpermute,
+    get_token_group_alignment_size,
+)
 
 
 class BaseExpertParallel(ParallelStyle, ABC):
@@ -78,6 +82,7 @@ class ExpertParallel(BaseExpertParallel):
         self.output_splits = None
         self.input_shape = None
         self.permuted_indices = None
+        self.token_group_alignment = get_token_group_alignment_size()
 
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         for param_name, param in mod.named_parameters(recurse=False):
@@ -135,24 +140,47 @@ class ExpertParallel(BaseExpertParallel):
         #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
         # We need to perform another shuffle to get the correct layout, via the _permute function
         # below, which also does padding to make sure the number of tokens each expert gets locally
-        # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+        # is a multiple of `self.token_group_alignment`.
         # Note that this will create side effects when wrapping the for-loop implementation
         # of GroupedExperts, as it does not need padding.
 
-        (
-            self.input_shape,
-            routed_input,
-            self.permuted_indices,
-            num_tokens_per_expert_group,
-        ) = _permute(
-            routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
-        )
+        # Non-HybridEP case:
+        # FP8/MXFP8 require groups to be permuted to expert major order AND padded to
+        # `alignment_size`.
+        # Otherwise, we only need to permute to expert major order.
+        if self.token_group_alignment > 0:
+            from torchao.prototype.moe_training.ep.permute import permute_and_pad
+
+            (
+                self.input_shape,
+                routed_input,
+                self.permuted_indices,
+                num_tokens_per_expert_group,
+                _,
+            ) = permute_and_pad(
+                routed_input,
+                num_tokens_per_expert_group,
+                ep_degree,
+                num_local_experts,
+                self.token_group_alignment,
+            )
+        else:
+            (
+                self.input_shape,
+                routed_input,
+                self.permuted_indices,
+                num_tokens_per_expert_group,
+            ) = _permute(
+                routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+            )
 
         return routed_input, num_tokens_per_expert_group
 
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
     ) -> Tensor:
+        # NOTE: this unpermutation can handle both the padded and non-padded cases,
+        # because all it needs is the input shape and the permutation indices.
         routed_output = _unpermute(
             routed_output, self.input_shape, self.permuted_indices
         )
