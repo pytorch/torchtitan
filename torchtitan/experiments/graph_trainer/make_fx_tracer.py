@@ -40,35 +40,6 @@ def _skip_nested_compile() -> Generator[None, None, None]:
         torch._dynamo.config.error_on_nested_fx_trace = prev
 
 
-@contextmanager
-def use_uncompiled_flex_attention() -> Generator[None, None, None]:
-    """Disable all torch.compile wrapping around flex_attention.
-
-    FlexAttentionWrapper uses a pre-compiled flex_attention (outer compile),
-    and raw flex_attention itself calls torch.compile internally (inner
-    compile). This context manager disables both so that flex_attention
-    dispatches directly through the FlexAttentionHOP without any fusion.
-
-    Use this around both tracing and eager execution to ensure bitwise-
-    identical numerics. The traced graph preserves the FlexAttentionHOP,
-    and eager also dispatches through the same unfused HOP path.
-    """
-    from torch.nn.attention import flex_attention as flex_attn_mod
-    from torch.nn.attention.flex_attention import flex_attention as raw_flex_attention
-
-    from torchtitan.models.common.attention import FlexAttentionWrapper
-
-    prev_compiled = FlexAttentionWrapper._compiled_flex_attn
-    prev_debug = flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG
-    FlexAttentionWrapper._compiled_flex_attn = staticmethod(raw_flex_attention)
-    flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = True
-    try:
-        yield
-    finally:
-        FlexAttentionWrapper._compiled_flex_attn = prev_compiled
-        flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = prev_debug
-
-
 @dataclass
 class SubclassMeta:
     cls: type
@@ -361,7 +332,7 @@ def trace_module(
         return unwrapped_outputs
 
     # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with fake_mode, preserve_node_meta(), _skip_nested_compile(), use_uncompiled_flex_attention():
+    with fake_mode, preserve_node_meta(), _skip_nested_compile():
         traced = make_fx(
             fn_with_subclass_handling,
             record_stack_traces=True,
