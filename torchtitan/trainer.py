@@ -271,6 +271,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_converters.convert(model)
 
         # Verify all submodules satisfy the Module protocol
+        # TODO: move this to module validate().
+        # This is current put here to verify module build and
+        # converter, which should guanrantee Module protocol.
+        # On the other hand, some parallelism wrappers don't
+        # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
 
         # Check if any converter uses quantization (FP8, MX, etc.)
@@ -775,7 +780,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ),
             )
         else:
-            global_avg_loss = global_max_loss = loss.detach().item()
+            global_avg_loss = global_max_loss = float(loss.detach().item())
             global_ntokens_seen = self.ntokens_seen
 
         extra_metrics = {
@@ -786,7 +791,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.step,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            float(grad_norm.item()),
             extra_metrics=extra_metrics,
         )
 
