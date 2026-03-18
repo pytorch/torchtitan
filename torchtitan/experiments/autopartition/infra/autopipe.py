@@ -96,7 +96,7 @@ def _calc_stage_times(
     fwd: list[int],
     bwd: list[int],
     last_mb: list[int],
-    num_micro: int, 
+    num_micro: int,
 ):
     """C++ calculate_stage_times"""
     num_stages = len(partition)
@@ -207,7 +207,9 @@ def _cooldown(
 
 
 def _training_time(
-    partition: list[list[int]], block_time: list[list[int]], num_micro: int, 
+    partition: list[list[int]],
+    block_time: list[list[int]],
+    num_micro: int,
 ) -> tuple[int, int]:
     """C++ calculate_training_time"""
     num_stages = len(partition)
@@ -305,7 +307,10 @@ def _find_best(
 
 # ---------- main ----------
 def auto_partition(
-    forward_times: list[int], backward_times: list[int], num_stages: int, num_micro: int, 
+    forward_times: list[int],
+    backward_times: list[int],
+    num_stages: int,
+    num_micro: int,
 ) -> list[int]:
 
     if not forward_times or not backward_times:
@@ -338,7 +343,9 @@ if __name__ == "__main__":
         for stages in 1, 2, 3, 4, 5:
             for num_micro in 2 * stages, 3 * stages, 4 * stages:
                 test_out = auto_partition(fwd_flops, bwd_flops, stages, num_micro)
-                print(f"stages={stages}, num_micro={num_micro}, result={test_out}, len={len(test_out)}")
+                print(
+                    f"stages={stages}, num_micro={num_micro}, result={test_out}, len={len(test_out)}"
+                )
 
     except Exception as e:
         traceback.print_exc()
