@@ -308,9 +308,12 @@ class VLLMGenerator(Actor, Configurable):
     async def pull_model_state_dict(self, version: int) -> None:
         """Pull latest weights from TorchStore.
 
-        Uses GPUDirect RDMA for one-hop GPU-to-GPU transfer when available,
-        otherwise falls back to TorchStore's RPC-based transport (two-hop
-        via StorageVolumes).
+        When ``direct_rdma=True``, weights are read directly from the
+        trainer's GPU memory via one-sided RDMA, bypassing StorageVolumes.
+        When ``False``, data is fetched through StorageVolumes (which may
+        themselves use RDMA as their transport internally).
+
+        See ``push_model_state_dict`` for more details on the distinction.
 
         Args:
             version: New policy version number.

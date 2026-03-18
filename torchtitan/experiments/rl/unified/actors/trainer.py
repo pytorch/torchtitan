@@ -72,9 +72,15 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         batch_invariant_mode: bool,
         hf_assets_path: str = "",
+        transfer_dtype: str = "",
     ):
         self.config = config
         self.model_spec = model_spec
+        # Only cast if transfer dtype differs from training dtype, otherwise
+        # staging buffers would be allocated for a no-op cast.
+        training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
+        requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
+        self._transfer_dtype = requested if requested != training_dtype else None
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -227,9 +233,16 @@ class PolicyTrainer(Actor, Configurable):
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generator consumption via TorchStore.
 
-        Uses GPUDirect RDMA for one-hop GPU-to-GPU transfer when available,
-        otherwise falls back to TorchStore's RPC-based transport (two-hop
-        via StorageVolumes).
+        When ``direct_rdma=True``, weights are transferred directly from
+        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
+        entirely. When ``False``, data goes through StorageVolumes
+        (which may themselves use RDMA as a transport internally).
+
+        Note: we couple ``is_rdma_available()`` with ``direct_rdma`` here,
+        but the two concepts are not identical — StorageVolumes can also
+        use RDMA as their transport layer. ``direct_rdma`` specifically
+        means "skip StorageVolumes and let the destination read directly
+        from the source's GPU memory".
         """
         from monarch.rdma import is_rdma_available
 
@@ -237,7 +250,7 @@ class PolicyTrainer(Actor, Configurable):
             self.model.state_dict(),
             "model_state_dict",
             direct_rdma=is_rdma_available(),
-            transfer_dtype=torch.bfloat16,
+            transfer_dtype=self._transfer_dtype,
         )
 
     @endpoint

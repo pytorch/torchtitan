@@ -208,6 +208,7 @@ class RLTrainer(Configurable):
             model_spec=config.model_spec,
             batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
+            transfer_dtype=config.generator.model_dtype,
         )
         self.generator = generator_mesh.spawn(
             "generator",
