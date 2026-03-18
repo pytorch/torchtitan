@@ -8,10 +8,11 @@ import logging
 
 import torch
 from torch.distributed.tensor import DTensor
-from torchtitan.experiments.rl.vllm_compat.models.attention import (
+from torchtitan.experiments.rl.models.vllm_compat_attention import (
     VLLMCompatibleFlashAttention,
 )
 from torchtitan.protocols.module import Module
+
 from vllm.model_executor.layers.attention import Attention
 
 logger = logging.getLogger(__name__)
