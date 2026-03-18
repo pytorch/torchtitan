@@ -32,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import Configurable
@@ -207,6 +208,7 @@ class RLTrainer(Configurable):
             model_spec=config.model_spec,
             batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
+            transfer_dtype=config.generator.model_dtype,
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -222,12 +224,18 @@ class RLTrainer(Configurable):
             self.task.reward_function,
         )
 
-        # Trainer gathers full (unsharded) weights on every rank. We only
-        # need to collect from one rank since they're all identical.
-        initial_weights = self.trainer.get_weights.call().get().item(gpus=0)
+        # Initialize TorchStore for weight sync between trainer and generator.
+        # StorageVolumes are spawned on the trainer mesh so they are colocated
+        # with the weight source for faster data access in the non-RDMA path.
+        # LocalRankStrategy: routes each process to a storage volume based on
+        #   LOCAL_RANK, so colocated processes share the same volume.
+        # https://github.com/meta-pytorch/torchstore
+        await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Initialize generator with trainer weights
-        self.generator.update.call(0, initial_weights).get()
+        # push weights from trainer
+        self.trainer.push_model_state_dict.call().get()
+        # pull weights for policy version 0 (initial weights)
+        self.generator.pull_model_state_dict.call(0).get()
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -338,9 +346,14 @@ class RLTrainer(Configurable):
 
             # 4. Trainer updates policy using episodes with advantages
             metrics = self.trainer.step.call(episodes).get().item(gpus=0)
-            # 5. Sync full weights to generator (each rank reshards locally)
-            weights = self.trainer.get_weights.call().get().item(gpus=0)
-            self.generator.update.call(metrics["policy_version"], weights).get()
+
+            # 5. Sync weights
+            t0 = time.perf_counter()
+            self.trainer.push_model_state_dict.call().get()
+            t_push = time.perf_counter() - t0
+            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            t_total = time.perf_counter() - t0
+            logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
             t_step = time.perf_counter() - step_start
 
