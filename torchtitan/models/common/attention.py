@@ -63,7 +63,7 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class LocalMapModule(Module):
+class LocalMapAttention(Module):
     """Base class for inner attention wrappers with DTensor support.
 
     When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
@@ -124,15 +124,6 @@ class LocalMapModule(Module):
         v: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self._forward_local(q, k, v, **kwargs)
-
-    def _forward_local(
-        self,
-        xq: torch.Tensor,
-        xk: torch.Tensor,
-        xv: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
 
@@ -141,7 +132,7 @@ class VarlenAttentionWrapper(LocalMapModule):
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
 
-    def _forward_local(
+    def forward(
         self,
         xq: torch.Tensor,
         xk: torch.Tensor,
@@ -220,7 +211,7 @@ class FlexAttentionWrapper(LocalMapModule):
         },
     )
 
-    def _forward_local(
+    def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -273,7 +264,7 @@ class ScaledDotProductAttentionWrapper(LocalMapModule):
                 SDPBackend.MATH,
             ]
 
-    def _forward_local(
+    def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
