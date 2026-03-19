@@ -14,13 +14,13 @@ Currently we follow a lightweight release process.
       - "added an experiment for multimodal LLM training"
       - or simply state "this is a regular release"
   - For now, choose "Set as a pre-release".
-- As we set up the GitHub workflow [release.yml](/.github/workflows/release.yml), it should trigger a [GitHub action](https://github.com/pytorch/torchtitan/actions/workflows/release.yml) to update the [torchtitan package on PyPI](https://pypi.org/project/torchtitan/), which requires approval from one of the maintainers to run.
+- As we set up the GitHub workflow [release.yml](../.github/workflows/release.yml), it should trigger a [GitHub action](https://github.com/pytorch/torchtitan/actions/workflows/release.yml) to update the [torchtitan package on PyPI](https://pypi.org/project/torchtitan/), which requires approval from one of the maintainers to run.
 
 The general instruction on managing releases can be found [here](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository).
 
 
 ## Nightly Builds
-Nightly builds are automatically triggered by a [nightly GitHub workflow](/.github/workflows/build_whl_and_publish.yaml) and can be installed by
+Nightly builds are automatically triggered by a [nightly GitHub workflow](../.github/workflows/build_whl_and_publish.yaml) and can be installed by
 ```bash
 pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu128
 ```

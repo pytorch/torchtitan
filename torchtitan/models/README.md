@@ -1,4 +1,4 @@
-This note outlines the process of adding a new model in the `torchtitan` repo. In most cases, new models should be added first under the `torchtitan/experiments` folder. For criteria of contributions, please see the [Contributing Guidelines](/torchtitan/experiments/README.md) therein. In general, please adhere to the [Guiding Principles](/README.md#overview) of `torchtitan`.
+This note outlines the process of adding a new model in the `torchtitan` repo. In most cases, new models should be added first under the `torchtitan/experiments` folder. For criteria of contributions, please see the [Contributing Guidelines](../../torchtitan/experiments/README.md) therein. In general, please adhere to the [Guiding Principles](../../README.md#overview) of `torchtitan`.
 
 For offline explorations, we recommend the same steps, unless otherwise noted.
 
@@ -19,10 +19,10 @@ The folder should be organized as follows
     - `init_weights()` is used to properly initialize the parameters and buffers in the model. Please define it in a recursive way so that every submodule has its own `init_weights()`.
     - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, `Router`, and `GroupedExperts` modules.
   - `state_dict_adapter.py`
-    - Inherit [`BaseStateDictAdapter`](/torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
+    - Inherit [`BaseStateDictAdapter`](../../torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
     - There are multiple ways such adapters could be used
       - Checkpoint conversion scripts in `scripts/checkpoint_conversion/` will use them to adapt state dicts containing non-sharded `torch.Tensor` on CPU.
-      - During training, [`CheckpointManager`](/torchtitan/components/checkpoint.py) will use them to adapt state dicts containing (potentially sharded) `DTensor` on GPUs to save / load checkpoints in HF format.
+      - During training, [`CheckpointManager`](../../torchtitan/components/checkpoint.py) will use them to adapt state dicts containing (potentially sharded) `DTensor` on GPUs to save / load checkpoints in HF format.
       - In post-training, `to_hf()` helps convert a torchtitan model to HF model, which can be used for inference by other frameworks.
     - This is optional for offline exploration.
 - `infra` folder: containing the functions used to parallelize the model using PyTorch native techniques
@@ -38,21 +38,21 @@ The folder should be organized as follows
   - Include other util files if necessary.
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: Model.Config]`.
-  - Define `model_registry(flavor)` to return a [`ModelSpec`](/torchtitan/protocols/model_spec.py), consisting of
+  - Define `model_registry(flavor)` to return a [`ModelSpec`](../../torchtitan/protocols/model_spec.py), consisting of
     - model name and flavor
     - model config (a `Model.Config` dataclass)
     - parallelizing function, pipelining function
     - loss function builder
     - state dict adapter
   - Model name should be the same as the folder name, which should be added to `torchtitan/models/__init__.py` or ``torchtitan/experiments/__init__.py``.
-  - Read [more](/docs/extension.md#modelspec) on `ModelSpec`.
+  - Read [more](../../docs/extension.md#modelspec) on `ModelSpec`.
 - `config_registry.py`
   - Define one function for each training configuration (e.g. `llama3_debugmodel`, `llama3_8b`, `llama3_70b`).
   - Each function returns a `Trainer.Config` (or subclass) instance with all training settings.
   - Functions can derive from each other via mutation for variants (e.g. flex_attn, float8).
   - These are selected at runtime via `--module <model_name> --config <function_name>`.
 - `README.md`
-  - Include [instructions](/README.md#downloading-a-tokenizer) to download tokenizers / encoders.
+  - Include [instructions](../../README.md#downloading-a-tokenizer) to download tokenizers / encoders.
   - Include instructions to download model checkpoints for continued pretraining or post training.
   - Update the current status of development, including the supported features and coming features.
   - This is optional for offline exploration.
@@ -64,10 +64,10 @@ The folder should be organized as follows
     - The correctness of a `torchtitan` model and the corresponding state dict adapter together indicates the correctness of both.
 - Loss converging
   - If there is a verified baseline, compare the loss curves with the baseline.
-  - For comparisons within `torchtitan`, see the [guidelines](/docs/converging.md).
+  - For comparisons within `torchtitan`, see the [guidelines](../../docs/converging.md).
 - Performance benchmarking
-  - Please refer to the [benchmarks](/benchmarks/) folder.
+  - Please refer to the [benchmarks](../../benchmarks/) folder.
 - CI tests
-  - Including unit tests and integration tests, see [examples](/tests/).
+  - Including unit tests and integration tests, see [examples](../../tests/).
   - If the model folder is under the experiments folder, put the tests under the model folder. Otherwise, put the tests under the `/tests` folder.
-  - Add necessary GitHub [workflows](/.github/workflows/).
+  - Add necessary GitHub [workflows](../../.github/workflows/).

@@ -23,7 +23,7 @@
 - [2025/11] AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
 - [2025/10] We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
 - [2025/10] SkyPilot now supports `torchtitan`! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
-- [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
+- [2025/07] We published [instructions](./torchtitan/models/README.md) on how to add a model to `torchtitan`.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
 - [2024/12] GPU MODE [lecture](https://www.youtube.com/watch?v=VYWRjcUqW6w) on torchtitan.
 - [2024/07] [Presentation](https://pytorch2024.sched.com/event/1fHn3) at PyTorch Conference 2024.
@@ -46,7 +46,7 @@ The Guiding Principles when building `torchtitan`
 
 We look forward to your contributions!
 
-* To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. New ideas should start there. To contribute, follow the [`experiments guidelines`](torchtitan/experiments/README.md).
+* To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](./torchtitan/experiments) folder. New ideas should start there. To contribute, follow the [`experiments guidelines`](./torchtitan/experiments/README.md).
 * For fixes and contributions to core, follow these [`guidelines`](CONTRIBUTING.md).
 
 ## Llama 3.1 training
@@ -70,7 +70,7 @@ We look forward to your contributions!
 9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
 10. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
 11. Flexible learning rate scheduler (warmup-stable-decay)
-12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
+12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](./docs/metrics.md)
 13. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
 14. All options easily configured via [Python config registry](torchtitan/models/llama3/config_registry.py) with `--module` and `--config` CLI flags
 15. [Helper scripts](scripts/) to
