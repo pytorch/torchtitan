@@ -141,6 +141,7 @@ class BenchmarkConfig:
     use_compile_cudagraph: bool = (
         False  # True = compile(eager) + piecewise cudagraph; False = fully eager
     )
+    compile_backend: str = "eager"  # "eager" or "inductor" for vLLM compile backend
     use_fused_kernels: bool = False  # True = fused QKV/RoPE/FFN/attention kernels
     # NCCL tuning
     nccl_algo: str | None = None  # e.g. "Tree" to force tree-based all-reduce
@@ -247,9 +248,14 @@ class VLLMNativeBenchmark:
             gen_config = rl_config.generator
             model_path = self.config.model_path or rl_config.hf_assets_path
 
+            # Override compile backend if specified
+            if self.config.compile_backend != "eager":
+                gen_config.compile.backend = self.config.compile_backend
+
             use_compile = self.config.use_compile_cudagraph
+            backend = gen_config.compile.backend
             mode_str = (
-                "compile(eager) + piecewise cudagraph"
+                f"compile({backend}) + piecewise cudagraph"
                 if use_compile
                 else "eager (no compile, no cudagraph)"
             )
@@ -429,9 +435,14 @@ class VLLMTorchTitanBenchmark:
 
                 vllm_wrapper.fused_kernels_enabled = True
 
+            # Override compile backend if specified
+            if self.config.compile_backend != "eager":
+                gen_config.compile.backend = self.config.compile_backend
+
             use_compile = self.config.use_compile_cudagraph
+            backend = gen_config.compile.backend
             mode_str = (
-                "compile(eager) + piecewise cudagraph"
+                f"compile({backend}) + piecewise cudagraph"
                 if use_compile
                 else "eager (no compile, no cudagraph)"
             )
@@ -1324,6 +1335,14 @@ def main():
         "Default is fully eager (no compile, no cudagraph).",
     )
     parser.add_argument(
+        "--compile-backend",
+        type=str,
+        default="eager",
+        choices=["eager", "inductor"],
+        help="torch.compile backend for vLLM (default: eager). "
+        "Use 'inductor' to enable Triton kernel fusion.",
+    )
+    parser.add_argument(
         "--use-fused-kernels",
         action="store_true",
         help="Enable fused vLLM kernels (QKV, RoPE, FFN, attention) for TorchTitan model. "
@@ -1372,6 +1391,7 @@ def main():
         profile_warmup=args.profile_warmup,
         profile_active=args.profile_active,
         use_compile_cudagraph=args.use_compile_cudagraph,
+        compile_backend=args.compile_backend,
         use_fused_kernels=args.use_fused_kernels,
         nccl_algo=args.nccl_algo,
     )
