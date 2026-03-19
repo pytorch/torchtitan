@@ -161,7 +161,7 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.output.weight
 
-    def init_states(self, **kwargs) -> None:
+    def init_states(self, *, param_init=None, param_prefix="", **kwargs) -> None:
         # The token embedding initialization produces weights with too large
         # standard deviation for the output layer. Under weight_tying, both should
         # use the output weights with a smaller, truncated normal distribution to
@@ -173,4 +173,4 @@ class Qwen3Model(Decoder):
             assert self.tok_embeddings is not None and self.output is not None
             self.tok_embeddings.weight = self.output.weight
 
-        super().init_states(**kwargs)
+        super().init_states(param_init=param_init, param_prefix=param_prefix, **kwargs)

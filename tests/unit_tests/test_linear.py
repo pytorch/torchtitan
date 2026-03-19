@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -23,32 +22,6 @@ from torchtitan.models.common.param_init import (
     init_zeros,
 )
 from torchtitan.protocols.module import Module
-
-
-# Helper wrapper to test init_states on leaf Linear modules.
-@dataclass(kw_only=True, slots=True)
-class _TestLinearConfig(Module.Config):
-    pass
-
-
-def _make_linear_wrapper(linear, *, param_init=None):
-    """Wraps a Linear with a param_init so init_states can be called."""
-
-    class _Wrapper(Module):
-        pass
-
-    wrapper = _Wrapper()
-    wrapper.config = _TestLinearConfig(
-        param_init=param_init
-        or init_by_regex(
-            {
-                r".*\.weight": init_trunc_normal(),
-                r".*\.bias": init_zeros(),
-            }
-        )
-    )
-    wrapper.linear = linear
-    return wrapper
 
 
 class TestLinear(unittest.TestCase):
@@ -77,38 +50,36 @@ class TestLinear(unittest.TestCase):
             config.build()
 
     def test_init_states(self):
-        """init_states via parent param_init re-initializes the weight tensor."""
-        config = Linear.Config()
+        """init_states via param_init re-initializes the weight tensor."""
+        config = Linear.Config(
+            param_init=init_by_regex(
+                {r"weight": init_trunc_normal(), r"bias": init_zeros()}
+            )
+        )
         linear = config.build(in_features=16, out_features=8)
 
         with torch.no_grad():
-            # Set weights to zero, then call init_states via wrapper
+            # Set weights to zero, then call init_states
             nn.init.zeros_(linear.weight)
             self.assertTrue(torch.all(linear.weight == 0))
-            wrapper = _make_linear_wrapper(linear)
-            wrapper.init_states()
+            linear.init_states()
             # After init_states, weights should no longer be all zero
             self.assertFalse(torch.all(linear.weight == 0))
 
     def test_custom_init_std(self):
         """Linear init respects custom mean and std via param_init."""
-        config = Linear.Config()
+        # Use init_normal (not truncated) so sample statistics closely
+        # match the requested mean/std without truncation bias.
+        config = Linear.Config(
+            param_init=init_by_regex(
+                {r"weight": init_normal(mean=0.1, std=0.02), r"bias": init_zeros()}
+            )
+        )
         linear = config.build(in_features=1000, out_features=500)
 
         torch.manual_seed(42)
         with torch.no_grad():
-            # Use init_normal (not truncated) so sample statistics closely
-            # match the requested mean/std without truncation bias.
-            wrapper = _make_linear_wrapper(
-                linear,
-                param_init=init_by_regex(
-                    {
-                        r".*\.weight": init_normal(mean=0.1, std=0.02),
-                        r".*\.bias": init_zeros(),
-                    }
-                ),
-            )
-            wrapper.init_states()
+            linear.init_states()
         # With large amount of samples (1000 * 500) the sample statistics should
         # be close to the requested values. places=3 checks within 0.0005, which
         # is well within statistical tolerance for this sample size.
@@ -202,23 +173,23 @@ class TestModuleInjection(unittest.TestCase):
         self.assertIs(type(model.fc), orig_cls)  # class unchanged
 
     def test_init_states_after_injection(self):
-        """init_states works on injected module via parent param_init."""
+        """init_states works on injected module with param_init."""
 
         class FakeQuantLinear(nn.Linear):
             pass
 
-        wrapper = _make_linear_wrapper(
-            Linear.Config().build(in_features=8, out_features=4)
+        # Simulate conversion, inject, then set param_init
+        model = nn.Module()
+        model.fc = FakeQuantLinear(8, 4)
+        inject_module_protocol(model, Linear)
+        param_init = init_by_regex(
+            {r"weight": init_trunc_normal(), r"bias": init_zeros()}
         )
+        object.__setattr__(model.fc, "param_init", param_init)
 
-        # Capture attrs, simulate conversion, inject
-        saved_attrs = capture_module_attrs(wrapper, [])
-        wrapper.linear = FakeQuantLinear(8, 4)
-        inject_module_protocol(wrapper, Linear, saved_attrs)
-
-        # Should not raise — init_states delegates to parent's param_init
+        # Should not raise — init_states uses param_init
         with torch.no_grad():
-            wrapper.init_states()
+            model.fc.init_states()
 
     def test_injection_cached_across_instances(self):
         """Same original class gets the same patched class."""

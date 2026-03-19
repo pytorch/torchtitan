@@ -19,7 +19,7 @@ class TestModuleInitStates(unittest.TestCase):
     """Tests for Module.init_states behavior.
 
     Module.init_states auto-recurses into children, then calls
-    init_self_parameters and init_self_buffers on the current module.
+    _init_self_parameters and _init_self_buffers on the current module.
     """
 
     def test_default_init_states_no_param_init_raises(self):
@@ -37,18 +37,14 @@ class TestModuleInitStates(unittest.TestCase):
     def test_init_states_with_param_init(self):
         """init_states uses param_init to initialize parameters."""
 
-        @dataclass(kw_only=True, slots=True)
-        class TestConfig(Module.Config):
-            pass
-
         class TestModel(Module):
-            def __init__(self, config):
+            def __init__(self, param_init):
                 super().__init__()
-                self.config = config
+                object.__setattr__(self, "param_init", param_init)
                 self.weight = nn.Parameter(torch.empty(4))
 
         param_init = init_by_regex({r".*": init_zeros()})
-        m = TestModel(TestConfig(param_init=param_init))
+        m = TestModel(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.weight == 0))
 
@@ -60,18 +56,14 @@ class TestModuleInitStates(unittest.TestCase):
                 super().__init__()
                 self.weight = nn.Parameter(torch.empty(4))
 
-        @dataclass(kw_only=True, slots=True)
-        class ParentConfig(Module.Config):
-            pass
-
         class Parent(Module):
-            def __init__(self, config):
+            def __init__(self, param_init):
                 super().__init__()
-                self.config = config
+                object.__setattr__(self, "param_init", param_init)
                 self.child = Child()
 
         param_init = init_by_regex({r"child\.weight": init_zeros()})
-        m = Parent(ParentConfig(param_init=param_init))
+        m = Parent(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.child.weight == 0))
 
@@ -88,43 +80,30 @@ class TestModuleInitStates(unittest.TestCase):
                 super().__init__()
                 self.leaf = Leaf()
 
-        @dataclass(kw_only=True, slots=True)
-        class RootConfig(Module.Config):
-            pass
-
         class Root(Module):
-            def __init__(self, config):
+            def __init__(self, param_init):
                 super().__init__()
-                self.config = config
+                object.__setattr__(self, "param_init", param_init)
                 self.mid = Mid()
 
         param_init = init_by_regex({r"mid\.leaf\.weight": init_ones()})
-        m = Root(RootConfig(param_init=param_init))
+        m = Root(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.mid.leaf.weight == 1))
-        # Verify transient init-time attrs are cleaned up
-        for _, mod in m.named_modules():
-            self.assertFalse(hasattr(mod, "_init_parent"))
-            self.assertFalse(hasattr(mod, "_init_name"))
 
-    def test_init_self_buffers_called(self):
-        """init_self_buffers is called with kwargs."""
+    def test__init_self_buffers_called(self):
+        """_init_self_buffers is called with kwargs."""
 
         class BufferModule(Module):
-            def __init__(self, config):
+            def __init__(self):
                 super().__init__()
-                self.config = config
                 self.register_buffer("buf", torch.zeros(4))
                 self.buffer_device_seen = None
 
-            def init_self_buffers(self, **kwargs):
+            def _init_self_buffers(self, **kwargs):
                 self.buffer_device_seen = kwargs.get("buffer_device")
 
-        @dataclass(kw_only=True, slots=True)
-        class BufConfig(Module.Config):
-            pass
-
-        m = BufferModule(BufConfig())
+        m = BufferModule()
         m.init_states(buffer_device=torch.device("cpu"))
         self.assertEqual(m.buffer_device_seen, torch.device("cpu"))
 
@@ -137,21 +116,6 @@ class TestModuleInitStates(unittest.TestCase):
 
         m = NoParams()
         m.init_states()  # should not raise
-
-    def test_init_self_parameters_override(self):
-        """Custom init_self_parameters overrides default delegation."""
-
-        class CustomInit(Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = nn.Parameter(torch.empty(4))
-
-            def init_self_parameters(self, **kwargs):
-                nn.init.constant_(self.weight, 42.0)
-
-        m = CustomInit()
-        m.init_states()
-        self.assertTrue(torch.all(m.weight == 42.0))
 
 
 class TestDiamondInheritance(unittest.TestCase):
@@ -234,16 +198,16 @@ class TestFromNnModule(unittest.TestCase):
         self.assertIsInstance(m, nn.Conv2d)
         self.assertIsInstance(m, Module)
 
-    def test_init_self_parameters_calls_reset_parameters(self):
-        """For classes with reset_parameters, init_self_parameters delegates to it."""
+    def test__init_self_parameters_calls_reset_parameters(self):
+        """For classes with reset_parameters, _init_self_parameters delegates to it."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         m = LayerNorm(32)
         nn.init.zeros_(m.weight)
-        m.init_self_parameters()
+        m._init_self_parameters()
         self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
 
     def test_init_states_calls_reset_parameters(self):
-        """init_states triggers init_self_parameters which calls reset_parameters."""
+        """init_states triggers _init_self_parameters which calls reset_parameters."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         m = LayerNorm(32)
         nn.init.zeros_(m.weight)
@@ -289,7 +253,7 @@ class TestContainerInitStates(unittest.TestCase):
     """Tests for ModuleList, ModuleDict, Sequential init_states."""
 
     def test_module_list_init_states(self):
-        """ModuleList.init_states calls init_self_parameters on children via recursion."""
+        """ModuleList.init_states calls _init_self_parameters on children via recursion."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         norms = ModuleList([LayerNorm(8) for _ in range(3)])
         for n in norms:
@@ -299,7 +263,7 @@ class TestContainerInitStates(unittest.TestCase):
             self.assertTrue(torch.allclose(n.weight, torch.ones(8)))
 
     def test_module_dict_init_states(self):
-        """ModuleDict.init_states calls init_self_parameters on children via recursion."""
+        """ModuleDict.init_states calls _init_self_parameters on children via recursion."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         norms = ModuleDict({"a": LayerNorm(8), "b": LayerNorm(8)})
         for n in norms.values():

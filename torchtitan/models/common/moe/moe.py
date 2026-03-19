@@ -514,7 +514,7 @@ class MoE(Module):
             return out_experts.reshape(bs, slen, dim)
         return (out + out_experts).reshape(bs, slen, dim)
 
-    def init_self_buffers(self, **kwargs) -> None:
+    def _init_self_buffers(self, **kwargs) -> None:
         buffer_device = kwargs.get("buffer_device")
         assert isinstance(buffer_device, torch.device)
 

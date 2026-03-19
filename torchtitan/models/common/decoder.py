@@ -100,22 +100,22 @@ class Decoder(BaseModel):
             in_features=config.dim, out_features=config.vocab_size
         )
 
-    def init_states(self, **kwargs) -> None:
+    def init_states(self, *, param_init=None, param_prefix="", **kwargs) -> None:
         # Compute buffer_device before recursion so children (RoPE) get
         # the correct device when buffer_device is not explicitly provided.
         if "buffer_device" not in kwargs or kwargs["buffer_device"] is None:
             kwargs = {**kwargs, "buffer_device": self.freqs_cis.device}
-        super().init_states(**kwargs)
+        super().init_states(param_init=param_init, param_prefix=param_prefix, **kwargs)
 
-    def init_self_buffers(self, **kwargs) -> None:
+    def _init_self_buffers(self, **kwargs) -> None:
         buffer_device: torch.device | None = kwargs.get("buffer_device")
         if self.rope is not None:
-            # RoPE's init_self_buffers was already called by auto-recursion
+            # RoPE's _init_self_buffers was already called by auto-recursion
             self.freqs_cis = self.rope.cache
         else:
             # PP case: rope module was pruned, rebuild to get freqs_cis
             rope = self.config.rope.build()
-            rope.init_self_buffers(buffer_device=buffer_device)
+            rope._init_self_buffers(buffer_device=buffer_device)
             self.freqs_cis = rope.cache
 
     def forward(

@@ -158,24 +158,8 @@ def make_decoder_param_init(
     base_std: float = 0.02,
     tok_emb_std: float = 1.0,
 ) -> dict[str, NamedInitializer]:
-    """Common param_init patterns for Decoder-based models.
+    """Common param_init patterns for Decoder-based models."""
 
-    Covers Llama3, Llama4, Qwen3, and DeepSeek V3 (with model-specific
-    extensions merged via dict update).
-
-    Pattern matching (first match wins):
-    - ``tok_embeddings.weight``: normal with tok_emb_std
-    - ``layers.*.attention.wo.weight``: depth-scaled trunc_normal
-    - ``layers.*.feed_forward.w[23].weight``: depth-scaled trunc_normal
-    - ``layers.*.moe.experts.w[23]``: depth-scaled trunc_normal (nn.Parameter, no .weight)
-    - ``layers.*.moe.router.gate.weight``: depth-scaled trunc_normal
-    - ``layers.*.moe.shared_experts.w[23].weight``: depth-scaled trunc_normal
-    - ``.*norm.*.weight``: ones (RMSNorm)
-    - ``output.weight``: trunc_normal with dim^-0.5
-    - ``.*\\.weight``: trunc_normal with base_std (default for other linears)
-    - ``.*\\.bias``: zeros
-    - ``.*``: trunc_normal with base_std (catch-all for nn.Parameters like sinks)
-    """
     depth_std = init_depth_scaled_trunc_normal(
         base_std=base_std, n_layers=n_layers, depth_init=depth_init
     )

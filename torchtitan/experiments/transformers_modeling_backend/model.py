@@ -647,7 +647,7 @@ class HFTransformerModel(BaseModel):
         """
         pass
 
-    def init_states(self, **kwargs):
+    def init_states(self, *, param_init=None, param_prefix="", **kwargs):
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
 

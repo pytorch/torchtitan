@@ -19,6 +19,8 @@ class GraphTrainerLlama3Model(Llama3Model):
     def __init__(self, config: Config):
         super().__init__(config)
 
-    def init_states(self, **kwargs):
+    def init_states(self, *, param_init=None, param_prefix="", **kwargs):
         with disable_active_parametrization():
-            super().init_states(**kwargs)
+            super().init_states(
+                param_init=param_init, param_prefix=param_prefix, **kwargs
+            )

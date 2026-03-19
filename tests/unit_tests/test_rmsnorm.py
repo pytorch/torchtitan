@@ -5,35 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torchtitan.models.common.param_init import init_by_regex, init_ones
 
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.protocols.module import Module
-
-
-# Helper wrapper to test init_states on leaf RMSNorm modules.
-@dataclass(kw_only=True, slots=True)
-class _TestRMSNormConfig(Module.Config):
-    pass
-
-
-class _TestRMSNormWrapper(Module):
-    """Wraps an RMSNorm with a param_init so init_states can be called."""
-
-    def __init__(self, norm):
-        super().__init__()
-        self.config = _TestRMSNormConfig(
-            param_init=init_by_regex(
-                {
-                    r".*\.weight": init_ones(),
-                }
-            )
-        )
-        self.norm = norm
 
 
 class TestRMSNorm(unittest.TestCase):
@@ -54,15 +31,14 @@ class TestRMSNorm(unittest.TestCase):
             config.build()
 
     def test_init_states(self):
-        """init_states via parent param_init re-initializes the weight tensor."""
-        config = RMSNorm.Config()
+        """init_states via param_init re-initializes the weight tensor."""
+        config = RMSNorm.Config(param_init=init_by_regex({r"weight": init_ones()}))
         norm = config.build(normalized_shape=16)
 
-        # Set weights to zero, then call init_states via wrapper
+        # Set weights to zero, then call init_states
         nn.init.zeros_(norm.weight)
         self.assertTrue(torch.all(norm.weight == 0))
-        wrapper = _TestRMSNormWrapper(norm)
-        wrapper.init_states()
+        norm.init_states()
         # After init_states, weights should be all ones (RMSNorm default)
         self.assertTrue(torch.all(norm.weight == 1))
 
