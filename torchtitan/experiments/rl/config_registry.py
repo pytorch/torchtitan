@@ -31,6 +31,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
+        seed=42,
+        deterministic=True,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
@@ -40,7 +42,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=1,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
@@ -51,7 +53,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,
@@ -71,6 +73,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
+        seed=42,
+        deterministic=True,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
