@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compiler import set_common_compiler_flags
+from torchtitan.distributed.compile import set_common_compiler_flags
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     get_transformer_block_buckets,

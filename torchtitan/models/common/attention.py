@@ -36,7 +36,7 @@ from torchtitan.protocols.module import Module
 __all__ = [
     "FlexAttentionWrapper",
     "GQAttention",
-    "LocalMapModule",
+    "LocalMapAttention",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
     "VarlenMetadata",
@@ -98,15 +98,20 @@ class LocalMapAttention(Module):
             # All placements must be Shard. We set
             # out_placements and in_grad_placements equal to
             # in_placements below. This is only valid for attention
-            # as qkv are sharded on head dim. CP is handled
+            # as qkv are sharded on the n_heads dim. CP is handled
             # independently by _ContextParallel hooks inside
             # nn.Module.__call__.
-            for tensor, name in ((q, "q"), (k, "k"), (v, "v")):
-                for p in tensor.placements:
-                    assert isinstance(p, Shard), (
-                        f"LocalMapModule requires Shard placements, "
-                        f"but {name} has placement {p}"
-                    )
+            assert q.placements == k.placements == v.placements, (
+                f"q, k, v must have the same placements, "
+                f"but got q={q.placements}, k={k.placements}, v={v.placements}"
+            )
+            # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
+            # on the n_heads dim (dim 1)
+            for i, p in enumerate(q.placements):
+                assert p == Shard(1), (
+                    f"LocalMapAttention requires Shard(1) placements "
+                    f"(head dim), but got {p} at position {i}"
+                )
             if self._local_map_fn is None:
                 self._local_map_fn = local_map(
                     super().__call__,
@@ -128,7 +133,7 @@ class LocalMapAttention(Module):
         raise NotImplementedError
 
 
-class VarlenAttentionWrapper(LocalMapModule):
+class VarlenAttentionWrapper(LocalMapAttention):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
@@ -186,7 +191,7 @@ class VarlenAttentionWrapper(LocalMapModule):
         ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(LocalMapModule):
+class FlexAttentionWrapper(LocalMapAttention):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -267,7 +272,7 @@ def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, Non
         FlexAttentionWrapper.forward = orig
 
 
-class ScaledDotProductAttentionWrapper(LocalMapModule):
+class ScaledDotProductAttentionWrapper(LocalMapAttention):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
