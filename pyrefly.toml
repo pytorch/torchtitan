@@ -1,0 +1,14 @@
+# Worktree-specific pyrefly config.
+# Disables the default **/.[!/.]*/** exclude pattern which would exclude
+# the entire project since worktrees live inside .claude/ (a dot-directory).
+disable-project-excludes-heuristics = true
+project-excludes = [
+    "torchtitan/experiments",
+    "**/tests/**",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/venv/**",
+    "**/.venv/**",
+]
+ignore-missing-imports = ["torchao.*", "torchft"]
+search-path = ["/home/jrcummings/projects/pytorch"]

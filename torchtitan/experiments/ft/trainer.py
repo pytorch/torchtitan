@@ -129,6 +129,9 @@ class FaultTolerantTrainer(Trainer):
         )
         model_converters.convert(model)
 
+        # Verify all submodules satisfy the Module protocol
+        model.verify_module_protocol()
+
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
