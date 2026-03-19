@@ -232,7 +232,6 @@ def llama3_8b_lora() -> Trainer.Config:
         interval=500,
         initial_load_in_hf=True,
         initial_load_model_only=True,
-        additional_load_in_hf=True,
     )
     return config
 
