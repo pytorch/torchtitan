@@ -599,9 +599,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        # TODO: improve the logic on obtaining attention masks
+        # For causal attention the whole packed sequence is one document,
+        # so sequential RoPE positions (positions=None) are correct.
         layer = getattr(self.model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
+        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
+        if attn_mask_type != "block_causal":
+            extra_inputs.pop("positions", None)
+
         attn_backend = getattr(attn_config, "attn_backend", "sdpa")
         if attn_backend in ["flex", "varlen"]:
             assert (
