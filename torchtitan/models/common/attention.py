@@ -114,7 +114,8 @@ class LocalMapAttention(Module):
                     f"LocalMapAttention requires Shard(1) placements "
                     f"(n_heads dim), but got {p} at position {i}"
                 )
-            # return_lse=True produces two outputs
+            # return_lse=True (e.g. gpt_oss attention sinks) produces
+            # 2 outputs instead of 1, requiring different out_placements.
             return_lse = kwargs.get("return_lse", False)
             out_placements = (
                 (q.placements, q.placements) if return_lse else (q.placements,)
@@ -127,9 +128,8 @@ class LocalMapAttention(Module):
                     in_grad_placements=(q.placements, k.placements, v.placements),
                     device_mesh=q.device_mesh,
                 )
-            return self._local_map_fn(
-                q, k, v, **kwargs
-            )  # pyrefly: ignore [bad-argument-count]
+            # pyrefly: ignore [bad-argument-count]
+            return self._local_map_fn(q, k, v, **kwargs)
         return super().__call__(q, k, v, **kwargs)
 
     def forward(
