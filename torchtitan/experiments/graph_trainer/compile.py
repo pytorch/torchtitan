@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.compiler import set_common_compiler_flags
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -132,13 +133,7 @@ def apply_compile(
         return model
 
     torch._inductor.config.reorder_for_peak_memory = False
-    torch._dynamo.config.capture_scalar_outputs = True
-    # Skip replaying forward side effects (e.g. RoPE cache updates) during
-    # the AC recompute in backward. Eager AC replays the forward python
-    # side-effects in backward, but torch.compile has no easy way to reapply
-    # python mutations in the backward. Setting this flag accepts this eager
-    # and compile divergence by skipping reapplication of side effects.
-    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+    set_common_compiler_flags()
 
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled

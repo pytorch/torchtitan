@@ -32,6 +32,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.compiler import set_common_compiler_flags
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
@@ -635,15 +636,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
-    # but it is experimental.
-    torch._dynamo.config.capture_scalar_outputs = True
-    # Skip replaying forward side effects (e.g. RoPE cache updates) during
-    # the AC recompute in backward. Eager AC replays the forward python
-    # side-effects in backward, but torch.compile has no easy way to reapply
-    # python mutations in the backward. Setting this flag accepts this eager
-    # and compile divergence by skipping reapplication of side effects.
-    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+    set_common_compiler_flags()
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:
