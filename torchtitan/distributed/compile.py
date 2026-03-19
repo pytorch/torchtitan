@@ -7,7 +7,7 @@
 import torch
 
 
-def set_common_compiler_flags() -> None:
+def set_dynamo_flags_for_compile() -> None:
     """Set common torch._dynamo config flags for distributed compilation.
 
     This should be called before torch.compile() in any compilation code path.

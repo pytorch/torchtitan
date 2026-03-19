@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import set_common_compiler_flags
+from torchtitan.distributed.compile import set_dynamo_flags_for_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     get_transformer_block_buckets,
@@ -133,7 +133,7 @@ def apply_compile(
         return model
 
     torch._inductor.config.reorder_for_peak_memory = False
-    set_common_compiler_flags()
+    set_dynamo_flags_for_compile()
 
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled

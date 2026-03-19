@@ -33,7 +33,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import set_common_compiler_flags
+from torchtitan.distributed.compile import set_dynamo_flags_for_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -636,7 +636,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    set_common_compiler_flags()
+    set_dynamo_flags_for_compile()
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:
