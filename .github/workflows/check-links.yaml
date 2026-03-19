@@ -27,16 +27,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install mistune pytest pytest-check-links
+          pip install mistune pytest pytest-check-links pytest-timeout pytest-xdist
 
       - name: Check links
         run: |
           FILES=$(find . -name "*.md")
 
-          # -p no:python disables import phase for standard Python files, otherwise
-          # there will be errors of missing dependencies
+          # -n auto: parallel execution
+          # -p no:python: skip discovery imports
           pytest -v \
             -p no:python \
+            -n auto \
             --check-links \
-            --check-links-ignore "http.*" \
+            --timeout 5 \
             $FILES
