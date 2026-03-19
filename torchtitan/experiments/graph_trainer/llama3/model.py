@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 
 from torchtitan.models.llama3 import Llama3Model
+from torchtitan.protocols.module import NamedInitializer
 
 from ..simple_fsdp import disable_active_parametrization
 
@@ -19,7 +20,13 @@ class GraphTrainerLlama3Model(Llama3Model):
     def __init__(self, config: Config):
         super().__init__(config)
 
-    def init_states(self, *, param_init=None, param_prefix="", **kwargs):
+    def init_states(
+        self,
+        *,
+        param_init: NamedInitializer | None = None,
+        param_prefix: str = "",
+        **kwargs,
+    ) -> None:
         with disable_active_parametrization():
             super().init_states(
                 param_init=param_init, param_prefix=param_prefix, **kwargs

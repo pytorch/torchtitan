@@ -9,11 +9,7 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_depth_scaled_trunc_normal,
-    make_decoder_param_init,
-)
+from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
@@ -29,14 +25,7 @@ __all__ = [
 
 
 def _deepseekv3_param_init(dim, n_layers):
-    base = make_decoder_param_init(dim=dim, n_layers=n_layers, depth_init=True)
-    depth_std = init_depth_scaled_trunc_normal(n_layers=n_layers, depth_init=True)
-    # MLA-specific: wo gets depth-scaled, other MLA linears get default
-    mla_patterns = {
-        r"layers\..+\.attention\.wo\.weight": depth_std,
-    }
-    # MLA patterns go first (override base), then base patterns
-    return init_by_regex({**mla_patterns, **base})
+    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
 
 
 deepseekv3_configs = {

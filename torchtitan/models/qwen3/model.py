@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.module import NamedInitializer
 from torchtitan.tools.logging import logger
 
 
@@ -161,15 +162,16 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.output.weight
 
-    def init_states(self, *, param_init=None, param_prefix="", **kwargs) -> None:
-        # The token embedding initialization produces weights with too large
-        # standard deviation for the output layer. Under weight_tying, both should
-        # use the output weights with a smaller, truncated normal distribution to
-        # improve training stability.
+    def init_states(
+        self,
+        *,
+        param_init: NamedInitializer | None = None,
+        param_prefix: str = "",
+        **kwargs,
+    ) -> None:
         if self.enable_weight_tying:
-            # since when the model is initialized on meta device,
-            # the tying in the __init__ may not have worked correctly
-            # we ensure the weights are tied here
+            # Re-tie before init: on meta device the __init__ tying may
+            # not have worked correctly.
             assert self.tok_embeddings is not None and self.output is not None
             self.tok_embeddings.weight = self.output.weight
 

@@ -31,15 +31,13 @@ class TestRMSNorm(unittest.TestCase):
             config.build()
 
     def test_init_states(self):
-        """init_states via param_init re-initializes the weight tensor."""
+        """init_states re-initializes the weight tensor."""
         config = RMSNorm.Config(param_init=init_by_regex({r"weight": init_ones()}))
         norm = config.build(normalized_shape=16)
 
-        # Set weights to zero, then call init_states
         nn.init.zeros_(norm.weight)
         self.assertTrue(torch.all(norm.weight == 0))
         norm.init_states()
-        # After init_states, weights should be all ones (RMSNorm default)
         self.assertTrue(torch.all(norm.weight == 1))
 
     def test_custom_eps(self):

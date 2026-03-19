@@ -15,7 +15,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model as Llama3
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, NamedInitializer
 
 from .args import Siglip2Config, SpecialTokens
 from .siglip2 import VisionTransformer
@@ -63,7 +63,13 @@ class Llama3Siglip2Transformer(Llama3):
         self.encoder = VisionTransformer(config.encoder)
         self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
 
-    def init_states(self, *, param_init=None, param_prefix="", **kwargs):
+    def init_states(
+        self,
+        *,
+        param_init: NamedInitializer | None = None,
+        param_prefix: str = "",
+        **kwargs,
+    ) -> None:
         super().init_states(param_init=param_init, param_prefix=param_prefix, **kwargs)
 
     def get_attention_masks(

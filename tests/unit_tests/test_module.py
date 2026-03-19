@@ -16,11 +16,7 @@ from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequenti
 
 
 class TestModuleInitStates(unittest.TestCase):
-    """Tests for Module.init_states behavior.
-
-    Module.init_states auto-recurses into children, then calls
-    _init_self_parameters and _init_self_buffers on the current module.
-    """
+    """Tests for Module.init_states behavior."""
 
     def test_default_init_states_no_param_init_raises(self):
         """Subclass with parameters but no param_init raises ValueError."""
@@ -253,7 +249,7 @@ class TestContainerInitStates(unittest.TestCase):
     """Tests for ModuleList, ModuleDict, Sequential init_states."""
 
     def test_module_list_init_states(self):
-        """ModuleList.init_states calls _init_self_parameters on children via recursion."""
+        """ModuleList.init_states initializes children."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         norms = ModuleList([LayerNorm(8) for _ in range(3)])
         for n in norms:
@@ -263,7 +259,7 @@ class TestContainerInitStates(unittest.TestCase):
             self.assertTrue(torch.allclose(n.weight, torch.ones(8)))
 
     def test_module_dict_init_states(self):
-        """ModuleDict.init_states calls _init_self_parameters on children via recursion."""
+        """ModuleDict.init_states initializes children."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         norms = ModuleDict({"a": LayerNorm(8), "b": LayerNorm(8)})
         for n in norms.values():

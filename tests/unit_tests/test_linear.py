@@ -50,7 +50,7 @@ class TestLinear(unittest.TestCase):
             config.build()
 
     def test_init_states(self):
-        """init_states via param_init re-initializes the weight tensor."""
+        """init_states re-initializes the weight tensor."""
         config = Linear.Config(
             param_init=init_by_regex(
                 {r"weight": init_trunc_normal(), r"bias": init_zeros()}
@@ -59,17 +59,13 @@ class TestLinear(unittest.TestCase):
         linear = config.build(in_features=16, out_features=8)
 
         with torch.no_grad():
-            # Set weights to zero, then call init_states
             nn.init.zeros_(linear.weight)
             self.assertTrue(torch.all(linear.weight == 0))
             linear.init_states()
-            # After init_states, weights should no longer be all zero
             self.assertFalse(torch.all(linear.weight == 0))
 
     def test_custom_init_std(self):
-        """Linear init respects custom mean and std via param_init."""
-        # Use init_normal (not truncated) so sample statistics closely
-        # match the requested mean/std without truncation bias.
+        """Linear respects custom mean and std."""
         config = Linear.Config(
             param_init=init_by_regex(
                 {r"weight": init_normal(mean=0.1, std=0.02), r"bias": init_zeros()}
@@ -173,12 +169,11 @@ class TestModuleInjection(unittest.TestCase):
         self.assertIs(type(model.fc), orig_cls)  # class unchanged
 
     def test_init_states_after_injection(self):
-        """init_states works on injected module with param_init."""
+        """init_states works on injected module."""
 
         class FakeQuantLinear(nn.Linear):
             pass
 
-        # Simulate conversion, inject, then set param_init
         model = nn.Module()
         model.fc = FakeQuantLinear(8, 4)
         inject_module_protocol(model, Linear)
@@ -187,9 +182,8 @@ class TestModuleInjection(unittest.TestCase):
         )
         object.__setattr__(model.fc, "param_init", param_init)
 
-        # Should not raise — init_states uses param_init
         with torch.no_grad():
-            model.fc.init_states()
+            model.fc.init_states()  # should not raise
 
     def test_injection_cached_across_instances(self):
         """Same original class gets the same patched class."""
@@ -247,17 +241,15 @@ class TestModuleInjection(unittest.TestCase):
         self.assertIsInstance(model.fc, Module)
 
     def test_mx_style_class_swap_preserves_protocol(self):
-        """MX-style class swap can be fixed by injection."""
+        """MX-style class swap is fixed by injection."""
 
         class FakeQuantLinear(nn.Linear):
             pass
 
-        # Build model with our Linear
         model = nn.Module()
         config = Linear.Config()
         model.fc = config.build(in_features=8, out_features=4)
 
-        # Simulate MX conversion: class swap
         model.fc.__class__ = FakeQuantLinear
         self.assertFalse(isinstance(model.fc, Module))
 

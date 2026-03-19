@@ -25,12 +25,10 @@ Example usage in a model's ``__init__.py``::
 """
 
 import re
-from collections.abc import Callable
 
 import torch.nn as nn
 
-
-NamedInitializer = Callable[[str, nn.Parameter], None]
+from torchtitan.protocols.module import NamedInitializer
 
 
 def init_by_regex(
@@ -123,6 +121,19 @@ def init_constant(*, val: float) -> NamedInitializer:
 
     def init(name: str, param: nn.Parameter) -> None:
         nn.init.constant_(param, val)
+
+    return init
+
+
+def init_skip() -> NamedInitializer:
+    """No-op: explicitly skip initialization for this parameter.
+
+    Useful when a parameter is tied to another (e.g., weight tying)
+    and should only be initialized via the other parameter's pattern.
+    """
+
+    def init(name: str, param: nn.Parameter) -> None:
+        pass
 
     return init
 

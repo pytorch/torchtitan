@@ -25,14 +25,14 @@ from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.protocols.module import Module, ModuleDict, NamedInitializer
 
 __all__ = ["Decoder", "TransformerBlock"]
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
-# init_weights, ffn vs. moe naming and creation, rope vs. nope, etc.
+# ffn vs. moe naming and creation, rope vs. nope, etc.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
@@ -100,7 +100,13 @@ class Decoder(BaseModel):
             in_features=config.dim, out_features=config.vocab_size
         )
 
-    def init_states(self, *, param_init=None, param_prefix="", **kwargs) -> None:
+    def init_states(
+        self,
+        *,
+        param_init: NamedInitializer | None = None,
+        param_prefix: str = "",
+        **kwargs,
+    ) -> None:
         # Compute buffer_device before recursion so children (RoPE) get
         # the correct device when buffer_device is not explicitly provided.
         if "buffer_device" not in kwargs or kwargs["buffer_device"] is None:

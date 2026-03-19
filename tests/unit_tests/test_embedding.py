@@ -36,7 +36,7 @@ class TestEmbedding(unittest.TestCase):
             config.build()
 
     def test_init_states(self):
-        """init_states via param_init re-initializes the weight tensor."""
+        """init_states re-initializes the weight tensor."""
         config = Embedding.Config(
             param_init=init_by_regex({r"weight": init_trunc_normal()})
         )
@@ -45,13 +45,10 @@ class TestEmbedding(unittest.TestCase):
         nn.init.zeros_(emb.weight)
         self.assertTrue(torch.all(emb.weight == 0))
         emb.init_states()
-        # After init_states, weights should no longer be all zero
         self.assertFalse(torch.all(emb.weight == 0))
 
     def test_custom_init_std(self):
-        """Embedding init respects custom mean and std via param_init."""
-        # Use init_normal (not truncated) so sample statistics closely
-        # match the requested mean/std without truncation bias.
+        """Embedding respects custom mean and std."""
         config = Embedding.Config(
             param_init=init_by_regex({r"weight": init_normal(mean=0.1, std=0.02)})
         )
