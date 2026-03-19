@@ -310,6 +310,62 @@ class TestSFTDatasetCheckpointing(unittest.TestCase):
             torch.testing.assert_close(in1["input"], in2["input"])
             torch.testing.assert_close(lb1, lb2)
 
+    def test_checkpoint_resume_no_data_loss(self):
+        """Checkpoint-resume at every yield point must match a full run.
+
+        This catches the class of bugs where _sample_idx is incremented
+        before tokens are added to the pack buffer, causing the sample
+        that triggered a flush to be lost on resume.
+        """
+        tokenizer = _make_tokenizer()
+
+        # Full run without checkpointing (ground truth)
+        ds_full = _make_dataset(
+            tokenizer=tokenizer, pack_sequences=True, infinite=False
+        )
+        full_output = list(ds_full)
+        self.assertGreater(len(full_output), 1, "Need multiple batches to test")
+
+        # Checkpoint-resume at each possible yield point
+        for checkpoint_after in range(1, len(full_output)):
+            ds1 = _make_dataset(
+                tokenizer=tokenizer, pack_sequences=True, infinite=False
+            )
+            it = iter(ds1)
+
+            prefix = [next(it) for _ in range(checkpoint_after)]
+
+            # Simulate checkpoint: save state and restore into a fresh dataset
+            state = ds1.state_dict()
+            ds2 = _make_dataset(
+                tokenizer=tokenizer, pack_sequences=True, infinite=False
+            )
+            ds2.load_state_dict(state)
+            suffix = list(ds2)
+
+            combined = prefix + suffix
+            self.assertEqual(
+                len(combined),
+                len(full_output),
+                f"Checkpoint at batch {checkpoint_after}: "
+                f"got {len(combined)} batches, expected {len(full_output)}",
+            )
+            for i, ((in1, lb1), (in2, lb2)) in enumerate(
+                zip(combined, full_output)
+            ):
+                torch.testing.assert_close(
+                    in1["input"],
+                    in2["input"],
+                    msg=f"Checkpoint at batch {checkpoint_after}, "
+                    f"batch {i}: input mismatch",
+                )
+                torch.testing.assert_close(
+                    lb1,
+                    lb2,
+                    msg=f"Checkpoint at batch {checkpoint_after}, "
+                    f"batch {i}: label mismatch",
+                )
+
 
 class TestSFTDatasetShuffling(unittest.TestCase):
     """Test that data is shuffled between epochs."""

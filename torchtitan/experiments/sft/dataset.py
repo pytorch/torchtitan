@@ -101,7 +101,7 @@ class SFTDataset(IterableDataset, Stateful):
         full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=True)
 
         if not self._logged_first_sample:
-            logger.info(f"[SFT] First sample full:\n{full_text}")
+            logger.info(f"[SFT] First sample:\n{full_text}")
             self._logged_first_sample = True
 
         # Drop examples exceeding seq_len rather than truncating. Truncation
@@ -135,44 +135,16 @@ class SFTDataset(IterableDataset, Stateful):
         return input_ids, label_ids
 
     def __iter__(self):
-        if self.pack_sequences:
-            yield from self._iter_greedy_packed()
-        else:
-            yield from self._iter_unpacked()
+        yield from self._iter_greedy_packed()
 
-    def _iter_unpacked(self):
-        """Yield each example independently, padded to seq_len."""
-        while True:
-            for sample in self._get_data_iter():
-                result = self._tokenize_sample(sample)
-                self._sample_idx += 1
-                if result is None:
-                    continue
+    def _flush_buffers(self):
+        """Pad buffers to seq_len, convert to tensors, clear, and return."""
+        pad_len = self.seq_len - len(self._pack_buffer_input)
+        if pad_len > 0:
+            self._pack_buffer_input.extend([self._eos_id] * pad_len)
+            self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
+            self._pack_buffer_positions.extend(range(pad_len))
 
-                input_ids, label_ids = result
-
-                pad_len = self.seq_len - len(input_ids)
-                if pad_len > 0:
-                    input_ids = input_ids + [self._eos_id] * pad_len
-                    label_ids = label_ids + [IGNORE_INDEX] * pad_len
-
-                input_tensor = torch.tensor(input_ids, dtype=torch.long)
-                label_tensor = torch.tensor(label_ids, dtype=torch.long)
-                yield {"input": input_tensor}, label_tensor
-
-            if not self.infinite:
-                logger.warning(f"SFT dataset '{self._dataset_id}' has run out of data")
-                break
-            else:
-                self._sample_idx = 0
-                self._epoch += 1
-                self._data = self._data.shuffle(seed=42 + self._epoch)
-                logger.warning(
-                    f"SFT dataset '{self._dataset_id}' is being re-looped (epoch {self._epoch})"
-                )
-
-    def _flush_pack_buffer(self):
-        """Convert pack buffers to tensors, clear them, and return the batch."""
         input_tensor = torch.tensor(self._pack_buffer_input, dtype=torch.long)
         label_tensor = torch.tensor(self._pack_buffer_label, dtype=torch.long)
         positions_tensor = torch.tensor(self._pack_buffer_positions, dtype=torch.long)
@@ -196,42 +168,29 @@ class SFTDataset(IterableDataset, Stateful):
         while True:
             for sample in self._get_data_iter():
                 result = self._tokenize_sample(sample)
-                self._sample_idx += 1
                 if result is None:
+                    self._sample_idx += 1
                     continue
 
                 input_ids, label_ids = result
-                remaining = self.seq_len - len(self._pack_buffer_input)
 
-                # If the example doesn't fit, pad and yield current buffer
-                if len(input_ids) > remaining and len(self._pack_buffer_input) > 0:
-                    pad_len = remaining
-                    self._pack_buffer_input.extend([self._eos_id] * pad_len)
-                    self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
-                    self._pack_buffer_positions.extend(list(range(pad_len)))
+                # If sample won't fit, pad and yield current buffer first
+                if len(self._pack_buffer_input) + len(input_ids) > self.seq_len:
+                    if self._pack_buffer_input:
+                        yield self._flush_buffers()
 
-                    yield self._flush_pack_buffer()
-
-                # Add example to buffer with positions resetting to 0
                 self._pack_buffer_input.extend(input_ids)
                 self._pack_buffer_label.extend(label_ids)
-                self._pack_buffer_positions.extend(list(range(len(input_ids))))
+                self._pack_buffer_positions.extend(range(len(input_ids)))
+                self._sample_idx += 1
 
-                # If buffer is exactly full, yield it. Buffer can never exceed
-                # seq_len because all examples are <= seq_len (over-length
-                # examples are dropped in _tokenize_sample).
-                if len(self._pack_buffer_input) == self.seq_len:
-                    yield self._flush_pack_buffer()
+                # Yield if buffer is full, or immediately when not packing ("unpacked" mode)
+                if not self.pack_sequences or len(self._pack_buffer_input) == self.seq_len:
+                    yield self._flush_buffers()
 
             # Flush remaining buffer at end of data
-            if len(self._pack_buffer_input) > 0:
-                pad_len = self.seq_len - len(self._pack_buffer_input)
-                if pad_len > 0:
-                    self._pack_buffer_input.extend([self._eos_id] * pad_len)
-                    self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
-                    self._pack_buffer_positions.extend(list(range(pad_len)))
-
-                yield self._flush_pack_buffer()
+            if self._pack_buffer_input:
+                yield self._flush_buffers()
 
             if not self.infinite:
                 logger.warning(f"SFT dataset '{self._dataset_id}' has run out of data")
@@ -248,17 +207,21 @@ class SFTDataset(IterableDataset, Stateful):
         return {
             "sample_idx": self._sample_idx,
             "epoch": self._epoch,
-            "pack_buffer_input": self._pack_buffer_input,
-            "pack_buffer_label": self._pack_buffer_label,
-            "pack_buffer_positions": self._pack_buffer_positions,
+            "pack_buffer_input": list(self._pack_buffer_input),
+            "pack_buffer_label": list(self._pack_buffer_label),
+            "pack_buffer_positions": list(self._pack_buffer_positions),
         }
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
         self._epoch = state_dict["epoch"]
-        self._pack_buffer_input = state_dict["pack_buffer_input"]
-        self._pack_buffer_label = state_dict["pack_buffer_label"]
-        self._pack_buffer_positions = state_dict["pack_buffer_positions"]
+        self._pack_buffer_input = list(state_dict["pack_buffer_input"])
+        self._pack_buffer_label = list(state_dict["pack_buffer_label"])
+        self._pack_buffer_positions = list(state_dict["pack_buffer_positions"])
+        # Re-apply the epoch shuffle so resumed iteration sees the same
+        # sample order as the original run.
+        if self._epoch > 0:
+            self._data = self._data.shuffle(seed=42 + self._epoch)
 
 
 class SFTDataLoader(ParallelAwareDataloader):
