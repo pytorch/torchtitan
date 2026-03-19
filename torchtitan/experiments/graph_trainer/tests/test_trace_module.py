@@ -677,8 +677,8 @@ class TestTraceFSDP(FSDPTest):
         model_ref = create_model(config_cls, model_config, "cuda", torch.float32)
         model_test = create_model(config_cls, model_config, "cuda", torch.float32)
         model_test.load_state_dict(model_ref.state_dict())
-        data_parallel(model_ref, device_mesh=fsdp_mesh, mode="fully_shard")
-        data_parallel(model_test, device_mesh=fsdp_mesh, mode="fully_shard")
+        model_ref = data_parallel(model_ref, device_mesh=fsdp_mesh, mode="fully_shard")
+        model_test = data_parallel(model_test, device_mesh=fsdp_mesh, mode="fully_shard")
 
         vocab_size = model_config.vocab_size
         seq_len = 128
