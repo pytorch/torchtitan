@@ -9,7 +9,6 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
@@ -33,7 +32,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_dense
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy, disable_fsdp_gradient_division
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -237,23 +236,6 @@ def apply_tp(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
         "Tensor Parallelism to the model"
     )
-
-
-def disable_fsdp_gradient_division(model: nn.Module) -> None:
-    """
-    Disable FSDP's automatic gradient division for all FSDP modules.
-
-    Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division.
-    We handle gradient scaling ourselves in the training loop with global token count.
-
-    Note: This also works for ReplicateModule since it inherits from FSDPModule.
-
-    Args:
-        model: The model containing FSDP-wrapped or Replicate-wrapped modules
-    """
-    for module in model.modules():
-        if isinstance(module, FSDPModule):
-            module.set_gradient_divide_factor(1.0)
 
 
 def apply_fsdp(

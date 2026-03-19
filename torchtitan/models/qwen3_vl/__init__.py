@@ -17,7 +17,14 @@ with images and videos. Key features include:
 """
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.models.common import Embedding, FeedForward, GQAttention, RMSNorm, RoPE
+from torchtitan.models.common import (
+    Embedding,
+    FeedForward,
+    GQAttention,
+    Linear,
+    RMSNorm,
+    RoPE,
+)
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.protocols.model_spec import ModelSpec
@@ -41,6 +48,7 @@ qwen3_vl_configs = {
         vocab_size=151936,
         norm=RMSNorm.Config(eps=1e-6),
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         dim=256,
         n_layers=4,
         layer=Qwen3TransformerBlock.Config(
@@ -63,7 +71,7 @@ qwen3_vl_configs = {
             theta=1000000.0,
             backend="cos_sin",
         ),
-        encoder=Qwen3VLVisionEncoder.Config(
+        vision_encoder=Qwen3VLVisionEncoder.Config(
             dim=256,
             ffn_dim=512,
             n_layers=4,
@@ -82,6 +90,7 @@ qwen3_vl_configs = {
         vocab_size=151936,
         norm=RMSNorm.Config(eps=1e-6),
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         dim=256,
         n_layers=1,
         layer=Qwen3TransformerBlock.Config(
@@ -115,7 +124,7 @@ qwen3_vl_configs = {
             theta=1000000.0,
             backend="cos_sin",
         ),
-        encoder=Qwen3VLVisionEncoder.Config(
+        vision_encoder=Qwen3VLVisionEncoder.Config(
             dim=256,
             ffn_dim=512,
             n_layers=4,
@@ -134,6 +143,7 @@ qwen3_vl_configs = {
         vocab_size=151936,
         norm=RMSNorm.Config(eps=1e-6),
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         dim=2048,
         n_layers=28,
         enable_weight_tying=True,
@@ -157,7 +167,7 @@ qwen3_vl_configs = {
             theta=5000000.0,
             backend="cos_sin",
         ),
-        encoder=Qwen3VLVisionEncoder.Config(
+        vision_encoder=Qwen3VLVisionEncoder.Config(
             dim=1024,
             ffn_dim=4096,
             n_layers=24,
@@ -176,6 +186,7 @@ qwen3_vl_configs = {
         vocab_size=151936,
         norm=RMSNorm.Config(eps=1e-6),
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         dim=4096,
         n_layers=36,
         layer=Qwen3TransformerBlock.Config(
@@ -198,7 +209,7 @@ qwen3_vl_configs = {
             theta=5000000.0,
             backend="cos_sin",
         ),
-        encoder=Qwen3VLVisionEncoder.Config(
+        vision_encoder=Qwen3VLVisionEncoder.Config(
             dim=1152,
             ffn_dim=4304,
             n_layers=27,
@@ -217,6 +228,7 @@ qwen3_vl_configs = {
         vocab_size=151936,
         norm=RMSNorm.Config(eps=1e-6),
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         dim=2048,
         n_layers=48,
         layer=Qwen3TransformerBlock.Config(
@@ -250,7 +262,7 @@ qwen3_vl_configs = {
             theta=5000000.0,
             backend="cos_sin",
         ),
-        encoder=Qwen3VLVisionEncoder.Config(
+        vision_encoder=Qwen3VLVisionEncoder.Config(
             dim=1152,
             ffn_dim=4304,
             n_layers=27,
@@ -269,6 +281,7 @@ qwen3_vl_configs = {
         vocab_size=151936,
         norm=RMSNorm.Config(eps=1e-6),
         tok_embeddings=Embedding.Config(),
+        output=Linear.Config(),
         dim=4096,
         n_layers=94,
         layer=Qwen3TransformerBlock.Config(
@@ -302,7 +315,7 @@ qwen3_vl_configs = {
             theta=5000000.0,
             backend="cos_sin",
         ),
-        encoder=Qwen3VLVisionEncoder.Config(
+        vision_encoder=Qwen3VLVisionEncoder.Config(
             dim=1152,
             ffn_dim=4304,
             n_layers=27,

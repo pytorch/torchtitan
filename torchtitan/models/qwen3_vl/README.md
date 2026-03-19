@@ -16,7 +16,7 @@ Qwen3-VL combines:
 Install the additional dependencies required by Qwen3-VL:
 
 ```bash
-pip install einops pillow av torchvision
+pip install av torchvision
 ```
 
 ## Model Variants

@@ -14,7 +14,9 @@ using FlexAttention with padded batches for efficient processing.
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common.attention import FlexAttentionWrapper
@@ -103,7 +105,7 @@ class PatchEmbed(nn.Module):
         Returns:
             (batch, max_num_patch, embed_dim)
         """
-        return self.proj(hidden_states.to(dtype=self.proj.weight.dtype))
+        return self.proj(hidden_states)
 
     def init_weights(self):
         nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=0.02)
@@ -377,9 +379,13 @@ class Qwen3VLVisionEncoder(nn.Module):
             embed_dim=config.dim,
         )
 
-        # Position embeddings (learnable, with bilinear interpolation)
+        # Position embeddings (learnable, with bilinear interpolation).
+        # Stored as nn.Parameter (not nn.Embedding) because we never use
+        # Embedding.forward() — we index and interpolate the weight directly.
         self.num_position_embeddings = config.num_position_embeddings
-        self.pos_embed = nn.Embedding(config.num_position_embeddings, config.dim)
+        self.pos_embed = nn.Parameter(
+            torch.empty(config.num_position_embeddings, config.dim)
+        )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
         # Rotary embeddings for 2D positions
@@ -387,6 +393,8 @@ class Qwen3VLVisionEncoder(nn.Module):
         self.rotary_pos_emb = VisionRotaryEmbedding(
             head_dim // 2, theta=config.rope_theta
         )
+        # Cached RoPE freq table — recomputed only when max_hw grows
+        self._cached_freq_table: torch.Tensor | None = None
 
         # Transformer layers
         self.layers = nn.ModuleDict(
@@ -422,7 +430,7 @@ class Qwen3VLVisionEncoder(nn.Module):
 
     def init_weights(self):
         self.patch_embed.init_weights()
-        nn.init.trunc_normal_(self.pos_embed.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, mean=0.0, std=0.02)
         self.rotary_pos_emb.init_weights()
         self.merger.init_weights()
         for merger in self.deepstack_merger_list:
@@ -436,7 +444,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         """Compute position embeddings for padded batch.
 
         Args:
-            grid_thw: (num_images, 3) with [t, h, w] per image
+            grid_thw: (num_images, 3) with pixel patch counts [t, h, w] per image
             max_num_patch: Maximum number of patches (for padding)
 
         Returns:
@@ -446,19 +454,20 @@ class Qwen3VLVisionEncoder(nn.Module):
         """
         num_images = grid_thw.shape[0]
         device = grid_thw.device
-        dtype = self.pos_embed.weight.dtype
+        dtype = self.pos_embed.dtype
         merge_size = self.spatial_merge_size
         head_dim = self.config.dim // self.config.n_heads
 
-        # Compute max height/width for RoPE freq table
+        # Get RoPE freq table, reusing cache when possible
         max_hw = int(grid_thw[:, 1:].max().item())
-        freq_table = self.rotary_pos_emb(max_hw)
+        if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
+            self._cached_freq_table = self.rotary_pos_emb(max_hw)
+        freq_table = self._cached_freq_table
 
-        # Get pos_embed weights for direct indexing (avoid nn.Embedding forward overhead)
         # Convert to local tensor if DTensor (from FSDP/TP wrapping) to allow
         # regular tensor indexing operations.
-        pos_embed_weight = self.pos_embed.weight
-        if hasattr(pos_embed_weight, "to_local"):
+        pos_embed_weight = self.pos_embed
+        if isinstance(pos_embed_weight, DTensor):
             pos_embed_weight = pos_embed_weight.to_local()
 
         # Pre-allocate output tensors
@@ -478,44 +487,29 @@ class Qwen3VLVisionEncoder(nn.Module):
                 hw_to_indices[key] = []
             hw_to_indices[key].append(i)
 
+        # Reshape pos_embed to 2D grid for F.interpolate:
+        # (num_position_embeddings, dim) -> (1, dim, grid_side, grid_side)
+        pos_grid = (
+            pos_embed_weight.reshape(self.num_grid_per_side, self.num_grid_per_side, -1)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .float()
+        )
+
         for (h, w), indices in hw_to_indices.items():
-            # Compute bilinear interpolated position embeddings once per unique (h, w)
-            h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h, device=device)
-            w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w, device=device)
+            # Bilinear interpolation of position embeddings from fixed grid to (h, w)
+            pos_hw = F.interpolate(
+                pos_grid, size=(h, w), mode="bilinear", align_corners=True
+            )
+            # (1, dim, h, w) -> (h*w, dim)
+            pos_hw = pos_hw.squeeze(0).permute(1, 2, 0).reshape(-1, self.config.dim)
+            pos_hw = pos_hw.to(dtype)
 
-            h_floor, w_floor = h_idxs.long(), w_idxs.long()
-            h_ceil = (h_floor + 1).clamp(max=self.num_grid_per_side - 1)
-            w_ceil = (w_floor + 1).clamp(max=self.num_grid_per_side - 1)
-
-            dh, dw = h_idxs - h_floor.float(), w_idxs - w_floor.float()
-
-            # Compute indices for 4 corners
-            # [idx_00 idx_01
-            #  idx_10 idx_11]
-            # Map from 2d indices to 1d indices used in pos_embed_weight
-            base_h = h_floor * self.num_grid_per_side
-            base_h_ceil = h_ceil * self.num_grid_per_side
-            idx_00 = (base_h[:, None] + w_floor[None, :]).flatten()
-            idx_01 = (base_h[:, None] + w_ceil[None, :]).flatten()
-            idx_10 = (base_h_ceil[:, None] + w_floor[None, :]).flatten()
-            idx_11 = (base_h_ceil[:, None] + w_ceil[None, :]).flatten()
-
-            # Bilinear weights
-            w_00 = ((1 - dh)[:, None] * (1 - dw)[None, :]).flatten()
-            w_01 = ((1 - dh)[:, None] * dw[None, :]).flatten()
-            w_10 = (dh[:, None] * (1 - dw)[None, :]).flatten()
-            w_11 = (dh[:, None] * dw[None, :]).flatten()
-
-            # Accumulate bilinear interpolation (avoids materializing all 4 corners)
-            pos_hw = w_00[:, None] * pos_embed_weight[idx_00]
-            pos_hw += w_01[:, None] * pos_embed_weight[idx_01]
-            pos_hw += w_10[:, None] * pos_embed_weight[idx_10]
-            pos_hw += w_11[:, None] * pos_embed_weight[idx_11]
-
-            # Compute RoPE position ids in block order (once per unique h, w)
+            # Compute RoPE position ids in block order (once per unique h, w).
+            # A "block" is a merge_size x merge_size group of patches that will
+            # be merged into one LLM visual token. RoPE indices must follow
+            # block order to match the patch layout from image_to_patches.
             merged_h, merged_w = h // merge_size, w // merge_size
-
-            # Create block order indices using einops-style reshaping
             row_base = (
                 torch.arange(merged_h, device=device) * merge_size
             )  # starting row of each block
@@ -525,8 +519,11 @@ class Qwen3VLVisionEncoder(nn.Module):
             intra_row = torch.arange(merge_size, device=device)
             intra_col = torch.arange(merge_size, device=device)
 
-            # Build row and col indices in block order
+            # Build row and col indices in block order.
             # The 4 dimensions represent: [block_row, block_col, intra_row, intra_col]
+            # e.g., for merge_size=2 on a 4x4 patch grid (2x2 blocks):
+            #   row_idx = [0,0,1,1, 0,0,1,1, 2,2,3,3, 2,2,3,3]
+            #   col_idx = [0,1,0,1, 2,3,2,3, 0,1,0,1, 2,3,2,3]
             row_idx = (
                 (row_base[:, None, None, None] + intra_row[None, None, :, None])
                 .expand(merged_h, merged_w, merge_size, merge_size)
@@ -538,14 +535,14 @@ class Qwen3VLVisionEncoder(nn.Module):
                 .reshape(-1)
             )
 
-            # Get RoPE embeddings for this (h, w) - freq_table is (max_hw, head_dim//4)
+            # 2D RoPE: row and col each get separate frequency sets, concatenated
+            # (not interleaved). freq_table shape: (max_hw, head_dim//4)
             rope_row = freq_table[row_idx]  # (h*w, head_dim//4)
             rope_col = freq_table[col_idx]  # (h*w, head_dim//4)
             rope_2d = torch.cat([rope_row, rope_col], dim=-1)  # (h*w, head_dim//2)
 
-            # Permute learned pos_hw to block order
-            # Before permute: (block_row, intra_row, block_col, intra_col, dim)
-            # After permute:  (block_row, block_col, intra_row, intra_col, dim)
+            # Permute learned pos_hw from raster order to block order
+            # to match the patch sequence produced by image_to_patches
             pos_hw_block = (
                 pos_hw.view(
                     h // merge_size, merge_size, w // merge_size, merge_size, -1
@@ -554,7 +551,9 @@ class Qwen3VLVisionEncoder(nn.Module):
                 .flatten(0, 3)
             )  # (h*w, dim)
 
-            # Apply to all images with this (h, w)
+            # Apply to all images with this (h, w).
+            # For videos (t > 1), repeat spatial embeddings per frame;
+            # temporal position encoding is handled by MRoPE in the LLM.
             for i in indices:
                 t = int(grid_thw[i, 0].item())
                 seq_len = t * h * w
@@ -596,6 +595,12 @@ class Qwen3VLVisionEncoder(nn.Module):
 
         # Patch embedding -> [num_images, max_num_patch, dim]
         hidden_states = self.patch_embed(pixel_values)
+
+        # After TP wrapping, patch_embed output is a DTensor (Replicate).
+        # Convert to local tensor since the rest of the vision encoder
+        # (position embeddings, RoPE, block masks) operates on plain tensors.
+        if isinstance(hidden_states, DTensor):
+            hidden_states = hidden_states.to_local()
 
         # Compute position embeddings (learned + RoPE)
         pos_embeds, rope_cos, rope_sin = self.compute_position_embeddings(

@@ -51,8 +51,8 @@ import torch.nn.functional as F
 # Disable torch.compile for eager-mode inference testing
 torch._dynamo.config.disable = True
 from torchtitan.components.checkpoint import ModelWrapper
-from torchtitan.experiments.qwen3_vl import model_registry
-from torchtitan.experiments.qwen3_vl.model import SpecialTokens
+from torchtitan.hf_datasets import SpecialTokens
+from torchtitan.models.qwen3_vl import model_registry
 from transformers import AutoProcessor
 
 
@@ -154,8 +154,8 @@ def _load_tt_model(model_flavor, checkpoint_path, gpus):
 
         if model.tok_embeddings is not None:
             model.tok_embeddings = model.tok_embeddings.to(first_device)
-        if hasattr(model, "visual") and model.visual is not None:
-            model.visual = model.visual.to(first_device)
+        if hasattr(model, "vision_encoder") and model.vision_encoder is not None:
+            model.vision_encoder = model.vision_encoder.to(first_device)
 
         layer_keys = list(model.layers.keys())
         n_layers = len(layer_keys)
@@ -192,8 +192,8 @@ def _tt_forward(model, tokens, gpus, **kwargs):
         return model(tokens, **kwargs)
 
     # Get device for the visual encoder (may differ from tok_embeddings due to weight tying)
-    if hasattr(model, "visual") and model.visual is not None:
-        visual_device = next(model.visual.parameters()).device
+    if hasattr(model, "vision_encoder") and model.vision_encoder is not None:
+        visual_device = next(model.vision_encoder.parameters()).device
     else:
         visual_device = next(model.tok_embeddings.parameters()).device
     embed_device = next(model.tok_embeddings.parameters()).device
@@ -209,7 +209,11 @@ def _tt_forward(model, tokens, gpus, **kwargs):
     if grid_thw is not None:
         grid_thw = grid_thw.to(visual_device)
 
-    inputs_embeds, visual_pos_masks, deepstack_visual_embeds = model._process_vision(
+    (
+        inputs_embeds,
+        visual_pos_masks,
+        deepstack_visual_embeds,
+    ) = model._prepare_multimodal_embeds(
         tokens,
         pixel_values,
         None,
@@ -363,10 +367,7 @@ def build_multimodal_inputs(hf_model_path, num_samples=3, image_size=224, verbos
         tt_inputs: list of (tokens, pixel_values, grid_thw) for TT model
     """
     from PIL import Image
-    from torchtitan.experiments.qwen3_vl.datasets.utils.image import (
-        image_to_patches,
-        process_image,
-    )
+    from torchtitan.hf_datasets.utils.image import process_image, vision_to_patches
 
     processor = AutoProcessor.from_pretrained(hf_model_path, trust_remote_code=True)
 
@@ -418,7 +419,7 @@ def build_multimodal_inputs(hf_model_path, num_samples=3, image_size=224, verbos
         if img_tensor is None:
             print(f"Warning: image {i} processing failed, skipping")
             continue
-        patches, grid_thw = image_to_patches(
+        patches, grid_thw = vision_to_patches(
             img_tensor,
             patch_size,
             temporal_patch_size,
