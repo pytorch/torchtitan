@@ -90,7 +90,7 @@ class LocalMapAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if isinstance(q, DTensor):
             assert isinstance(k, DTensor) and isinstance(
                 v, DTensor
@@ -114,11 +114,16 @@ class LocalMapAttention(Module):
                     f"LocalMapAttention requires Shard(1) placements "
                     f"(n_heads dim), but got {p} at position {i}"
                 )
+            # return_lse=True produces two outputs
+            return_lse = kwargs.get("return_lse", False)
+            out_placements = (
+                (q.placements, q.placements) if return_lse else (q.placements,)
+            )
             if self._local_map_fn is None:
                 self._local_map_fn = local_map(
                     super().__call__,
                     in_placements=(q.placements, k.placements, v.placements),
-                    out_placements=(q.placements,),
+                    out_placements=out_placements,
                     in_grad_placements=(q.placements, k.placements, v.placements),
                     device_mesh=q.device_mesh,
                 )
@@ -133,7 +138,7 @@ class LocalMapAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -311,7 +316,7 @@ class ScaledDotProductAttentionWrapper(LocalMapAttention):
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
             return F.scaled_dot_product_attention(
                 q, k, v, scale=scale, is_causal=is_causal, enable_gqa=enable_gqa
