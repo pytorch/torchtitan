@@ -261,10 +261,10 @@ class FluxDataset(IterableDataset, Stateful):
                     continue
             except Exception as e:
                 # HuggingFace datasets decode images internally during iteration;
-                # a corrupted EXIF tag (e.g. rational value with denominator=0
-                # in CC12M) raises ZeroDivisionError inside PIL before we receive
-                # a sample dict. We recreate the iterator rather than continuing
-                # with the old one, because its internal state may be broken
+                # errors (e.g. from truncated image data) are raised before we
+                # receive a sample dict. PIL EXIF errors are suppressed at startup
+                # by exif_safe_patch.apply(), so this path is rarely triggered.
+                # We recreate the iterator because its internal state may be broken
                 # after an exception.
                 consecutive_bad += 1
                 logger.warning(
@@ -277,6 +277,10 @@ class FluxDataset(IterableDataset, Stateful):
                         f"FluxDataset: aborting after {consecutive_bad} consecutive "
                         f"dataset errors. Last: {type(e).__name__}: {e}"
                     ) from e
+                # For non-streaming (map-style) datasets, advance the index so
+                # that _get_data_iter() skips the bad sample on the next attempt.
+                if isinstance(self._data, Dataset):
+                    self._sample_idx += 1
                 dataset_iterator = self._get_data_iter()
                 continue
 
