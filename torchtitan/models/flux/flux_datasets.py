@@ -138,13 +138,15 @@ DATASETS = {
     "cc12m-test": DatasetConfig(
         path="tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
-            path, split="train", data_files={"train": "*.tar"}, streaming=True
+            path, split="train", data_files={"train": "*.tar"}, streaming=False
         ),
         sample_processor=_cc12m_wds_data_processor,
     ),
+    # For validation dataset, set `streaming = False` temporarily to avoid `datasets` bug.
+    # For remote dataset, we recommend using streaming = True to reduce the startup time.
     "coco-validation": DatasetConfig(
         path="howard-hou/COCO-Text",
-        loader=lambda path: load_dataset(path, split="validation", streaming=True),
+        loader=lambda path: load_dataset(path, split="validation", streaming=False),
         sample_processor=_coco_data_processor,
     ),
 }
