@@ -63,11 +63,7 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
     FlexAttentionWrapper.forward = annotate_fn(
-        {
-            "compile_with_inductor": {
-                "inductor_configs": FlexAttentionWrapper.inductor_configs
-            }
-        }
+        {"compile_with_inductor": "flex_attention"}
     )(FlexAttentionWrapper.forward)
 
     annotate_ac_regions(model)

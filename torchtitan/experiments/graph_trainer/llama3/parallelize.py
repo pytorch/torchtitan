@@ -67,11 +67,7 @@ def annotate_llama(model: GraphTrainerLlama3Model) -> None:
     from torchtitan.models.common.attention import FlexAttentionWrapper
 
     FlexAttentionWrapper.forward = annotate_fn(
-        {
-            "compile_with_inductor": {
-                "inductor_configs": FlexAttentionWrapper.inductor_configs
-            }
-        }
+        {"compile_with_inductor": "flex_attention"}
     )(FlexAttentionWrapper.forward)
 
     annotate_ac_regions(model)
