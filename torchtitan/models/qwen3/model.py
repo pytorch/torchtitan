@@ -50,11 +50,6 @@ class Qwen3TransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
-
     def forward(
         self,
         x: torch.Tensor,

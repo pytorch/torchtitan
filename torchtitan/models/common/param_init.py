@@ -39,10 +39,13 @@ def init_by_regex(
     First matching pattern wins. Raises ``ValueError`` if no pattern matches.
     Note that Python dictionary is ordered.
     """
+    compiled = [
+        (re.compile(pattern), init_fn) for pattern, init_fn in regex_to_init.items()
+    ]
 
     def init(name: str, param: nn.Parameter) -> None:
-        for pattern, init_fn in regex_to_init.items():
-            if re.fullmatch(pattern, name):
+        for pattern, init_fn in compiled:
+            if pattern.fullmatch(name):
                 init_fn(name, param)
                 return
         raise ValueError(f"No initializers matched '{name}'.")
@@ -84,12 +87,18 @@ def init_depth_scaled_trunc_normal(
     and scales std by ``1 / sqrt(2 * (layer_id + 1))``.
     """
 
+    _layer_re = re.compile(r"layers\.(\d+)\.")
+
     def init(name: str, param: nn.Parameter) -> None:
         layer_id = None
-        m = re.match(r"layers\.(\d+)\.", name)
+        m = _layer_re.match(name)
         if m is not None:
             layer_id = int(m.group(1))
-        if depth_init and layer_id is not None:
+        assert layer_id is not None, (
+            f"Could not parse layer_id from FQN '{name}'. "
+            f"Expected FQN to contain 'layers.<digit>.'."
+        )
+        if depth_init:
             std = base_std / (2 * (layer_id + 1)) ** 0.5
         else:
             std = base_std / (2 * n_layers) ** 0.5

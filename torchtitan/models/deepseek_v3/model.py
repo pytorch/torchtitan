@@ -200,7 +200,6 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
             assert config.feed_forward is not None
             self.feed_forward = config.feed_forward.build(dim=dim)
 
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def forward(

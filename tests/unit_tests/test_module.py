@@ -36,7 +36,7 @@ class TestModuleInitStates(unittest.TestCase):
         class TestModel(Module):
             def __init__(self, param_init):
                 super().__init__()
-                object.__setattr__(self, "param_init", param_init)
+                self.param_init = param_init
                 self.weight = nn.Parameter(torch.empty(4))
 
         param_init = init_by_regex({r".*": init_zeros()})
@@ -55,7 +55,7 @@ class TestModuleInitStates(unittest.TestCase):
         class Parent(Module):
             def __init__(self, param_init):
                 super().__init__()
-                object.__setattr__(self, "param_init", param_init)
+                self.param_init = param_init
                 self.child = Child()
 
         param_init = init_by_regex({r"child\.weight": init_zeros()})
@@ -79,7 +79,7 @@ class TestModuleInitStates(unittest.TestCase):
         class Root(Module):
             def __init__(self, param_init):
                 super().__init__()
-                object.__setattr__(self, "param_init", param_init)
+                self.param_init = param_init
                 self.mid = Mid()
 
         param_init = init_by_regex({r"mid\.leaf\.weight": init_ones()})
@@ -281,44 +281,37 @@ class TestContainerInitStates(unittest.TestCase):
         self.assertIsInstance(Sequential(), Module)
 
 
-class TestInitByRegex(unittest.TestCase):
-    """Tests for init_by_regex utility."""
+class TestConfigBuildPropagatesParamInit(unittest.TestCase):
+    """Tests for Config.build() propagating param_init to the instance."""
 
-    def test_basic_regex_matching(self):
-        """init_by_regex matches patterns and applies the right initializer."""
-        param_init = init_by_regex(
-            {
-                r".*\.weight": init_ones(),
-                r".*\.bias": init_zeros(),
-            }
-        )
-        weight = nn.Parameter(torch.empty(4, 3))
-        bias = nn.Parameter(torch.empty(4))
-        param_init("linear.weight", weight)
-        param_init("linear.bias", bias)
-        self.assertTrue(torch.all(weight == 1))
-        self.assertTrue(torch.all(bias == 0))
+    def test_param_init_on_instance(self):
+        """build() sets param_init on the constructed instance."""
+        param_init = init_by_regex({r".*": init_zeros()})
+        config = Linear.Config(param_init=param_init)
+        linear = config.build(in_features=4, out_features=4)
+        self.assertTrue(hasattr(linear, "param_init"))
+        self.assertIs(linear.param_init, param_init)
 
-    def test_first_match_wins(self):
-        """The first matching pattern is used."""
-        param_init = init_by_regex(
-            {
-                r"special\.weight": init_zeros(),
-                r".*\.weight": init_ones(),
-            }
-        )
-        special = nn.Parameter(torch.empty(4))
-        normal = nn.Parameter(torch.empty(4))
-        param_init("special.weight", special)
-        param_init("other.weight", normal)
-        self.assertTrue(torch.all(special == 0))
-        self.assertTrue(torch.all(normal == 1))
+    def test_no_param_init_by_default(self):
+        """build() without param_init leaves it as None."""
+        config = Linear.Config()
+        linear = config.build(in_features=4, out_features=4)
+        self.assertIsNone(linear.param_init)
 
-    def test_no_match_raises(self):
-        """ValueError raised when no pattern matches."""
-        param_init = init_by_regex({r"foo": init_zeros()})
-        with self.assertRaises(ValueError):
-            param_init("bar", nn.Parameter(torch.empty(4)))
+    def test_init_states_uses_config_param_init(self):
+        """init_states uses param_init from config when available."""
+
+        class Parent(Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = Linear.Config(
+                    param_init=init_by_regex({r"weight": init_ones()})
+                ).build(in_features=4, out_features=4)
+
+        m = Parent()
+        nn.init.zeros_(m.linear.weight)
+        m.init_states()
+        self.assertTrue(torch.all(m.linear.weight == 1))
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):

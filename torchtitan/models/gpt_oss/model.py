@@ -152,7 +152,6 @@ class GptOssTransformerBlock(TransformerBlock):
         self.moe = config.moe.build(dim=dim)
         self.moe_enabled = True  # for composability with load balancing
 
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def forward(

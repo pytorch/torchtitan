@@ -40,6 +40,8 @@ class Module(nn.Module, Configurable):
     for buffer initialization.
     """
 
+    param_init: NamedInitializer | None = None
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: NamedInitializer | None = None
@@ -47,7 +49,7 @@ class Module(nn.Module, Configurable):
         def build(self, **kwargs):
             instance = Configurable.Config.build(self, **kwargs)
             if self.param_init is not None:
-                object.__setattr__(instance, "param_init", self.param_init)
+                instance.param_init = self.param_init
             return instance
 
     def init_states(
@@ -74,8 +76,7 @@ class Module(nn.Module, Configurable):
         """
         # If this module owns a param_init, it becomes the active one
         # and the prefix resets (FQNs are relative to the owner).
-        if hasattr(self, "param_init") and self.param_init is not None:
-            assert callable(self.param_init)
+        if self.param_init is not None:
             param_init = self.param_init
             param_prefix = ""
 

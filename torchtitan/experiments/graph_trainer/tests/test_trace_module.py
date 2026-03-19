@@ -54,7 +54,7 @@ def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     model = config_cls(model_config)
     model.to(device=device, dtype=dtype)
     with torch.no_grad():
-        model.init_weights(buffer_device=torch.device(device))
+        model.init_states(buffer_device=torch.device(device))
     return model
 
 

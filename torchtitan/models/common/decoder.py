@@ -40,7 +40,6 @@ class TransformerBlock(Module):
     - Attention module (from ``attention.build(dim=dim)``)
     - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
     - Two RMSNorms (``attention_norm``, ``ffn_norm``)
-    - ``weight_init_std`` computed from ``layer_id``
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
 
     Children implement ``__init__`` and ``forward``.

@@ -51,7 +51,7 @@ class SliceableModuleDict(ModuleDict):
     def __len__(self):
         return len(self._modules)
 
-    def init_weights(self, **kwargs) -> None:
+    def init_states(self, **kwargs) -> None:
         """No-op: HFTransformerModel handles initialization via HF mechanisms."""
         pass
 
