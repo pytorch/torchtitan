@@ -83,28 +83,28 @@ class ModelWrapper(Stateful):
         return False
 
     def has_converter_keys(self) -> bool:
-        """Check if any model part has converter-added keys (e.g. LoRA adapters)."""
+        """Check if any model part has converter-added keys."""
         return any(
             getattr(part, "converter_key_filter", None) is not None
             for part in self.model
         )
 
     @property
-    def converter_save_format(self) -> str:
-        """Return the save format from the first model part that has one."""
+    def converter_save_last_fn(self):
+        """Return converter's custom last-step save function, or None."""
         for part in self.model:
-            fmt = getattr(part, "converter_save_format", None)
-            if fmt is not None:
-                return fmt
-        return "dcp"
+            fn = getattr(part, "converter_save_last_fn", None)
+            if fn is not None:
+                return fn
+        return None
 
     @property
-    def converter_config(self) -> dict[str, Any] | None:
-        """Return converter config metadata from the first model part that has it."""
+    def converter_load_additional_fn(self):
+        """Return converter's custom additional-checkpoint load function, or None."""
         for part in self.model:
-            cfg = getattr(part, "converter_config", None)
-            if cfg is not None:
-                return cfg
+            fn = getattr(part, "converter_load_additional_fn", None)
+            if fn is not None:
+                return fn
         return None
 
     def state_dict_to_save(self) -> dict[str, Any]:
@@ -377,14 +377,10 @@ class CheckpointManager(Configurable):
         """
         Additional checkpoint paths to load from after the primary checkpoint.
         Useful for loading state dicts from multiple sources, e.g., base model
-        weights from one checkpoint and LoRA adapter weights from another.
-        Each path should contain a valid DCP checkpoint or PEFT directory.
+        weights from one checkpoint and converter-specific weights from another.
+        Each path should contain a valid DCP checkpoint, or a converter-specific
+        format if the model has a ``converter_load_additional_fn`` attribute.
         """
-
-        additional_load_in_hf: bool = False
-        """When True, additional_load_paths are PEFT safetensors directories
-        (adapter_model.safetensors + adapter_config.json). Keys are remapped from HF
-        naming to torchtitan naming. When False (default), paths are DCP checkpoints."""
 
         enable_first_step_checkpoint: bool = False
         """
@@ -511,7 +507,6 @@ class CheckpointManager(Configurable):
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.exclude_from_loading = config.exclude_from_loading
         self.additional_load_paths = config.additional_load_paths
-        self.additional_load_in_hf = config.additional_load_in_hf
         self.interval = config.interval
         self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
@@ -677,8 +672,8 @@ class CheckpointManager(Configurable):
             state_dict (dict): The state dict to load.
             checkpoint_ids (list[str]): The checkpoint ids to load.
                 The first checkpoint is treated as the primary checkpoint.
-                Additional checkpoints are in DCP format (default) or PEFT
-                safetensors format when ``additional_load_in_hf`` is True.
+                Additional checkpoints use the model's
+                ``converter_load_additional_fn`` if available, otherwise DCP.
             from_hf (bool): Whether to load the primary checkpoint from
                 HuggingFace safetensors format.
             from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
@@ -717,30 +712,14 @@ class CheckpointManager(Configurable):
                     if MODEL in self.states:
                         self.states[MODEL].load_state_dict(state_dict)
             else:
-                if self.additional_load_in_hf:
-                    # PEFT safetensors: load adapter weights only, remap to
-                    # torchtitan naming. Use broadcast_from_rank0 to handle
-                    # plain Tensor → DTensor conversion for parallelized models.
-                    from safetensors.torch import load_file
-
-                    from torchtitan.components.lora import remap_lora_keys_from_hf
-
-                    safetensors_path = os.path.join(cid, "adapter_model.safetensors")
-                    adapter_sd = load_file(safetensors_path)
-                    from_hf_map = self._get_from_hf_map()
-                    if from_hf_map is not None:
-                        adapter_sd = remap_lora_keys_from_hf(adapter_sd, from_hf_map)
-                    if MODEL in self.states:
-                        func = functools.partial(
-                            set_model_state_dict,
-                            model_state_dict=adapter_sd,
-                            options=StateDictOptions(
-                                strict=False,
-                                full_state_dict=True,
-                                broadcast_from_rank0=True,
-                            ),
-                        )
-                        list(map(func, self.states[MODEL].model))
+                load_fn = self.states[MODEL].converter_load_additional_fn
+                if load_fn is not None:
+                    # Converter-provided load (e.g. PEFT safetensors)
+                    load_fn(
+                        cid,
+                        self.states[MODEL].model,
+                        self._get_from_hf_map(),
+                    )
                 else:
                     # DCP: load all available states (model + training info).
                     # This overwrites corresponding states from primary.
@@ -1082,14 +1061,11 @@ class CheckpointManager(Configurable):
                 self.last_save_model_only
             ), "Only model can be saved when saving in HF safetensors format."
 
-        # PEFT format: save adapter_model.safetensors + adapter_config.json
-        model_wrapper = self.states[MODEL]
-        if (
-            self.last_save_model_only
-            and model_wrapper.converter_save_format == "peft"
-            and model_wrapper.has_converter_keys()
-        ):
-            self._save_peft(states, curr_step, model_wrapper.converter_config)
+        # Converter-provided last-step save (e.g. PEFT format)
+        save_last_fn = self.states[MODEL].converter_save_last_fn
+        if self.last_save_model_only and save_last_fn is not None:
+            checkpoint_dir = self._create_checkpoint_id(curr_step)
+            save_last_fn(states, checkpoint_dir, self._get_from_hf_map())
             return
 
         self.dcp_save(
@@ -1105,82 +1081,6 @@ class CheckpointManager(Configurable):
         if self.sd_adapter is None:
             return None
         return getattr(self.sd_adapter, "from_hf_map", None)
-
-    def _save_peft(
-        self,
-        states: dict[str, Any],
-        curr_step: int,
-        converter_config: dict[str, Any] | None,
-    ) -> None:
-        """Save adapter weights in PEFT-compatible format.
-
-        Writes adapter_model.safetensors and adapter_config.json into the
-        checkpoint folder. Only rank 0 performs the file I/O.
-        Keys are remapped from torchtitan naming to HF PEFT naming.
-        """
-        from safetensors.torch import save_file
-
-        if converter_config is None:
-            raise ValueError(
-                "converter_config is required for PEFT save format. "
-                "Ensure the model converter sets converter_config on the model."
-            )
-
-        checkpoint_dir = self._create_checkpoint_id(curr_step)
-
-        # Collect full tensors from DTensors on CPU.
-        # LoRA adapter weights are Replicate-placed DTensors after parallelization,
-        # so full_tensor() returns the complete tensor on every rank.
-        cpu_states = {}
-        for k, v in states.items():
-            if hasattr(v, "full_tensor"):
-                cpu_states[k] = v.full_tensor().cpu()
-            else:
-                cpu_states[k] = v.cpu() if isinstance(v, torch.Tensor) else v
-
-        # Remap keys to HF PEFT naming
-        from torchtitan.components.lora import remap_lora_keys_to_hf
-
-        from_hf_map = self._get_from_hf_map()
-        if from_hf_map is not None:
-            hf_states = remap_lora_keys_to_hf(cpu_states, from_hf_map)
-        else:
-            logger.warning(
-                "No from_hf_map available; saving PEFT with torchtitan keys."
-            )
-            hf_states = cpu_states
-
-        if dist.get_rank() == 0:
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-            safetensors_path = os.path.join(checkpoint_dir, "adapter_model.safetensors")
-            save_file(hf_states, safetensors_path)
-            logger.info(f"Saved PEFT adapter weights to {safetensors_path}")
-
-            # Write adapter_config.json with HF module names
-            target_modules = sorted(
-                {
-                    # Extract the module name before .lora_A or .lora_B
-                    k.rsplit(".lora_A.", 1)[0].rsplit(".", 1)[-1]
-                    if ".lora_A." in k
-                    else k.rsplit(".lora_B.", 1)[0].rsplit(".", 1)[-1]
-                    for k in hf_states
-                }
-            )
-            config_dict = {
-                "peft_type": "LORA",
-                "r": converter_config["rank"],
-                "lora_alpha": converter_config["alpha"],
-                "target_modules": target_modules,
-            }
-            config_path = os.path.join(checkpoint_dir, "adapter_config.json")
-            with open(config_path, "w") as f:
-                json.dump(config_dict, f, indent=2)
-            logger.info(f"Saved PEFT adapter config to {config_path}")
-
-        # Ensure all ranks wait for rank 0 to finish writing
-        if dist.is_initialized():
-            dist.barrier()
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable or self.load_only:

@@ -4,13 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
 
 from torchtitan.config import Configurable
 from torchtitan.models.common.linear import Linear
@@ -144,6 +151,108 @@ class LoRAConverter(Configurable):
 
         return merge
 
+    def _make_peft_save_fn(self):
+        """Return a closure that saves adapter weights in PEFT format.
+
+        The closure writes ``adapter_model.safetensors`` and
+        ``adapter_config.json`` into the checkpoint directory. Only rank 0
+        performs file I/O. Keys are remapped from torchtitan to HF PEFT naming.
+        """
+        rank = self.rank
+        alpha = self.alpha
+
+        def save(
+            state_dict: dict[str, Any],
+            checkpoint_dir: str,
+            from_hf_map: dict[str, str | None] | None,
+        ) -> None:
+            from safetensors.torch import save_file
+
+            # Collect full tensors from DTensors on CPU
+            cpu_states = {}
+            for k, v in state_dict.items():
+                if hasattr(v, "full_tensor"):
+                    cpu_states[k] = v.full_tensor().cpu()
+                else:
+                    cpu_states[k] = v.cpu() if isinstance(v, torch.Tensor) else v
+
+            # Remap keys to HF PEFT naming
+            if from_hf_map is not None:
+                hf_states = remap_lora_keys_to_hf(cpu_states, from_hf_map)
+            else:
+                logger.warning(
+                    "No from_hf_map available; saving PEFT with torchtitan keys."
+                )
+                hf_states = cpu_states
+
+            if dist.get_rank() == 0:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+
+                safetensors_path = os.path.join(
+                    checkpoint_dir, "adapter_model.safetensors"
+                )
+                save_file(hf_states, safetensors_path)
+                logger.info(f"Saved PEFT adapter weights to {safetensors_path}")
+
+                # Write adapter_config.json with HF module names
+                target_modules = sorted(
+                    {
+                        k.rsplit(".lora_A.", 1)[0].rsplit(".", 1)[-1]
+                        if ".lora_A." in k
+                        else k.rsplit(".lora_B.", 1)[0].rsplit(".", 1)[-1]
+                        for k in hf_states
+                    }
+                )
+                config_dict = {
+                    "peft_type": "LORA",
+                    "r": rank,
+                    "lora_alpha": alpha,
+                    "target_modules": target_modules,
+                }
+                config_path = os.path.join(checkpoint_dir, "adapter_config.json")
+                with open(config_path, "w") as f:
+                    json.dump(config_dict, f, indent=2)
+                logger.info(f"Saved PEFT adapter config to {config_path}")
+
+            # Ensure all ranks wait for rank 0 to finish writing
+            if dist.is_initialized():
+                dist.barrier()
+
+        return save
+
+    def _make_peft_load_fn(self):
+        """Return a closure that loads adapter weights from a PEFT directory.
+
+        The closure loads ``adapter_model.safetensors``, remaps keys from HF
+        PEFT naming to torchtitan naming, and broadcasts from rank 0.
+        """
+
+        def load(
+            path: str,
+            model_parts: list[nn.Module],
+            from_hf_map: dict[str, str | None] | None,
+        ) -> None:
+            import functools
+
+            from safetensors.torch import load_file
+
+            safetensors_path = os.path.join(path, "adapter_model.safetensors")
+            adapter_sd = load_file(safetensors_path)
+            if from_hf_map is not None:
+                adapter_sd = remap_lora_keys_from_hf(adapter_sd, from_hf_map)
+            func = functools.partial(
+                set_model_state_dict,
+                model_state_dict=adapter_sd,
+                options=StateDictOptions(
+                    strict=False,
+                    full_state_dict=True,
+                    broadcast_from_rank0=True,
+                ),
+            )
+            list(map(func, model_parts))
+
+        return load
+
     def convert(self, model: nn.Module) -> None:
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
@@ -151,14 +260,13 @@ class LoRAConverter(Configurable):
         # Wire up checkpoint filtering so ModelWrapper knows which keys
         # are adapter keys and how to save them.
         model.converter_key_filter = self._is_lora_key  # type: ignore[attr-defined]
-        model.converter_save_format = self.save_format  # type: ignore[attr-defined]
-        model.converter_config = {  # type: ignore[attr-defined]
-            "rank": self.rank,
-            "alpha": self.alpha,
-        }
 
         if self.save_format == "merged":
             model.converter_export_sd_fn = self._make_merge_fn()  # type: ignore[attr-defined]
+        elif self.save_format == "peft":
+            model.converter_save_last_fn = self._make_peft_save_fn()  # type: ignore[attr-defined]
+            model.converter_load_additional_fn = self._make_peft_load_fn()  # type: ignore[attr-defined]
+        # "dcp" format: no special attrs needed, checkpoint uses DCP
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         for _, child in list(module.named_modules()):
