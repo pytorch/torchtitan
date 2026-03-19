@@ -10,10 +10,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import datasets as _datasets_lib
 import numpy as np
 import PIL.Image
 import torch
 from datasets import Dataset, load_dataset
+
+print(f"[flux_datasets] datasets version: {_datasets_lib.__version__}")
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
