@@ -17,7 +17,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
 
     def _build_dataloader(self, batch_size, seq_len, world_size, rank):
         tokenizer = HuggingFaceTokenizer.Config().build(
-            tokenizer_path="tests/assets/qwen3_vl_tokenizer"
+            tokenizer_path="tests/assets/tokenizer"
         )
         dl_config = MMDataLoader.Config(
             dataset="cc12m-test",
