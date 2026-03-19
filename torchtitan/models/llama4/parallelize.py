@@ -638,6 +638,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
+    # Skip replaying forward side effects (e.g. RoPE cache updates) during
+    # the AC recompute in backward. Eager AC replays the forward python
+    # side-effects in backward, but torch.compile has no easy way to reapply
+    # python mutations in the backward. Setting this flag accepts this eager
+    # and compile divergence by skipping reapplication of side effects.
+    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:

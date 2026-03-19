@@ -133,10 +133,11 @@ def apply_compile(
 
     torch._inductor.config.reorder_for_peak_memory = False
     torch._dynamo.config.capture_scalar_outputs = True
-    # Eager AC/SAC reapplies the mutations (like global dict mutations) in the
-    # backward during the recomputation of forward. torch.compile has no easy way to
-    # reapply python mutations in the backward. Setting this flag accepts this
-    # eager and compile divergence by skipping reapplication of side effects.
+    # Skip replaying forward side effects (e.g. RoPE cache updates) during
+    # the AC recompute in backward. Eager AC replays the forward python
+    # side-effects in backward, but torch.compile has no easy way to reapply
+    # python mutations in the backward. Setting this flag accepts this eager
+    # and compile divergence by skipping reapplication of side effects.
     torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
 
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
