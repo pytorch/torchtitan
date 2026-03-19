@@ -15,9 +15,11 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
-    annotate_flex_attention_for_regional_inductor,
     run_traced_module,
     trace_module,
+)
+from torchtitan.models.common.attention import (
+    annotate_flex_attention_for_regional_inductor,
 )
 
 
@@ -678,7 +680,9 @@ class TestTraceFSDP(FSDPTest):
         model_test = create_model(config_cls, model_config, "cuda", torch.float32)
         model_test.load_state_dict(model_ref.state_dict())
         model_ref = data_parallel(model_ref, device_mesh=fsdp_mesh, mode="fully_shard")
-        model_test = data_parallel(model_test, device_mesh=fsdp_mesh, mode="fully_shard")
+        model_test = data_parallel(
+            model_test, device_mesh=fsdp_mesh, mode="fully_shard"
+        )
 
         vocab_size = model_config.vocab_size
         seq_len = 128

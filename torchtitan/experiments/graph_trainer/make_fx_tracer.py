@@ -24,31 +24,6 @@ from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 
 @contextmanager
-def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
-    """Annotate FlexAttentionWrapper.forward so regional_inductor compiles flex attention HOPs.
-
-    Uses the same inductor configs as FlexAttentionWrapper._compiled_flex_attn
-    to ensure bitwise-identical kernels between eager and regional_inductor paths.
-    """
-    from torch.fx.traceback import annotate_fn
-
-    from torchtitan.models.common.attention import FlexAttentionWrapper
-
-    orig = FlexAttentionWrapper.forward
-    FlexAttentionWrapper.forward = annotate_fn(
-        {
-            "compile_with_inductor": {
-                "inductor_configs": FlexAttentionWrapper.inductor_configs
-            }
-        }
-    )(orig)
-    try:
-        yield
-    finally:
-        FlexAttentionWrapper.forward = orig
-
-
-@contextmanager
 def _skip_nested_compile() -> Generator[None, None, None]:
     """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
 

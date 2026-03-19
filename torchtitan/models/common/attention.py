@@ -4,7 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import ClassVar, NamedTuple
 
@@ -173,6 +174,29 @@ class FlexAttentionWrapper(Module):
             enable_gqa=enable_gqa,
             return_lse=return_lse,
         )
+
+
+@contextmanager
+def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
+    """Annotate FlexAttentionWrapper.forward so regional_inductor compiles flex attention HOPs.
+
+    Uses the same inductor configs as FlexAttentionWrapper._compiled_flex_attn
+    to ensure bitwise-identical kernels between eager and regional_inductor paths.
+    """
+    from torch.fx.traceback import annotate_fn
+
+    orig = FlexAttentionWrapper.forward
+    FlexAttentionWrapper.forward = annotate_fn(
+        {
+            "compile_with_inductor": {
+                "inductor_configs": FlexAttentionWrapper.inductor_configs
+            }
+        }
+    )(orig)
+    try:
+        yield
+    finally:
+        FlexAttentionWrapper.forward = orig
 
 
 class ScaledDotProductAttentionWrapper(Module):
