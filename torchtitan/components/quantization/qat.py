@@ -120,6 +120,11 @@ class QATConverter(Configurable):
         (int4_weight_only, intx_weight_only, int8_dynamic_act_intx_weight).
         Must divide in_features of all Linear layers in the model."""
 
+        convert_at_end: bool = False
+        """When True, finalize() applies QAT CONVERT step at end of training,
+        replacing FakeQuantizedLinear modules with real quantized modules
+        (e.g. WeightOnlyInt4Linear with packed int4 weights)."""
+
     def __init__(self, config: Config, **kwargs):
         if config.scheme not in _SUPPORTED_SCHEMES:
             raise ValueError(
@@ -128,13 +133,15 @@ class QATConverter(Configurable):
             )
         self.scheme = config.scheme
         self.group_size = config.group_size
+        self.convert_at_end = config.convert_at_end
         if config.scheme not in _SCHEMES_WITH_GROUP_SIZE:
             logger.warning(
                 f"QAT scheme '{config.scheme}' does not use group_size, "
                 f"ignoring group_size={config.group_size}"
             )
         logger.info(
-            f"QAT training active (scheme={self.scheme}, group_size={self.group_size})"
+            f"QAT training active (scheme={self.scheme}, group_size={self.group_size}, "
+            f"convert_at_end={self.convert_at_end})"
         )
 
     def convert(self, model: nn.Module) -> None:
@@ -142,8 +149,36 @@ class QATConverter(Configurable):
         from torchao.quantization.qat import QATConfig
         from torchao.quantization.qat.api import QATStep
 
+        # Snapshot init params before quantize_ replaces Linear subclasses
+        # with FakeQuantizedLinear (which lacks _init_mean / _init_std).
+        init_params_cache: dict[str, tuple[float, float]] = {}
+        for name, mod in model.named_modules():
+            if isinstance(mod, nn.Linear) and hasattr(mod, "_init_mean"):
+                init_params_cache[name] = (
+                    getattr(mod, "_init_mean", 0.0),
+                    getattr(mod, "_init_std", 0.02),
+                )
+
         base_config = _build_base_config(self.scheme, self.group_size)
         quantize_(model, QATConfig(base_config, step=QATStep.PREPARE))
+
+        # Restore init params on replaced modules and patch init_weights onto
+        # the FakeQuantizedLinear *class* (not instance) so that LoRA's subclass
+        # can properly override it via MRO. An instance-level bound method would
+        # shadow LoRA's class-level init_weights and break adapter initialization.
+        from torchtitan.models.common.linear import Linear
+
+        _patched_classes: set[type] = set()
+        for name, mod in model.named_modules():
+            if isinstance(mod, nn.Linear) and name in init_params_cache:
+                init_mean, init_std = init_params_cache[name]
+                mod._init_mean = init_mean
+                mod._init_std = init_std
+
+                cls = type(mod)
+                if cls not in _patched_classes and not hasattr(cls, "init_weights"):
+                    cls.init_weights = Linear.init_weights
+                    _patched_classes.add(cls)
 
         # Store QAT config on the model so downstream converters (e.g. LoRA)
         # can apply the same QAT to newly created modules.
@@ -157,3 +192,34 @@ class QATConverter(Configurable):
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
+
+    def finalize(self, model: nn.Module) -> None:
+        """Apply QAT CONVERT step, replacing FakeQuantizedLinear with real quantized modules.
+
+        Skipped when convert_at_end is False. Also skipped if LoRA adapters
+        are still present (adapter-only save), since CONVERT requires plain
+        FakeQuantizedLinear modules without LoRA wrappers.
+        """
+        if not self.convert_at_end:
+            return
+
+        # Check for remaining LoRA adapters — if present, skip CONVERT.
+        for name, mod in model.named_modules():
+            if hasattr(mod, "lora_a") or hasattr(mod, "lora_b"):
+                logger.warning(
+                    "QAT CONVERT skipped: LoRA adapters still present on the model. "
+                    "Use LoRA save_format='merged' to merge adapters before CONVERT."
+                )
+                return
+
+        from torchao.quantization import quantize_
+        from torchao.quantization.qat import QATConfig
+        from torchao.quantization.qat.api import QATStep
+
+        base_config = _build_base_config(self.scheme, self.group_size)
+        quantize_(model, QATConfig(base_config, step=QATStep.CONVERT))
+
+        logger.info(
+            f"Applied QAT CONVERT (scheme={self.scheme}, group_size={self.group_size}): "
+            "FakeQuantizedLinear modules replaced with real quantized modules"
+        )

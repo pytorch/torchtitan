@@ -31,6 +31,16 @@ class ModelConverter(Protocol):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
         ...
 
+    def finalize(self, model: nn.Module) -> None:
+        """End-of-training hook for final model transformations.
+
+        Called before the last checkpoint save. Examples:
+        - QAT CONVERT: replace fake-quantized modules with real quantized ones
+        - LoRA merge: fold adapter weights into base weights at model level
+        Default is a no-op.
+        """
+        ...
+
 
 class ModelConvertersContainer(Configurable, ModelConverter):
     """Model converters sequential container.
@@ -56,6 +66,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         def __post_init__(self):
             _validate_converter_ordering(self.converters)
             _validate_quantization(self.converters)
+            _validate_qat_lora_finalize(self.converters)
 
     def __init__(
         self,
@@ -79,9 +90,26 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         if self.print_after_conversion:
             logger.info(f"Model definition after conversion:\n\n{model}\n\n")
 
+        # Attach a finalize function on the model so the checkpoint system
+        # can call it before the last save (same pattern as converter_export_sd_fn).
+        def _finalize_fn():
+            self.finalize(model)
+
+        model.converter_finalize_fn = _finalize_fn  # type: ignore[attr-defined]
+
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
+
+    def finalize(self, model: nn.Module) -> None:
+        """Run end-of-training finalization in reverse converter order.
+
+        Reverse order ensures proper composition: e.g. LoRA merge happens
+        before QAT CONVERT so that adapters are folded into base weights
+        before real quantization is applied.
+        """
+        for mh in reversed(self.converters):
+            mh.finalize(model)
 
 
 def _validate_converter_ordering(converters: list[Configurable.Config]):
@@ -98,7 +126,10 @@ def _validate_converter_ordering(converters: list[Configurable.Config]):
     for config in converters:
         if isinstance(config, LoRAConverter.Config):
             seen_lora = True
-        elif isinstance(config, (QuantizationConverter.Config, QATConverter.Config)) and seen_lora:
+        elif (
+            isinstance(config, (QuantizationConverter.Config, QATConverter.Config))
+            and seen_lora
+        ):
             raise ValueError(
                 "LoRA converter must come after quantization and QAT converters. "
                 "Quantization/QAT replaces nn.Linear with specialized subclasses, "
@@ -124,3 +155,34 @@ def _validate_quantization(converters: list[Configurable.Config]):
                     "Cannot combine model converters with different quantization types: "
                     f"'{qt}' and '{existing_type}'"
                 )
+
+
+def _validate_qat_lora_finalize(converters: list[Configurable.Config]):
+    """Warn if QAT convert_at_end=True but LoRA save_format != 'merged'.
+
+    QAT CONVERT replaces FakeQuantizedLinear with real quantized modules, but
+    this only works after LoRA adapters have been merged into base weights.
+    If LoRA is saving adapter-only (dcp/peft), CONVERT will be skipped.
+    """
+    from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization.qat import QATConverter
+
+    qat_convert_at_end = False
+    lora_save_format: str | None = None
+    for config in converters:
+        if isinstance(config, QATConverter.Config) and config.convert_at_end:
+            qat_convert_at_end = True
+        if isinstance(config, LoRAConverter.Config):
+            lora_save_format = config.save_format
+
+    if (
+        qat_convert_at_end
+        and lora_save_format is not None
+        and lora_save_format != "merged"
+    ):
+        logger.warning(
+            "QAT convert_at_end=True requires LoRA save_format='merged' to apply "
+            "real quantization. With save_format='%s', QAT CONVERT will be "
+            "skipped at end of training.",
+            lora_save_format,
+        )
