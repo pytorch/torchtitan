@@ -24,6 +24,31 @@ from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 
 @contextmanager
+def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
+    """Annotate FlexAttentionWrapper.forward so regional_inductor compiles flex attention HOPs.
+
+    Uses the same inductor configs as FlexAttentionWrapper._compiled_flex_attn
+    to ensure bitwise-identical kernels between eager and regional_inductor paths.
+    """
+    from torch.fx.traceback import annotate_fn
+
+    from torchtitan.models.common.attention import FlexAttentionWrapper
+
+    orig = FlexAttentionWrapper.forward
+    FlexAttentionWrapper.forward = annotate_fn(
+        {
+            "compile_with_inductor": {
+                "inductor_configs": FlexAttentionWrapper.inductor_configs
+            }
+        }
+    )(orig)
+    try:
+        yield
+    finally:
+        FlexAttentionWrapper.forward = orig
+
+
+@contextmanager
 def _skip_nested_compile() -> Generator[None, None, None]:
     """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
 
@@ -38,35 +63,6 @@ def _skip_nested_compile() -> Generator[None, None, None]:
         yield
     finally:
         torch._dynamo.config.error_on_nested_fx_trace = prev
-
-
-@contextmanager
-def use_uncompiled_flex_attention() -> Generator[None, None, None]:
-    """Disable all torch.compile wrapping around flex_attention.
-
-    FlexAttentionWrapper uses a pre-compiled flex_attention (outer compile),
-    and raw flex_attention itself calls torch.compile internally (inner
-    compile). This context manager disables both so that flex_attention
-    dispatches directly through the FlexAttentionHOP without any fusion.
-
-    Use this around both tracing and eager execution to ensure bitwise-
-    identical numerics. The traced graph preserves the FlexAttentionHOP,
-    and eager also dispatches through the same unfused HOP path.
-    """
-    from torch.nn.attention import flex_attention as flex_attn_mod
-    from torch.nn.attention.flex_attention import flex_attention as raw_flex_attention
-
-    from torchtitan.models.common.attention import FlexAttentionWrapper
-
-    prev_compiled = FlexAttentionWrapper._compiled_flex_attn
-    prev_debug = flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG
-    FlexAttentionWrapper._compiled_flex_attn = staticmethod(raw_flex_attention)
-    flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = True
-    try:
-        yield
-    finally:
-        FlexAttentionWrapper._compiled_flex_attn = prev_compiled
-        flex_attn_mod._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = prev_debug
 
 
 @dataclass
@@ -265,7 +261,7 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     seq_nr_to_fwd_node: dict[int, torch.fx.Node] = {}
 
     for node in fx_g.graph.nodes:
-        if node.op != "call_function" or "seq_nr" not in node.meta:
+        if node.op not in ("call_function", "get_attr") or "seq_nr" not in node.meta:
             continue
         seq_nr = node.meta["seq_nr"]
         if seq_nr not in seq_nr_to_fwd_node:
@@ -321,11 +317,14 @@ def trace_module(
             unwrapped_args.append(arg)
             input_layouts.append(SubclassLayout(1, None))
 
-    fake_mode = FakeTensorMode(allow_non_fake_inputs=True)
+    fake_mode = FakeTensorMode(
+        allow_non_fake_inputs=True,
+        shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+    )
 
     def to_fake(t):
         if isinstance(t, torch.Tensor):
-            return fake_mode.from_tensor(t)
+            return fake_mode.from_tensor(t, static_shapes=True)
         return t
 
     fake_args = tuple(to_fake(a) for a in unwrapped_args)
@@ -361,7 +360,7 @@ def trace_module(
         return unwrapped_outputs
 
     # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with fake_mode, preserve_node_meta(), _skip_nested_compile(), use_uncompiled_flex_attention():
+    with fake_mode, preserve_node_meta(), _skip_nested_compile():
         traced = make_fx(
             fn_with_subclass_handling,
             record_stack_traces=True,

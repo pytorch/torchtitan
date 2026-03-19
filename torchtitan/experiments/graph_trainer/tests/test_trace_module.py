@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import unittest
 from collections import Counter
 
@@ -14,9 +15,9 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
+    annotate_flex_attention_for_regional_inductor,
     run_traced_module,
     trace_module,
-    use_uncompiled_flex_attention,
 )
 
 
@@ -58,6 +59,27 @@ def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     with torch.no_grad():
         model.init_weights(buffer_device=torch.device(device))
     return model
+
+
+def _apply_regional_inductor(traced_result):
+    """Apply regional_inductor to compile annotated HOP regions in the traced graph."""
+    from torch.fx.graph import CodeGen
+    from torch.fx.passes.regional_inductor import regional_inductor
+
+    fake_mode = None
+    for node in traced_result.gm.graph.nodes:
+        if node.op == "placeholder" and "val" in node.meta:
+            val = node.meta["val"]
+            if isinstance(val, torch.Tensor) and hasattr(val, "fake_mode"):
+                fake_mode = val.fake_mode
+                break
+
+    context = torch._guards.TracingContext(fake_mode)
+    with torch._guards.tracing(context):
+        traced_result.gm = regional_inductor(traced_result.gm)
+
+    traced_result.gm.graph.set_codegen(CodeGen())
+    traced_result.gm.recompile()
 
 
 class SimpleMLP(nn.Module):
@@ -381,12 +403,14 @@ class TestTraceModels(unittest.TestCase):
         fwd_args,
         labels,
         check_collective_ops=False,
+        use_regional_inductor=False,
         num_steps=5,
         lr=1e-3,
     ):
         train_step_ref = TrainStepModule(model_ref, get_loss)
 
-        traced_result = trace_module(train_step_ref, (*fwd_args, labels))
+        with annotate_flex_attention_for_regional_inductor() if use_regional_inductor else contextlib.nullcontext():
+            traced_result = trace_module(train_step_ref, (*fwd_args, labels))
 
         if check_collective_ops:
             ag = sum(
@@ -404,12 +428,14 @@ class TestTraceModels(unittest.TestCase):
                 f"Expected collective ops in FSDP graph (ag={ag}, rs={rs})",
             )
 
+        if use_regional_inductor:
+            _apply_regional_inductor(traced_result)
+
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=lr)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr)
 
         for step in range(1, num_steps + 1):
-            with use_uncompiled_flex_attention():
-                logits_ref = model_ref(*fwd_args)
+            logits_ref = model_ref(*fwd_args)
             loss_ref = get_loss(logits_ref, labels)
             loss_ref.backward()
             grads_ref = [p.grad.clone() for p in model_ref.parameters()]
@@ -434,7 +460,13 @@ class TestTraceModels(unittest.TestCase):
             for gr, gt in zip(grads_ref, grads_tr, strict=True):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
-    def _run_model_test(self, config_cls, model_config, use_attn_masks=False):
+    def _run_model_test(
+        self,
+        config_cls,
+        model_config,
+        use_attn_masks=False,
+        use_regional_inductor=False,
+    ):
         vocab_size = model_config.vocab_size
         model_ref = create_model(config_cls, model_config, self.DEVICE, self.DTYPE)
         model_test = create_model(config_cls, model_config, self.DEVICE, self.DTYPE)
@@ -463,6 +495,7 @@ class TestTraceModels(unittest.TestCase):
             model_test,
             fwd_args,
             labels,
+            use_regional_inductor=use_regional_inductor,
             num_steps=self.NUM_STEPS,
             lr=self.LR,
         )
@@ -495,7 +528,10 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.llama4.model import Llama4Model
 
         self._run_model_test(
-            Llama4Model, llama4_configs["debugmodel"], use_attn_masks=True
+            Llama4Model,
+            llama4_configs["debugmodel"],
+            use_attn_masks=True,
+            use_regional_inductor=True,
         )
 
     def test_gpt_oss(self):
@@ -539,12 +575,12 @@ class TestTraceModels(unittest.TestCase):
             model_test,
             (tokens, attn_masks),
             labels,
+            use_regional_inductor=True,
             num_steps=self.NUM_STEPS,
             lr=self.LR,
         )
 
     def test_flex_attention_annotations(self):
-        from torch.fx.traceback import annotate_fn
         from torch.nn.attention.flex_attention import and_masks
 
         from torchtitan.experiments.graph_trainer.common_utils import (
@@ -552,7 +588,6 @@ class TestTraceModels(unittest.TestCase):
         )
         from torchtitan.models.common.attention import (
             create_attention_mask,
-            FlexAttentionWrapper,
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
@@ -561,10 +596,6 @@ class TestTraceModels(unittest.TestCase):
 
         config = gptoss_configs["debugmodel"]
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
-
-        FlexAttentionWrapper.forward = annotate_fn(
-            {"compile_with_inductor": "flex_attention"}
-        )(FlexAttentionWrapper.forward)
         annotate_ac_regions(model)
 
         tokens = torch.randint(
@@ -584,7 +615,8 @@ class TestTraceModels(unittest.TestCase):
             "basic_mask": basic_mask,
             "sliding_window_mask": sliding_window_mask,
         }
-        traced_result = trace_module(model, (tokens, attn_masks))
+        with annotate_flex_attention_for_regional_inductor():
+            traced_result = trace_module(model, (tokens, attn_masks))
 
         flex_nodes = [
             n
@@ -595,9 +627,9 @@ class TestTraceModels(unittest.TestCase):
 
         for node in flex_nodes:
             custom = node.meta.get("custom", {})
-            self.assertEqual(
-                custom.get("compile_with_inductor"),
-                "flex_attention",
+            self.assertIn(
+                "compile_with_inductor",
+                custom,
                 f"{node.name} missing compile_with_inductor annotation",
             )
             self.assertIn(
@@ -627,7 +659,12 @@ class TestTraceFSDP(FSDPTest):
         )
 
     def _run_fsdp_model_test(
-        self, config_cls, model_config, use_attn_masks=False, attn_masks=None
+        self,
+        config_cls,
+        model_config,
+        use_attn_masks=False,
+        attn_masks=None,
+        use_regional_inductor=False,
     ):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 
@@ -665,7 +702,8 @@ class TestTraceFSDP(FSDPTest):
 
         train_step_ref = TrainStepModule(model_ref, get_loss)
 
-        traced_result = trace_module(train_step_ref, (*fwd_args, labels))
+        with annotate_flex_attention_for_regional_inductor() if use_regional_inductor else contextlib.nullcontext():
+            traced_result = trace_module(train_step_ref, (*fwd_args, labels))
 
         ag = sum(
             1
@@ -682,12 +720,14 @@ class TestTraceFSDP(FSDPTest):
             f"Expected collective ops in FSDP graph (ag={ag}, rs={rs})",
         )
 
+        if use_regional_inductor:
+            _apply_regional_inductor(traced_result)
+
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=1e-3)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3)
 
         for step in range(1, 6):
-            with use_uncompiled_flex_attention():
-                logits_ref = model_ref(*fwd_args)
+            logits_ref = model_ref(*fwd_args)
             loss_ref = get_loss(logits_ref, labels)
             loss_ref.backward()
             grads_ref = [p.grad.clone() for p in model_ref.parameters()]
@@ -734,7 +774,10 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.llama4.model import Llama4Model
 
         self._run_fsdp_model_test(
-            Llama4Model, llama4_configs["debugmodel"], use_attn_masks=True
+            Llama4Model,
+            llama4_configs["debugmodel"],
+            use_attn_masks=True,
+            use_regional_inductor=True,
         )
 
     def test_gpt_oss_fsdp(self):
@@ -764,7 +807,12 @@ class TestTraceFSDP(FSDPTest):
             "basic_mask": basic_mask,
             "sliding_window_mask": sliding_window_mask,
         }
-        self._run_fsdp_model_test(GptOssModel, config, attn_masks=attn_masks)
+        self._run_fsdp_model_test(
+            GptOssModel,
+            config,
+            attn_masks=attn_masks,
+            use_regional_inductor=True,
+        )
 
 
 if __name__ == "__main__":

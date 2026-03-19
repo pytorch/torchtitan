@@ -130,17 +130,19 @@ class FlexAttentionWrapper(Module):
         block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
+    inductor_configs: ClassVar[dict[str, bool]] = {
+        # TODO: turn on wrap_inductor_compiled_regions after PyTorch fix is
+        # landed again: https://github.com/pytorch/pytorch/pull/175733.
+        "wrap_inductor_compiled_regions": False,
+        "max_autotune": True,
+        "coordinate_descent_tuning": True,
+        "triton.cudagraphs": False,
+    }
+
+    # pyrefly: ignore[no-matching-overload]
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
-        # This options also encapsulate max-autotune-no-cudagraphs.
-        options={
-            # TODO: turn on this after PyTorch fix is landed again
-            # https://github.com/pytorch/pytorch/pull/175733.
-            "wrap_inductor_compiled_regions": False,
-            "max_autotune": True,
-            "coordinate_descent_tuning": True,
-            "triton.cudagraphs": False,
-        },
+        options=inductor_configs,
     )
 
     def forward(
