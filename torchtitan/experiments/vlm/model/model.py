@@ -13,6 +13,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model as Llama3
 from torchtitan.protocols.module import Module
 
@@ -40,8 +41,9 @@ class Projector(Module):
 
     def __init__(self, in_dim: int, out_dim: int) -> None:
         super().__init__()
-        self.w1 = nn.Linear(in_dim, in_dim)
-        self.w2 = nn.Linear(in_dim, out_dim)
+        linear_config = Linear.Config(bias=True)
+        self.w1 = linear_config.build(in_features=in_dim, out_features=in_dim)
+        self.w2 = linear_config.build(in_features=in_dim, out_features=out_dim)
         self.init_weights()
 
     def forward(self, x_NLD: torch.Tensor):
