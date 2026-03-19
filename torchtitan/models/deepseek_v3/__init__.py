@@ -9,7 +9,13 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.param_init import (
+    init_by_regex,
+    init_depth_scaled_trunc_normal,
+    make_decoder_param_init,
+)
 from torchtitan.protocols.model_spec import ModelSpec
+
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 
 from .parallelize import parallelize_deepseekv3
@@ -22,11 +28,23 @@ __all__ = [
 ]
 
 
+def _deepseekv3_param_init(dim, n_layers):
+    base = make_decoder_param_init(dim=dim, n_layers=n_layers, depth_init=True)
+    depth_std = init_depth_scaled_trunc_normal(n_layers=n_layers, depth_init=True)
+    # MLA-specific: wo gets depth-scaled, other MLA linears get default
+    mla_patterns = {
+        r"layers\..+\.attention\.wo\.weight": depth_std,
+    }
+    # MLA patterns go first (override base), then base patterns
+    return init_by_regex({**mla_patterns, **base})
+
+
 deepseekv3_configs = {
     "debugmodel": DeepSeekV3Model.Config(
         vocab_size=2048,
         dim=256,
         n_layers=6,
+        param_init=_deepseekv3_param_init(256, 6),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -76,6 +94,7 @@ deepseekv3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=6,
+        param_init=_deepseekv3_param_init(256, 6),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -127,6 +146,7 @@ deepseekv3_configs = {
         vocab_size=102400,
         dim=2048,
         n_layers=27,
+        param_init=_deepseekv3_param_init(2048, 27),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -178,6 +198,7 @@ deepseekv3_configs = {
         vocab_size=102400,
         dim=5120,
         n_layers=60,
+        param_init=_deepseekv3_param_init(5120, 60),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -232,6 +253,7 @@ deepseekv3_configs = {
         vocab_size=129280,
         dim=7168,
         n_layers=61,
+        param_init=_deepseekv3_param_init(7168, 61),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),

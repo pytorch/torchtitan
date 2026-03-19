@@ -19,6 +19,6 @@ class GraphTrainerDeepSeekV3Model(DeepSeekV3Model):
     def __init__(self, config: Config):
         super().__init__(config)
 
-    def init_weights(self, *args, **kwargs):
+    def init_states(self, **kwargs):
         with disable_active_parametrization():
-            super().init_weights(*args, **kwargs)
+            super().init_states(**kwargs)

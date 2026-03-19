@@ -200,7 +200,7 @@ class RoPE(Module):
         """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
         return self.cache
 
-    def init_weights(self, **kwargs) -> None:
+    def init_self_buffers(self, **kwargs) -> None:
         buffer_device = kwargs.get("buffer_device")
         if buffer_device is not None:
             with torch.device(buffer_device):

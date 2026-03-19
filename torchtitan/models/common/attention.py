@@ -559,12 +559,3 @@ class GQAttention(BaseAttention):
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
-
-    def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
-        for linear in (self.wq, self.wk, self.wv):
-            linear.init_weights()
-        self.wo.init_weights(init_std=init_std)
-        if self.q_norm is not None:
-            self.q_norm.init_weights()
-        if self.k_norm is not None:
-            self.k_norm.init_weights()

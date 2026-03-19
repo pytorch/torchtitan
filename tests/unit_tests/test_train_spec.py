@@ -38,8 +38,8 @@ class FakeModel(BaseModel):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
 
-    def init_weights(self, buffer_device: torch.device | None = None, **kwargs) -> None:
-        self.linear.init_weights()
+    def init_self_parameters(self, **kwargs) -> None:
+        nn.init.trunc_normal_(self.linear.weight, std=0.02)
 
 
 def fake_post_optimizer_build_fn(

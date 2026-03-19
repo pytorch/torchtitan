@@ -17,7 +17,7 @@ class BaseModel(Module):
     Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
     The model is constructed via ``config.build()``.
 
-    All models must implement ``init_weights`` (from Module).
+    All models must implement ``init_states`` (from Module).
     """
 
     def verify_module_protocol(self) -> None:

@@ -132,13 +132,6 @@ class GroupedExperts(Module):
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
-
 
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
@@ -301,11 +294,6 @@ class TokenChoiceTopKRouter(Module):
         )
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
-
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        self.gate.init_weights(init_std=init_std)
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -526,16 +514,9 @@ class MoE(Module):
             return out_experts.reshape(bs, slen, dim)
         return (out + out_experts).reshape(bs, slen, dim)
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
+    def init_self_buffers(self, **kwargs) -> None:
         buffer_device = kwargs.get("buffer_device")
-        assert init_std is not None
         assert isinstance(buffer_device, torch.device)
-
-        self.experts.init_weights(init_std=init_std)
-        self.router.init_weights(init_std=init_std)
-        if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std=init_std)
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(

@@ -12,7 +12,7 @@ from torchtitan.protocols.module import Module
 
 
 class RMSNorm(nn.RMSNorm, Module):
-    """Configurable nn.RMSNorm with init_weights support.
+    """Configurable nn.RMSNorm.
 
     Uses diamond inheritance (nn.RMSNorm + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
@@ -24,6 +24,9 @@ class RMSNorm(nn.RMSNorm, Module):
     ``Config.__init__``.  It is typically supplied via ``build()`` kwargs
     from the parent model. See ``Configurable`` docstring to understand
     the design pattern.
+
+    Parameter initialization is handled by the ancestor's ``param_init``
+    callable (e.g., ``.*norm.*weight`` → ``init_ones()``).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -45,6 +48,3 @@ class RMSNorm(nn.RMSNorm, Module):
             elementwise_affine=config.elementwise_affine,
         )
         self.config = config
-
-    def init_weights(self, **kwargs) -> None:
-        self.reset_parameters()

@@ -6,7 +6,6 @@
 
 import math
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 from torch import nn
@@ -20,7 +19,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -178,26 +176,6 @@ class Attention(BaseAttention):
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        linear_list = [
-            self.wkv_a,
-            self.wkv_b,
-        ]
-        if self.q_lora_rank > 0:
-            linear_list.extend([self.wq_a, self.wq_b])
-        else:
-            linear_list.append(self.wq)
-
-        for linear in linear_list:
-            linear.init_weights()
-        self.wo.init_weights(init_std=init_std)
-
-        self.kv_norm.init_weights()
-        if self.q_lora_rank > 0:
-            self.q_norm.init_weights()
-
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
     """
@@ -240,19 +218,6 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
-
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        assert buffer_device is not None
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        if self.moe_enabled:
-            cast(MoE, self.moe).init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class DeepSeekV3Model(Decoder):

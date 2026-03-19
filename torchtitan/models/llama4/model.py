@@ -130,18 +130,6 @@ class Llama4TransformerBlock(TransformerBlock):
             out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def init_weights(self, **kwargs):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        if self.moe_enabled:
-            self.moe.init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
-
 
 class Llama4Model(Decoder):
     """

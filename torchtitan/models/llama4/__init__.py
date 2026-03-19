@@ -17,7 +17,9 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
 from torchtitan.protocols.model_spec import ModelSpec
+
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 
 from .parallelize import parallelize_llama
@@ -29,11 +31,16 @@ __all__ = [
 ]
 
 
+def _llama4_param_init(dim, n_layers):
+    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
+
+
 llama4_configs = {
     "debugmodel": Llama4Model.Config(
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        param_init=_llama4_param_init(256, 6),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -66,6 +73,7 @@ llama4_configs = {
     "17bx16e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
+        param_init=_llama4_param_init(5120, 48),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -110,6 +118,7 @@ llama4_configs = {
     "17bx128e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
+        param_init=_llama4_param_init(5120, 48),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),

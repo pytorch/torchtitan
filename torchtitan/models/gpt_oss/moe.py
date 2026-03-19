@@ -268,14 +268,6 @@ class GptOssGroupedExperts(Module):
                 tp_degree,
             )
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
-
 
 class GptOssMoE(MoE):
     """GptOss MoE implementation that inherits from the base MoE class."""

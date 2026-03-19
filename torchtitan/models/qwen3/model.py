@@ -71,18 +71,6 @@ class Qwen3TransformerBlock(TransformerBlock):
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
-    def init_weights(self, **kwargs):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        if self.moe_enabled:
-            self.moe.init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
-
 
 class Qwen3Model(Decoder):
     """
@@ -173,12 +161,7 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.output.weight
 
-    def init_weights(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-        **kwargs,
-    ):
+    def init_states(self, **kwargs) -> None:
         # The token embedding initialization produces weights with too large
         # standard deviation for the output layer. Under weight_tying, both should
         # use the output weights with a smaller, truncated normal distribution to
@@ -190,4 +173,4 @@ class Qwen3Model(Decoder):
             assert self.tok_embeddings is not None and self.output is not None
             self.tok_embeddings.weight = self.output.weight
 
-        super().init_weights(buffer_device=buffer_device, **kwargs)
+        super().init_states(**kwargs)

@@ -44,7 +44,7 @@ class Projector(Module):
         linear_config = Linear.Config(bias=True)
         self.w1 = linear_config.build(in_features=in_dim, out_features=in_dim)
         self.w2 = linear_config.build(in_features=in_dim, out_features=out_dim)
-        self.init_weights()
+        self.init_self_parameters()
 
     def forward(self, x_NLD: torch.Tensor):
         x_NLD = self.w1(x_NLD)
@@ -52,7 +52,7 @@ class Projector(Module):
         x_NLD = self.w2(x_NLD)
         return x_NLD
 
-    def init_weights(self, **kwargs) -> None:
+    def init_self_parameters(self, **kwargs) -> None:
         nn.init.xavier_uniform_(self.w1.weight)
         if self.w1.bias is not None:
             nn.init.zeros_(self.w1.bias)
@@ -72,12 +72,8 @@ class Llama3Siglip2Transformer(Llama3):
         self.encoder = VisionTransformer(config.encoder)
         self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
 
-    def init_weights(self, buffer_device=None):
-        super().init_weights(buffer_device=buffer_device)
-        if self.encoder is not None:
-            self.encoder.init_weights()
-        if self.projector is not None:
-            self.projector.init_weights()
+    def init_states(self, **kwargs):
+        super().init_states(**kwargs)
 
     def get_attention_masks(
         self,

@@ -6,6 +6,13 @@
 
 from torchtitan.components.loss import build_mse_loss
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.param_init import (
+    init_by_regex,
+    init_normal,
+    init_ones,
+    init_xavier_uniform,
+    init_zeros,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
@@ -29,8 +36,36 @@ __all__ = [
 ]
 
 
+def _flux_param_init():
+    """DiT-style param_init for Flux flow matching transformer.
+
+    Most weights use xavier_uniform (DiT convention). Exceptions:
+    - Modulation + LastLayer output weights: zero-init for stable training start
+    - MLPEmbedder weights (time_in, vector_in): normal(std=0.02)
+    - RMSNorm weights (QKNorm children): ones
+    """
+    return init_by_regex(
+        {
+            # Modulation layers: zero-init weights for stable training start
+            r".*mod(?:ulation)?\.lin\.weight": init_zeros(),
+            # LastLayer: zero-init weights for output stability
+            r"final_layer\.linear\.weight": init_zeros(),
+            r"final_layer\.adaLN_modulation\.1\.weight": init_zeros(),
+            # MLPEmbedder (time_in, vector_in): normal init for weights
+            r"(?:time_in|vector_in)\.(?:in|out)_layer\.weight": init_normal(std=0.02),
+            # RMSNorm weights (QKNorm children)
+            r".*norm.*\.weight": init_ones(),
+            # Default: xavier_uniform for remaining weights (DiT-style)
+            r".*\.weight": init_xavier_uniform(),
+            # Default: zeros for all biases
+            r".*\.bias": init_zeros(),
+        }
+    )
+
+
 flux_configs = {
     "flux-dev": FluxModel.Config(
+        param_init=_flux_param_init(),
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -95,6 +130,7 @@ flux_configs = {
         ),
     ),
     "flux-schnell": FluxModel.Config(
+        param_init=_flux_param_init(),
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -159,6 +195,7 @@ flux_configs = {
         ),
     ),
     "flux-debug": FluxModel.Config(
+        param_init=_flux_param_init(),
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,

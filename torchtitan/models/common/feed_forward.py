@@ -60,8 +60,3 @@ class FeedForward(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02, **kwargs):
-        self.w1.init_weights()
-        self.w2.init_weights(init_std=init_std)
-        self.w3.init_weights(init_std=init_std)

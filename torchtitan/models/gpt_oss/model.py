@@ -74,13 +74,6 @@ class Attention(BaseAttention):
         assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
         self.inner_attention = FlexAttentionWrapper()
 
-    def init_weights(self, **kwargs):
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in (self.wq, self.wk, self.wv, self.wo):
-            linear.init_weights(init_std=init_std)
-
     def forward(
         self,
         x: torch.Tensor,
@@ -193,15 +186,6 @@ class GptOssTransformerBlock(TransformerBlock):
         x = x + self.attention(self.attention_norm(x), freqs_cis, layer_mask, positions)
         x = x + self.moe(self.ffn_norm(x))
         return x
-
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        self.moe.init_weights(
-            init_std=self.weight_init_std, buffer_device=buffer_device
-        )
 
 
 class GptOssModel(Decoder):

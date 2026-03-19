@@ -15,6 +15,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
+from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
@@ -28,11 +29,16 @@ __all__ = [
 ]
 
 
+def _llama3_param_init(dim, n_layers):
+    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
+
+
 llama3_configs = {
     "debugmodel": Llama3Model.Config(
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        param_init=_llama3_param_init(256, 6),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -61,6 +67,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        param_init=_llama3_param_init(256, 6),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -89,6 +96,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        param_init=_llama3_param_init(256, 6),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -116,6 +124,7 @@ llama3_configs = {
     "8B": Llama3Model.Config(
         dim=4096,
         n_layers=32,
+        param_init=_llama3_param_init(4096, 32),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -145,6 +154,7 @@ llama3_configs = {
     "8B_flex": Llama3Model.Config(
         dim=4096,
         n_layers=32,
+        param_init=_llama3_param_init(4096, 32),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -175,6 +185,7 @@ llama3_configs = {
     "8B_varlen": Llama3Model.Config(
         dim=4096,
         n_layers=32,
+        param_init=_llama3_param_init(4096, 32),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -205,6 +216,7 @@ llama3_configs = {
     "70B": Llama3Model.Config(
         dim=8192,
         n_layers=80,
+        param_init=_llama3_param_init(8192, 80),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -234,6 +246,7 @@ llama3_configs = {
     "405B": Llama3Model.Config(
         dim=16384,
         n_layers=126,
+        param_init=_llama3_param_init(16384, 126),
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),

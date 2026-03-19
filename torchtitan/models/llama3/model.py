@@ -58,12 +58,6 @@ class Llama3TransformerBlock(TransformerBlock):
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def init_weights(self, **kwargs):
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
-
 
 class Llama3Model(Decoder):
     """

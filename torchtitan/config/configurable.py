@@ -82,6 +82,9 @@ class Configurable:
                 except AttributeError:
                     # field(init=False) not yet set, ignore this field.
                     continue
+                if callable(val) and not dataclasses.is_dataclass(val):
+                    # Skip non-serializable callables (e.g., param_init).
+                    continue
                 if hasattr(val, "to_dict"):
                     result[f.name] = val.to_dict()
                 elif dataclasses.is_dataclass(val):

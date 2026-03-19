@@ -88,10 +88,6 @@ class VisionEmbeddings(Module):
         )
         self.n_pos_embs = args.n_pos_embs
 
-    def init_weights(self, **kwargs) -> None:
-        self.patch_embedding.init_weights()
-        self.position_embedding.init_weights()
-
     def forward(self, pixels_NLD: torch.Tensor, grid_hw: torch.Tensor) -> torch.Tensor:
         # Apply patch embeddings to already patchified pixel values
         patch_embeds_NLD = self.patch_embedding(pixels_NLD)
@@ -159,10 +155,6 @@ class Attention(Module):
 
         return self.out_proj(output)
 
-    def init_weights(self, **kwargs) -> None:
-        for linear in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            linear.init_weights()
-
 
 class FeedForward(Module):
     def __init__(self, args: Siglip2Config):
@@ -176,10 +168,6 @@ class FeedForward(Module):
         x = F.gelu(x, approximate="tanh")
         x = self.fc2(x)
         return x
-
-    def init_weights(self, **kwargs) -> None:
-        self.fc1.init_weights()
-        self.fc2.init_weights()
 
 
 class TransformerLayer(Module):
@@ -196,12 +184,6 @@ class TransformerLayer(Module):
         x = x + self.self_attn(self.layer_norm1(x), attention_masks)
         x = x + self.mlp(self.layer_norm2(x))
         return x
-
-    def init_weights(self, **kwargs) -> None:
-        self.layer_norm1.init_weights()
-        self.layer_norm2.init_weights()
-        self.self_attn.init_weights()
-        self.mlp.init_weights()
 
 
 class VisionTransformer(Module):
@@ -259,9 +241,3 @@ class VisionTransformer(Module):
         h = self.post_layernorm(h)
 
         return h
-
-    def init_weights(self, **kwargs) -> None:
-        self.embeddings.init_weights()
-        for layer in self.layers.values():
-            layer.init_weights()
-        self.post_layernorm.init_weights()

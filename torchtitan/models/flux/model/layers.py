@@ -113,13 +113,6 @@ class MLPEmbedder(Module):
             in_features=config.hidden_dim, out_features=config.hidden_dim
         )
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std", 0.02)
-        nn.init.normal_(self.in_layer.weight, std=init_std)
-        nn.init.constant_(self.in_layer.bias, 0)
-        nn.init.normal_(self.out_layer.weight, std=init_std)
-        nn.init.constant_(self.out_layer.bias, 0)
-
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
 
@@ -129,10 +122,6 @@ class QKNorm(Module):
         super().__init__()
         self.query_norm = RMSNorm.Config().build(normalized_shape=dim)
         self.key_norm = RMSNorm.Config().build(normalized_shape=dim)
-
-    def init_weights(self, **kwargs) -> None:
-        self.query_norm.init_weights()
-        self.key_norm.init_weights()
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         q = self.query_norm(q)
@@ -152,12 +141,6 @@ class SelfAttention(Module):
         self.norm = QKNorm(dim=head_dim)
         self.proj = Linear.Config(bias=True).build(in_features=dim, out_features=dim)
         self.inner_attention = ScaledDotProductAttentionWrapper()
-
-    def init_weights(self, **kwargs) -> None:
-        for layer in (self.qkv, self.proj):
-            nn.init.xavier_uniform_(layer.weight)
-            nn.init.constant_(layer.bias, 0)
-        self.norm.init_weights()
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
@@ -185,10 +168,6 @@ class Modulation(Module):
         self.lin = Linear.Config(bias=True).build(
             in_features=dim, out_features=self.multiplier * dim
         )
-
-    def init_weights(self, **kwargs) -> None:
-        nn.init.constant_(self.lin.weight, 0)
-        nn.init.constant_(self.lin.bias, 0)
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
         out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(
@@ -262,27 +241,6 @@ class DoubleStreamBlock(Module):
         )
 
         self.inner_attention = ScaledDotProductAttentionWrapper()
-
-    def init_weights(self, **kwargs) -> None:
-        # initialize all the nn.Linear submodules
-        for layer in (
-            self.img_mlp[0],
-            self.img_mlp[2],
-            self.txt_mlp[0],
-            self.txt_mlp[2],
-        ):
-            # pyrefly: ignore [bad-argument-type]
-            nn.init.xavier_uniform_(layer.weight)
-            # pyrefly: ignore [bad-argument-type]
-            nn.init.constant_(layer.bias, 0)
-
-        # initialize Modulation layers, SelfAttention layers
-        for layer in (self.img_attn, self.img_mod, self.txt_attn, self.txt_mod):
-            layer.init_weights()
-
-        # Initialize Normalization layers
-        for norm in (self.txt_norm1, self.txt_norm2, self.img_norm1, self.img_norm2):
-            norm.init_weights()
 
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
@@ -378,14 +336,6 @@ class SingleStreamBlock(Module):
         self.modulation = Modulation(dim=config.hidden_size, double=False)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
-    def init_weights(self, **kwargs) -> None:
-        for layer in (self.linear1, self.linear2):
-            nn.init.xavier_uniform_(layer.weight)
-            nn.init.constant_(layer.bias, 0)
-        self.norm.init_weights()
-        self.pre_norm.init_weights()
-        self.modulation.init_weights()
-
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
@@ -430,15 +380,6 @@ class LastLayer(Module):
                 in_features=config.hidden_size, out_features=2 * config.hidden_size
             ),
         )
-
-    def init_weights(self, **kwargs) -> None:
-        # pyrefly: ignore [bad-argument-type]
-        nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
-        # pyrefly: ignore [bad-argument-type]
-        nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.linear.weight, 0)
-        nn.init.constant_(self.linear.bias, 0)
-        self.norm_final.init_weights()
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)

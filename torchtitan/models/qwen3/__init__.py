@@ -10,6 +10,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -25,11 +26,17 @@ __all__ = [
 
 # Adding different variants of the model
 
+
+def _qwen3_param_init(dim, n_layers):
+    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
+
+
 qwen3_configs = {
     "debugmodel": Qwen3Model.Config(
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        param_init=_qwen3_param_init(256, 8),
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
@@ -61,6 +68,7 @@ qwen3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        param_init=_qwen3_param_init(256, 8),
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
@@ -90,6 +98,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=1024,
         n_layers=28,
+        param_init=_qwen3_param_init(1024, 28),
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
@@ -121,6 +130,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2048,
         n_layers=28,
+        param_init=_qwen3_param_init(2048, 28),
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
@@ -152,6 +162,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2560,
         n_layers=36,
+        param_init=_qwen3_param_init(2560, 36),
         norm=RMSNorm.Config(eps=1e-6),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(),
@@ -183,6 +194,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=36,
+        param_init=_qwen3_param_init(4096, 36),
         tok_embeddings=Embedding.Config(),
         output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
@@ -213,6 +225,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=40,
+        param_init=_qwen3_param_init(5120, 40),
         tok_embeddings=Embedding.Config(),
         output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
@@ -243,6 +256,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=64,
+        param_init=_qwen3_param_init(5120, 64),
         tok_embeddings=Embedding.Config(),
         output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
@@ -274,6 +288,7 @@ qwen3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        param_init=_qwen3_param_init(256, 8),
         tok_embeddings=Embedding.Config(),
         output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
@@ -316,6 +331,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2048,
         n_layers=48,
+        param_init=_qwen3_param_init(2048, 48),
         tok_embeddings=Embedding.Config(),
         output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
@@ -358,6 +374,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=94,
+        param_init=_qwen3_param_init(4096, 94),
         tok_embeddings=Embedding.Config(),
         output=Linear.Config(),
         norm=RMSNorm.Config(eps=1e-6),
