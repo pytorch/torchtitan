@@ -107,10 +107,12 @@ class LocalMapAttention(Module):
             )
             # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
             # on the n_heads dim (dim 1)
+            # TODO: after full DTensor rewrite, the DP mesh will also be
+            # present, update this check to allow Shard(0) for DP and Shard(1) for TP.
             for i, p in enumerate(q.placements):
                 assert p == Shard(1), (
                     f"LocalMapAttention requires Shard(1) placements "
-                    f"(head dim), but got {p} at position {i}"
+                    f"(n_heads dim), but got {p} at position {i}"
                 )
             if self._local_map_fn is None:
                 self._local_map_fn = local_map(
@@ -120,7 +122,9 @@ class LocalMapAttention(Module):
                     in_grad_placements=(q.placements, k.placements, v.placements),
                     device_mesh=q.device_mesh,
                 )
-            return self._local_map_fn(q, k, v, **kwargs)
+            return self._local_map_fn(
+                q, k, v, **kwargs
+            )  # pyrefly: ignore [bad-argument-count]
         return super().__call__(q, k, v, **kwargs)
 
     def forward(
@@ -138,6 +142,7 @@ class VarlenAttentionWrapper(LocalMapAttention):
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
 
+    # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
         xq: torch.Tensor,
@@ -219,6 +224,7 @@ class FlexAttentionWrapper(LocalMapAttention):
         options=inductor_configs,
     )
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -295,6 +301,7 @@ class ScaledDotProductAttentionWrapper(LocalMapAttention):
                 SDPBackend.MATH,
             ]
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
