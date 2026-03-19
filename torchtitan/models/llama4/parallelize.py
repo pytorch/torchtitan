@@ -32,8 +32,8 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compiler import set_common_compiler_flags
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compiler import set_common_compiler_flags
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
