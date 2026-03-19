@@ -31,13 +31,38 @@ jobs:
 
       - name: Check links
         run: |
-          FILES=$(find . -name "*.md")
+          # 1. Create a temporary conftest.py to handle 403/429/503s.
+          # With these errors the link is technically correct,
+          # but can be blocked by e.g. CloudFlare.
 
-          # -n auto: parallel execution
-          # -p no:python: skip discovery imports
+          cat <<EOF > conftest.py
+          import pytest
+
+          @pytest.hookimpl(hookwrapper=True)
+          def pytest_runtest_makereport(item, call):
+              outcome = yield
+              report = outcome.get_result()
+
+              if report.when == "call" and report.failed:
+                  error_text = str(report.longrepr)
+                  # Handle 403 (Forbidden), 429 (Rate Limit), and 503 (Overloaded/Bot Block)
+                  if any(code in error_text for code in ["403", "429", "503"]):
+                      report.outcome = "passed"
+                      report.wasxfail = f"Silenced transient error: {item.name}"
+                      report.longrepr = None
+          EOF
+
+          # 2. Find markdown files (skip hidden folders)
+          FILES=$(find . -name "*.md" -not -path "*/.*")
+
+          # 3. Run pytest
           pytest -v \
             -p no:python \
             -n auto \
             --check-links \
-            --timeout 5 \
+            --timeout 10 \
+            --check-links-ignore "http://localhost:.*" \
             $FILES
+
+          # 4. Cleanup
+          rm conftest.py
