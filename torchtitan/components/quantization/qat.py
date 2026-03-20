@@ -84,6 +84,71 @@ def _build_base_config(scheme: str, group_size: int):
         )
 
 
+def apply_qat_prepare(
+    model: nn.Module,
+    scheme: str,
+    group_size: int,
+    *,
+    filter_fn=None,
+) -> None:
+    """Apply QAT PREPARE step: insert fake quantization into Linear modules.
+
+    This is the shared core used by both ``QATConverter.convert()`` (all linears)
+    and ``LoRAConverter._apply_adapter_qat()`` (adapter linears only).
+
+    After ``quantize_()``, restores ``_init_mean``/``_init_std`` on replaced
+    modules and patches ``init_weights`` onto all new module classes so they
+    satisfy the Module protocol.
+
+    Args:
+        model: The model (or subtree) to quantize.
+        scheme: QAT scheme name (must be in ``_SUPPORTED_SCHEMES``).
+        group_size: Group size for per-group schemes.
+        filter_fn: Optional ``(module, fqn) -> bool`` passed to ``quantize_()``.
+            When None, all ``nn.Linear`` modules are quantized.
+    """
+    from torchao.quantization import quantize_
+    from torchao.quantization.qat import QATConfig
+    from torchao.quantization.qat.api import QATStep
+
+    from torchtitan.models.common.linear import Linear
+
+    # Snapshot init params before quantize_ replaces Linear subclasses
+    # with FakeQuantizedLinear (which lacks _init_mean / _init_std).
+    init_params_cache: dict[str, tuple[float, float]] = {}
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.Linear) and hasattr(mod, "_init_mean"):
+            init_params_cache[name] = (
+                getattr(mod, "_init_mean", 0.0),
+                getattr(mod, "_init_std", 0.02),
+            )
+
+    base_config = _build_base_config(scheme, group_size)
+
+    kwargs = {}
+    if filter_fn is not None:
+        kwargs["filter_fn"] = filter_fn
+    quantize_(model, QATConfig(base_config, step=QATStep.PREPARE), **kwargs)
+
+    # Restore init params on replaced modules and patch init_weights onto
+    # all new module classes introduced by quantize_() so they satisfy
+    # the Module protocol's init_weights contract.
+    _patched_classes: set[type] = set()
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.Linear) and name in init_params_cache:
+            init_mean, init_std = init_params_cache[name]
+            object.__setattr__(mod, "_init_mean", init_mean)
+            object.__setattr__(mod, "_init_std", init_std)
+
+        cls = type(mod)
+        if cls not in _patched_classes and not hasattr(cls, "init_weights"):
+            if isinstance(mod, nn.Linear):
+                cls.init_weights = Linear.init_weights
+            else:
+                cls.init_weights = lambda self, **kwargs: None
+            _patched_classes.add(cls)
+
+
 class QATConverter(Configurable):
     """Apply quantization-aware training via torchao's QATConfig.
 
@@ -145,40 +210,7 @@ class QATConverter(Configurable):
         )
 
     def convert(self, model: nn.Module) -> None:
-        from torchao.quantization import quantize_
-        from torchao.quantization.qat import QATConfig
-        from torchao.quantization.qat.api import QATStep
-
-        # Snapshot init params before quantize_ replaces Linear subclasses
-        # with FakeQuantizedLinear (which lacks _init_mean / _init_std).
-        init_params_cache: dict[str, tuple[float, float]] = {}
-        for name, mod in model.named_modules():
-            if isinstance(mod, nn.Linear) and hasattr(mod, "_init_mean"):
-                init_params_cache[name] = (
-                    getattr(mod, "_init_mean", 0.0),
-                    getattr(mod, "_init_std", 0.02),
-                )
-
-        base_config = _build_base_config(self.scheme, self.group_size)
-        quantize_(model, QATConfig(base_config, step=QATStep.PREPARE))
-
-        # Restore init params on replaced modules and patch init_weights onto
-        # the FakeQuantizedLinear *class* (not instance) so that LoRA's subclass
-        # can properly override it via MRO. An instance-level bound method would
-        # shadow LoRA's class-level init_weights and break adapter initialization.
-        from torchtitan.models.common.linear import Linear
-
-        _patched_classes: set[type] = set()
-        for name, mod in model.named_modules():
-            if isinstance(mod, nn.Linear) and name in init_params_cache:
-                init_mean, init_std = init_params_cache[name]
-                mod._init_mean = init_mean
-                mod._init_std = init_std
-
-                cls = type(mod)
-                if cls not in _patched_classes and not hasattr(cls, "init_weights"):
-                    cls.init_weights = Linear.init_weights
-                    _patched_classes.add(cls)
+        apply_qat_prepare(model, self.scheme, self.group_size)
 
         # Store QAT config on the model so downstream converters (e.g. LoRA)
         # can apply the same QAT to newly created modules.

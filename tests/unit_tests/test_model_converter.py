@@ -334,5 +334,3 @@ def test_qat_lora_adapter_qat():
     x = torch.randn(4, 64)
     out = model(x)
     assert out.shape == (4, 64)
-
-

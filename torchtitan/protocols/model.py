@@ -32,7 +32,7 @@ class BaseModel(Module):
         """
         failures: list[tuple[str, str]] = []
         for fqn, mod in self.named_modules():
-            if not isinstance(mod, Module):
+            if not isinstance(mod, Module) and not hasattr(mod, "init_weights"):
                 failures.append((fqn, type(mod).__name__))
         if failures:
             details = ", ".join(f"'{fqn}' ({cls})" for fqn, cls in failures)
