@@ -82,7 +82,7 @@ def parallelize_hf_transformers(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
@@ -140,7 +140,7 @@ def parallelize_hf_transformers(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
 ):
     """Apply tensor parallelism."""
@@ -179,8 +179,8 @@ def apply_non_moe_tp(
         else:
             root_plan["output"] = ColwiseParallel(
                 input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
             )
     if root_plan:  # Only call if there's something to parallelize
         parallelize_module(model, tp_mesh, root_plan)
