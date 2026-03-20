@@ -12,8 +12,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -23,15 +23,15 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.unified.actors.utils import (
+from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.unified.models.attention import (
+from torchtitan.experiments.rl.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
-from torchtitan.experiments.rl.unified.types import Episode
+from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -72,9 +72,15 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         batch_invariant_mode: bool,
         hf_assets_path: str = "",
+        transfer_dtype: str = "",
     ):
         self.config = config
         self.model_spec = model_spec
+        # Only cast if transfer dtype differs from training dtype, otherwise
+        # staging buffers would be allocated for a no-op cast.
+        training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
+        requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
+        self._transfer_dtype = requested if requested != training_dtype else None
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -224,30 +230,39 @@ class PolicyTrainer(Actor, Configurable):
         return model
 
     @endpoint
-    async def get_weights(self) -> dict:
-        """Get model weights for generator.
+    async def push_model_state_dict(self) -> None:
+        """Publish model weights for generator consumption via TorchStore.
 
-        Returns:
-            model state dict with plain local tensors (DTensors unwrapped
-            to avoid cross-mesh issues when transferring through Monarch).
+        When ``direct_rdma=True``, weights are transferred directly from
+        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
+        entirely. When ``False``, data goes through StorageVolumes
+        (which may themselves use RDMA as a transport internally).
+
+        Note: we couple ``is_rdma_available()`` with ``direct_rdma`` here,
+        but the two concepts are not identical — StorageVolumes can also
+        use RDMA as their transport layer. ``direct_rdma`` specifically
+        means "skip StorageVolumes and let the destination read directly
+        from the source's GPU memory".
         """
-        titan_state = self.model.state_dict()
+        from monarch.rdma import is_rdma_available
 
-        return {
-            k: v.full_tensor() if isinstance(v, DTensor) else v
-            for k, v in titan_state.items()
-        }
+        await ts.put_state_dict(
+            self.model.state_dict(),
+            "model_state_dict",
+            direct_rdma=is_rdma_available(),
+            transfer_dtype=self._transfer_dtype,
+        )
 
     @endpoint
     async def step(self, episodes: list[Episode]) -> dict:
         """Perform one training step.
 
-        Computes advantages from rewards on the full batch (GRPO normalizes
-        within each prompt group), then shards completions across DP ranks
-        so each rank processes a unique slice of the data.
+        Expects a flat list of Episodes with ``advantage`` already computed
+        by the controller. Shards episodes across DP ranks so each rank
+        processes a unique slice of the data.
 
         Args:
-            episodes: List of Episode data (one per prompt) with rewards filled by Grader
+            episodes: Flat list of Episodes with advantages set.
 
         Returns:
             Training metrics
@@ -256,25 +271,13 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        # Compute GRPO advantages on the full batch (group normalization
-        # requires seeing all completions per prompt).
-        all_token_ids: list[list[int]] = []
-        all_prompt_token_ids: list[list[int]] = []
-        all_token_log_probs: list[list[float]] = []
-        all_advantages: list[torch.Tensor] = []
-        all_rewards: list[float] = []
-        for episode in episodes:
-            rewards = torch.tensor([c.reward for c in episode.completions])
-            advantages = rewards - rewards.mean()
-            all_advantages.append(advantages)
-            all_rewards.extend(c.reward for c in episode.completions)
-            for completion in episode.completions:
-                all_token_ids.append(completion.token_ids)
-                all_prompt_token_ids.append(episode.prompt_token_ids)
-                all_token_log_probs.append(completion.token_log_probs)
+        advantages = torch.tensor([ep.advantage for ep in episodes])
 
-        advantages = torch.cat(all_advantages)
-        all_rewards_tensor = torch.tensor(all_rewards)
+        all_token_ids: list[list[int]] = [ep.token_ids for ep in episodes]
+        all_prompt_token_ids: list[list[int]] = [ep.prompt_token_ids for ep in episodes]
+        all_token_log_probs: list[list[float]] = [ep.token_log_probs for ep in episodes]
+
+        all_rewards_tensor = torch.tensor([ep.reward for ep in episodes])
 
         # Shard flattened completions across DP ranks so each rank processes
         # a unique subset of the data.
@@ -349,7 +352,7 @@ class PolicyTrainer(Actor, Configurable):
             "reward_std": all_rewards_tensor.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": episodes[0].completions[0].text[:80],
+            "sample_completion": episodes[0].text[:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             # Trainer vs generator log prob divergence

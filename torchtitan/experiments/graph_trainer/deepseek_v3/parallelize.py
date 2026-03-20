@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.traceback import annotate_fn
 
@@ -20,8 +19,14 @@ from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import maybe_disable_eager_ac
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_ac_regions,
+    maybe_disable_eager_ac,
+)
 from torchtitan.experiments.graph_trainer.compile import apply_compile
+from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
+    GraphTrainerDeepSeekV3Model,
+)
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -31,7 +36,7 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
-def annotate_deepseekv3() -> None:
+def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
@@ -40,6 +45,9 @@ def annotate_deepseekv3() -> None:
       {"compile_with_inductor": "flex_attention"} so the compiler can apply
       regional inductor pass based on the annotation. Regional inductor is now only
       supported in AOT mode.
+    - AC region annotation: Tags each transformer block's forward with a unique
+      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
+      boundaries for the min-cut partitioner.
 
     """
     from torchtitan.distributed.expert_parallel import ExpertParallel
@@ -58,10 +66,12 @@ def annotate_deepseekv3() -> None:
         {"compile_with_inductor": "flex_attention"}
     )(FlexAttentionWrapper.forward)
 
+    annotate_ac_regions(model)
+
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
-    model: nn.Module,
+    model: GraphTrainerDeepSeekV3Model,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -87,7 +97,7 @@ def parallelize_deepseekv3(
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 
-    annotate_deepseekv3()
+    annotate_deepseekv3(model)
 
     maybe_disable_eager_ac(compile_config, ac_config)
 

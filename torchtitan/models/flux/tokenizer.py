@@ -8,12 +8,80 @@
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 
+from dataclasses import dataclass
+
 import torch
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 
-from .configs import Encoder
+
+class FluxTokenizerContainer(BaseTokenizer):
+    """Container holding both T5 and CLIP tokenizers for Flux.
+
+    This plugs into Trainer.Config.tokenizer so that tokenizers are built
+    by the trainer (via Configurable.Config.build) rather than inside the
+    dataloader.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenizer.Config):
+        t5_tokenizer_path: str = "google/t5-v1_1-small"
+        """HuggingFace model name or local path for the T5 tokenizer."""
+        clip_tokenizer_path: str = "openai/clip-vit-large-patch14"
+        """HuggingFace model name or local path for the CLIP tokenizer."""
+        max_t5_encoding_len: int = 256
+        test_mode: bool = False
+
+    def __init__(self, config: Config, **kwargs):
+        super().__init__()
+        if config.test_mode:
+            tokenizer_class = FluxTestTokenizer
+        else:
+            tokenizer_class = FluxTokenizer
+
+        t5_path = config.t5_tokenizer_path
+        clip_path = config.clip_tokenizer_path
+
+        self.t5_tokenizer: BaseTokenizer = tokenizer_class(
+            t5_path, max_length=config.max_t5_encoding_len
+        )
+        self.clip_tokenizer: BaseTokenizer = tokenizer_class(clip_path, max_length=77)
+
+    # pyrefly: ignore [bad-override]
+    def encode(self, text: str | list[str]) -> dict[str, torch.Tensor]:
+        """Encode text using both T5 and CLIP tokenizers.
+
+        Args:
+            text: A string or list of strings to encode.
+
+        Returns:
+            A dict with keys "clip" and "t5", each mapping to a torch.Tensor.
+        """
+        return {  # pyrefly: ignore [bad-return]
+            "clip": self.clip_tokenizer.encode(text),
+            "t5": self.t5_tokenizer.encode(text),
+        }
+
+    # pyrefly: ignore [bad-override]
+    def decode(self, tokens: dict[str, list[int]]) -> dict[str, str]:
+        """Decode token IDs using both T5 and CLIP tokenizers.
+
+        Args:
+            tokens: A dict with keys "clip" and/or "t5".
+
+        Returns:
+            A dict with keys "clip_text" and/or "t5_text".
+        """
+        results = {}
+        if "t5" in tokens:
+            results["t5_text"] = self.t5_tokenizer.decode(tokens["t5"])
+        if "clip" in tokens:
+            results["clip_text"] = self.clip_tokenizer.decode(tokens["clip"])
+        return results
+
+    def get_vocab_size(self) -> int:
+        return self.t5_tokenizer.get_vocab_size()
 
 
 class FluxTestTokenizer(BaseTokenizer):
@@ -135,39 +203,3 @@ class FluxTokenizer(BaseTokenizer):
         Decode function. This function will not be called.
         """
         return self._tokenizer.decode(t)
-
-
-def build_flux_tokenizer(
-    encoder_config: Encoder,
-    hf_assets_path: str,
-) -> tuple[BaseTokenizer, BaseTokenizer]:
-    """
-    Build the tokenizer for Flux.
-    """
-    # pyrefly: ignore [missing-attribute]
-    t5_tokenizer_path = encoder_config.t5_encoder
-    # pyrefly: ignore [missing-attribute]
-    clip_tokenzier_path = encoder_config.clip_encoder
-    # pyrefly: ignore [missing-attribute]
-    max_t5_encoding_len = encoder_config.max_t5_encoding_len
-
-    # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
-    # pyrefly: ignore [missing-attribute]
-    if encoder_config.test_mode:
-        tokenizer_class = FluxTestTokenizer
-        t5_tokenizer_path = clip_tokenzier_path = hf_assets_path
-    else:
-        tokenizer_class = FluxTokenizer
-
-    # T5 tokenzier will pad the token sequence to max_t5_encoding_len,
-    # and CLIP tokenizer will pad the token sequence to 77 (fixed number).
-    t5_tokenizer = tokenizer_class(
-        t5_tokenizer_path,
-        max_length=max_t5_encoding_len,
-    )
-    clip_tokenizer = tokenizer_class(
-        clip_tokenzier_path,
-        max_length=77,
-    )
-
-    return t5_tokenizer, clip_tokenizer

@@ -16,7 +16,6 @@ import dataclasses
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-import torch.nn as nn
 from torch.distributed._tensor import DTensor, Replicate
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
@@ -25,10 +24,9 @@ from torch.distributed.checkpoint.state_dict import (
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.experiments.rl.unified.models.attention import (
-    replace_with_vllm_attention,
-)
+from torchtitan.experiments.rl.models.attention import replace_with_vllm_attention
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -118,7 +116,7 @@ def create_torchtitan_config_from_vllm_config(
         "positions": 0,
     }
 )
-class TorchTitanVLLMModelWrapper(nn.Module):
+class TorchTitanVLLMModelWrapper(Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
     required interface required by vLLM Engine.
@@ -185,7 +183,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
         # may use up to 2x max_seq_len, so use max_model_len which already
-        # accounts for this).  This avoids data-dependent control flow in
+        # accounts for this). This avoids data-dependent control flow in
         # forward() which is incompatible with torch.compile.
         max_model_len = vllm_config.model_config.max_model_len
         if self.model.freqs_cis.shape[0] < max_model_len:

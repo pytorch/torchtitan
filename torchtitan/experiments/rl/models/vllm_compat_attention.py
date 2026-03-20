@@ -4,16 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# TODO: This file needs to be deleted after switching to PyTorch's Varlen Attention
 
 import math
 from collections.abc import Callable
 
 import torch
 from torch.distributed._tensor import DTensor
+
+from torchtitan.protocols.module import Module
 from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 
-class VLLMCompatibleFlashAttention(torch.nn.Module):
+class VLLMCompatibleFlashAttention(Module):
     """Wrapper around FlashAttention as used by VLLM"""
 
     def __init__(self) -> None:

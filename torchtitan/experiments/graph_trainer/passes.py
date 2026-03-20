@@ -15,6 +15,7 @@ Pass Types:
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
 import operator
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,9 +27,11 @@ from torch._inductor.fx_passes.bucketing import (
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
+from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
@@ -108,21 +111,43 @@ def validate_flex_attn_annotation_pass(
     return gm
 
 
-# Default set of ops whose outputs should be saved (not recomputed) during
-# activation checkpointing. These are compute-intensive or communication ops
-# where recomputation is expensive.
-DEFAULT_SAC_SAVE_OPS = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
-}
+def _get_default_sac_save_ops() -> set:
+    """Build the default set of ops whose outputs should be saved (not recomputed)
+    during activation checkpointing.
+
+    Compute-intensive ops are obtained dynamically from PyTorch's partitioner
+    (``get_default_op_list``) so the list stays in sync with upstream changes.
+    """
+    from torch._functorch.partitioners import get_default_op_list
+
+    # Compute-intensive ops from PyTorch's partitioner
+    compute_intensive_ops = {
+        op.default for op in get_default_op_list().compute_intensive_ops
+    }
+
+    # attention variants
+    scaled_dot_product_attention_ops = {
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+        torch.ops.aten._scaled_dot_product_attention_math.default,
+        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+    }
+
+    higher_order_ops = {
+        torch._higher_order_ops.flex_attention,
+        torch._higher_order_ops.inductor_compiled_code,
+    }
+
+    communication_intensive_ops = {
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        torch.ops._c10d_functional.all_to_all_single.default,
+    }
+
+    return (
+        compute_intensive_ops
+        | scaled_dot_product_attention_ops
+        | higher_order_ops
+        | communication_intensive_ops
+    )
 
 
 def apply_sac_pass(
@@ -151,44 +176,72 @@ def apply_sac_pass(
     Args:
         gm: The joint forward-backward graph module
         op_list_to_save: Set of op targets whose outputs should be saved.
-            Defaults to DEFAULT_SAC_SAVE_OPS if None.
+            Defaults to ``_get_default_sac_save_ops()`` if None.
 
     Returns:
         The annotated graph module
     """
     if op_list_to_save is None:
-        op_list_to_save = DEFAULT_SAC_SAVE_OPS
+        op_list_to_save = _get_default_sac_save_ops()
 
-    nodes = list(gm.graph.nodes)
-    output_node = nodes[-1].all_input_nodes[0]
     mm_count = 0
+    ac_region_stats: dict[int, dict[str, int]] = defaultdict(
+        lambda: {"save": 0, "recompute": 0}
+    )
 
-    for node in nodes:
-        if node.op != "call_function" or node.target is operator.getitem:
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
             continue
 
-        node.meta["ac_graph_id"] = 0
+        if node.target in (
+            operator.getitem,
+            torch.ops._c10d_functional.wait_tensor.default,
+        ):
+            # Propagate recompute tag from the parent node:
+            # - getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa),
+            #   it is followed by getitem nodes that extract individual elements.
+            #   They inherit the parent's recompute tag, otherwise they will be
+            #   exposed as graph outputs and saved for backwards unnecessarily.
+            # - wait_tensor: Semantically tied to its parent async collective
+            #   (e.g., reduce_scatter_tensor, all_gather_into_tensor) and must
+            #   share the same save/recompute decision.
+            parent = node.args[0]
+            if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
+                node.meta["recompute"] = parent.meta["recompute"]
+                node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
+            continue
+
+        custom_meta = node.meta.get("custom", {})
+        ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
+        node.meta["ac_graph_id"] = ac_region_id
 
         if node.target is torch.ops.aten.mm.default:
             mm_count += 1
             # Save every odd mm, recompute every even mm
             if mm_count % 2 == 0:
-                node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+                policy = CheckpointPolicy.PREFER_RECOMPUTE
             else:
-                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                policy = CheckpointPolicy.MUST_SAVE
         elif node.target in op_list_to_save:
-            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            policy = CheckpointPolicy.MUST_SAVE
         else:
-            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            policy = CheckpointPolicy.PREFER_RECOMPUTE
 
-        if node is output_node:
-            break
+        node.meta["recompute"] = policy
+        if policy == CheckpointPolicy.MUST_SAVE:
+            ac_region_stats[ac_region_id]["save"] += 1
+        else:
+            ac_region_stats[ac_region_id]["recompute"] += 1
 
     gm.recompile()
-    logger.info(
-        "Applied selective activation checkpointing (SAC) graph pass "
-        f"({mm_count} mm ops found, {mm_count - mm_count // 2} saved)"
-    )
+    logger.info("Applied selective activation checkpointing (SAC) graph pass.")
+    for ac_region_id in sorted(ac_region_stats):
+        stats = ac_region_stats[ac_region_id]
+        logger.info(
+            f"  AC region {ac_region_id}: "
+            f"{stats['save']} nodes annotated with MUST_SAVE, "
+            f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
+        )
     return gm
 
 
@@ -208,28 +261,22 @@ def fsdp_reshard_after_fwd_pass(
 
 def inductor_decomposition_pass(
     gm: torch.fx.GraphModule,
-    model: torch.nn.Module,
     joint_with_descriptors: JointWithDescriptors,
-    forward_inputs: tuple,
 ) -> torch.fx.GraphModule:
     """
     Apply Inductor decompositions to the joint graph.
 
     This pass applies decompositions to the joint forward-backward graph using make_fx.
-    It unwraps tensor subclasses (like DTensor) and retraces the graph with decompositions
-    applied, while preserving metadata required by the partitioner.
+    It reads fake tensor inputs from placeholder metadata and retraces the graph with
+    decompositions applied, while preserving metadata required by the partitioner.
 
     Args:
         gm: The joint graph module
-        model: The parallelized model
         joint_with_descriptors: The joint graph with descriptors
-        forward_inputs: Forward input arguments (may be DTensors)
 
     Returns:
         The joint graph with decompositions applied
     """
-    from torch._functorch._aot_autograd.descriptors import DummyAOTInput
-    from torch._functorch._aot_autograd.subclass_utils import unwrap_tensor_subclasses
     from torch._inductor.decomposition import select_decomp_table
     from torch.fx.experimental.proxy_tensor import make_fx
 
@@ -237,53 +284,23 @@ def inductor_decomposition_pass(
 
     decomp_table = select_decomp_table()
 
-    # Get traced tangents metadata
-    traced_tangents = joint_with_descriptors._aot_state.fw_metadata.traced_tangents
-
-    # Collect all inputs: params, buffers, forward inputs, tangents
-    param_inputs = list(model.parameters())
-    buffer_inputs = list(model.buffers())
-    primals = param_inputs + buffer_inputs + list(forward_inputs)
-    tangents = list(traced_tangents)
-
-    # Create dummy descriptors for unwrapping
-    primals_descs = [DummyAOTInput(i) for i in range(len(primals))]
-    tangents_descs = [DummyAOTInput(i + len(primals)) for i in range(len(tangents))]
-
-    # Unwrap tensor subclasses (DTensor -> _local_tensor)
-    primals_unwrapped, _ = unwrap_tensor_subclasses(
-        primals, primals_descs, append_symints=False
-    )
-    tangents_unwrapped, _ = unwrap_tensor_subclasses(
-        tangents, tangents_descs, append_symints=False
-    )
-
-    # Verify unwrapped tensor shapes match joint graph placeholders
-    all_inputs = primals_unwrapped + tangents_unwrapped
+    # Build fake inputs directly from the joint graph placeholders' metadata.
+    # This handles all inputs including effect tokens (e.g. from MoE load
+    # balancing copy_ mutations) that AOT Autograd prepends as placeholders.
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    all_inputs = []
+    for ph in placeholders:
+        val = ph.meta.get("val")
+        if val is None:
+            raise RuntimeError(f"Placeholder {ph.target} has no 'val' metadata")
+        all_inputs.append(val)
 
-    if len(all_inputs) != len(placeholders):
-        raise RuntimeError(
-            f"Input count mismatch: {len(all_inputs)} inputs vs {len(placeholders)} placeholders"
-        )
-
-    shape_mismatches = []
-    for i, (inp, ph) in enumerate(zip(all_inputs, placeholders)):
-        if hasattr(inp, "shape") and "val" in ph.meta:
-            expected_shape = ph.meta["val"].shape
-            actual_shape = inp.shape
-            if expected_shape != actual_shape:
-                shape_mismatches.append(
-                    f"  {ph.target}: expected {expected_shape}, got {actual_shape}"
-                )
-
-    if shape_mismatches:
-        logger.error(f"Shape mismatches found ({len(shape_mismatches)}):")
-        for msg in shape_mismatches:
-            logger.error(msg)
-        raise RuntimeError(
-            "Unwrapped tensor shapes don't match joint graph placeholders."
-        )
+    # The joint graph forward() takes (primals, tangents) as two list args.
+    # Split based on traced_tangents count from fw_metadata.
+    fw_metadata = joint_with_descriptors._aot_state.fw_metadata
+    num_tangents = len(fw_metadata.traced_tangents)
+    primals_fake = all_inputs[: len(all_inputs) - num_tangents]
+    tangents_fake = all_inputs[len(all_inputs) - num_tangents :]
 
     # Get the FakeTensorMode from the original joint graph
     fake_mode = None
@@ -297,7 +314,7 @@ def inductor_decomposition_pass(
     if fake_mode is None:
         from torch._guards import detect_fake_mode
 
-        fake_mode = detect_fake_mode(primals_unwrapped)
+        fake_mode = detect_fake_mode(all_inputs)
 
     # Use make_fx with the original fake mode to retrace with decompositions
     with fake_mode:
@@ -305,7 +322,7 @@ def inductor_decomposition_pass(
             gm,
             decomposition_table=decomp_table,
             _allow_non_fake_inputs=False,
-        )(primals_unwrapped, tangents_unwrapped)
+        )(primals_fake, tangents_fake)
 
     # Copy metadata from original placeholders to decomposed placeholders
     orig_placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
@@ -388,6 +405,44 @@ def reassign_to_pg_pass(
             f"to PG {target_pg_name}"
         )
     gm.recompile()
+    return gm
+
+
+def tlparse_log_graph_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: Sequence[Any],
+    *,
+    graph_name: str,
+) -> torch.fx.GraphModule:
+    """Log the transformed graph to tlparse via trace_structured.
+
+    This pass should be added as the last transform in fwd/bwd_transforms
+    so that the logged graph reflects all prior transformations.
+
+    Args:
+        gm: The graph module to log.
+        example_inputs: The example inputs (unused, required by protocol).
+        graph_name: The name for this graph artifact
+            (e.g. "aot_forward_graph_transformed").
+
+    Returns:
+        The graph module unchanged.
+    """
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": graph_name,
+            "encoding": "string",
+        },
+        payload_fn=lambda: gm.print_readable(
+            print_output=False,
+            include_stride=True,
+            include_device=True,
+            expanded_def=True,
+        ),
+        expect_trace_id=False,
+    )
+
     return gm
 
 
