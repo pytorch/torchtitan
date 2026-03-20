@@ -5,9 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Annotated, Protocol
 
 import torch.nn as nn
+import tyro
 
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
@@ -23,6 +24,7 @@ class ConverterCheckpointHooks:
     save_last_fn: Callable | None = None
     load_additional_fn: Callable | None = None
     finalize_fn: Callable | None = None
+    from_hf_map: dict[str, str | None] | None = None
 
 
 class ModelConverter(Protocol):
@@ -66,7 +68,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         (e.g. Float8LinearConverter.Config) whose build() constructs the converter.
         """
 
-        converters: list = field(default_factory=list)
+        converters: Annotated[list, tyro.conf.Suppress] = field(default_factory=list)
         """List of converter Config objects to apply to the model."""
 
         print_after_conversion: bool = False
@@ -182,11 +184,7 @@ def _validate_qat_lora_finalize(converters: list[Configurable.Config]):
         if isinstance(config, LoRAConverter.Config):
             lora_merge_adapter = config.merge_adapter
 
-    if (
-        qat_convert_at_end
-        and lora_merge_adapter is not None
-        and not lora_merge_adapter
-    ):
+    if qat_convert_at_end and lora_merge_adapter is not None and not lora_merge_adapter:
         logger.warning(
             "QAT convert_at_end=True requires LoRA merge_adapter=True to apply "
             "real quantization. With merge_adapter=False, QAT CONVERT will be "

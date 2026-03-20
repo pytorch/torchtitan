@@ -83,9 +83,7 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 # so values are representable in float8; the initial LoRA
                 # contribution is still negligible.
                 try:
-                    from torchao.quantization.qat.linear import (
-                        FakeQuantizedLinear,
-                    )
+                    from torchao.quantization.qat.linear import FakeQuantizedLinear
 
                     is_fake_quantized = isinstance(self.lora_b, FakeQuantizedLinear)
                 except ImportError:
@@ -297,7 +295,7 @@ class LoRAConverter(Configurable):
         self,
         state_dict: dict[str, Any],
         checkpoint_dir: str,
-        from_hf_map: dict[str, str | None] | None,
+        hooks: "ConverterCheckpointHooks",
     ) -> None:
         """Save adapter weights in PEFT format.
 
@@ -316,8 +314,8 @@ class LoRAConverter(Configurable):
                 cpu_states[k] = v.cpu() if isinstance(v, torch.Tensor) else v
 
         # Remap keys to HF PEFT naming
-        if from_hf_map is not None:
-            hf_states = remap_lora_keys_to_hf(cpu_states, from_hf_map)
+        if hooks.from_hf_map is not None:
+            hf_states = remap_lora_keys_to_hf(cpu_states, hooks.from_hf_map)
         else:
             logger.warning(
                 "No from_hf_map available; saving PEFT with torchtitan keys."
@@ -359,7 +357,7 @@ class LoRAConverter(Configurable):
         self,
         path: str,
         model_parts: list[nn.Module],
-        from_hf_map: dict[str, str | None] | None,
+        hooks: "ConverterCheckpointHooks",
     ) -> None:
         """Load adapter weights from a PEFT directory.
 
@@ -372,8 +370,8 @@ class LoRAConverter(Configurable):
 
         safetensors_path = os.path.join(path, "adapter_model.safetensors")
         adapter_sd = load_file(safetensors_path)
-        if from_hf_map is not None:
-            adapter_sd = remap_lora_keys_from_hf(adapter_sd, from_hf_map)
+        if hooks.from_hf_map is not None:
+            adapter_sd = remap_lora_keys_from_hf(adapter_sd, hooks.from_hf_map)
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=adapter_sd,
@@ -415,27 +413,14 @@ class LoRAConverter(Configurable):
         For schemes with per-group quantization, the group_size is clamped to
         the LoRA rank so that lora_b (weight shape: out_features x rank) is
         compatible.
-
-        Also patches init_weights onto the replaced adapter classes so that
-        LoRALinear.init_weights() -> super chain works after adapters become
-        FakeQuantizedLinear.
         """
-        import dataclasses
-
-        from torchao.quantization import quantize_
-        from torchao.quantization.qat import QATConfig
-        from torchao.quantization.qat.api import QATStep
-        from torchao.quantization.qat.fake_quantize_config import (
-            _infer_fake_quantize_configs,
-        )
-
         from torchtitan.components.quantization.qat import (
-            _build_base_config,
             _SCHEMES_WITH_GROUP_SIZE,
+            apply_qat_prepare,
         )
 
-        # For schemes with per-group quantization, clamp group_size to rank
-        # so lora_b's in_features (= rank) dimension is divisible.
+        # Clamp group_size to rank for per-group schemes so lora_b's
+        # in_features (= rank) dimension is divisible.
         adapter_group_size = group_size
         if scheme in _SCHEMES_WITH_GROUP_SIZE:
             adapter_group_size = min(group_size, self.rank)
@@ -445,48 +430,12 @@ class LoRAConverter(Configurable):
                     f"{adapter_group_size} to fit LoRA rank={self.rank}"
                 )
 
-        # Build the fake quantize configs directly rather than relying on
-        # QATConfig(base_config=...) inference, which hardcodes group_size
-        # for some schemes.
-        base_config = _build_base_config(scheme, adapter_group_size)
-        act_config, weight_config = _infer_fake_quantize_configs(base_config)
-        if (
-            weight_config is not None
-            and hasattr(weight_config, "group_size")
-            and weight_config.group_size != adapter_group_size
-        ):
-            weight_config = dataclasses.replace(
-                weight_config, group_size=adapter_group_size
-            )
-
         def _is_lora_linear(mod: nn.Module, fqn: str) -> bool:
             return isinstance(mod, nn.Linear) and (
                 fqn.endswith(".lora_a") or fqn.endswith(".lora_b")
             )
 
-        quantize_(
-            model,
-            QATConfig(
-                activation_config=act_config,
-                weight_config=weight_config,
-                step=QATStep.PREPARE,
-            ),
-            filter_fn=_is_lora_linear,
-        )
-
-        # Patch init_weights onto adapter FakeQuantizedLinear classes (same
-        # pattern as QATConverter.convert) so the LoRA init_weights chain works.
-        _patched_classes: set[type] = set()
-        for name, mod in model.named_modules():
-            if isinstance(mod, nn.Linear) and (
-                name.endswith(".lora_a") or name.endswith(".lora_b")
-            ):
-                mod._init_mean = 0.0
-                mod._init_std = 0.02
-                cls = type(mod)
-                if cls not in _patched_classes and not hasattr(cls, "init_weights"):
-                    cls.init_weights = Linear.init_weights
-                    _patched_classes.add(cls)
+        apply_qat_prepare(model, scheme, adapter_group_size, filter_fn=_is_lora_linear)
 
         logger.info(
             f"Applied adapter QAT fake quantization "
@@ -524,8 +473,13 @@ class LoRAConverter(Configurable):
         for name, mod in list(model.named_modules()):
             if not (hasattr(mod, "lora_a") and hasattr(mod, "lora_b")):
                 continue
+            assert isinstance(mod, nn.Linear)
+            lora_a = mod.lora_a
+            lora_b = mod.lora_b
+            assert isinstance(lora_a, nn.Linear)
+            assert isinstance(lora_b, nn.Linear)
             with torch.no_grad():
-                mod.weight.add_(scaling * (mod.lora_b.weight @ mod.lora_a.weight))
+                mod.weight.add_(scaling * (lora_b.weight @ lora_a.weight))
             del mod.lora_a, mod.lora_b
             if hasattr(mod, "_lora_scaling"):
                 del mod._lora_scaling
