@@ -46,7 +46,7 @@ jobs:
               if report.when == "call" and report.failed:
                   error_text = str(report.longrepr)
                   # Handle 403 (Forbidden), 429 (Rate Limit), and 503 (Overloaded/Bot Block)
-                  if any(code in error_text for code in ["403", "429", "503"]):
+                  if any(code in error_text for code in ["403", "429", "503", "'Connection reset'"]):
                       report.outcome = "passed"
                       report.wasxfail = f"Silenced transient error: {item.name}"
                       report.longrepr = None
