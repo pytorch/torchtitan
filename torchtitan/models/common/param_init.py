@@ -6,175 +6,118 @@
 
 """Parameter initialization utilities and factories for torchtitan models.
 
-Provides ``NamedInitializer`` primitives (``init_by_regex``, ``init_zeros``,
-etc.) and higher-level factories like ``make_decoder_param_init``.
+Provides ``RegexInitializer`` for regex-based FQN dispatch,
+``DepthScaledTruncNormal`` for depth-scaled init, and
+``make_decoder_param_init`` for common decoder patterns.
 
 Example usage in a model's ``__init__.py``::
 
     from torchtitan.models.common.param_init import (
-        init_by_regex,
+        RegexInitializer,
         make_decoder_param_init,
     )
 
     cfg = Llama3Model.Config(
         ...,
-        param_init=init_by_regex(
+        param_init=RegexInitializer(
             make_decoder_param_init(dim=256, n_layers=6)
         ),
     )
 """
 
 import re
+from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.protocols.module import NamedInitializer
+from torchtitan.protocols.module import NamedParamInitializer, ParamInitializer
+
+# No-op initializer: explicitly skip initialization for a parameter.
+# Useful when a parameter is tied to another (e.g., weight tying).
+SKIP_PARAM_INIT: ParamInitializer = lambda param: None
 
 
-def init_by_regex(
-    regex_to_init: dict[str, NamedInitializer],
-) -> NamedInitializer:
+class RegexInitializer(NamedParamInitializer):
     """Regex-match parameter FQNs to initializers.
 
     First matching pattern wins. Raises ``ValueError`` if no pattern matches.
     Note that Python dictionary is ordered.
+
+    Dict values can be either:
+    - ``ParamInitializer`` (``Callable[[nn.Parameter], None]``):
+      e.g. ``nn.init.zeros_``, ``partial(nn.init.normal_, std=0.02)``
+    - ``NamedParamInitializer``: for init functions that need the FQN
+      (e.g. ``DepthScaledTruncNormal``)
     """
-    compiled = [
-        (re.compile(pattern), init_fn) for pattern, init_fn in regex_to_init.items()
-    ]
 
-    def init(name: str, param: nn.Parameter) -> None:
-        for pattern, init_fn in compiled:
+    def __init__(
+        self,
+        rules: dict[str, ParamInitializer | NamedParamInitializer],
+    ) -> None:
+        self._compiled = [
+            (re.compile(pattern), init_fn) for pattern, init_fn in rules.items()
+        ]
+
+    def __call__(self, name: str, param: nn.Parameter) -> None:
+        for pattern, init_fn in self._compiled:
             if pattern.fullmatch(name):
-                init_fn(name, param)
+                if isinstance(init_fn, NamedParamInitializer):
+                    init_fn(name, param)
+                else:
+                    init_fn(param)
                 return
-        raise ValueError(f"No initializers matched '{name}'.")
-
-    return init
+        raise ValueError(f"No initializer matched '{name}'.")
 
 
-def init_normal(*, std: float = 0.02, mean: float = 0.0) -> NamedInitializer:
-    """Normal init."""
-
-    def init(name: str, param: nn.Parameter) -> None:
-        nn.init.normal_(param, mean=mean, std=std)
-
-    return init
-
-
-def init_trunc_normal(
-    *, std: float = 0.02, mean: float = 0.0, a: float = -2.0, b: float = 2.0
-) -> NamedInitializer:
-    """Truncated normal init."""
-
-    def init(name: str, param: nn.Parameter) -> None:
-        nn.init.trunc_normal_(param, mean=mean, std=std, a=a, b=b)
-
-    return init
-
-
-def init_depth_scaled_trunc_normal(
-    *,
-    base_std: float = 0.02,
-    n_layers: int,
-    depth_init: bool = True,
-    a: float = -2.0,
-    b: float = 2.0,
-) -> NamedInitializer:
+class DepthScaledTruncNormal(NamedParamInitializer):
     """Truncated normal with depth-dependent std.
 
     Parses ``layer_id`` from the FQN (e.g., ``layers.5.attention.wo.weight``)
     and scales std by ``1 / sqrt(2 * (layer_id + 1))``.
     """
 
-    _layer_re = re.compile(r"layers\.(\d+)\.")
+    def __init__(
+        self,
+        *,
+        base_std: float = 0.02,
+        n_layers: int,
+        a: float = -2.0,
+        b: float = 2.0,
+    ) -> None:
+        self._base_std = base_std
+        self._n_layers = n_layers
+        self._a = a
+        self._b = b
+        self._layer_re = re.compile(r"layers\.(\d+)\.")
 
-    def init(name: str, param: nn.Parameter) -> None:
-        layer_id = None
-        m = _layer_re.match(name)
-        if m is not None:
-            layer_id = int(m.group(1))
-        assert layer_id is not None, (
+    def __call__(self, name: str, param: nn.Parameter) -> None:
+        m = self._layer_re.match(name)
+        assert m is not None, (
             f"Could not parse layer_id from FQN '{name}'. "
             f"Expected FQN to contain 'layers.<digit>.'."
         )
-        if depth_init:
-            std = base_std / (2 * (layer_id + 1)) ** 0.5
-        else:
-            std = base_std / (2 * n_layers) ** 0.5
-        nn.init.trunc_normal_(param, mean=0.0, std=std, a=a, b=b)
-
-    return init
-
-
-def init_zeros() -> NamedInitializer:
-    """Fill with zeros."""
-
-    def init(name: str, param: nn.Parameter) -> None:
-        nn.init.zeros_(param)
-
-    return init
-
-
-def init_ones() -> NamedInitializer:
-    """Fill with ones."""
-
-    def init(name: str, param: nn.Parameter) -> None:
-        nn.init.ones_(param)
-
-    return init
-
-
-def init_constant(*, val: float) -> NamedInitializer:
-    """Fill with a constant value."""
-
-    def init(name: str, param: nn.Parameter) -> None:
-        nn.init.constant_(param, val)
-
-    return init
-
-
-def init_skip() -> NamedInitializer:
-    """No-op: explicitly skip initialization for this parameter.
-
-    Useful when a parameter is tied to another (e.g., weight tying)
-    and should only be initialized via the other parameter's pattern.
-    """
-
-    def init(name: str, param: nn.Parameter) -> None:
-        pass
-
-    return init
-
-
-def init_xavier_uniform() -> NamedInitializer:
-    """Xavier uniform init."""
-
-    def init(name: str, param: nn.Parameter) -> None:
-        nn.init.xavier_uniform_(param)
-
-    return init
+        layer_id = int(m.group(1))
+        std = self._base_std / (2 * (layer_id + 1)) ** 0.5
+        nn.init.trunc_normal_(param, mean=0.0, std=std, a=self._a, b=self._b)
 
 
 def make_decoder_param_init(
     *,
     dim: int,
     n_layers: int,
-    depth_init: bool = True,
     base_std: float = 0.02,
     tok_emb_std: float = 1.0,
-) -> dict[str, NamedInitializer]:
+) -> dict[str, ParamInitializer | NamedParamInitializer]:
     """Common param_init patterns for Decoder-based models.
 
     Covers Llama3, Llama4, Qwen3, and DeepSeek V3 (with model-specific
     extensions merged via dict update). See inline comments for pattern details.
     """
-    depth_std = init_depth_scaled_trunc_normal(
-        base_std=base_std, n_layers=n_layers, depth_init=depth_init
-    )
+    depth_std = DepthScaledTruncNormal(base_std=base_std, n_layers=n_layers)
+    final_out_std = dim**-0.5
     return {
         # Token embeddings
-        r"tok_embeddings\.weight": init_normal(std=tok_emb_std),
+        r"tok_embeddings\.weight": partial(nn.init.normal_, std=tok_emb_std),
         # Depth-scaled output projections in attention and FFN
         r"layers\..+\.attention\.wo\.weight": depth_std,
         r"layers\..+\.feed_forward\.w[23]\.weight": depth_std,
@@ -185,15 +128,18 @@ def make_decoder_param_init(
         # MoE shared experts
         r"layers\..+\.moe\.shared_experts\.w[23]\.weight": depth_std,
         # Norm weights (RMSNorm, LayerNorm)
-        r".*norm.*\.weight": init_ones(),
+        r".*norm.*\.weight": nn.init.ones_,
         # Output projection
-        r"output\.weight": init_trunc_normal(
-            std=dim**-0.5, a=-3 * dim**-0.5, b=3 * dim**-0.5
+        r"output\.weight": partial(
+            nn.init.trunc_normal_,
+            std=final_out_std,
+            a=-3 * final_out_std,
+            b=3 * final_out_std,
         ),
         # Default for remaining weights (wq, wk, wv, w1, etc.)
-        r".*\.weight": init_trunc_normal(std=base_std),
+        r".*\.weight": partial(nn.init.trunc_normal_, std=base_std),
         # Biases
-        r".*\.bias": init_zeros(),
+        r".*\.bias": nn.init.zeros_,
         # Catch-all for bare nn.Parameters (e.g., sinks)
-        r".*": init_trunc_normal(std=base_std),
+        r".*": partial(nn.init.trunc_normal_, std=base_std),
     }

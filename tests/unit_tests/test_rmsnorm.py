@@ -8,7 +8,8 @@ import unittest
 
 import torch
 import torch.nn as nn
-from torchtitan.models.common.param_init import init_by_regex, init_ones
+
+from torchtitan.models.common.param_init import RegexInitializer
 
 from torchtitan.models.common.rmsnorm import RMSNorm
 
@@ -32,7 +33,7 @@ class TestRMSNorm(unittest.TestCase):
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = RMSNorm.Config(param_init=init_by_regex({r"weight": init_ones()}))
+        config = RMSNorm.Config(param_init=RegexInitializer({r"weight": nn.init.ones_}))
         norm = config.build(normalized_shape=16)
 
         nn.init.zeros_(norm.weight)

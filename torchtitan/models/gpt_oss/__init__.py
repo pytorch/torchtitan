@@ -4,18 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_depth_scaled_trunc_normal,
-    init_normal,
-    init_ones,
-    init_trunc_normal,
-    init_zeros,
-)
+
+from torchtitan.models.common.param_init import DepthScaledTruncNormal, RegexInitializer
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, GptOssModel, GptOssTransformerBlock
@@ -32,11 +30,12 @@ __all__ = [
 
 
 def _gptoss_param_init(dim, n_layers):
-    depth_std = init_depth_scaled_trunc_normal(n_layers=n_layers, depth_init=True)
-    return init_by_regex(
+    depth_std = DepthScaledTruncNormal(n_layers=n_layers)
+    final_out_std = dim**-0.5
+    return RegexInitializer(
         {
             # Token embeddings
-            r"tok_embeddings\.weight": init_normal(std=0.02),
+            r"tok_embeddings\.weight": partial(nn.init.normal_, std=0.02),
             # All attention linears get depth-scaled (GPT-OSS-specific)
             r"layers\..+\.attention\.w[qkvo]\.weight": depth_std,
             # Attention sinks parameter
@@ -47,17 +46,20 @@ def _gptoss_param_init(dim, n_layers):
             # MoE router gate
             r"layers\..+\.moe\.router\.gate\.weight": depth_std,
             # Norm weights
-            r".*norm.*\.weight": init_ones(),
+            r".*norm.*\.weight": nn.init.ones_,
             # Output projection
-            r"output\.weight": init_trunc_normal(
-                std=dim**-0.5, a=-3 * dim**-0.5, b=3 * dim**-0.5
+            r"output\.weight": partial(
+                nn.init.trunc_normal_,
+                std=final_out_std,
+                a=-3 * final_out_std,
+                b=3 * final_out_std,
             ),
             # Default weights
-            r".*\.weight": init_trunc_normal(std=0.02),
+            r".*\.weight": partial(nn.init.trunc_normal_, std=0.02),
             # Biases
-            r".*\.bias": init_zeros(),
+            r".*\.bias": nn.init.zeros_,
             # Catch-all
-            r".*": init_trunc_normal(std=0.02),
+            r".*": partial(nn.init.trunc_normal_, std=0.02),
         }
     )
 

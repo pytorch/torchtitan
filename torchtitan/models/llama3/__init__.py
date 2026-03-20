@@ -15,7 +15,10 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
-from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
+from torchtitan.models.common.param_init import (
+    make_decoder_param_init,
+    RegexInitializer,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
@@ -30,7 +33,7 @@ __all__ = [
 
 
 def _llama3_param_init(dim, n_layers):
-    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
+    return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
 
 
 llama3_configs = {

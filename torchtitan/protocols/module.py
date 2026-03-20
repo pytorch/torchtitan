@@ -12,8 +12,28 @@ import torch.nn as nn
 
 from torchtitan.config import Configurable
 
-# Type alias for named initializer functions: (fqn, param) -> None
-NamedInitializer = Callable[[str, nn.Parameter], None]
+# Type alias for simple parameter initializers: (param) -> Any
+# Uses Any return type because nn.init.* functions return Tensor,
+# but the return value is always ignored by the dispatch layer.
+ParamInitializer = Callable[[nn.Parameter], Any]
+
+
+class NamedParamInitializer:
+    """Base class for parameter initializers that receive the FQN.
+
+    Most initializers are simple ``ParamInitializer`` callables that only
+    need the parameter tensor.  Subclass ``NamedParamInitializer`` when
+    the initialization logic depends on the parameter's fully-qualified
+    name (e.g., depth-scaled init that parses the layer id from the FQN,
+    or regex-based dispatch).
+
+    Instances are set on ``Module.param_init`` or ``Module.Config.param_init``
+    and called by ``_init_self_parameters`` with ``(fqn, param)``.
+    """
+
+    def __call__(self, name: str, param: nn.Parameter) -> None:
+        raise NotImplementedError
+
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
 # Module classes are typically created at import time and live for
@@ -40,11 +60,11 @@ class Module(nn.Module, Configurable):
     for buffer initialization.
     """
 
-    param_init: NamedInitializer | None = None
+    param_init: NamedParamInitializer | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        param_init: NamedInitializer | None = None
+        param_init: NamedParamInitializer | None = None
 
         def build(self, **kwargs):
             instance = Configurable.Config.build(self, **kwargs)
@@ -55,7 +75,7 @@ class Module(nn.Module, Configurable):
     def init_states(
         self,
         *,
-        param_init: NamedInitializer | None = None,
+        param_init: NamedParamInitializer | None = None,
         param_prefix: str = "",
         **kwargs,
     ) -> None:
@@ -66,7 +86,7 @@ class Module(nn.Module, Configurable):
         3. Calls ``self._init_self_buffers(...)``.
 
         Args:
-            param_init: The active ``NamedInitializer`` passed down from an
+            param_init: The active ``NamedParamInitializer`` passed down from an
                 ancestor. If this module has its own ``self.param_init``, it
                 takes precedence and ``param_prefix`` resets to ``""``.
             param_prefix: FQN prefix accumulated during recursion, so that
@@ -103,7 +123,7 @@ class Module(nn.Module, Configurable):
     def _init_self_parameters(
         self,
         *,
-        param_init: NamedInitializer | None = None,
+        param_init: NamedParamInitializer | None = None,
         param_prefix: str = "",
         **kwargs,
     ) -> None:

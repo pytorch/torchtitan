@@ -14,7 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.module import NamedInitializer
+from torchtitan.protocols.module import NamedParamInitializer
 from torchtitan.tools.logging import logger
 
 
@@ -160,7 +160,7 @@ class Qwen3Model(Decoder):
     def init_states(
         self,
         *,
-        param_init: NamedInitializer | None = None,
+        param_init: NamedParamInitializer | None = None,
         param_prefix: str = "",
         **kwargs,
     ) -> None:

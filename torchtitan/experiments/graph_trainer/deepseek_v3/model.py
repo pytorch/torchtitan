@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
-from torchtitan.protocols.module import NamedInitializer
+from torchtitan.protocols.module import NamedParamInitializer
 
 from ..simple_fsdp import disable_active_parametrization
 
@@ -23,7 +23,7 @@ class GraphTrainerDeepSeekV3Model(DeepSeekV3Model):
     def init_states(
         self,
         *,
-        param_init: NamedInitializer | None = None,
+        param_init: NamedParamInitializer | None = None,
         param_prefix: str = "",
         **kwargs,
     ) -> None:

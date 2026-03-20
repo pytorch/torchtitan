@@ -19,7 +19,7 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict, NamedInitializer
+from torchtitan.protocols.module import ModuleDict, NamedParamInitializer
 from torchtitan.tools.logging import logger
 
 
@@ -650,7 +650,7 @@ class HFTransformerModel(BaseModel):
     def init_states(
         self,
         *,
-        param_init: NamedInitializer | None = None,
+        param_init: NamedParamInitializer | None = None,
         param_prefix: str = "",
         **kwargs,
     ) -> None:

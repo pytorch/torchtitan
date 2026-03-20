@@ -17,7 +17,10 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
+from torchtitan.models.common.param_init import (
+    make_decoder_param_init,
+    RegexInitializer,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
@@ -32,7 +35,7 @@ __all__ = [
 
 
 def _llama4_param_init(dim, n_layers):
-    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
+    return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
 
 
 llama4_configs = {

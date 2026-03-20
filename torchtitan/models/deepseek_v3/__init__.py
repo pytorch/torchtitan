@@ -9,7 +9,10 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import init_by_regex, make_decoder_param_init
+from torchtitan.models.common.param_init import (
+    make_decoder_param_init,
+    RegexInitializer,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
@@ -25,7 +28,7 @@ __all__ = [
 
 
 def _deepseekv3_param_init(dim, n_layers):
-    return init_by_regex(make_decoder_param_init(dim=dim, n_layers=n_layers))
+    return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
 
 
 deepseekv3_configs = {

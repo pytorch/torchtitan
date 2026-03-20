@@ -26,7 +26,7 @@ class RMSNorm(nn.RMSNorm, Module):
     the design pattern.
 
     Parameter initialization is handled by the ancestor's ``param_init``
-    callable (e.g., ``.*norm.*weight`` → ``init_ones()``).
+    callable (e.g., ``.*norm.*weight`` → ``nn.init.ones_``).
     """
 
     @dataclass(kw_only=True, slots=True)

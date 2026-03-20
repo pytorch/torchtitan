@@ -4,15 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+import torch.nn as nn
+
 from torchtitan.components.loss import build_mse_loss
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_normal,
-    init_ones,
-    init_xavier_uniform,
-    init_zeros,
-)
+
+from torchtitan.models.common.param_init import RegexInitializer
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
@@ -44,21 +43,23 @@ def _flux_param_init():
     - MLPEmbedder weights (time_in, vector_in): normal(std=0.02)
     - RMSNorm weights (QKNorm children): ones
     """
-    return init_by_regex(
+    return RegexInitializer(
         {
             # Modulation layers: zero-init weights for stable training start
-            r".*mod(?:ulation)?\.lin\.weight": init_zeros(),
+            r".*mod(?:ulation)?\.lin\.weight": nn.init.zeros_,
             # LastLayer: zero-init weights for output stability
-            r"final_layer\.linear\.weight": init_zeros(),
-            r"final_layer\.adaLN_modulation\.1\.weight": init_zeros(),
+            r"final_layer\.linear\.weight": nn.init.zeros_,
+            r"final_layer\.adaLN_modulation\.1\.weight": nn.init.zeros_,
             # MLPEmbedder (time_in, vector_in): normal init for weights
-            r"(?:time_in|vector_in)\.(?:in|out)_layer\.weight": init_normal(std=0.02),
+            r"(?:time_in|vector_in)\.(?:in|out)_layer\.weight": partial(
+                nn.init.normal_, std=0.02
+            ),
             # RMSNorm weights (QKNorm children)
-            r".*norm.*\.weight": init_ones(),
+            r".*norm.*\.weight": nn.init.ones_,
             # Default: xavier_uniform for remaining weights (DiT-style)
-            r".*\.weight": init_xavier_uniform(),
+            r".*\.weight": nn.init.xavier_uniform_,
             # Default: zeros for all biases
-            r".*\.bias": init_zeros(),
+            r".*\.bias": nn.init.zeros_,
         }
     )
 

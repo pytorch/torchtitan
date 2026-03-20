@@ -25,9 +25,6 @@ class Embedding(nn.Embedding, Module):
     ``num_embeddings`` and ``embedding_dim`` use ``field(init=False)`` so
     they are excluded from ``Config.__init__()``.  They are typically supplied
     via ``build()`` kwargs from the parent model.
-
-    Parameter initialization is handled by the ancestor's ``param_init``
-    callable (set via ``init_by_regex`` on the model Config).
     """
 
     @dataclass(kw_only=True, slots=True)

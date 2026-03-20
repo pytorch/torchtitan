@@ -7,12 +7,13 @@
 from dataclasses import fields
 from typing import Any
 
+import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
+
 from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_xavier_uniform,
-    init_zeros,
     make_decoder_param_init,
+    RegexInitializer,
 )
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.protocols.model_spec import ModelSpec
@@ -39,10 +40,10 @@ def _vlm_param_init(dim, n_layers):
     base = make_decoder_param_init(dim=dim, n_layers=n_layers)
     # Projector uses xavier_uniform for weights, zeros for biases
     projector_patterns = {
-        r"projector\.w[12]\.weight": init_xavier_uniform(),
-        r"projector\.w[12]\.bias": init_zeros(),
+        r"projector\.w[12]\.weight": nn.init.xavier_uniform_,
+        r"projector\.w[12]\.bias": nn.init.zeros_,
     }
-    return init_by_regex({**projector_patterns, **base})
+    return RegexInitializer({**projector_patterns, **base})
 
 
 llama3_siglip2_configs = {

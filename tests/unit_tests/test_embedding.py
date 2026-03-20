@@ -6,16 +6,15 @@
 
 import unittest
 from dataclasses import dataclass
+from functools import partial
 
 import torch
+
 import torch.nn as nn
 
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_normal,
-    init_trunc_normal,
-)
+
+from torchtitan.models.common.param_init import RegexInitializer
 
 
 class TestEmbedding(unittest.TestCase):
@@ -38,7 +37,9 @@ class TestEmbedding(unittest.TestCase):
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
         config = Embedding.Config(
-            param_init=init_by_regex({r"weight": init_trunc_normal()})
+            param_init=RegexInitializer(
+                {r"weight": partial(nn.init.trunc_normal_, std=0.02)}
+            )
         )
         emb = config.build(num_embeddings=50, embedding_dim=16)
 
@@ -50,7 +51,9 @@ class TestEmbedding(unittest.TestCase):
     def test_custom_init_std(self):
         """Embedding respects custom mean and std."""
         config = Embedding.Config(
-            param_init=init_by_regex({r"weight": init_normal(mean=0.1, std=0.02)})
+            param_init=RegexInitializer(
+                {r"weight": partial(nn.init.normal_, mean=0.1, std=0.02)}
+            )
         )
         emb = config.build(num_embeddings=1000, embedding_dim=160)
 

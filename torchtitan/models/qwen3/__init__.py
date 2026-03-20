@@ -11,9 +11,9 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_skip,
     make_decoder_param_init,
+    RegexInitializer,
+    SKIP_PARAM_INIT,
 )
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -36,8 +36,8 @@ def _qwen3_param_init(dim, n_layers, weight_tying=False):
     if weight_tying:
         # tok_embeddings.weight is tied to output.weight; skip its init
         # so only output.weight's truncated-normal init applies.
-        patterns[r"tok_embeddings\.weight"] = init_skip()
-    return init_by_regex(patterns)
+        patterns[r"tok_embeddings\.weight"] = SKIP_PARAM_INIT
+    return RegexInitializer(patterns)
 
 
 qwen3_configs = {

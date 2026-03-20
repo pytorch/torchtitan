@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.param_init import init_by_regex, init_ones, init_zeros
+from torchtitan.models.common.param_init import RegexInitializer
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 
 
@@ -39,7 +39,7 @@ class TestModuleInitStates(unittest.TestCase):
                 self.param_init = param_init
                 self.weight = nn.Parameter(torch.empty(4))
 
-        param_init = init_by_regex({r".*": init_zeros()})
+        param_init = RegexInitializer({r".*": nn.init.zeros_})
         m = TestModel(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.weight == 0))
@@ -58,7 +58,7 @@ class TestModuleInitStates(unittest.TestCase):
                 self.param_init = param_init
                 self.child = Child()
 
-        param_init = init_by_regex({r"child\.weight": init_zeros()})
+        param_init = RegexInitializer({r"child\.weight": nn.init.zeros_})
         m = Parent(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.child.weight == 0))
@@ -82,7 +82,7 @@ class TestModuleInitStates(unittest.TestCase):
                 self.param_init = param_init
                 self.mid = Mid()
 
-        param_init = init_by_regex({r"mid\.leaf\.weight": init_ones()})
+        param_init = RegexInitializer({r"mid\.leaf\.weight": nn.init.ones_})
         m = Root(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.mid.leaf.weight == 1))
@@ -286,7 +286,7 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
 
     def test_param_init_on_instance(self):
         """build() sets param_init on the constructed instance."""
-        param_init = init_by_regex({r".*": init_zeros()})
+        param_init = RegexInitializer({r".*": nn.init.zeros_})
         config = Linear.Config(param_init=param_init)
         linear = config.build(in_features=4, out_features=4)
         self.assertTrue(hasattr(linear, "param_init"))
@@ -305,7 +305,7 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.linear = Linear.Config(
-                    param_init=init_by_regex({r"weight": init_ones()})
+                    param_init=RegexInitializer({r"weight": nn.init.ones_})
                 ).build(in_features=4, out_features=4)
 
         m = Parent()

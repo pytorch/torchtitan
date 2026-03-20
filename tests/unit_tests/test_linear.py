@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from functools import partial
 
 import torch
+
 import torch.nn as nn
 
 from torchtitan.components.quantization.module_utils import (
@@ -15,12 +17,8 @@ from torchtitan.components.quantization.module_utils import (
     verify_module_protocol,
 )
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.param_init import (
-    init_by_regex,
-    init_normal,
-    init_trunc_normal,
-    init_zeros,
-)
+
+from torchtitan.models.common.param_init import RegexInitializer
 from torchtitan.protocols.module import Module
 
 
@@ -52,8 +50,11 @@ class TestLinear(unittest.TestCase):
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
         config = Linear.Config(
-            param_init=init_by_regex(
-                {r"weight": init_trunc_normal(), r"bias": init_zeros()}
+            param_init=RegexInitializer(
+                {
+                    r"weight": partial(nn.init.trunc_normal_, std=0.02),
+                    r"bias": nn.init.zeros_,
+                }
             )
         )
         linear = config.build(in_features=16, out_features=8)
@@ -67,8 +68,11 @@ class TestLinear(unittest.TestCase):
     def test_custom_init_std(self):
         """Linear respects custom mean and std."""
         config = Linear.Config(
-            param_init=init_by_regex(
-                {r"weight": init_normal(mean=0.1, std=0.02), r"bias": init_zeros()}
+            param_init=RegexInitializer(
+                {
+                    r"weight": partial(nn.init.normal_, mean=0.1, std=0.02),
+                    r"bias": nn.init.zeros_,
+                }
             )
         )
         linear = config.build(in_features=1000, out_features=500)
@@ -177,8 +181,11 @@ class TestModuleInjection(unittest.TestCase):
         model = nn.Module()
         model.fc = FakeQuantLinear(8, 4)
         inject_module_protocol(model, Linear)
-        param_init = init_by_regex(
-            {r"weight": init_trunc_normal(), r"bias": init_zeros()}
+        param_init = RegexInitializer(
+            {
+                r"weight": partial(nn.init.trunc_normal_, std=0.02),
+                r"bias": nn.init.zeros_,
+            }
         )
         object.__setattr__(model.fc, "param_init", param_init)
 

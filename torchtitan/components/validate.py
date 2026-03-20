@@ -185,6 +185,17 @@ class Validator(BaseValidator):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
+        # TODO: deduplicate with Trainer.post_dataloading_process which has
+        # the same logic; extract a shared function to prevent further drift.
+        # For causal attention the whole packed sequence is one document,
+        # so sequential RoPE positions (positions=None) are correct.
+        model_config = getattr(model_parts[0], "config", None)
+        layer = getattr(model_config, "layer", None)
+        attn_config = getattr(layer, "attention", None) if layer else None
+        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
+        if attn_mask_type != "block_causal":
+            extra_inputs.pop("positions", None)
+
         try:
             # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = cast(

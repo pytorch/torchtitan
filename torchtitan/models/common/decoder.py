@@ -25,7 +25,7 @@ from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module, ModuleDict, NamedInitializer
+from torchtitan.protocols.module import Module, ModuleDict, NamedParamInitializer
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -102,7 +102,7 @@ class Decoder(BaseModel):
     def init_states(
         self,
         *,
-        param_init: NamedInitializer | None = None,
+        param_init: NamedParamInitializer | None = None,
         param_prefix: str = "",
         **kwargs,
     ) -> None:
