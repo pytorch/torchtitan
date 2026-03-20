@@ -12,9 +12,9 @@ from typing import Any
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from torchtitan.tools.logging import logger
-
 from torchtitan.hf_datasets import SpecialTokens
+
+from torchtitan.tools.logging import logger
 
 from .utils.image import vision_to_patches
 from .utils.text import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch
@@ -82,10 +82,13 @@ class MultiModalCollatorNLD:
 
         padded_patches = torch.zeros(len(all_patches), max_num_patch, patch_dim)
         for i, patches in enumerate(all_patches):
+            # pyrefly: ignore [unsupported-operation]
             padded_patches[i, : patches.shape[0]] = patches
 
+        # pyrefly: ignore [bad-argument-type]
         grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
 
+        # pyrefly: ignore [bad-return]
         return padded_patches, grid_thw
 
     def collate_text(
@@ -121,6 +124,7 @@ class MultiModalCollatorNLD:
             ignore_idx=self.special_tokens.ignore_id,
         )
 
+        # pyrefly: ignore [bad-return]
         return input_ids[:, :-1], labels[:, 1:]
 
     def __call__(
@@ -168,4 +172,5 @@ class MultiModalCollatorNLD:
             "special_tokens": self.special_tokens,
         }
 
+        # pyrefly: ignore [bad-return]
         return input_dict, labels

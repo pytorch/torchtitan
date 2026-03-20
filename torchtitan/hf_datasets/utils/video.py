@@ -43,6 +43,7 @@ def load_video(
         video_fps = float(stream.average_rate or stream.guessed_rate or 24)
         total_frames = stream.frames
         if total_frames == 0 and stream.duration:
+            # pyrefly: ignore [unsupported-operation]
             total_frames = int(float(stream.duration * stream.time_base) * video_fps)
         if total_frames == 0:
             # No metadata available — decode all frames to count them
@@ -61,6 +62,7 @@ def load_video(
                 np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
             )
             selected = [all_frames[i] for i in sorted(indices)]
+            # pyrefly: ignore [bad-return]
             return torch.from_numpy(np.stack(selected))
 
         duration = total_frames / video_fps
@@ -85,6 +87,7 @@ def load_video(
         if not frames:
             return None
 
+        # pyrefly: ignore [bad-return]
         return torch.from_numpy(np.stack(frames))  # (T, H, W, C)
 
     except Exception as e:
@@ -136,17 +139,25 @@ def process_video(
 
         # Resize frames: torchvision F.resize expects (..., H, W) format
         # video is (T, H, W, C) -> permute to (T, C, H, W)
+        # pyrefly: ignore [bad-assignment]
         video = video.permute(0, 3, 1, 2).float()  # (T, C, H, W)
+        # pyrefly: ignore [bad-assignment]
         video = F.resize(
-            video, [target_h, target_w], interpolation=F.InterpolationMode.BICUBIC
+            # pyrefly: ignore [bad-argument-type]
+            video,
+            [target_h, target_w],
+            interpolation=F.InterpolationMode.BICUBIC,
         )
         # Back to channel-last: (T, H', W', C)
+        # pyrefly: ignore [bad-assignment]
         video = video.permute(0, 2, 3, 1)
 
         # Normalize
+        # pyrefly: ignore [bad-assignment]
         video = video / 255.0
         mean = torch.tensor(image_mean, dtype=video.dtype)
         std = torch.tensor(image_std, dtype=video.dtype)
+        # pyrefly: ignore [bad-assignment]
         video = (video - mean) / std
 
         return video
@@ -154,5 +165,3 @@ def process_video(
     except Exception as e:
         logger.warning(f"Error processing video: {e}")
         return None
-
-

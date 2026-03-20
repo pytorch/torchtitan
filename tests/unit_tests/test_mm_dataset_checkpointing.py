@@ -72,9 +72,9 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                     for key in ["pixel_values", "grid_thw"]:
                         exp_v = expected_input[key]
                         res_v = input_dict[key]
-                        assert (exp_v is None) == (res_v is None), (
-                            f"{key} None mismatch (world_size={world_size}, rank={rank})"
-                        )
+                        assert (exp_v is None) == (
+                            res_v is None
+                        ), f"{key} None mismatch (world_size={world_size}, rank={rank})"
                         if exp_v is not None:
                             print(exp_v.shape)
                             assert exp_v.shape == res_v.shape, (

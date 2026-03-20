@@ -19,7 +19,12 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttentionWrapper
+from torchtitan.protocols.module import Module, ModuleDict, ModuleList
+
+LayerNorm = Module.from_nn_module(nn.LayerNorm)
+GELU = Module.from_nn_module(nn.GELU)
 
 
 # Compiled block mask creation
@@ -30,6 +35,7 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
+    # pyrefly: ignore [bad-return]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -45,10 +51,15 @@ def apply_rotary_pos_emb_vision_batched(
         sin: (batch, max_num_patch, head_dim)
     """
     # Expand cos/sin for heads dimension, keep in original dtype
+    # pyrefly: ignore [bad-assignment]
     cos = cos.unsqueeze(2)  # (batch, max_num_patch, 1, head_dim)
+    # pyrefly: ignore [bad-assignment]
     sin = sin.unsqueeze(2)
+    # pyrefly: ignore [unsupported-operation]
     q_embed = (q * cos) + (rotate_half(q) * sin)
+    # pyrefly: ignore [unsupported-operation]
     k_embed = (k * cos) + (rotate_half(k) * sin)
+    # pyrefly: ignore [bad-return]
     return q_embed, k_embed
 
 
@@ -71,7 +82,7 @@ def get_vision_block_mask_mod(num_patch: torch.Tensor, max_num_patch: int):
     return mask_mod
 
 
-class PatchEmbed(nn.Module):
+class PatchEmbed(Module):
     """Patch Embedding using Linear projection.
 
     Since patches are already extracted by the collator, we use Linear instead of Conv3d.
@@ -96,7 +107,9 @@ class PatchEmbed(nn.Module):
 
         # patch_dim matches the flattened patch from collator: (pt * ph * pw * c)
         self.patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
-        self.proj = nn.Linear(self.patch_dim, embed_dim, bias=True)
+        self.proj = Linear.Config(bias=True).build(
+            in_features=self.patch_dim, out_features=embed_dim
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
@@ -107,13 +120,11 @@ class PatchEmbed(nn.Module):
         """
         return self.proj(hidden_states)
 
-    def init_weights(self):
-        nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=0.02)
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
+    def init_weights(self, **kwargs):
+        self.proj.init_weights(**kwargs)
 
 
-class VisionRotaryEmbedding(nn.Module):
+class VisionRotaryEmbedding(Module):
     """2D Rotary Position Embedding for Vision Transformer."""
 
     def __init__(self, dim: int, theta: float = 10000.0):
@@ -121,11 +132,12 @@ class VisionRotaryEmbedding(nn.Module):
         self.dim = dim
         self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        # pyrefly: ignore [bad-argument-type]
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def init_weights(self, device: torch.device | None = None):
+    def init_weights(self, **kwargs):
         """Re-compute inv_freq on the target device after to_empty()."""
-        device = device or self.inv_freq.device
+        device = kwargs.get("buffer_device") or self.inv_freq.device
         self.inv_freq = 1.0 / (
             self.theta
             ** (
@@ -140,10 +152,11 @@ class VisionRotaryEmbedding(nn.Module):
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         freqs = torch.outer(seq, self.inv_freq)
+        # pyrefly: ignore [bad-return]
         return freqs
 
 
-class PatchMerger(nn.Module):
+class PatchMerger(Module):
     """Merge spatial patches to reduce sequence length.
 
     Args:
@@ -169,10 +182,14 @@ class PatchMerger(nn.Module):
         self.use_postshuffle_norm = use_postshuffle_norm
 
         norm_dim = self.merged_hidden_size if use_postshuffle_norm else hidden_size
-        self.norm = nn.LayerNorm(norm_dim, eps=1e-6)
-        self.linear_fc1 = nn.Linear(self.merged_hidden_size, self.merged_hidden_size)
-        self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(self.merged_hidden_size, out_hidden_size)
+        self.norm = LayerNorm(norm_dim, eps=1e-6)
+        self.linear_fc1 = Linear.Config(bias=True).build(
+            in_features=self.merged_hidden_size, out_features=self.merged_hidden_size
+        )
+        self.act_fn = GELU()
+        self.linear_fc2 = Linear.Config(bias=True).build(
+            in_features=self.merged_hidden_size, out_features=out_hidden_size
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -184,6 +201,7 @@ class PatchMerger(nn.Module):
         batch_size, seq_len, _ = x.shape
         if self.use_postshuffle_norm:
             # Reshape first, then norm
+            # pyrefly: ignore [bad-assignment]
             x = x.view(
                 batch_size,
                 seq_len // (self.spatial_merge_size**2),
@@ -201,17 +219,13 @@ class PatchMerger(nn.Module):
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x
 
-    def init_weights(self):
-        self.norm.reset_parameters()
-        nn.init.trunc_normal_(self.linear_fc1.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.linear_fc2.weight, mean=0.0, std=0.02)
-        if self.linear_fc1.bias is not None:
-            nn.init.zeros_(self.linear_fc1.bias)
-        if self.linear_fc2.bias is not None:
-            nn.init.zeros_(self.linear_fc2.bias)
+    def init_weights(self, **kwargs):
+        self.norm.init_weights(**kwargs)
+        self.linear_fc1.init_weights(**kwargs)
+        self.linear_fc2.init_weights(**kwargs)
 
 
-class VisionAttention(nn.Module):
+class VisionAttention(Module):
     """Multi-head attention with FlexAttention for efficient batched processing."""
 
     def __init__(self, dim: int, n_heads: int):
@@ -220,8 +234,12 @@ class VisionAttention(nn.Module):
         self.num_heads = n_heads
         self.head_dim = self.dim // self.num_heads
 
-        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
-        self.proj = nn.Linear(self.dim, self.dim)
+        self.qkv = Linear.Config(bias=True).build(
+            in_features=self.dim, out_features=self.dim * 3
+        )
+        self.proj = Linear.Config(bias=True).build(
+            in_features=self.dim, out_features=self.dim
+        )
         self.flex_attention = FlexAttentionWrapper()
 
     def forward(
@@ -265,43 +283,39 @@ class VisionAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2).reshape(num_images, max_num_patch, -1)
         return self.proj(attn_output)
 
-    def init_weights(self):
-        nn.init.trunc_normal_(self.qkv.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=0.02)
-        if self.qkv.bias is not None:
-            nn.init.zeros_(self.qkv.bias)
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
+    def init_weights(self, **kwargs):
+        self.qkv.init_weights(**kwargs)
+        self.proj.init_weights(**kwargs)
 
 
-class VisionMLP(nn.Module):
+class VisionMLP(Module):
     """Feed-forward network with GELU activation."""
 
     def __init__(self, dim: int, ffn_dim: int):
         super().__init__()
-        self.linear_fc1 = nn.Linear(dim, ffn_dim, bias=True)
-        self.linear_fc2 = nn.Linear(ffn_dim, dim, bias=True)
-        self.act_fn = nn.GELU()
+        self.linear_fc1 = Linear.Config(bias=True).build(
+            in_features=dim, out_features=ffn_dim
+        )
+        self.linear_fc2 = Linear.Config(bias=True).build(
+            in_features=ffn_dim, out_features=dim
+        )
+        self.act_fn = GELU()
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
 
-    def init_weights(self):
-        nn.init.trunc_normal_(self.linear_fc1.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.linear_fc2.weight, mean=0.0, std=0.02)
-        if self.linear_fc1.bias is not None:
-            nn.init.zeros_(self.linear_fc1.bias)
-        if self.linear_fc2.bias is not None:
-            nn.init.zeros_(self.linear_fc2.bias)
+    def init_weights(self, **kwargs):
+        self.linear_fc1.init_weights(**kwargs)
+        self.linear_fc2.init_weights(**kwargs)
 
 
-class VisionTransformerBlock(nn.Module):
+class VisionTransformerBlock(Module):
     """Single transformer block for vision encoder."""
 
     def __init__(self, dim: int, ffn_dim: int, n_heads: int, layer_norm_eps: float):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(dim, eps=layer_norm_eps)
+        self.norm1 = LayerNorm(dim, eps=layer_norm_eps)
+        self.norm2 = LayerNorm(dim, eps=layer_norm_eps)
         self.attn = VisionAttention(dim, n_heads)
         self.mlp = VisionMLP(dim, ffn_dim)
 
@@ -319,14 +333,14 @@ class VisionTransformerBlock(nn.Module):
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
 
-    def init_weights(self):
-        self.norm1.reset_parameters()
-        self.norm2.reset_parameters()
-        self.attn.init_weights()
-        self.mlp.init_weights()
+    def init_weights(self, **kwargs):
+        self.norm1.init_weights(**kwargs)
+        self.norm2.init_weights(**kwargs)
+        self.attn.init_weights(**kwargs)
+        self.mlp.init_weights(**kwargs)
 
 
-class Qwen3VLVisionEncoder(nn.Module):
+class Qwen3VLVisionEncoder(Module):
     """
     Qwen3-VL Vision Encoder with FlexAttention.
 
@@ -334,7 +348,7 @@ class Qwen3VLVisionEncoder(nn.Module):
     """
 
     @dataclass
-    class Config:
+    class Config:  # pyrefly: ignore [bad-override]
         """Configuration for Qwen3-VL Vision Encoder (ViT)."""
 
         # Transformer dimensions
@@ -384,6 +398,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         # Embedding.forward() — we index and interpolate the weight directly.
         self.num_position_embeddings = config.num_position_embeddings
         self.pos_embed = nn.Parameter(
+            # pyrefly: ignore [bad-argument-type]
             torch.empty(config.num_position_embeddings, config.dim)
         )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
@@ -397,7 +412,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         self._cached_freq_table: torch.Tensor | None = None
 
         # Transformer layers
-        self.layers = nn.ModuleDict(
+        self.layers = ModuleDict(
             {
                 str(idx): VisionTransformerBlock(
                     config.dim, config.ffn_dim, config.n_heads, config.layer_norm_eps
@@ -416,7 +431,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         # DeepStack mergers for intermediate layers
         # DeepStack mergers use postshuffle norm (norm after spatial reshape)
         self.deepstack_visual_indices = config.deepstack_visual_indices
-        self.deepstack_merger_list = nn.ModuleList(
+        self.deepstack_merger_list = ModuleList(
             [
                 PatchMerger(
                     hidden_size=config.dim,
@@ -428,15 +443,15 @@ class Qwen3VLVisionEncoder(nn.Module):
             ]
         )
 
-    def init_weights(self):
-        self.patch_embed.init_weights()
+    def init_weights(self, **kwargs):
+        self.patch_embed.init_weights(**kwargs)
         nn.init.trunc_normal_(self.pos_embed, mean=0.0, std=0.02)
-        self.rotary_pos_emb.init_weights()
-        self.merger.init_weights()
+        self.rotary_pos_emb.init_weights(**kwargs)
+        self.merger.init_weights(**kwargs)
         for merger in self.deepstack_merger_list:
-            merger.init_weights()
+            merger.init_weights(**kwargs)  # pyrefly: ignore [not-callable]
         for block in self.layers.values():
-            block.init_weights()
+            block.init_weights(**kwargs)  # pyrefly: ignore [not-callable]
 
     def compute_position_embeddings(
         self, grid_thw: torch.Tensor, max_num_patch: int
@@ -499,7 +514,12 @@ class Qwen3VLVisionEncoder(nn.Module):
         for (h, w), indices in hw_to_indices.items():
             # Bilinear interpolation of position embeddings from fixed grid to (h, w)
             pos_hw = F.interpolate(
-                pos_grid, size=(h, w), mode="bilinear", align_corners=True
+                # pyrefly: ignore [bad-argument-type]
+                pos_grid,
+                # pyrefly: ignore [bad-argument-type]
+                size=(h, w),
+                mode="bilinear",
+                align_corners=True,
             )
             # (1, dim, h, w) -> (h*w, dim)
             pos_hw = pos_hw.squeeze(0).permute(1, 2, 0).reshape(-1, self.config.dim)
@@ -570,6 +590,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         rope_cos = rope_embeds.cos()
         rope_sin = rope_embeds.sin()
 
+        # pyrefly: ignore [bad-return]
         return pos_embeds, rope_cos, rope_sin
 
     def forward(
@@ -609,6 +630,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         hidden_states = hidden_states + pos_embeds
 
         # Create attention mask for block-diagonal attention
+        # pyrefly: ignore [bad-argument-type]
         mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)
         attention_mask = _compiled_create_block_mask(
             mask_mod,

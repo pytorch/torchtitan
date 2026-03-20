@@ -13,15 +13,16 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.hf_datasets.mm_datasets import MMDataLoader
 from torchtitan.trainer import Trainer
 
 from . import model_registry
-from .datasets.mm_datasets import MMDataLoader
 
 
 def qwen3_vl_debugmodel() -> Trainer.Config:
     spec = model_registry("debugmodel")
-    encoder = spec.model.encoder
+    # pyrefly: ignore [missing-attribute]
+    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -57,7 +58,8 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
 
 def qwen3_vl_debugmodel_video() -> Trainer.Config:
     spec = model_registry("debugmodel")
-    encoder = spec.model.encoder
+    # pyrefly: ignore [missing-attribute]
+    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -99,9 +101,10 @@ def qwen3_vl_debugmodel_video() -> Trainer.Config:
 
 def qwen3_vl_debugmodel_moe() -> Trainer.Config:
     spec = model_registry("debugmodel_moe")
-    encoder = spec.model.encoder
+    # pyrefly: ignore [missing-attribute]
+    encoder = spec.model.vision_encoder
     return Trainer.Config(
-        hf_assets_path="../hf_models/Qwen/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=spec,
         dataloader=MMDataLoader.Config(
@@ -118,8 +121,10 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
             steps=10,
         ),
         parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
+            data_parallel_shard_degree=8,
+            expert_parallel_degree=8,
             expert_tensor_parallel_degree=1,
+            tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -134,9 +139,10 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
 
 def qwen3_vl_2b() -> Trainer.Config:
     spec = model_registry("2B")
-    encoder = spec.model.encoder
+    # pyrefly: ignore [missing-attribute]
+    encoder = spec.model.vision_encoder
     return Trainer.Config(
-        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
+        hf_assets_path="../assets/hf/Qwen3-VL-2B-Instruct",
         model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
@@ -169,7 +175,8 @@ def qwen3_vl_2b() -> Trainer.Config:
 
 def qwen3_vl_8b() -> Trainer.Config:
     spec = model_registry("8B")
-    encoder = spec.model.encoder
+    # pyrefly: ignore [missing-attribute]
+    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-8B-Instruct",
         model_spec=spec,
@@ -204,7 +211,8 @@ def qwen3_vl_8b() -> Trainer.Config:
 
 def qwen3_vl_30b_a3b() -> Trainer.Config:
     spec = model_registry("30B-A3B")
-    encoder = spec.model.encoder
+    # pyrefly: ignore [missing-attribute]
+    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
         model_spec=spec,

@@ -76,10 +76,9 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
-from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.tools.logging import logger
 
-from torchtitan.hf_datasets import SpecialTokens
+from torchtitan.hf_datasets import DatasetConfig, SpecialTokens
+from torchtitan.tools.logging import logger
 from .mm_collator_nld import MultiModalCollatorNLD
 from .utils.image import calculate_vision_tokens, process_image, smart_resize
 from .utils.packing import MMSamplePacker
@@ -161,6 +160,7 @@ def _process_mm_sample(
                     )
                     processed_images.append(processed_img)
                     image_dimensions.append((num_tokens, tokens_per_row, num_rows))
+                    # pyrefly: ignore [unsupported-operation]
                     texts[idx] = None
                 else:
                     texts[idx] = ""
@@ -250,7 +250,9 @@ def _process_cc12_wd_sample(
     images = [image, None]
 
     return _process_mm_sample(
+        # pyrefly: ignore [bad-argument-type]
         texts=texts,
+        # pyrefly: ignore [bad-argument-type]
         images=images,
         tokenizer=tokenizer,
         patch_size=patch_size,
@@ -405,7 +407,12 @@ def _process_nemotron_video_sample(
         video_dimensions = [(num_tokens, tokens_per_row, num_rows)]
 
         processed_text = process_text_with_videos(
-            texts, video_dimensions, tokenizer, special_tokens, add_eos=True
+            # pyrefly: ignore [bad-argument-type]
+            texts,
+            video_dimensions,
+            tokenizer,
+            special_tokens,
+            add_eos=True,
         )
 
         tokens = tokenizer.encode(processed_text)
@@ -599,6 +606,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
             if self.enable_packing:
                 self.packer.flush()
                 while self.packer.has_batch_ready():
+                    # pyrefly: ignore [invalid-yield]
                     yield from self.packer.get_next_batch()
                 # Drain any remainder that doesn't fill a full batch
                 while self.packer.packed_samples:
@@ -664,6 +672,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
             state["hf_dataset_state"] = self._data.state_dict()
 
         if self.enable_packing and hasattr(self, "packer"):
+            # pyrefly: ignore [bad-typed-dict-key]
             state["packer_state"] = {
                 "sample_buffer": list(self.packer.sample_buffer),
                 "packed_samples": list(self.packer.packed_samples),

@@ -209,18 +209,45 @@ def _tt_forward(model, tokens, gpus, **kwargs):
     if grid_thw is not None:
         grid_thw = grid_thw.to(visual_device)
 
-    (
-        inputs_embeds,
-        visual_pos_masks,
-        deepstack_visual_embeds,
-    ) = model._prepare_multimodal_embeds(
-        tokens,
-        pixel_values,
-        None,
-        grid_thw,
-        None,
-        special_tokens,
-    )
+    # Run vision encoder on visual_device, then move outputs to embed_device
+    # before _prepare_multimodal_embeds scatters them into text embeddings.
+    if pixel_values is not None and visual_device != embed_device:
+        pixel_values = pixel_values.to(visual_device)
+        grid_thw_vis = grid_thw.to(visual_device) if grid_thw is not None else None
+        visual_embeds_list, deepstack_features = model._get_visual_features(
+            pixel_values, grid_thw_vis
+        )
+        # Move vision outputs to embed_device
+        visual_embeds_list = [v.to(embed_device) for v in visual_embeds_list]
+        deepstack_features = [d.to(embed_device) for d in deepstack_features]
+
+        # Now do embedding + scatter on embed_device
+        special_tokens_obj = special_tokens
+        img_token_id = (
+            special_tokens_obj.img_id
+            if special_tokens_obj is not None
+            else model.image_token_id
+        )
+        inputs_embeds = model.tok_embeddings(tokens)
+        image_embeds = torch.cat(visual_embeds_list, dim=0)
+        inputs_embeds, image_scatter_success = model._scatter_vision_embeds(
+            inputs_embeds, tokens, image_embeds, img_token_id=img_token_id
+        )
+        visual_pos_masks = (tokens == img_token_id) if image_scatter_success else None
+        deepstack_visual_embeds = deepstack_features if image_scatter_success else None
+    else:
+        (
+            inputs_embeds,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+        ) = model._prepare_multimodal_embeds(
+            tokens,
+            pixel_values,
+            None,
+            grid_thw,
+            None,
+            special_tokens,
+        )
 
     hidden_states = inputs_embeds
     for layer_idx, layer in model.layers.items():
