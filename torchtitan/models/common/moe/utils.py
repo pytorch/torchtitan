@@ -103,10 +103,7 @@ def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
     max_len = x.shape[0]
 
     with torch.no_grad():
-        (
-            permuted_indices,
-            num_tokens_per_expert,
-        ) = _generate_permute_indices(
+        (permuted_indices, num_tokens_per_expert,) = _generate_permute_indices(
             num_tokens_per_expert,
             num_local_experts,
             ep_degree,
@@ -154,8 +151,10 @@ def _generate_permute_indices(
     return permuted_indices, m_sizes
 
 
-def _unpermute(out, input_shape, permuted_indices):
+def _unpermute(out, input_shape, permuted_indices, remove_padding_row=False):
+    """Unpermute tokens from expert-major to rank-major order."""
     out_unpermuted = out.new_empty(input_shape)
     out_unpermuted[permuted_indices, :] = out
-    out = out_unpermuted[:-1]
-    return out
+    if remove_padding_row:
+        out_unpermuted = out_unpermuted[:-1]
+    return out_unpermuted

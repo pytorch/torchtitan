@@ -75,11 +75,6 @@ class TensorParallel(ParallelStyle):
         )
 
 
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 class ExpertParallel(BaseExpertParallel):
     def __init__(self):
         super().__init__()
@@ -184,10 +179,14 @@ class ExpertParallel(BaseExpertParallel):
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
     ) -> Tensor:
-        # NOTE: this unpermutation can handle both the padded and non-padded cases,
-        # because all it needs is the input shape and the permutation indices.
+        # If per group padding was done to prepare for MXFP8 grouped mm, there is an extra 'padding' row that
+        # `permuted_indices` selects from to add padding into the routed_input in dispatch.
+        remove_padding_row = self.token_group_alignment > 0
         routed_output = _unpermute(
-            routed_output, self.input_shape, self.permuted_indices
+            routed_output,
+            self.input_shape,
+            self.permuted_indices,
+            remove_padding_row=remove_padding_row,
         )
         routed_output = all_to_all_single_autograd(
             routed_output,
