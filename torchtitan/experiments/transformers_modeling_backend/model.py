@@ -19,10 +19,11 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
 
 
-class SliceableModuleDict(nn.ModuleDict):
+class SliceableModuleDict(ModuleDict):
     """
     A ModuleDict that supports slicing like ModuleList.
     Keys are expected to be string representations of integers (e.g., "0", "1", "2").
@@ -49,6 +50,10 @@ class SliceableModuleDict(nn.ModuleDict):
 
     def __len__(self):
         return len(self._modules)
+
+    def init_weights(self, **kwargs) -> None:
+        """No-op: HFTransformerModel handles initialization via HF mechanisms."""
+        pass
 
 
 # Define all possible mappings organized by argument type
@@ -632,6 +637,15 @@ class HFTransformerModel(BaseModel):
         output = self.model.model(*args, **kwargs)
         output = self.model.lm_head(output.last_hidden_state)
         return output
+
+    def verify_module_protocol(self) -> None:
+        """Skip recursive verification for HuggingFace model internals.
+
+        HF PreTrainedModel submodules are plain nn.Module and cannot
+        conform to the Module protocol. Initialization is handled
+        entirely by HF's own _init_weights mechanism.
+        """
+        pass
 
     def init_weights(self, *args, **kwargs):
         # This method replicates the behavior of the original PreTrainedModel.init_weights,

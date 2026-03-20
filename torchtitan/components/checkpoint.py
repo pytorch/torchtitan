@@ -1043,8 +1043,15 @@ class CheckpointManager(Configurable):
         # conversion when we are checkpointing model only and the current dtype
         # is not the same as the export dtype at the end of the training.
 
+        # Run converter finalization (e.g. LoRA merge) before extracting state dict.
+        model_wrapper = self.states[MODEL]
+        for part in model_wrapper.model:
+            finalize_fn = getattr(part, "converter_finalize_fn", None)
+            if finalize_fn is not None:
+                finalize_fn()
+
         if self.last_save_model_only:
-            states = self.states[MODEL].export_state_dict()
+            states = model_wrapper.export_state_dict()
 
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
@@ -1063,7 +1070,7 @@ class CheckpointManager(Configurable):
 
         # Converter-provided last-step save (e.g. PEFT format)
         save_last_fn = self.states[MODEL].converter_save_last_fn
-        if self.last_save_model_only and save_last_fn is not None:
+        if self.last_save_in_hf and self.last_save_model_only and save_last_fn is not None:
             checkpoint_dir = self._create_checkpoint_id(curr_step)
             save_last_fn(states, checkpoint_dir, self._get_from_hf_map())
             return

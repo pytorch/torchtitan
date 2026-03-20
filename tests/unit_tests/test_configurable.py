@@ -200,6 +200,30 @@ class TestConfigurable(unittest.TestCase):
         self.assertEqual(d2["inner"]["a"], 1)
         self.assertEqual(d2["inner"]["b"], 256)
 
+    def test_repr_with_unset_init_false(self):
+        """repr() must not crash when field(init=False) slots are unset."""
+        cfg = self.NewStyleComponent.Config(x=10)
+        # Before build: dim and hidden are unset
+        r = repr(cfg)
+        self.assertIn("x=10", r)
+        self.assertIn("dim=<UNSET>", r)
+        self.assertIn("hidden=<UNSET>", r)
+
+        # After build: all fields set
+        obj = cfg.build(dim=64, hidden=128)
+        r2 = repr(obj.config)
+        self.assertIn("x=10", r2)
+        self.assertIn("dim=64", r2)
+        self.assertIn("hidden=128", r2)
+        self.assertNotIn("UNSET", r2)
+
+    def test_repr_no_init_false_fields(self):
+        """repr() works normally when there are no field(init=False) fields."""
+        cfg = self.NoKwargsComponent.Config(x=42)
+        r = repr(cfg)
+        self.assertIn("x=42", r)
+        self.assertNotIn("UNSET", r)
+
     def test_init_false_with_inheritance(self):
         """Child config can redeclare field with default."""
 

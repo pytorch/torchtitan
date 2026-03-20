@@ -31,6 +31,14 @@ class ModelConverter(Protocol):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
         ...
 
+    def finalize(self, model: nn.Module) -> None:
+        """End-of-training hook called before the last checkpoint save.
+
+        Examples: LoRA merge (fold adapter weights into base weights),
+        QAT CONVERT (replace fake-quantized modules with real quantized ones).
+        """
+        ...
+
 
 class ModelConvertersContainer(Configurable, ModelConverter):
     """Model converters sequential container.
@@ -79,9 +87,26 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         if self.print_after_conversion:
             logger.info(f"Model definition after conversion:\n\n{model}\n\n")
 
+        # Attach a finalize function on the model so the checkpoint system
+        # can call it before the last save.
+        def _finalize_fn():
+            self.finalize(model)
+
+        model.converter_finalize_fn = _finalize_fn  # type: ignore[attr-defined]
+
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
+
+    def finalize(self, model: nn.Module) -> None:
+        """Run end-of-training finalization in reverse converter order.
+
+        Reverse order ensures proper composition: e.g. LoRA merge happens
+        before QAT CONVERT so that adapters are folded into base weights
+        before real quantization is applied.
+        """
+        for mh in reversed(self.converters):
+            mh.finalize(model)
 
 
 def _validate_converter_ordering(converters: list[Configurable.Config]):
