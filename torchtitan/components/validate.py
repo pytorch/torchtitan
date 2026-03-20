@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
@@ -232,14 +233,16 @@ class Validator(BaseValidator):
 
         parallel_dims = self.parallel_dims
 
+        config = cast(Validator.Config, self.config)
         accumulated_losses = []
         device_type = utils.device_type
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
-            # pyrefly: ignore [missing-attribute, unsupported-operation]
-            if self.config.steps != -1 and num_steps >= self.config.steps:
-                break
+        dataloader = self.validation_dataloader
+        if config.steps != -1:
+            dataloader = itertools.islice(dataloader, config.steps)
+
+        for input_dict, labels in dataloader:
 
             self.metrics_processor.ntokens_since_last_log += labels.numel()
             for k, v in input_dict.items():
