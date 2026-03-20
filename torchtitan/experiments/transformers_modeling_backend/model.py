@@ -101,6 +101,10 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=attn_implementation, **kwargs
             )
+            # Set param_init before Module.Config.build() accesses it.
+            # PretrainedConfig.__getattribute__ doesn't recognize the
+            # param_init slot inherited from Module.Config.
+            self.param_init = None
             assert titan_dense_config is not None, "titan_dense_config is required"
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
