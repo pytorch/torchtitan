@@ -145,6 +145,13 @@ class CUDAGraphWrapper:
         # (debug only) whether check static input tensor addresses during runtime
         self._should_check_address = should_check_address
 
+        self._gm = runnable if isinstance(runnable, torch.fx.GraphModule) else None
+
+    def print_readable(self, *args, **kwargs):
+        """Delegate to the inner GraphModule's print_readable."""
+        assert self._gm is not None, "print_readable requires a GraphModule runnable"
+        return self._gm.print_readable(*args, **kwargs)
+
     def _copy_non_static_inputs(self, *args):
         for i in self._input_indices_to_copy:
             self._args[i].copy_(args[i])
