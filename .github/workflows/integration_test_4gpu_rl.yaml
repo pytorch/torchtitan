@@ -1,14 +1,14 @@
-name: RL Unified Integration Tests
+name: RL Integration Tests
 
 on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/rl/unified/**'
+      - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl.yaml'
   pull_request:
     paths:
-      - 'torchtitan/experiments/rl/unified/**'
+      - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl.yaml'
   schedule:
     # Runs every 12 hours
@@ -62,12 +62,20 @@ jobs:
         # Install uv for faster dependency resolution
         pip install uv
 
-        # Install vllm, Monarch, and nightly torch
-        uv pip install torch vllm xformers torchmonarch --pre \
+        # 1. Install Monarch and TorchStore
+        uv pip install torchmonarch==0.3.0
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+        uv pip install pygtrie portpicker
+
+        # 2. Install Flash Attention v3 kernels
+        uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
+
+        # 3. Install PyTorch nightly, vllm, and xformers
+        uv pip install torch vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
           --index-strategy unsafe-best-match
 
-        # Install torchtitan in editable mode because integration test spawns
+        # 4. Install torchtitan in editable mode because integration test spawns
         # python simple_grpo_sum_digits.py as a subprocess
         uv pip install -e .
 
@@ -75,9 +83,9 @@ jobs:
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         # Run numerics unit tests (TP=1)
-        torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v
+        torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/tests/test_numerics.py -v
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
 
         # Run E2E RL integration tests (TP=1 on 2 GPUs, TP=2 on 4 GPUs)
-        python -m torchtitan.experiments.rl.unified.tests.integration_tests \
+        python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
