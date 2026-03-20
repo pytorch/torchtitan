@@ -7,12 +7,14 @@
 import logging
 
 import torch
-from torch.distributed.tensor import DTensor
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.protocols.module import Module
+from torchtitan.experiments.rl.models.vllm_compat_attention import (
+    VLLMCompatibleFlashAttention,
+)
+from torchtitan.models.common.attention import LocalMapAttention
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
@@ -166,7 +168,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 logger = logging.getLogger(__name__)
 
 
-class VLLMAttention(Module):
+class VLLMAttention(LocalMapAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -239,20 +241,7 @@ class VLLMAttention(Module):
         Returns:
             ``(batch, num_heads, seq_len, head_dim)``
         """
-        # Capture the original symbolic seq_len from the input BEFORE
-        # to_local() so that the symbol is the same one GQAttention uses
-        # in its .view(bs, seqlen, -1) call.
         batch_size, _, seq_len, head_dim = q.shape
-
-        # Unwrap DTensor inputs to local tensors for attention computation
-        device_mesh = None
-        placements = None
-        if isinstance(q, DTensor):
-            device_mesh = q.device_mesh
-            placements = q.placements
-            q = q.to_local()
-            k = k.to_local()
-            v = v.to_local()
 
         # TODO: may be good to use einops in future as we can explicitly reshape
         # with dimension names - see https://github.com/arogozhnikov/einops
@@ -275,11 +264,6 @@ class VLLMAttention(Module):
         # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
         output = output_flat.view(batch_size, seq_len, -1, head_dim)
         output = output.transpose(1, 2)
-
-        if device_mesh is not None:
-            output = DTensor.from_local(
-                output, device_mesh=device_mesh, placements=placements
-            )
 
         return output
 
