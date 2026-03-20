@@ -156,31 +156,30 @@ def _validate_quantization(converters: list[Configurable.Config]):
 
 
 def _validate_qat_lora_finalize(converters: list[Configurable.Config]):
-    """Warn if QAT convert_at_end=True but LoRA save_format != 'merged'.
+    """Warn if QAT convert_at_end=True but LoRA merge_adapter is False.
 
     QAT CONVERT replaces FakeQuantizedLinear with real quantized modules, but
     this only works after LoRA adapters have been merged into base weights.
-    If LoRA is saving adapter-only (dcp/peft), CONVERT will be skipped.
+    If LoRA is not merging adapters, CONVERT will be skipped.
     """
     from torchtitan.components.lora import LoRAConverter
     from torchtitan.components.quantization.qat import QATConverter
 
     qat_convert_at_end = False
-    lora_save_format: str | None = None
+    lora_merge_adapter: bool | None = None
     for config in converters:
         if isinstance(config, QATConverter.Config) and config.convert_at_end:
             qat_convert_at_end = True
         if isinstance(config, LoRAConverter.Config):
-            lora_save_format = config.save_format
+            lora_merge_adapter = config.merge_adapter
 
     if (
         qat_convert_at_end
-        and lora_save_format is not None
-        and lora_save_format != "merged"
+        and lora_merge_adapter is not None
+        and not lora_merge_adapter
     ):
         logger.warning(
-            "QAT convert_at_end=True requires LoRA save_format='merged' to apply "
-            "real quantization. With save_format='%s', QAT CONVERT will be "
+            "QAT convert_at_end=True requires LoRA merge_adapter=True to apply "
+            "real quantization. With merge_adapter=False, QAT CONVERT will be "
             "skipped at end of training.",
-            lora_save_format,
         )
