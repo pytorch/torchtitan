@@ -73,6 +73,11 @@ class MXFP8Converter(QuantizationConverter):
             10, 0
         ), "MXFP8 is only supported on SM100 or architectures"
 
+        # Avoids confusing bugs where fqns is a string we iterate over each character instead of iterating each full string in a list
+        assert isinstance(
+            config.fqns, list
+        ), "MXFP8Converter.Config.fqns must be a Python list of strings"
+
         # Warn user if torch.compile is not enabled
         if not model_compile_enabled:
             logger.warning(

@@ -75,6 +75,11 @@ class TensorParallel(ParallelStyle):
         )
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class ExpertParallel(BaseExpertParallel):
     def __init__(self):
         super().__init__()
@@ -155,8 +160,8 @@ class ExpertParallel(BaseExpertParallel):
                 self.input_shape,
                 routed_input,
                 self.permuted_indices,
-                num_tokens_per_expert_group,
-                _,
+                num_tokens_per_expert_group_padded,
+                group_offsets,
             ) = permute_and_pad(
                 routed_input,
                 num_tokens_per_expert_group,
@@ -164,6 +169,7 @@ class ExpertParallel(BaseExpertParallel):
                 num_local_experts,
                 self.token_group_alignment,
             )
+            return routed_input, num_tokens_per_expert_group_padded
         else:
             (
                 self.input_shape,
@@ -173,8 +179,7 @@ class ExpertParallel(BaseExpertParallel):
             ) = _permute(
                 routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
             )
-
-        return routed_input, num_tokens_per_expert_group
+            return routed_input, num_tokens_per_expert_group
 
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
@@ -184,7 +189,6 @@ class ExpertParallel(BaseExpertParallel):
         routed_output = _unpermute(
             routed_output, self.input_shape, self.permuted_indices
         )
-
         routed_output = all_to_all_single_autograd(
             routed_output,
             self.input_splits,

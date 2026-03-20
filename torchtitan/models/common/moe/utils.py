@@ -157,4 +157,5 @@ def _generate_permute_indices(
 def _unpermute(out, input_shape, permuted_indices):
     out_unpermuted = out.new_empty(input_shape)
     out_unpermuted[permuted_indices, :] = out
+    out = out_unpermuted[:-1]
     return out
