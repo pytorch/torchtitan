@@ -355,11 +355,11 @@ def test_qat_group_size_warning_for_unsupported_scheme(caplog):
 
 def test_qat_lora_adapter_qat():
     """QAT + LoRA: base and adapter weights are both fake-quantized.
-    Also tests that group_size > rank errors out."""
+    Also tests that group_size > rank is clamped to rank."""
     pytest.importorskip("torchao")
     from torchao.quantization.qat.linear import FakeQuantizedLinear
 
-    # --- group_size > rank should error ---
+    # --- group_size > rank: clamped to rank so adapters still work ---
     model = nn.Sequential(
         OrderedDict(
             [
@@ -373,8 +373,15 @@ def test_qat_lora_adapter_qat():
         QATConverter.Config(scheme="intx_weight_only", group_size=128)
     )
     qat_converter.convert(model)
-    with pytest.raises(ValueError, match="does not divide LoRA rank"):
-        LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0)).convert(model)
+    lora_converter = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_converter.convert(model)
+    # Adapter linears should be FakeQuantizedLinear with clamped group_size
+    assert isinstance(model.fc1.lora_a, FakeQuantizedLinear)
+    assert isinstance(model.fc1.lora_b, FakeQuantizedLinear)
+    # Forward pass should succeed
+    x = torch.randn(4, 128)
+    out = model(x)
+    assert out.shape == (4, 128)
 
     # --- Compatible group_size should work ---
     model = nn.Sequential(

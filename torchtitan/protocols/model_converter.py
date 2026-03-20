@@ -3,6 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -12,6 +13,16 @@ from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
+
+
+@dataclass
+class ConverterCheckpointHooks:
+    """Hooks attached to a model by converters for checkpoint integration."""
+
+    key_filter: Callable[[str], bool] | None = None
+    save_last_fn: Callable | None = None
+    load_additional_fn: Callable | None = None
+    finalize_fn: Callable | None = None
 
 
 class ModelConverter(Protocol):
@@ -88,12 +99,10 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         if self.print_after_conversion:
             logger.info(f"Model definition after conversion:\n\n{model}\n\n")
 
-        # Attach a finalize function on the model so the checkpoint system
-        # can call it before the last save.
-        def _finalize_fn():
-            self.finalize(model)
-
-        model.converter_finalize_fn = _finalize_fn  # type: ignore[attr-defined]
+        # Attach finalize into existing hooks (or create new hooks)
+        hooks = getattr(model, "_converter_hooks", None) or ConverterCheckpointHooks()
+        hooks.finalize_fn = lambda: self.finalize(model)
+        model._converter_hooks = hooks  # type: ignore[attr-defined]
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
