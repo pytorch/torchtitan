@@ -167,7 +167,7 @@ def llama3_debugmodel_qat_lora_merged() -> Trainer.Config:
             LoRAConverter.Config(
                 rank=8,
                 alpha=16.0,
-                save_format="merged",
+                merge_adapter=True,
             ),
         ],
     )
