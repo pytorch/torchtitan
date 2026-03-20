@@ -23,6 +23,7 @@ class ConverterCheckpointHooks:
     save_last_fn: Callable | None = None
     load_additional_fn: Callable | None = None
     finalize_fn: Callable | None = None
+    from_hf_map: dict[str, str | None] | None = None
 
 
 class ModelConverter(Protocol):
