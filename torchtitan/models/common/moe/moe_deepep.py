@@ -6,12 +6,10 @@
 
 """MoE with DeepEP backend for efficient expert-parallel communication."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from torch.distributed.tensor import DTensor, Partial
-from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.distributed.deepep import sync_combine
 
@@ -44,7 +42,6 @@ class DeepEPMoE(MoE):
         super().__init__(config, dim=dim)
         # DeepEP doesn't use reorderer - routing handled by DeepEPExpertParallel
         self.reorderer = None  # pyrefly: ignore [bad-assignment]
-        self._local_map_fn: Callable | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -55,8 +52,7 @@ class DeepEPMoE(MoE):
         asynchronously, allowing shared_experts to overlap with the
         combine all-to-all communication.
         """
-        # When x is a DTensor (e.g., from TP with SequenceParallel), use
-        # local_map to convert to local tensors for MoE-internal computation.
+        # Convert DTensor to local tensor for MoE-internal computation.
         # See MoE.forward() for detailed gradient placement documentation.
         if isinstance(x, DTensor):
             assert (
@@ -65,19 +61,8 @@ class DeepEPMoE(MoE):
             assert x.device_mesh.mesh_dim_names == (
                 "tp",
             ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            if self._local_map_fn is None:
-                self._local_map_fn = local_map(
-                    self._forward_local,
-                    in_placements=(x.placements,),
-                    out_placements=x.placements,
-                    in_grad_placements=((Partial(),),),
-                    device_mesh=x.device_mesh,
-                )
-            return self._local_map_fn(x)
-        return self._forward_local(x)
+            x = x.to_local(grad_placements=(Partial(),))
 
-    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
-        """DeepEP MoE forward on local (plain) tensors."""
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
