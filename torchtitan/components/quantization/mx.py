@@ -138,3 +138,6 @@ class MXFP8Converter(QuantizationConverter):
         MXFP8 training doesn't require any post-optimizer hooks at the moment
         """
         return
+
+    def finalize(self, model: nn.Module) -> None:
+        pass
