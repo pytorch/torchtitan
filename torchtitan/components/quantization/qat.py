@@ -208,7 +208,7 @@ class QATConverter(Configurable):
             if hasattr(mod, "lora_a") or hasattr(mod, "lora_b"):
                 logger.warning(
                     "QAT CONVERT skipped: LoRA adapters still present on the model. "
-                    "Use LoRA save_format='merged' to merge adapters before CONVERT."
+                    "Use LoRA merge_adapter=True to merge adapters before CONVERT."
                 )
                 return
 
