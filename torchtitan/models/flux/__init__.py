@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 
-def _flux_param_init():
+def _flux_param_init() -> RegexInitializer:
     """DiT-style param_init for Flux flow matching transformer.
 
     Most weights use xavier_uniform (DiT convention). Exceptions:

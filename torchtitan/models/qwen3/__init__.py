@@ -31,7 +31,9 @@ __all__ = [
 # Adding different variants of the model
 
 
-def _qwen3_param_init(dim, n_layers, weight_tying=False):
+def _qwen3_param_init(
+    dim: int, n_layers: int, weight_tying: bool = False
+) -> RegexInitializer:
     patterns = make_decoder_param_init(dim=dim, n_layers=n_layers)
     if weight_tying:
         # tok_embeddings.weight is tied to output.weight; skip its init

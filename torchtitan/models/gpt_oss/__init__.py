@@ -29,7 +29,7 @@ __all__ = [
 ]
 
 
-def _gptoss_param_init(dim, n_layers):
+def _gptoss_param_init(dim: int, n_layers: int) -> RegexInitializer:
     depth_std = DepthScaledTruncNormal(n_layers=n_layers)
     final_out_std = dim**-0.5
     return RegexInitializer(

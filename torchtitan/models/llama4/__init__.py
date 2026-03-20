@@ -34,7 +34,7 @@ __all__ = [
 ]
 
 
-def _llama4_param_init(dim, n_layers):
+def _llama4_param_init(dim: int, n_layers: int) -> RegexInitializer:
     return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
 
 

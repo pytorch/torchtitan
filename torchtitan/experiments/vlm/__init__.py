@@ -36,7 +36,7 @@ def _get_dict(obj) -> dict[str, Any]:
     return {field.name: getattr(obj, field.name) for field in fields(obj)}
 
 
-def _vlm_param_init(dim, n_layers):
+def _vlm_param_init(dim: int, n_layers: int) -> RegexInitializer:
     base = make_decoder_param_init(dim=dim, n_layers=n_layers)
     # Projector uses xavier_uniform for weights, zeros for biases
     projector_patterns = {
