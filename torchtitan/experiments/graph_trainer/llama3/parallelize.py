@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
 from torch.fx.traceback import annotate_fn
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
@@ -16,41 +15,23 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import maybe_disable_eager_ac
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_ac_regions,
+    apply_graph_ac,
+)
 from torchtitan.experiments.graph_trainer.compile import apply_compile
+from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.parallelize import apply_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn.default,
-    torch._higher_order_ops.inductor_compiled_code,
-}
-
-
-def annotate_llama() -> None:
+def annotate_llama(model: GraphTrainerLlama3Model) -> None:
     """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
     - Flex attention annotation: Tags FlexAttentionWrapper.forward with
@@ -58,6 +39,9 @@ def annotate_llama() -> None:
       regional inductor pass based on the annotation. Regional inductor is now only
       supported in AOT mode.
 
+    - AC region annotation: Tags each transformer block's forward with a unique
+      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
+      boundaries for the min-cut partitioner.
     """
     from torchtitan.models.common.attention import FlexAttentionWrapper
 
@@ -65,9 +49,11 @@ def annotate_llama() -> None:
         {"compile_with_inductor": "flex_attention"}
     )(FlexAttentionWrapper.forward)
 
+    annotate_ac_regions(model)
+
 
 def parallelize_llama(
-    model: Llama3Model,
+    model: GraphTrainerLlama3Model,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -94,9 +80,7 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    annotate_llama()
-
-    maybe_disable_eager_ac(compile_config, ac_config)
+    annotate_llama(model)
 
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
@@ -121,16 +105,7 @@ def parallelize_llama(
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if ac_config.mode != "none":
-        model_compile_enabled = (
-            compile_config.enable and "model" in compile_config.components
-        )
-        apply_ac(
-            model,
-            ac_config,
-            model_compile_enabled=model_compile_enabled,
-            op_sac_save_list=_op_sac_save_list,
-            base_folder=dump_folder,
-        )
+        apply_graph_ac(compile_config, ac_config)
 
     # apply data parallel
     if (
