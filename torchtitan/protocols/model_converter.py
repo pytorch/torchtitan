@@ -32,12 +32,10 @@ class ModelConverter(Protocol):
         ...
 
     def finalize(self, model: nn.Module) -> None:
-        """End-of-training hook for final model transformations.
+        """End-of-training hook called before the last checkpoint save.
 
-        Called before the last checkpoint save. Examples:
-        - QAT CONVERT: replace fake-quantized modules with real quantized ones
-        - LoRA merge: fold adapter weights into base weights at model level
-        Default is a no-op.
+        Examples: LoRA merge (fold adapter weights into base weights),
+        QAT CONVERT (replace fake-quantized modules with real quantized ones).
         """
         ...
 
@@ -91,7 +89,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
             logger.info(f"Model definition after conversion:\n\n{model}\n\n")
 
         # Attach a finalize function on the model so the checkpoint system
-        # can call it before the last save (same pattern as converter_export_sd_fn).
+        # can call it before the last save.
         def _finalize_fn():
             self.finalize(model)
 

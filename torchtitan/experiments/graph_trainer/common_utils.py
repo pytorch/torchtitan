@@ -8,12 +8,29 @@ from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
+from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_pytree_node, tree_map
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
+
+_AC_REGION_ID = "ac_region_id"
+
+
+def annotate_ac_regions(model: nn.Module) -> None:
+    """Annotate each transformer block with a unique AC region ID.
+
+    This enables apply_sac_pass to assign different ac_graph_id values
+    per block, creating AC region boundaries between transformer blocks.
+    """
+    layers = model.get_submodule("layers")
+    for layer_id, transformer_block in layers.named_children():
+        transformer_block.forward = annotate_fn({_AC_REGION_ID: int(layer_id)})(
+            transformer_block.forward
+        )
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -128,20 +145,25 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def maybe_disable_eager_ac(
+def apply_graph_ac(
     compile_config: CompileConfig,
     ac_config: "ActivationCheckpointConfig",
 ) -> None:
-    """Disable eager AC when apply_sac graph pass is enabled.
+    """Add apply_sac to compile joint passes for graph-based selective AC.
 
-    When apply_sac is used as a joint graph pass, eager activation checkpointing
-    must be disabled to avoid double-checkpointing. This must be called before
-    the model parallelization step that applies eager AC.
+    Must be called only when ac_config.mode != "none". Only "selective" mode
+    is supported; other modes raise ValueError.
     """
+    if ac_config.mode != "selective":
+        raise ValueError(
+            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
+            f"'none', got '{ac_config.mode}'. Use 'selective' for graph-based SAC."
+        )
+
     joint_pass_names = getattr(compile_config, "joint_passes", [])
-    if "apply_sac" in joint_pass_names:
-        if ac_config.mode != "none":
-            logger.info(
-                "apply_sac graph pass is enabled, overriding eager AC mode to none"
-            )
-            ac_config.mode = "none"
+    if "apply_sac" not in joint_pass_names:
+        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
+        logger.info(
+            "activation_checkpoint.mode is 'selective', added apply_sac to "
+            "compile.joint_passes"
+        )
