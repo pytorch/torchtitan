@@ -169,7 +169,6 @@ def llama3_8b_lora() -> Trainer.Config:
             LoRAConverter.Config(
                 rank=128,
                 alpha=32.0,
-                save_format="peft",
             ),
         ],
     )
@@ -178,6 +177,7 @@ def llama3_8b_lora() -> Trainer.Config:
         interval=500,
         initial_load_in_hf=True,
         initial_load_model_only=True,
+        last_save_in_hf=True,
     )
     return config
 
