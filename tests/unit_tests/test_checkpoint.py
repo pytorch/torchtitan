@@ -778,7 +778,7 @@ class TestCheckpointManager(unittest.TestCase):
 
 
 class TestModelWrapperConverterKeys(unittest.TestCase):
-    """Tests for ModelWrapper.has_converter_keys() and its effect on load planner."""
+    """Tests for converter hooks and their effect on load planner."""
 
     def _create_manager(self, mock_save, mock_load, model, temp_dir):
         """Create a CheckpointManager with mocked dcp.save/load."""
@@ -842,9 +842,13 @@ class TestModelWrapperConverterKeys(unittest.TestCase):
         """With converter keys on the model, dcp.load is called with allow_partial_load=True."""
         temp_dir = tempfile.mkdtemp()
         try:
+            from torchtitan.protocols.model_converter import ConverterCheckpointHooks
+
             model = nn.Linear(2, 2)
             object.__setattr__(
-                model, "converter_key_filter", lambda key: ".lora_a." in key
+                model,
+                "_converter_hooks",
+                ConverterCheckpointHooks(key_filter=lambda key: ".lora_a." in key),
             )
             manager = self._create_manager(mock_save, mock_load, model, temp_dir)
             manager.save(curr_step=1)
