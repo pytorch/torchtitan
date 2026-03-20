@@ -265,7 +265,7 @@ def apply_non_moe_tp(
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     positions_sharding = Replicate() if enable_cp else None
     norm_plan = SequenceParallel() if enable_sp else NoParallel()
-    qk_norm_plan = SequenceParallel(sequence_dim=2) if enable_sp else NoParallel()
+    qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=enable_sp)
     rowwise_output_plan = rowwise_parallel(
         output_layouts=sp_layout, use_local_output=enable_sp
     )

@@ -7,17 +7,19 @@
 import unittest
 
 import torch
-import torch.nn as nn
 
 from torchtitan.config import CompileConfig
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama4.parallelize import apply_compile
+from torchtitan.protocols.module import Module, ModuleDict
 
 
-class TransformerBlock(nn.Module):
+class TransformerBlock(Module):
     def __init__(self, dim=512):
         super().__init__()
-        self.attention = nn.Linear(dim, dim, bias=False)
-        self.mlp = nn.Linear(dim, dim, bias=False)
+        linear_config = Linear.Config(bias=False)
+        self.attention = linear_config.build(in_features=dim, out_features=dim)
+        self.mlp = linear_config.build(in_features=dim, out_features=dim)
         self.moe_enabled = False
 
     def forward(self, x):
@@ -26,10 +28,10 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class TinyModel(nn.Module):
+class TinyModel(Module):
     def __init__(self, num_layers=2, dim=512):
         super().__init__()
-        self.layers = nn.ModuleDict(
+        self.layers = ModuleDict(
             {str(i): TransformerBlock(dim) for i in range(num_layers)}
         )
 
