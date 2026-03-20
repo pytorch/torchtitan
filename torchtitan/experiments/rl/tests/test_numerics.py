@@ -11,23 +11,29 @@ Single-GPU (TP=1) only. Verifies that TorchTitanVLLMModelWrapper produces
 the same outputs as vLLM's native Qwen3 model when loaded from the same
 checkpoint.
 
+The vLLM native model uses vLLM's default FLASH_ATTN backend (bundled
+flash-attn kernel). The TorchTitan model uses the CUSTOM backend
+(PyTorchFlashAttentionImpl), which routes attention through PyTorch's
+native FlashAttention varlen API.
+
 All tests exercise the **prefill** forward path only (single pass, no
 autoregressive decode). KV cache is written during prefill but never
 read back — the decode path is not covered here.
 
 Test cases and tolerance standards:
   - test_weights_match:          max_diff <= 1e-5 (exact weight loading)
-  - test_attention_module:       atol=1e-5
+  - test_attention_module:       atol=1e-5 (FLASH_ATTN vs CUSTOM backend)
   - test_end_to_end_logits:      atol=1e-3
 
-test_attention_module tests the full attention module (QKV projections +
-RoPE + vLLM paged attention with KV cache write + output projection).
+test_attention_module compares vLLM's bundled FlashAttention (FLASH_ATTN)
+against our PyTorchFlashAttentionImpl (CUSTOM backend) to verify parity
+between the two attention implementations.
 
 Usage:
-    pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v -s
+    pytest torchtitan/experiments/rl/tests/test_numerics.py -v -s
 
     MODEL_CHECKPOINT_PATH=Qwen/Qwen3-0.6B pytest \
-        torchtitan/experiments/rl/unified/tests/test_numerics.py -v -s
+        torchtitan/experiments/rl/tests/test_numerics.py -v -s
 """
 
 import os
@@ -49,10 +55,12 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
-from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
-from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
-    TorchTitanVLLMModelWrapper,
+# Import to register the CUSTOM attention backend with vLLM's registry
+from torchtitan.experiments.rl.models.attention import (  # noqa: F401
+    PyTorchFlashAttentionBackend,
 )
+from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
 from torchtitan.models.qwen3 import model_registry
 
 BLOCK_SIZE = 32
@@ -155,6 +163,21 @@ class _TorchRMSNormWrapper(torch.nn.Module):
         return (out, residual) if residual is not None else out
 
 
+def _make_engine_args(checkpoint: str, attention_backend: str | None = None):
+    """Create EngineArgs with optional attention backend override."""
+    kwargs = dict(
+        model=checkpoint,
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.9,
+        tensor_parallel_size=1,
+        dtype="bfloat16",
+    )
+    if attention_backend is not None:
+        kwargs["attention_backend"] = attention_backend
+    return EngineArgs(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Fixture: build both models once per test class
 # ---------------------------------------------------------------------------
@@ -162,7 +185,7 @@ class _TorchRMSNormWrapper(torch.nn.Module):
 
 @pytest.fixture(scope="class")
 def ctx():
-    """Load vLLM native and TorchTitan models from the same checkpoint (TP=1)."""
+    """Load vLLM native (FLASH_ATTN attention backend) and TorchTitan (CUSTOM attention backend) models from the same checkpoint."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
@@ -175,19 +198,18 @@ def ctx():
 
         checkpoint = snapshot_download(checkpoint)
 
-    engine_args = EngineArgs(
-        model=checkpoint,
-        skip_tokenizer_init=True,
-        enforce_eager=True,
-        gpu_memory_utilization=0.1,
-        tensor_parallel_size=1,
-        dtype="bfloat16",
+    # Two separate configs: one per attention backend
+    native_vllm_config = _make_engine_args(checkpoint).create_engine_config(
+        UsageContext.ENGINE_CONTEXT
     )
-    vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
-    hf_cfg = vllm_config.model_config.hf_config
+    custom_vllm_config = _make_engine_args(
+        checkpoint, attention_backend="CUSTOM"
+    ).create_engine_config(UsageContext.ENGINE_CONTEXT)
 
-    with set_current_vllm_config(vllm_config):
-        # vLLM requires distributed init even for TP=1
+    hf_cfg = native_vllm_config.model_config.hf_config
+
+    # vLLM requires distributed init even for TP=1
+    with set_current_vllm_config(native_vllm_config):
         if not model_parallel_is_initialized():
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             init_distributed_environment(
@@ -199,19 +221,23 @@ def ctx():
             )
             initialize_model_parallel(1, 1)
 
-        # vLLM native model
-        loader = get_model_loader(vllm_config.load_config)
-        native_model = loader.load_model(vllm_config, vllm_config.model_config)
-        _replace_vllm_rmsnorm_with_torch(native_model)
+    # vLLM native model (FLASH_ATTN — vLLM's bundled flash-attn)
+    with set_current_vllm_config(native_vllm_config):
+        loader = get_model_loader(native_vllm_config.load_config)
+        vllm_native_model = loader.load_model(
+            native_vllm_config, native_vllm_config.model_config
+        )
+        _replace_vllm_rmsnorm_with_torch(vllm_native_model)
 
-        # TorchTitan model via wrapper
+    # TorchTitan model (CUSTOM — PyTorchFlashAttentionImpl)
+    with set_current_vllm_config(custom_vllm_config):
         model_spec = model_registry(_get_model_flavor(checkpoint))
         model_spec.parallelize_fn = parallelize_qwen3
-        tt_model = TorchTitanVLLMModelWrapper(
-            model_spec=model_spec, vllm_config=vllm_config
+        torchtitan_model = TorchTitanVLLMModelWrapper(
+            model_spec=model_spec, vllm_config=custom_vllm_config
         )
 
-    tt_model.to(device=device, dtype=torch.bfloat16).eval()
+    torchtitan_model.to(device=device, dtype=torch.bfloat16).eval()
 
     # Shared test inputs
     num_kv_heads = hf_cfg.num_key_value_heads
@@ -224,15 +250,19 @@ def ctx():
     tokens = torch.randint(0, hf_cfg.vocab_size, (seq_len,), device=device)
     positions = torch.arange(seq_len, device=device)
     attn_meta = _build_attn_metadata(seq_len, device)
-    _reset_kv_caches(vllm_config, num_kv_heads, head_dim, device)
+
+    # Reset KV caches for both configs
+    _reset_kv_caches(native_vllm_config, num_kv_heads, head_dim, device)
+    _reset_kv_caches(custom_vllm_config, num_kv_heads, head_dim, device)
 
     return {
-        "native": native_model,
-        "tt": tt_model,
-        "vllm_config": vllm_config,
+        "vllm_native_model": vllm_native_model,
+        "torchtitan_model": torchtitan_model,
+        "native_vllm_config": native_vllm_config,
+        "custom_vllm_config": custom_vllm_config,
         "tokens": tokens,
         "positions": positions,
-        "attn_meta": attn_meta,
+        "prefill_attn_metadata": attn_meta,
         "dim": hf_cfg.hidden_size,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
@@ -261,20 +291,26 @@ class TestVLLMTorchTitanNumerics:
         device = ctx["device"]
 
         _reset_kv_caches(
-            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+            ctx["native_vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
         )
-        with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
-            native_hidden = ctx["native"](
+        with set_forward_context(
+            ctx["prefill_attn_metadata"], ctx["native_vllm_config"]
+        ):
+            native_hidden = ctx["vllm_native_model"](
                 input_ids=ctx["tokens"], positions=ctx["positions"]
             )
-            native_logits = ctx["native"].compute_logits(native_hidden)
+            native_logits = ctx["vllm_native_model"].compute_logits(native_hidden)
 
         _reset_kv_caches(
-            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+            ctx["custom_vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
         )
-        with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
-            tt_hidden = ctx["tt"](input_ids=ctx["tokens"], positions=ctx["positions"])
-            tt_logits = ctx["tt"].compute_logits(tt_hidden)
+        with set_forward_context(
+            ctx["prefill_attn_metadata"], ctx["custom_vllm_config"]
+        ):
+            tt_hidden = ctx["torchtitan_model"](
+                input_ids=ctx["tokens"], positions=ctx["positions"]
+            )
+            tt_logits = ctx["torchtitan_model"].compute_logits(tt_hidden)
 
         torch.testing.assert_close(
             native_logits.float(),
@@ -286,16 +322,17 @@ class TestVLLMTorchTitanNumerics:
 
     @torch.inference_mode()
     def test_attention_module(self, ctx):
-        """Attention module parity: QKV + RoPE + paged attention + output projection.
+        """Attention backend parity: FLASH_ATTN vs CUSTOM (PyTorchFlashAttentionImpl).
 
         Feeds identical random hidden states through vLLM native's self_attn
-        and TorchTitan's attention module. Both use vLLM's paged attention
-        with KV cache (via set_forward_context and attn_metadata).
+        (using vLLM's bundled FlashAttention) and TorchTitan's attention module
+        (using PyTorchFlashAttentionImpl). Verifies the two attention backends
+        produce matching outputs.
         """
         device = ctx["device"]
 
-        vllm_attn = ctx["native"].model.layers[0].self_attn
-        tt_attn = ctx["tt"].model.layers["0"].attention
+        vllm_attn = ctx["vllm_native_model"].model.layers[0].self_attn
+        tt_attn = ctx["torchtitan_model"].model.layers["0"].attention
 
         torch.manual_seed(123)
         hidden = torch.randn(
@@ -303,17 +340,23 @@ class TestVLLMTorchTitanNumerics:
         )
         positions = torch.arange(ctx["seq_len"], device=device)
 
+        # Native model forward with FLASH_ATTN backend
         _reset_kv_caches(
-            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+            ctx["native_vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
         )
-        with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
+        with set_forward_context(
+            ctx["prefill_attn_metadata"], ctx["native_vllm_config"]
+        ):
             native_out = vllm_attn(positions=positions, hidden_states=hidden.clone())
 
+        # TorchTitan model forward with CUSTOM backend (PyTorchFlashAttentionImpl)
         _reset_kv_caches(
-            ctx["vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
+            ctx["custom_vllm_config"], ctx["num_kv_heads"], ctx["head_dim"], device
         )
-        with set_forward_context(ctx["attn_meta"], ctx["vllm_config"]):
-            freqs_cis = ctx["tt"].model.freqs_cis
+        with set_forward_context(
+            ctx["prefill_attn_metadata"], ctx["custom_vllm_config"]
+        ):
+            freqs_cis = ctx["torchtitan_model"].model.freqs_cis
             tt_out = tt_attn(
                 hidden.unsqueeze(0).clone(), freqs_cis, None, positions.unsqueeze(0)
             )
@@ -332,8 +375,8 @@ class TestVLLMTorchTitanNumerics:
     @torch.inference_mode()
     def test_weights_match(self, ctx):
         """Spot-check that key weight tensors loaded identically."""
-        native_sd = dict(ctx["native"].named_parameters())
-        tt_sd = dict(ctx["tt"].model.named_parameters())
+        native_sd = dict(ctx["vllm_native_model"].named_parameters())
+        tt_sd = dict(ctx["torchtitan_model"].model.named_parameters())
 
         pairs = [
             ("model.embed_tokens.weight", "tok_embeddings.weight"),

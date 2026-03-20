@@ -15,6 +15,7 @@ The integration consists of the following components:
 
 0. Create and activate environment with uv:
 ```bash
+pip install uv
 uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```

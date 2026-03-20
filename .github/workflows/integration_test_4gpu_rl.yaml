@@ -84,7 +84,6 @@ jobs:
 
         # Run numerics unit tests (TP=1)
         torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/tests/test_numerics.py -v
-        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
 
         # Run E2E RL integration tests (TP=1 on 2 GPUs, TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
