@@ -100,7 +100,6 @@ class GroupedExperts(Module):
         )
         self.use_grouped_mm = config.use_grouped_mm
         self._local_map_fn: Callable | None = None
-        self._local_map_run_experts_fn: Callable | None = None
 
     def forward(
         self,
@@ -127,10 +126,7 @@ class GroupedExperts(Module):
             # tensors. The output has a dynamic token dimension that cannot be
             # wrapped as a DTensor, so we use None out_placements to keep it
             # as a plain tensor.
-            if (
-                self._local_map_fn is None
-                or self._local_map_run_experts_fn is not run_experts_fn
-            ):
+            if self._local_map_fn is None:
                 self._local_map_fn = local_map(
                     run_experts_fn,
                     in_placements=(
@@ -143,7 +139,6 @@ class GroupedExperts(Module):
                     out_placements=None,  # output stays as plain tensor
                     device_mesh=self.w1.device_mesh,
                 )
-                self._local_map_run_experts_fn = run_experts_fn
             return self._local_map_fn(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
