@@ -12,6 +12,9 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
+from torchtitan.experiments.rl.models.vllm_compat_attention import (
+    VLLMCompatibleFlashAttention,
+)
 from torchtitan.protocols.module import Module
 
 from vllm.model_executor.layers.attention import Attention
