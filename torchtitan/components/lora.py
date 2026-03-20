@@ -108,24 +108,16 @@ class LoRAConverter(Configurable):
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
 
-        save_format: str = "dcp"
-        """Format for saving adapter weights at the last training step.
-        "dcp" saves adapter weights via DCP (default, supports resumption).
-        "peft" saves adapter_model.safetensors + adapter_config.json for
-        compatibility with HuggingFace PEFT.
-        "merged" folds adapters into base weights (base + alpha/rank * B @ A)
-        and saves a standard checkpoint with no LoRA keys."""
+        merge_adapter: bool = False
+        """When True, adapters are folded into base weights
+        (base + alpha/rank * B @ A) and the checkpoint contains no LoRA keys.
+        When False (default), adapter weights are saved separately.
+        Use checkpoint.last_save_in_hf=True to save in PEFT format."""
 
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
-        self.save_format = config.save_format
-        if self.save_format not in ("dcp", "peft", "merged"):
-            raise ValueError(
-                f"LoRA save_format must be 'dcp', 'peft', or 'merged', "
-                f"got '{self.save_format}'"
-            )
-
+        self.merge_adapter = config.merge_adapter
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
 
     @staticmethod
@@ -281,12 +273,12 @@ class LoRAConverter(Configurable):
         # are adapter keys and how to save them.
         model.converter_key_filter = self._is_lora_key  # type: ignore[attr-defined]
 
-        if self.save_format == "merged":
+        if self.merge_adapter:
             model.converter_export_sd_fn = self._make_merge_fn()  # type: ignore[attr-defined]
-        elif self.save_format == "peft":
+        else:
+            # Adapter-only save: wire up PEFT save/load for HF format
             model.converter_save_last_fn = self._make_peft_save_fn()  # type: ignore[attr-defined]
             model.converter_load_additional_fn = self._make_peft_load_fn()  # type: ignore[attr-defined]
-        # "dcp" format: no special attrs needed, checkpoint uses DCP
 
     def _apply_adapter_qat(
         self, model: nn.Module, scheme: str, group_size: int
@@ -383,48 +375,29 @@ class LoRAConverter(Configurable):
         pass
 
     def finalize(self, model: nn.Module) -> None:
-        """Merge LoRA adapters into base weights at the model level.
+        """Merge LoRA adapters into base weights at end of training.
 
-        Only runs when save_format='merged'. After finalize, the model
-        contains no LoRA modules — just plain linear layers (or whatever
-        the parent class was, e.g. FakeQuantizedLinear) ready for
-        downstream converters like QAT CONVERT.
+        Only runs when merge_adapter=True. After merging, adapter modules
+        are removed and the linear class is restored to its parent class.
         """
-        if self.save_format != "merged":
+        if not self.merge_adapter:
             return
 
         scaling = self.alpha / self.rank
-        merge_count = 0
         for name, mod in list(model.named_modules()):
             if not (hasattr(mod, "lora_a") and hasattr(mod, "lora_b")):
                 continue
-
-            # Merge: base.weight += scaling * B @ A
             with torch.no_grad():
-                lora_a_weight = mod.lora_a.weight
-                lora_b_weight = mod.lora_b.weight
-                mod.weight.add_(scaling * (lora_b_weight @ lora_a_weight))
-
-            # Remove LoRA submodules
-            del mod.lora_a
-            del mod.lora_b
+                mod.weight.add_(scaling * (mod.lora_b.weight @ mod.lora_a.weight))
+            del mod.lora_a, mod.lora_b
             if hasattr(mod, "_lora_scaling"):
                 del mod._lora_scaling
-
-            # Restore the original parent class (remove LoRA from MRO).
-            # The LoRA class is dynamically created as LoRA<ParentClass>,
-            # and the parent is always the second entry in __mro__
-            # (after the LoRA class itself).
+            # Restore the parent class (e.g. FakeQuantizedLinear or nn.Linear)
             parent_cls = type(mod).__mro__[1]
             if parent_cls is not nn.Module and issubclass(parent_cls, nn.Linear):
                 mod.__class__ = parent_cls
 
-            merge_count += 1
-
-        logger.info(
-            f"LoRA finalize: merged {merge_count} adapter(s) into base weights "
-            f"(scaling={scaling})"
-        )
+        logger.info("LoRA adapters merged into base weights")
 
 
 def remap_lora_keys_to_hf(

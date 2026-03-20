@@ -26,7 +26,7 @@ from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -90,7 +90,7 @@ class Decoder(BaseModel):
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
-        self.layers = torch.nn.ModuleDict()
+        self.layers = ModuleDict()
         for layer_id in range(config.n_layers):
             self.layers[str(layer_id)] = config.layer.build(
                 layer_id=layer_id, dim=config.dim, n_layers=config.n_layers

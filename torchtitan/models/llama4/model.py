@@ -176,11 +176,11 @@ class Llama4Model(Decoder):
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             assert self.layer.moe is not None
-            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
+            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported on SM90 or later",
                 )
-                self.layer.moe.use_grouped_mm = False
+                self.layer.moe.experts.use_grouped_mm = False
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -188,12 +188,33 @@ class Llama4Model(Decoder):
                     "(Llama4 requires FlexAttention, which is not supported with CP)."
                 )
 
-            self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
+            self.layer.moe.router._debug_force_load_balance = (
+                debug.moe_force_load_balance
+            )
 
             if parallelism.expert_parallel_comm_backend == "deepep":
                 from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
 
-                self.layer.moe = DeepEPMoE.Config(**dataclasses.asdict(self.layer.moe))
+                init_kwargs = {
+                    f.name: getattr(self.layer.moe, f.name)
+                    for f in dataclasses.fields(self.layer.moe)
+                    if f.init
+                }
+                self.layer.moe = DeepEPMoE.Config(**init_kwargs)
+
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layer.attention.n_heads
+                # pyrefly: ignore [missing-attribute]
+                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
