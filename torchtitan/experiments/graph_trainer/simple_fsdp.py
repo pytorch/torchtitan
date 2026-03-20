@@ -23,6 +23,8 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
+from torchtitan.protocols.module import Module
+
 _active_parametrization = True
 
 
@@ -150,7 +152,7 @@ def _register_parametrization(
     module.__class__ = module_cls
 
 
-class ReplicateComputation(torch.nn.Module):
+class ReplicateComputation(Module):
     def __init__(
         self,
         device_mesh: DeviceMesh,
