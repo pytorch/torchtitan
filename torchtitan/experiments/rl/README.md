@@ -28,10 +28,7 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 2. Install Flash Attention v3 kernels:
 ```
 # CUDA 12
-pip install flash-attn-3 --extra-index=https://download.pytorch.org/whl/test/cu128
-# CUDA 13
-pip install flash-attn-3 --extra-index=https://download.pytorch.org/whl/test/cu130
-```
+uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
 
 3. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
 ```bash
