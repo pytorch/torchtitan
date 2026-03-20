@@ -23,6 +23,7 @@ source titan-rl/bin/activate
 ```bash
 uv pip install torchmonarch==0.3.0
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+uv pip install pygtrie portpicker
 ```
 
 2. Install Flash Attention v3 kernels:
