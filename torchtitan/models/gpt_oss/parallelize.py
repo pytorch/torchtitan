@@ -19,6 +19,10 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
+from torchtitan.components.quantization.utils import (
+    get_grouped_mm_quantization_type,
+    QuantizationType,
+)
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -36,6 +40,8 @@ from torchtitan.distributed.dual_pipe_v import (
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
     ExpertParallel,
+    Float8ExpertParallel,
+    MXFP8ExpertParallel,
     ReordererSequenceParallel,
 )
 from torchtitan.distributed.tensor_parallel import NoParallel
@@ -127,6 +133,7 @@ def parallelize_gptoss(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
+            quantization=get_grouped_mm_quantization_type(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -278,6 +285,7 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
     dual_pipe_v: bool = False,
+    quantization: "QuantizationType | None" = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -326,8 +334,15 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            # input / output sharding on the batch / tokens dim.
+            # float8/mxfp8 expert parallel impls dynamically pad token groups to alignment size required
+            # for the low precision grouped GEMM.
+            if quantization == QuantizationType.FLOAT8:
+                experts_plan = Float8ExpertParallel()
+            elif quantization == QuantizationType.MXFP8:
+                experts_plan = MXFP8ExpertParallel()
+            else:
+                experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = GptossExpertTensorParallel()

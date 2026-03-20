@@ -9,14 +9,10 @@ from importlib.util import find_spec
 from typing import ClassVar, Literal
 
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    MXFP8_GROUP_ALIGNMENT_SIZE,
-    QuantizationConverter,
-)
+from torchtitan.components.quantization import QuantizationConverter
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe.utils import set_token_group_alignment_size
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -61,6 +57,7 @@ class MXFP8Converter(QuantizationConverter):
         model_compile_enabled: bool,
     ):
         self.enabled = False
+        self.convert_grouped_gemms = False
 
         # Ensure minimum torchao versions
         if find_spec("torchao") is None:
@@ -86,9 +83,6 @@ class MXFP8Converter(QuantizationConverter):
             )
 
         logger.info("MXFP8 MoE training enabled")
-
-        # Set token group alignment size for MXFP8 grouped GEMMs
-        set_token_group_alignment_size(MXFP8_GROUP_ALIGNMENT_SIZE)
 
         # If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
         # as part of the EP implementation.
@@ -153,3 +147,13 @@ class MXFP8Converter(QuantizationConverter):
         MXFP8 training doesn't require any post-optimizer hooks at the moment
         """
         return
+
+
+def find_mxfp8_config(
+    converters: list,
+) -> MXFP8Converter.Config | None:
+    """Find the MXFP8Converter.Config in a list of converter configs, if any."""
+    return next(
+        (c for c in converters if isinstance(c, MXFP8Converter.Config)),
+        None,
+    )

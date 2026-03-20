@@ -4,7 +4,35 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from enum import auto, Enum
+
 import torch.nn as nn
+from torchtitan.components.quantization.float8 import find_float8_grouped_mm_config
+from torchtitan.components.quantization.mx import find_mxfp8_config
+from torchtitan.protocols import ModelConverter
+
+
+class QuantizationType(Enum):
+    FLOAT8 = auto()
+    MXFP8 = auto()
+
+
+def routed_experts_in_fqns(fqns: list[str]) -> bool:
+    """Helper used to determine if quantization is targeting routed experts (grouped GEMMs)."""
+    for fqn in fqns:
+        if "experts" in fqn and "shared_experts" not in fqn:
+            return True
+    return False
+
+
+def get_grouped_mm_quantization_type(
+    model_converters: list[ModelConverter],
+) -> QuantizationType | None:
+    if find_float8_grouped_mm_config(model_converters):
+        return QuantizationType.FLOAT8
+    elif config := find_mxfp8_config(model_converters):
+        if routed_experts_in_fqns(config.fqns):
+            return QuantizationType.MXFP8
 
 
 def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:

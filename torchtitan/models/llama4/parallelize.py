@@ -21,6 +21,11 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
+
+from torchtitan.components.quantization.utils import (
+    get_grouped_mm_quantization_type,
+    QuantizationType,
+)
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -41,6 +46,8 @@ from torchtitan.distributed.expert_parallel import (
     DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
+    Float8ExpertParallel,
+    MXFP8ExpertParallel,
     ReordererSequenceParallel,
     TensorParallel,
 )
@@ -168,6 +175,7 @@ def parallelize_llama(
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+            quantization=get_grouped_mm_quantization_type(model_converters.converters),
         )
 
     attn_backend = model.config.layer.attention.attn_backend
@@ -528,6 +536,7 @@ def apply_moe_ep_tp(
     dual_pipe_v: bool = False,
     comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
+    quantization: QuantizationType | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -607,11 +616,19 @@ def apply_moe_ep_tp(
                     score_before_experts=score_before_experts,
                     comm_backend=comm_backend,
                     hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
+                    quantization_type=quantization,
                 )
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             else:
-                # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+                # input / output sharding on the batch / tokens dim.
+                # float8/mxfp8 expert parallel impls dynamically pad token groups to alignment size required
+                # for the low precision grouped GEMM.
+                if QuantizationType == QuantizationType.FLOAT8:
+                    experts_plan = Float8ExpertParallel()
+                elif QuantizationType == QuantizationType.MXFP8:
+                    experts_plan = MXFP8ExpertParallel()
+                else:
+                    experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()

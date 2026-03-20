@@ -45,10 +45,9 @@ class ScaleBiasForward(torch.autograd.Function):
 
 def indices_padding_wrapper(func: Callable) -> Callable:
     """
-    In order to use torch._grouped_mm, we need to make sure the number of
-    tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
-    generate_permute_indices kernel also helps achieve this via padding,
-    without incurring synchronization between device and host.
+    Wrapper to permute tokens from rank-major to expert-major order for
+    torch._grouped_mm. The permutation is done without incurring
+    synchronization between device and host.
     """
 
     def wrapper(

@@ -17,6 +17,8 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
+
+from torchtitan.components.quantization.utils import get_grouped_mm_quantization_type
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -142,6 +144,7 @@ def parallelize_deepseekv3(
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+            quantization=get_grouped_mm_quantization_type(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:

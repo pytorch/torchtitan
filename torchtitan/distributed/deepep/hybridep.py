@@ -29,13 +29,11 @@ from torch._library.opaque_object import (
 )
 from torch.distributed import ProcessGroup
 
-from torchtitan.models.common.moe.utils import (
-    get_mxfp8_pad_multiple,
-    maybe_align_num_tokens_for_mxfp8,
-)
-
+from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization.utils import QuantizationType
 
 _buffer: Any = None  # Global buffer instance
+_quantization_type: QuantizationType | None = None  # Current quantization type
 
 
 class DispatchHandle(OpaqueBase):
@@ -308,8 +306,6 @@ def _combine_backward(ctx, grad_combined):
 
     # Must pass pad_multiple so backward gradients entering ScaledGroupedMM
     # (torchao MXFP8) also have rows aligned to 32.
-    from torchtitan.models.common.moe.utils import get_mxfp8_pad_multiple
-
     pad_multiple = get_mxfp8_pad_multiple()
 
     grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
@@ -404,6 +400,7 @@ def dispatch_tokens(
     group: ProcessGroup,
     score_before_experts: bool = True,
     non_blocking_expert_capacity_factor: float | None = None,
+    quantization_type: QuantizationType | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
 
@@ -419,10 +416,15 @@ def dispatch_tokens(
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
             tensor as num_tokens × ep_size × min(num_local_experts, top_k) × cf,
             aligned for MXFP8.
+        quantization_type: Quantization type (FLOAT8, MXFP8, or None) for
+            determining padding requirements.
 
     Returns:
         (permuted_hidden, tokens_per_expert, state)
     """
+    global _quantization_type
+    _quantization_type = quantization_type
+
     non_blocking = non_blocking_expert_capacity_factor is not None
 
     selected_experts_indices = selected_experts_indices.contiguous()
@@ -472,6 +474,42 @@ def combine_tokens(hidden_states: torch.Tensor, state: DispatchState) -> torch.T
         hidden_states = hidden_states * state.permuted_scores.reshape(-1, 1)
 
     return torch.ops.hybridep.combine(hidden_states, state.handle, state.num_tokens)
+
+
+def get_mxfp8_pad_multiple() -> int | None:
+    """Return the pad_multiple needed for MXFP8 grouped GEMMs, or None if not active.
+
+    When _quantization_type is MXFP8, dispatch kernels must pad per-expert token
+    groups to MXFP8_GROUP_ALIGNMENT_SIZE (32) so the quantisation kernel's
+    row-count requirement is satisfied.
+
+    Returns:
+        32 if using MXFP8, None otherwise.
+    """
+    return (
+        MXFP8_GROUP_ALIGNMENT_SIZE
+        if _quantization_type == QuantizationType.MXFP8
+        else None
+    )
+
+
+def maybe_align_num_tokens_for_mxfp8(num_tokens: int) -> int:
+    """Round up token count only when MXFP8 group alignment is active.
+
+    Args:
+        num_tokens: The number of tokens to potentially align.
+
+    Returns:
+        Aligned token count if using MXFP8, original count otherwise.
+    """
+    if _quantization_type != QuantizationType.MXFP8:
+        return num_tokens
+    num_tokens_rounded = (
+        (num_tokens + MXFP8_GROUP_ALIGNMENT_SIZE - 1)
+        // MXFP8_GROUP_ALIGNMENT_SIZE
+        * MXFP8_GROUP_ALIGNMENT_SIZE
+    )
+    return num_tokens_rounded
 
 
 __all__ = [

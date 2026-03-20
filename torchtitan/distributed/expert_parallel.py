@@ -22,11 +22,13 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.models.common.moe.utils import (
-    _permute,
-    _unpermute,
-    get_token_group_alignment_size,
+from torchtitan.components.quantization import (
+    FLOAT8_GROUP_ALIGNMENT_SIZE,
+    MXFP8_GROUP_ALIGNMENT_SIZE,
 )
+
+from torchtitan.components.quantization.utils import QuantizationType
+from torchtitan.models.common.moe.utils import _permute, _unpermute
 
 
 class BaseExpertParallel(ParallelStyle, ABC):
@@ -82,7 +84,110 @@ class ExpertParallel(BaseExpertParallel):
         self.output_splits = None
         self.input_shape = None
         self.permuted_indices = None
-        self.token_group_alignment = get_token_group_alignment_size()
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+        ep_degree = device_mesh.shape[0]
+        num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=device_mesh.get_group(),
+            )
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
+            )
+            input_splits = (
+                num_tokens_per_expert.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
+
+        # perform all-to-all
+        routed_input = all_to_all_single_autograd(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct layout, via the _permute function
+        # below.
+        # Note that this will create side effects when wrapping the for-loop implementation
+        # of GroupedExperts, as it does not need padding.
+        (
+            self.input_shape,
+            routed_input,
+            self.permuted_indices,
+            num_tokens_per_expert_group,
+        ) = _permute(
+            routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+        )
+        return routed_input, num_tokens_per_expert_group
+
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        routed_output = _unpermute(
+            routed_output,
+            self.input_shape,
+            self.permuted_indices,
+        )
+        routed_output = all_to_all_single_autograd(
+            routed_output,
+            self.input_splits,
+            self.output_splits,
+            device_mesh.get_group(),
+        )
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,
+        )
+
+
+class Float8ExpertParallel(BaseExpertParallel):
+    def __init__(self):
+        super().__init__()
+        self.input_splits = None
+        self.output_splits = None
+        self.input_shape = None
+        self.permuted_indices = None
 
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         for param_name, param in mod.named_parameters(recurse=False):
@@ -144,49 +249,152 @@ class ExpertParallel(BaseExpertParallel):
         # Note that this will create side effects when wrapping the for-loop implementation
         # of GroupedExperts, as it does not need padding.
 
-        # Non-HybridEP case:
-        # FP8/MXFP8 require groups to be permuted to expert major order AND padded to
-        # `alignment_size`.
-        # Otherwise, we only need to permute to expert major order.
-        if self.token_group_alignment > 0:
-            from torchao.prototype.moe_training.ep.permute import permute_and_pad
+        # FP8/MXFP8 require groups to be permuted to expert major order AND padded to nearest multiple of 16.
 
-            (
-                self.input_shape,
-                routed_input,
-                self.permuted_indices,
-                num_tokens_per_expert_group_padded,
-                group_offsets,
-            ) = permute_and_pad(
-                routed_input,
-                num_tokens_per_expert_group,
-                ep_degree,
-                num_local_experts,
-                self.token_group_alignment,
+        from torchao.prototype.moe_training.ep.permute import permute_and_pad
+
+        (
+            self.input_shape,
+            routed_input,
+            self.permuted_indices,
+            num_tokens_per_expert_group_padded,
+            group_offsets,
+        ) = permute_and_pad(
+            routed_input,
+            num_tokens_per_expert_group,
+            ep_degree,
+            num_local_experts,
+            FLOAT8_GROUP_ALIGNMENT_SIZE,
+        )
+        return routed_input, num_tokens_per_expert_group_padded
+
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        # If per group padding was done to prepare for FP8 grouped mm, there is an extra 'padding' row that
+        # `permuted_indices` selects from to add padding into the routed_input in dispatch.
+        routed_output = _unpermute(
+            routed_output,
+            self.input_shape,
+            self.permuted_indices,
+            remove_padding_row=True,
+        )
+        routed_output = all_to_all_single_autograd(
+            routed_output,
+            self.input_splits,
+            self.output_splits,
+            device_mesh.get_group(),
+        )
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,
+        )
+
+
+class MXFP8ExpertParallel(ExpertParallel):
+    def __init__(self):
+        super().__init__()
+        self.input_splits = None
+        self.output_splits = None
+        self.input_shape = None
+        self.permuted_indices = None
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+        ep_degree = device_mesh.shape[0]
+        num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=device_mesh.get_group(),
             )
-            return routed_input, num_tokens_per_expert_group_padded
-        else:
-            (
-                self.input_shape,
-                routed_input,
-                self.permuted_indices,
-                num_tokens_per_expert_group,
-            ) = _permute(
-                routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
             )
-            return routed_input, num_tokens_per_expert_group
+            input_splits = (
+                num_tokens_per_expert.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
+
+        # perform all-to-all
+        routed_input = all_to_all_single_autograd(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct layout, via the _permute function
+        # below, which also does padding to make sure the number of tokens each expert gets locally
+        # is a multiple of `self.token_group_alignment`.
+        # Note that this will create side effects when wrapping the for-loop implementation
+        # of GroupedExperts, as it does not need padding.
+
+        # MXFP8 require groups to be permuted to expert major order AND padded to nearest multiple of 32.
+        from torchao.prototype.moe_training.ep.permute import permute_and_pad
+
+        (
+            self.input_shape,
+            routed_input,
+            self.permuted_indices,
+            num_tokens_per_expert_group_padded,
+            group_offsets,
+        ) = permute_and_pad(
+            routed_input,
+            num_tokens_per_expert_group,
+            ep_degree,
+            num_local_experts,
+            MXFP8_GROUP_ALIGNMENT_SIZE,
+        )
+        return routed_input, num_tokens_per_expert_group_padded
 
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
     ) -> Tensor:
         # If per group padding was done to prepare for MXFP8 grouped mm, there is an extra 'padding' row that
         # `permuted_indices` selects from to add padding into the routed_input in dispatch.
-        remove_padding_row = self.token_group_alignment > 0
         routed_output = _unpermute(
             routed_output,
             self.input_shape,
             self.permuted_indices,
-            remove_padding_row=remove_padding_row,
+            remove_padding_row=True,
         )
         routed_output = all_to_all_single_autograd(
             routed_output,
@@ -328,6 +536,8 @@ class DeepEPExpertParallel(BaseExpertParallel):
         hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; controls the fused-permute
             output tensor size (num_permuted_tokens). Only used with hybridep.
+        quantization_type: Quantization type for grouped GEMMs (FLOAT8, MXFP8, or None).
+            Used to determine padding requirements for HybridEP dispatch.
     """
 
     def __init__(
@@ -335,6 +545,7 @@ class DeepEPExpertParallel(BaseExpertParallel):
         score_before_experts: bool = True,
         comm_backend: str = "deepep",
         hybridep_non_blocking_expert_capacity_factor: float | None = None,
+        quantization_type: QuantizationType | None = None,
     ):
         super().__init__()
         self._state = None  # State preserved between dispatch and combine
@@ -343,6 +554,7 @@ class DeepEPExpertParallel(BaseExpertParallel):
         self.hybridep_non_blocking_expert_capacity_factor = (
             hybridep_non_blocking_expert_capacity_factor
         )
+        self.quantization_type = quantization_type
 
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
@@ -365,6 +577,7 @@ class DeepEPExpertParallel(BaseExpertParallel):
                 ep_group,
                 score_before_experts=self.score_before_experts,
                 non_blocking_expert_capacity_factor=self.hybridep_non_blocking_expert_capacity_factor,
+                quantization_type=self.quantization_type,
             )
         else:
             from torchtitan.distributed.deepep import dispatch_tokens

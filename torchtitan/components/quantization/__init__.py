@@ -32,5 +32,5 @@ class QuantizationConverter(Configurable):
 
 
 # Module level global constants
-FP8_GROUP_ALIGNMENT_SIZE = 16
+FLOAT8_GROUP_ALIGNMENT_SIZE = 16
 MXFP8_GROUP_ALIGNMENT_SIZE = 32
