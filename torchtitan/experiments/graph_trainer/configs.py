@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from typing import Literal
 
+from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
@@ -58,5 +59,11 @@ def to_graph_trainer_config(
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
     d["model_spec"] = model_registry(base_config.model_spec.flavor)
     d.pop("compile")
+
+    # graph_trainer uses graph-based SAC instead of eager AC. Override any
+    # non-"none" AC mode to "selective" so callers don't need per-config fixups.
+    ac = d.get("activation_checkpoint")
+    if ac is not None and ac.mode != "none":
+        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
 
     return GraphTrainer.Config(**d)

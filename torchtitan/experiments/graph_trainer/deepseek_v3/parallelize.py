@@ -17,11 +17,10 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 
-from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_ac_regions,
-    maybe_disable_eager_ac,
+    apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
@@ -99,8 +98,6 @@ def parallelize_deepseekv3(
 
     annotate_deepseekv3(model)
 
-    maybe_disable_eager_ac(compile_config, ac_config)
-
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
         enable_float8_linear = float8_config is not None
@@ -135,7 +132,7 @@ def parallelize_deepseekv3(
         )
 
     if ac_config.mode != "none":
-        apply_ac(model, ac_config)
+        apply_graph_ac(compile_config, ac_config)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
