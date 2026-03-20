@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import enum
 import functools
-import json
 import os
 import queue
 import re
@@ -68,68 +67,35 @@ class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
 
+    def _get_hooks(self):
+        """Return the ConverterCheckpointHooks from the first model part that has them."""
+        for part in self.model:
+            hooks = getattr(part, "_converter_hooks", None)
+            if hooks is not None:
+                return hooks
+        return None
+
     def _get_state_dict(self) -> dict[str, Any]:
         state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
         return state_dict
 
-    def _is_converter_key(self, key: str) -> bool:
-        """Check if a state dict key was added by a model converter."""
-        for part in self.model:
-            fn = getattr(part, "converter_key_filter", None)
-            if fn is not None and fn(key):
-                return True
-        return False
-
-    def has_converter_keys(self) -> bool:
-        """Check if any model part has converter-added keys."""
-        return any(
-            getattr(part, "converter_key_filter", None) is not None
-            for part in self.model
-        )
-
-    @property
-    def converter_save_last_fn(self):
-        """Return converter's custom last-step save function, or None."""
-        for part in self.model:
-            fn = getattr(part, "converter_save_last_fn", None)
-            if fn is not None:
-                return fn
-        return None
-
-    @property
-    def converter_load_additional_fn(self):
-        """Return converter's custom additional-checkpoint load function, or None."""
-        for part in self.model:
-            fn = getattr(part, "converter_load_additional_fn", None)
-            if fn is not None:
-                return fn
-        return None
-
-    def state_dict_to_save(self) -> dict[str, Any]:
-        full_sd = self._get_state_dict()
-        if self.has_converter_keys():
-            return {k: v for k, v in full_sd.items() if self._is_converter_key(k)}
-        return full_sd
-
-    def export_state_dict(self) -> dict[str, Any]:
-        """State dict for final export. Converters may customize this
-        (e.g. to merge converter weights into base weights)."""
-        full_sd = self._get_state_dict()
-        for part in self.model:
-            fn = getattr(part, "converter_export_sd_fn", None)
-            if fn is not None:
-                return fn(full_sd)
-        return self.state_dict_to_save()
-
     def base_state_dict(self) -> dict[str, Any]:
         """Return state dict with only the original model keys (before converters)."""
+        hooks = self._get_hooks()
+        if hooks is None or hooks.key_filter is None:
+            return self._get_state_dict()
         full_sd = self._get_state_dict()
-        return {k: v for k, v in full_sd.items() if not self._is_converter_key(k)}
+        return {k: v for k, v in full_sd.items() if not hooks.key_filter(k)}
 
     def state_dict(self) -> dict[str, Any]:
-        return self.state_dict_to_save()
+        """Adapter-only keys if hooks.key_filter is set, otherwise full state dict."""
+        hooks = self._get_hooks()
+        if hooks is not None and hooks.key_filter is not None:
+            full_sd = self._get_state_dict()
+            return {k: v for k, v in full_sd.items() if hooks.key_filter(k)}
+        return self._get_state_dict()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -379,7 +345,7 @@ class CheckpointManager(Configurable):
         Useful for loading state dicts from multiple sources, e.g., base model
         weights from one checkpoint and converter-specific weights from another.
         Each path should contain a valid DCP checkpoint, or a converter-specific
-        format if the model has a ``converter_load_additional_fn`` attribute.
+        format if the model has a ``_converter_hooks.load_additional_fn`` attribute.
         """
 
         enable_first_step_checkpoint: bool = False
@@ -673,14 +639,14 @@ class CheckpointManager(Configurable):
             checkpoint_ids (list[str]): The checkpoint ids to load.
                 The first checkpoint is treated as the primary checkpoint.
                 Additional checkpoints use the model's
-                ``converter_load_additional_fn`` if available, otherwise DCP.
+                ``_converter_hooks.load_additional_fn`` if available, otherwise DCP.
             from_hf (bool): Whether to load the primary checkpoint from
                 HuggingFace safetensors format.
             from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
         """
-        needs_partial = (
-            len(checkpoint_ids) > 1 or self.states[MODEL].has_converter_keys()
-        )
+        hooks = self.states[MODEL]._get_hooks()
+        has_converter_keys = hooks is not None and hooks.key_filter is not None
+        needs_partial = len(checkpoint_ids) > 1 or has_converter_keys
         planner = DefaultLoadPlanner(allow_partial_load=needs_partial)
 
         for i, cid in enumerate(checkpoint_ids):
@@ -712,7 +678,7 @@ class CheckpointManager(Configurable):
                     if MODEL in self.states:
                         self.states[MODEL].load_state_dict(state_dict)
             else:
-                load_fn = self.states[MODEL].converter_load_additional_fn
+                load_fn = hooks.load_additional_fn if hooks is not None else None
                 if load_fn is not None:
                     # Converter-provided load (e.g. PEFT safetensors)
                     load_fn(
@@ -983,7 +949,7 @@ class CheckpointManager(Configurable):
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
         self.dcp_load(
             self.ft_states,
-            checkpoint_id=checkpoint_id,
+            checkpoint_ids=[checkpoint_id],
             # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
             from_hf=False,
             from_quantized=False,
@@ -1045,13 +1011,13 @@ class CheckpointManager(Configurable):
 
         # Run converter finalization (e.g. LoRA merge) before extracting state dict.
         model_wrapper = self.states[MODEL]
-        for part in model_wrapper.model:
-            finalize_fn = getattr(part, "converter_finalize_fn", None)
-            if finalize_fn is not None:
-                finalize_fn()
+        hooks = model_wrapper._get_hooks()
+        if hooks is not None and hooks.finalize_fn is not None:
+            hooks.finalize_fn()
 
         if self.last_save_model_only:
-            states = model_wrapper.export_state_dict()
+            # After finalize, _get_state_dict() returns the right (merged) base weights
+            states = model_wrapper.state_dict()
 
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
@@ -1069,8 +1035,12 @@ class CheckpointManager(Configurable):
             ), "Only model can be saved when saving in HF safetensors format."
 
         # Converter-provided last-step save (e.g. PEFT format)
-        save_last_fn = self.states[MODEL].converter_save_last_fn
-        if self.last_save_in_hf and self.last_save_model_only and save_last_fn is not None:
+        save_last_fn = hooks.save_last_fn if hooks is not None else None
+        if (
+            self.last_save_in_hf
+            and self.last_save_model_only
+            and save_last_fn is not None
+        ):
             checkpoint_dir = self._create_checkpoint_id(curr_step)
             save_last_fn(states, checkpoint_dir, self._get_from_hf_map())
             return
