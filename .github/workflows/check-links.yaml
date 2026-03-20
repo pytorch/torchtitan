@@ -19,50 +19,25 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Lychee Link Checker
+        uses: lycheeverse/lychee-action@v2
         with:
-          python-version: "3.10"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install mistune pytest pytest-check-links pytest-timeout pytest-xdist
-
-      - name: Check links
-        run: |
-          # 1. Create a temporary conftest.py to handle 403/429/503s.
-          # With these errors the link is technically correct,
-          # but can be blocked by e.g. CloudFlare.
-
-          cat <<EOF > conftest.py
-          import pytest
-
-          @pytest.hookimpl(hookwrapper=True)
-          def pytest_runtest_makereport(item, call):
-              outcome = yield
-              report = outcome.get_result()
-
-              if report.when == "call" and report.failed:
-                  error_text = str(report.longrepr)
-                  # Handle 403 (Forbidden), 429 (Rate Limit), and 503 (Overloaded/Bot Block)
-                  if any(code in error_text for code in ["403", "429", "503", "'Connection reset'"]):
-                      report.outcome = "passed"
-                      report.wasxfail = f"Silenced transient error: {item.name}"
-                      report.longrepr = None
-          EOF
-
-          # 2. Find markdown files (skip hidden folders)
-          FILES=$(find . -name "*.md" -not -path "*/.*")
-
-          # 3. Run pytest
-          pytest -v \
-            -p no:python \
-            -n auto \
-            --check-links \
-            --timeout 10 \
-            --check-links-ignore "http://localhost:.*" \
-            $FILES
-
-          # 4. Cleanup
-          rm conftest.py
+          # --accept: treats 403, 429, 503 as successful (ignores Cloudflare/Rate limits)
+          # --exclude: ignores localhost and internal patterns
+          # --max-retries: handles temporary "Connection reset" or 503s
+          # --user-agent: mimics a browser to reduce 403 Forbidden errors
+          args: >
+            --verbose
+            --no-progress
+            --accept 200,403,429,503
+            --exclude "http://localhost:.*"
+            --exclude "http://127.0.0.1:.*"
+            --max-retries 3
+            --retry-wait-time 5
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            --root-dir .
+            "**/*.md"
+        env:
+          # By passing the GITHUB_TOKEN, Lychee uses the official GitHub API to check
+          # any github.com links. This drastically reduces the 429/503 "Rate Limit" errors
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
