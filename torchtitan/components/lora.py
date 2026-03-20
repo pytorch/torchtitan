@@ -119,7 +119,7 @@ class LoRAConverter(Configurable):
         self,
         state_dict: dict[str, Any],
         checkpoint_dir: str,
-        from_hf_map: dict[str, str | None] | None,
+        hooks: "ConverterCheckpointHooks",
     ) -> None:
         """Save adapter weights in PEFT format.
 
@@ -138,8 +138,8 @@ class LoRAConverter(Configurable):
                 cpu_states[k] = v.cpu() if isinstance(v, torch.Tensor) else v
 
         # Remap keys to HF PEFT naming
-        if from_hf_map is not None:
-            hf_states = remap_lora_keys_to_hf(cpu_states, from_hf_map)
+        if hooks.from_hf_map is not None:
+            hf_states = remap_lora_keys_to_hf(cpu_states, hooks.from_hf_map)
         else:
             logger.warning(
                 "No from_hf_map available; saving PEFT with torchtitan keys."
@@ -181,7 +181,7 @@ class LoRAConverter(Configurable):
         self,
         path: str,
         model_parts: list[nn.Module],
-        from_hf_map: dict[str, str | None] | None,
+        hooks: "ConverterCheckpointHooks",
     ) -> None:
         """Load adapter weights from a PEFT directory.
 
@@ -194,8 +194,8 @@ class LoRAConverter(Configurable):
 
         safetensors_path = os.path.join(path, "adapter_model.safetensors")
         adapter_sd = load_file(safetensors_path)
-        if from_hf_map is not None:
-            adapter_sd = remap_lora_keys_from_hf(adapter_sd, from_hf_map)
+        if hooks.from_hf_map is not None:
+            adapter_sd = remap_lora_keys_from_hf(adapter_sd, hooks.from_hf_map)
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=adapter_sd,
@@ -243,8 +243,13 @@ class LoRAConverter(Configurable):
         for name, mod in list(model.named_modules()):
             if not (hasattr(mod, "lora_a") and hasattr(mod, "lora_b")):
                 continue
+            assert isinstance(mod, nn.Linear)
+            lora_a = mod.lora_a
+            lora_b = mod.lora_b
+            assert isinstance(lora_a, nn.Linear)
+            assert isinstance(lora_b, nn.Linear)
             with torch.no_grad():
-                mod.weight.add_(scaling * (mod.lora_b.weight @ mod.lora_a.weight))
+                mod.weight.add_(scaling * (lora_b.weight @ lora_a.weight))
             del mod.lora_a, mod.lora_b
             if hasattr(mod, "_lora_scaling"):
                 del mod._lora_scaling

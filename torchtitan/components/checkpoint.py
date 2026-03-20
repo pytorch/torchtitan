@@ -470,6 +470,12 @@ class CheckpointManager(Configurable):
                 sd_adapter is not None
             ), "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
         self.sd_adapter = sd_adapter
+
+        # Inject from_hf_map into converter hooks so save/load fns can remap keys
+        hooks = self.states[MODEL]._get_hooks()
+        if hooks is not None and sd_adapter is not None:
+            hooks.from_hf_map = getattr(sd_adapter, "from_hf_map", None)
+
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.exclude_from_loading = config.exclude_from_loading
         self.additional_load_paths = config.additional_load_paths
@@ -684,7 +690,7 @@ class CheckpointManager(Configurable):
                     load_fn(
                         cid,
                         self.states[MODEL].model,
-                        self._get_from_hf_map(),
+                        hooks,
                     )
                 else:
                     # DCP: load all available states (model + training info).
@@ -1042,7 +1048,7 @@ class CheckpointManager(Configurable):
             and save_last_fn is not None
         ):
             checkpoint_dir = self._create_checkpoint_id(curr_step)
-            save_last_fn(states, checkpoint_dir, self._get_from_hf_map())
+            save_last_fn(states, checkpoint_dir, hooks)
             return
 
         self.dcp_save(
@@ -1052,12 +1058,6 @@ class CheckpointManager(Configurable):
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
         )
-
-    def _get_from_hf_map(self) -> dict[str, str | None] | None:
-        """Return from_hf_map from sd_adapter, or None if unavailable."""
-        if self.sd_adapter is None:
-            return None
-        return getattr(self.sd_adapter, "from_hf_map", None)
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable or self.load_only:
