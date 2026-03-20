@@ -222,6 +222,9 @@ class Float8LinearConverter(QuantizationConverter):
         for m in models:
             precompute_float8_dynamic_scale_for_fsdp(m)
 
+    def finalize(self, model: nn.Module) -> None:
+        pass
+
 
 class Float8GroupedMMConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
@@ -306,6 +309,9 @@ class Float8GroupedMMConverter(QuantizationConverter):
         )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        pass
+
+    def finalize(self, model: nn.Module) -> None:
         pass
 
 
