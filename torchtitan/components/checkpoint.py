@@ -1043,7 +1043,7 @@ class CheckpointManager(Configurable):
         # conversion when we are checkpointing model only and the current dtype
         # is not the same as the export dtype at the end of the training.
 
-        # Run converter finalization before extracting the state dict.
+        # Run converter finalization (e.g. LoRA merge) before extracting state dict.
         model_wrapper = self.states[MODEL]
         for part in model_wrapper.model:
             finalize_fn = getattr(part, "converter_finalize_fn", None)
@@ -1070,7 +1070,7 @@ class CheckpointManager(Configurable):
 
         # Converter-provided last-step save (e.g. PEFT format)
         save_last_fn = self.states[MODEL].converter_save_last_fn
-        if self.last_save_model_only and save_last_fn is not None:
+        if self.last_save_in_hf and self.last_save_model_only and save_last_fn is not None:
             checkpoint_dir = self._create_checkpoint_id(curr_step)
             save_last_fn(states, checkpoint_dir, self._get_from_hf_map())
             return
