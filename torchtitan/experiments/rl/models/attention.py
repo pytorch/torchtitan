@@ -7,6 +7,7 @@
 import logging
 
 import torch
+from torch.distributed.tensor import DTensor
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -176,9 +177,17 @@ class VLLMAttention(LocalMapAttention):
     wrapper handles the transpose/reshape from TorchTitan's
     ``(batch, num_heads, seq_len, head_dim)`` layout and back.
 
+    DTensor handling uses :class:`LocalMapAttention`'s ``local_map`` to strip
+    TP DTensors before ``forward``.  The output is unwrapped back to a local
+    tensor because during vLLM CUDA graph capture with 1-token dummy inputs
+    (``seqlen=1``), ``GQAttention``'s ``view(bs, 1, -1)`` merges three dims
+    ``(1, n_heads, head_dim)`` where the sharded ``n_heads`` dim is not first
+    in the flatten group — a case DTensor cannot propagate without
+    redistribution.  ``wo``'s ``RowwiseParallel`` ``PrepareModuleInput`` hook
+    re-wraps the local tensor as DTensor downstream.
+
     Used by the **generator** (via :func:`replace_with_vllm_attention`).
     """
-
     def __init__(
         self,
         hidden_size: int,
@@ -229,14 +238,12 @@ class VLLMAttention(LocalMapAttention):
         scale: float | None = None,
         enable_gqa: bool = False,
     ) -> torch.Tensor:
-        """Run vLLM paged attention.
+        """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
             q: ``(batch, num_heads, seq_len, head_dim)``
             k: ``(batch, num_kv_heads, seq_len, head_dim)``
             v: ``(batch, num_kv_heads, seq_len, head_dim)``
-            scale: Ignored — vLLM uses its own internal scale.
-            enable_gqa: Ignored — vLLM handles GQA internally.
 
         Returns:
             ``(batch, num_heads, seq_len, head_dim)``
@@ -261,7 +268,7 @@ class VLLMAttention(LocalMapAttention):
         # which happens with cudagraph capture for dummy input
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
+        # Reshape back to titan: (batch, seq_len, num_heads_local, head_dim)
         output = output_flat.view(batch_size, seq_len, -1, head_dim)
         output = output.transpose(1, 2)
 
