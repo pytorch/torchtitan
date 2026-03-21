@@ -26,7 +26,6 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config):
         if config.compile.fake_tensors:
-            config.compile.precompile = True
             self._fake_mode = FakeTensorMode(allow_non_fake_inputs=True)
 
             original_to_empty = torch.nn.Module.to_empty
@@ -48,12 +47,12 @@ class GraphTrainer(Trainer):
             super().__init__(config)
 
     def train(self):
-        if self._fake_mode is not None:
-            self._precompile_and_exit()
+        if self.config.compile.precompile and self._fake_mode is not None:
+            self._precompile_with_fake_tensors()
         else:
             super().train()
 
-    def _precompile_and_exit(self):
+    def _precompile_with_fake_tensors(self):
         """
         Trigger AOT compilation with fake tensors and save the artifact.
         We call the joint_graph_builder directly (not the full forward)
