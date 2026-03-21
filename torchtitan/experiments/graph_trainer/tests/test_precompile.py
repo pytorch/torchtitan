@@ -99,7 +99,15 @@ class TestGraphTrainerCompileConfig(unittest.TestCase):
         config = GraphTrainerCompileConfig()
         self.assertFalse(config.fake_tensors)
 
-    def test_fake_tensors_config_custom(self):
+    def test_fake_tensors_config_requires_precompile(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        with self.assertRaises(ValueError):
+            GraphTrainerCompileConfig(enable=True, fake_tensors=True)
+
+    def test_fake_tensors_config_with_precompile(self):
         from torchtitan.experiments.graph_trainer.configs import (
             GraphTrainerCompileConfig,
         )
@@ -107,8 +115,10 @@ class TestGraphTrainerCompileConfig(unittest.TestCase):
         config = GraphTrainerCompileConfig(
             enable=True,
             fake_tensors=True,
+            precompile=True,
         )
         self.assertTrue(config.fake_tensors)
+        self.assertTrue(config.precompile)
 
 
 if __name__ == "__main__":
