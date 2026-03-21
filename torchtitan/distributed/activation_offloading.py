@@ -7,20 +7,21 @@
 """
 Async activation offloading to CPU with prefetch for torchtitan.
 
-Activations are copied D2H during forward on a dedicated CUDA stream, then
-prefetched H2D during backward on a second stream, so transfers overlap with
-compute at near-zero overhead.
+Activations are copied D2H during forward on a dedicated CUDA stream.  During
+backward, H2D transfers are prefetched one layer ahead using
+``register_full_backward_pre_hook``, so transfers overlap with backward compute.
 
-Key design decisions vs. torchtune's OffloadActivations:
-- Pre-allocated pinned CPU memory pool avoids per-tensor
-  ``torch.empty(..., pin_memory=True)`` calls, which trigger implicit CUDA
-  synchronisation and negate the overlap benefit.
-- Explicit event-based synchronisation keeps the compute stream from consuming
-  data before H2D transfers finish.
+Key design decisions:
+- GPU-side event ordering (``stream.wait_event``) instead of host-blocking
+  ``event.synchronize()`` keeps the CPU thread free to issue work.
+- Backward pre-hooks on transformer layers trigger H2D copies one layer
+  ahead of where backward currently is, overlapping transfers with compute.
+- Pinned CPU buffers are allocated with ``torch.empty(..., pin_memory=True)``
+  and rely on PyTorch's ``CachingHostAllocator`` to cache and reuse them
+  across steps.
 """
 
 import contextlib
-import threading
 from typing import Any
 
 import torch
@@ -37,6 +38,10 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
     training loop.  Only tensors that live on CUDA, are not ``nn.Parameter``
     instances, and exceed *min_offload_size* bytes are moved.
 
+    Call :meth:`register_prefetch_hooks` after construction to enable
+    layer-level prefetching.  Without it, H2D copies happen reactively in
+    ``_unpack_hook`` with no compute overlap.
+
     Args:
         use_streams: Use separate CUDA streams for D2H/H2D copies.  Disable
             only for debugging on CPU-only machines.
@@ -45,9 +50,6 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
             alive before draining completed D2H copies.  A larger value
             increases overlap at the cost of temporarily holding more GPU
             memory references.
-        cpu_pool_size: Number of bytes to pre-allocate in the pinned CPU pool.
-            When the pool is exhausted a fallback allocation is made with a
-            warning.
     """
 
     def __init__(
@@ -56,7 +58,6 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
         use_streams: bool = True,
         min_offload_size: int = 1024,
         max_fwd_stash_size: int = 5,
-        cpu_pool_size: int = 2 * 1024**3,  # 2 GiB default
     ) -> None:
         self._use_streams = use_streams and torch.cuda.is_available()
         self._min_offload_size = min_offload_size
@@ -70,83 +71,78 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
             self._d2h_stream = None
             self._h2d_stream = None
 
-        # --- Pinned CPU memory pool (slab allocator) -----------------------
-        # We keep a flat pinned tensor and carve slices from it.  This avoids
-        # the per-tensor cudaMallocHost calls that torch.empty(pin_memory=True)
-        # issues, each of which flushes the CUDA work queue.
-        self._pool_lock = threading.Lock()
-        if cpu_pool_size > 0 and torch.cuda.is_available():
-            try:
-                self._cpu_pool: torch.Tensor | None = torch.empty(
-                    cpu_pool_size, dtype=torch.uint8, pin_memory=True
-                )
-            except Exception:
-                logger.warning(
-                    "activation_offloading: failed to allocate %d-byte pinned "
-                    "pool; falling back to per-tensor allocations.",
-                    cpu_pool_size,
-                )
-                self._cpu_pool = None
-        else:
-            self._cpu_pool = None
-
-        # Byte offset of the next free region inside _cpu_pool.
-        self._pool_offset: int = 0
-
         # _fwd_stash[tensor_id] = (cpu_buf, gpu_tensor, d2h_event)
         # Keeps the GPU tensor alive until the D2H copy has finished.
         self._fwd_stash: dict[int, tuple[torch.Tensor, torch.Tensor, Any]] = {}
 
         # _bwd_stash[tensor_id] = (gpu_buf, h2d_event, cpu_buf)
         # Keeps both the prefetched GPU tensor AND the source CPU buffer alive
-        # until the next __enter__.  The cpu_buf ref is critical for the fallback
-        # (non-pool) path: cpu_buf.to("cuda", non_blocking=True) submits an async
-        # H2D copy, and if cpu_buf is freed by Python GC before the kernel
-        # completes, the copy reads garbage data.  Pool slices are safe because
-        # the pool tensor (self._cpu_pool) is always alive, but fresh pin_memory
-        # allocations must be kept alive explicitly.
+        # until the next __enter__.  The cpu_buf ref is critical because
+        # cpu_buf.to("cuda", non_blocking=True) submits an async H2D copy, and
+        # if cpu_buf is freed by Python GC before the kernel completes, the
+        # copy reads garbage data.
         self._bwd_stash: dict[int, tuple[torch.Tensor, Any, torch.Tensor]] = {}
 
         # Monotonically-increasing ID assigned to each offloaded tensor.
         self._next_id: int = 0
 
+        # --- Prefetch tracking ---------------------------------------------
+        # Module ID currently executing in forward (None outside tracked modules).
+        self._current_module_id: int | None = None
+        # Map from module_id → list of tensor_ids packed during that module's fwd.
+        self._module_tensor_ids: dict[int, list[int]] = {}
+        # Number of tracked modules (set by register_prefetch_hooks).
+        self._num_tracked_modules: int = 0
+        # Registered hooks (for cleanup).
+        self._hooks: list[Any] = []
+
         super().__init__(self._pack_hook, self._unpack_hook)
 
     # ------------------------------------------------------------------
-    # Pool allocation helpers
+    # Prefetch hooks
     # ------------------------------------------------------------------
 
-    def _alloc_cpu_buf(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Allocate a pinned CPU buffer with the same shape/dtype as *tensor*.
+    def register_prefetch_hooks(self, modules: list[nn.Module]) -> None:
+        """Register forward/backward hooks on *modules* for layer-level prefetching.
 
-        Tries the pre-allocated pool first; falls back to a fresh allocation.
+        Modules should be provided in forward execution order (e.g., the list
+        of transformer blocks).  During backward (reverse order), H2D copies
+        for the next layer's activations are started one layer ahead, so
+        transfers overlap with backward compute.
+
+        Args:
+            modules: Ordered list of modules (typically transformer layers).
         """
-        nbytes = tensor.nbytes
-        elem_size = tensor.element_size()
-        with self._pool_lock:
-            if self._cpu_pool is not None:
-                # Align pool offset to the target dtype's element size so that
-                # raw.view(tensor.dtype) never hits a misaligned-storage error.
-                align = elem_size
-                aligned_offset = (self._pool_offset + align - 1) & ~(align - 1)
-                if aligned_offset + nbytes <= self._cpu_pool.numel():
-                    raw = self._cpu_pool[aligned_offset : aligned_offset + nbytes]
-                    self._pool_offset = aligned_offset + nbytes
-                    buf = raw.view(tensor.dtype).reshape(tensor.shape)
-                    return buf
+        for i, mod in enumerate(modules):
+            module_id = i
 
-        # Pool exhausted – fall back to a fresh pinned CPU allocation.
-        logger.warning(
-            "activation_offloading: pinned pool exhausted; allocating %d bytes "
-            "with pin_memory=True (may cause CUDA sync).",
-            nbytes,
-        )
-        return torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True)
+            def _fwd_pre(mod: nn.Module, args: Any, *, mid: int = module_id) -> None:
+                self._current_module_id = mid
+                self._module_tensor_ids.setdefault(mid, [])
 
-    def _reset_pool(self) -> None:
-        """Reset the pool offset so all slices can be reused next forward."""
-        with self._pool_lock:
-            self._pool_offset = 0
+            def _fwd_post(
+                mod: nn.Module, args: Any, output: Any, *, mid: int = module_id
+            ) -> None:
+                if self._current_module_id == mid:
+                    self._current_module_id = None
+
+            def _bwd_pre(
+                mod: nn.Module, grad_output: Any, *, mid: int = module_id
+            ) -> None:
+                # Prefetch this module's tensors (may already be done by the
+                # previous module's backward_pre_hook look-ahead).
+                for tid in self._module_tensor_ids.get(mid, []):
+                    self._prefetch_tensor(tid)
+                # Look-ahead: start H2D for the next module in backward order.
+                if mid > 0:
+                    for tid in self._module_tensor_ids.get(mid - 1, []):
+                        self._prefetch_tensor(tid)
+
+            self._hooks.append(mod.register_forward_pre_hook(_fwd_pre))
+            self._hooks.append(mod.register_forward_hook(_fwd_post))
+            self._hooks.append(mod.register_full_backward_pre_hook(_bwd_pre))
+
+        self._num_tracked_modules = len(modules)
 
     # ------------------------------------------------------------------
     # saved_tensors_hooks callbacks
@@ -169,7 +165,7 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
         tensor_id = self._next_id
         self._next_id += 1
 
-        cpu_buf = self._alloc_cpu_buf(tensor)
+        cpu_buf = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True)
 
         if self._use_streams:
             assert self._d2h_stream is not None  # guaranteed when _use_streams=True
@@ -190,6 +186,10 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
 
         self._fwd_stash[tensor_id] = (cpu_buf, tensor, d2h_event)
 
+        # Track which module this tensor belongs to for prefetching.
+        if self._current_module_id is not None:
+            self._module_tensor_ids[self._current_module_id].append(tensor_id)
+
         # Drain stash entries whose D2H copy has finished to release GPU refs.
         if len(self._fwd_stash) > self._max_fwd_stash_size:
             self._drain_fwd_stash(blocking=False)
@@ -205,49 +205,63 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
         for tid, cpu_buf in done:
             self._fwd_stash[tid] = (cpu_buf, None, None)  # type: ignore[assignment]
 
+    def _prefetch_tensor(self, tensor_id: int) -> None:
+        """Start an async H2D copy for a single tensor on ``_h2d_stream``.
+
+        If the tensor is already in ``_bwd_stash`` (already prefetched) or
+        not in ``_fwd_stash`` (already consumed), this is a no-op.
+        """
+        if tensor_id in self._bwd_stash:
+            return
+        if tensor_id not in self._fwd_stash:
+            return
+
+        cpu_buf, _gpu_ref, d2h_event = self._fwd_stash.pop(tensor_id)
+
+        if self._use_streams:
+            assert self._h2d_stream is not None
+            # GPU-side ordering: wait for D2H to finish before reading cpu_buf.
+            if d2h_event is not None:
+                self._h2d_stream.wait_event(d2h_event)
+            with torch.cuda.stream(self._h2d_stream):
+                gpu_buf = cpu_buf.to("cuda", non_blocking=True)
+            h2d_event = torch.cuda.Event()
+            h2d_event.record(self._h2d_stream)
+        else:
+            if d2h_event is not None:
+                d2h_event.synchronize()
+            gpu_buf = cpu_buf.to("cuda")
+            h2d_event = None
+
+        self._bwd_stash[tensor_id] = (gpu_buf, h2d_event, cpu_buf)
+
     def _unpack_hook(self, tensor_id: int | torch.Tensor) -> torch.Tensor:
         """Called by autograd for every saved tensor consumed during backward.
 
-        Prefetches the CPU buffer back to GPU on *h2d_stream*, then lets the
-        compute stream wait for it.
+        If the tensor was prefetched by a backward pre-hook, the H2D copy is
+        already in flight (or complete) on ``_h2d_stream``.  Otherwise, a
+        synchronous fallback path handles it.
         """
         # If pack_hook returned the tensor directly (not offloaded), just return it.
         if isinstance(tensor_id, torch.Tensor):
             return tensor_id
 
-        # Already prefetched during a previous unpack (shouldn't happen, but be safe).
-        if tensor_id in self._bwd_stash:
-            gpu_buf, _, _cpu_ref = self._bwd_stash[tensor_id]
-            return gpu_buf
+        # If not yet prefetched, do it now (fallback for untracked tensors).
+        if tensor_id not in self._bwd_stash:
+            self._prefetch_tensor(tensor_id)
 
-        # Retrieve the CPU buffer from whichever stash still has it.
-        if tensor_id in self._fwd_stash:
-            cpu_buf, _gpu_ref, event = self._fwd_stash.pop(tensor_id)
-            if event is not None:
-                # Block until the D2H copy is fully visible on the CPU side.
-                event.synchronize()
-        else:
+        if tensor_id not in self._bwd_stash:
             raise RuntimeError(
                 f"activation_offloading: tensor_id {tensor_id} not found in "
-                "fwd_stash.  This is a bug — please file an issue."
+                "fwd_stash or bwd_stash.  This is a bug — please file an issue."
             )
 
-        # Prefetch back to GPU.
-        if self._use_streams:
-            assert self._h2d_stream is not None  # guaranteed when _use_streams=True
-            with torch.cuda.stream(self._h2d_stream):
-                gpu_buf = cpu_buf.to("cuda", non_blocking=True)
-            h2d_event = torch.cuda.Event()
-            h2d_event.record(self._h2d_stream)
-            # Make the compute stream wait for the H2D transfer to finish.
-            torch.cuda.current_stream().wait_stream(self._h2d_stream)
-        else:
-            gpu_buf = cpu_buf.to("cuda")
-            h2d_event = None
+        gpu_buf, h2d_event, _cpu_ref = self._bwd_stash[tensor_id]
 
-        # Keep cpu_buf alive until __enter__ so the async H2D copy (on h2d_stream)
-        # can finish reading it even after this function returns.
-        self._bwd_stash[tensor_id] = (gpu_buf, h2d_event, cpu_buf)
+        # Make the compute stream wait for the H2D transfer to finish.
+        if h2d_event is not None and self._use_streams:
+            torch.cuda.current_stream().wait_event(h2d_event)
+
         return gpu_buf
 
     # ------------------------------------------------------------------
@@ -257,9 +271,13 @@ class ActivationOffloadingManager(torch.autograd.graph.saved_tensors_hooks):
     def __enter__(  # pyrefly: ignore[bad-override]
         self,
     ) -> "ActivationOffloadingManager":
-        self._reset_pool()
+        # Ensure all H2D copies from the previous step have completed before
+        # we drop CPU buffer references.
+        if self._use_streams and self._h2d_stream is not None:
+            self._h2d_stream.synchronize()
         self._fwd_stash.clear()
         self._bwd_stash.clear()
+        self._module_tensor_ids.clear()
         self._next_id = 0
         super().__enter__()
         return self
@@ -292,11 +310,10 @@ def get_activation_offloading_ctx(
 ) -> contextlib.AbstractContextManager:
     """Return an activation-offloading context manager, or a no-op if disabled.
 
-    Also registers forward hooks on the model's ``output`` sub-module (the final
-    LM-head linear) so that its inputs/outputs are wrapped with a no-op
-    ``saved_tensors_hooks`` — identical to the torchtune pattern.  The output
-    projection is large and consumed immediately after forward, so offloading it
-    wastes bandwidth.
+    Registers forward/backward hooks on the model's transformer layers (if
+    found under ``model.layers``) for layer-level H2D prefetching.  Also
+    registers hooks on the ``output`` sub-module to exclude it from
+    offloading.
 
     Args:
         model: The model whose forward pass will be wrapped.
@@ -316,6 +333,18 @@ def get_activation_offloading_ctx(
         min_offload_size=min_offload_size,
         max_fwd_stash_size=max_fwd_stash_size,
     )
+
+    # Register prefetch hooks on transformer layers for H2D overlap.
+    layers = None
+    try:
+        layers_mod = model.get_submodule("layers")
+        if isinstance(layers_mod, nn.ModuleList):
+            layers = list(layers_mod)
+    except AttributeError:
+        pass
+
+    if layers:
+        manager.register_prefetch_hooks(layers)
 
     # Wrap the output projection with a passthrough hook so its activations
     # are never offloaded (they are immediately used by the loss and would

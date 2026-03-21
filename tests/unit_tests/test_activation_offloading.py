@@ -77,7 +77,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=CUDA,
             min_offload_size=0,
-            cpu_pool_size=0,
         )
         orig_pack = ctx._pack_hook
 
@@ -133,7 +132,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=CUDA,
             min_offload_size=0,
-            cpu_pool_size=0,
         )
         x_off = x.clone().requires_grad_(True)
         model_off.zero_grad()
@@ -146,7 +144,7 @@ class TestActivationOffloading(unittest.TestCase):
             torch.testing.assert_close(p_ref.grad, p_off.grad)
 
     # ------------------------------------------------------------------
-    # 2b. Gradients correct across multiple steps (pool recycling)
+    # 2b. Gradients correct across multiple steps
     # ------------------------------------------------------------------
     def test_gradients_correct_multiple_steps(self) -> None:
         """Repeated enter/exit cycles must produce correct gradients each step."""
@@ -160,7 +158,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=CUDA,
             min_offload_size=0,
-            cpu_pool_size=1024 * 1024,  # small pool to exercise recycling
         )
 
         for step in range(3):
@@ -192,7 +189,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=True,
             min_offload_size=0,
-            cpu_pool_size=0,
         )
         orig_pack = ctx._pack_hook
         parameter_offloaded = []
@@ -226,7 +222,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=True,
             min_offload_size=min_size,
-            cpu_pool_size=0,
         )
         captured = []
         orig_pack = ctx._pack_hook
@@ -260,7 +255,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=True,
             min_offload_size=min_size,
-            cpu_pool_size=0,
         )
         captured = []
         orig_pack = ctx._pack_hook
@@ -312,7 +306,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=CUDA,
             min_offload_size=0,
-            cpu_pool_size=0,
         )
 
         x = torch.randn(4, 64, device=device, requires_grad=True)
@@ -346,35 +339,7 @@ class TestActivationOffloading(unittest.TestCase):
             self.fail("NotImplementedError raised unexpectedly with pp_enabled=False")
 
     # ------------------------------------------------------------------
-    # 8. Pool alignment — mixed-dtype tensors must not crash view()
-    # ------------------------------------------------------------------
-    @unittest.skipUnless(CUDA, "CUDA required")
-    def test_pool_alignment_mixed_dtype(self) -> None:
-        """Pool slices must be correctly aligned even after odd-numel bfloat16 tensors."""
-        # Force a scenario where a bfloat16 tensor with odd numel (3 elements = 6 bytes)
-        # is followed by a float32 tensor.  Without alignment padding, the float32
-        # view() would see a non-4-byte-aligned offset and crash.
-        pool_size = 64 * 1024
-        ctx = ActivationOffloadingManager(
-            use_streams=True,
-            min_offload_size=0,
-            cpu_pool_size=pool_size,
-        )
-
-        bf16 = torch.randn(3, device="cuda", dtype=torch.bfloat16)  # 6 bytes
-        f32 = torch.randn(4, device="cuda", dtype=torch.float32)  # 16 bytes
-
-        # Manually exercise _alloc_cpu_buf — should not raise.
-        buf_bf16 = ctx._alloc_cpu_buf(bf16)
-        self.assertEqual(buf_bf16.dtype, torch.bfloat16)
-        self.assertEqual(buf_bf16.shape, bf16.shape)
-
-        buf_f32 = ctx._alloc_cpu_buf(f32)
-        self.assertEqual(buf_f32.dtype, torch.float32)
-        self.assertEqual(buf_f32.shape, f32.shape)
-
-    # ------------------------------------------------------------------
-    # 9. Context can be re-entered (step recycling doesn't corrupt state)
+    # 8. Context can be re-entered (step recycling doesn't corrupt state)
     # ------------------------------------------------------------------
     def test_context_reentrant(self) -> None:
         """__enter__ must cleanly reset state so repeated use is safe."""
@@ -383,7 +348,6 @@ class TestActivationOffloading(unittest.TestCase):
         ctx = ActivationOffloadingManager(
             use_streams=CUDA,
             min_offload_size=0,
-            cpu_pool_size=0,
         )
 
         for _ in range(4):
@@ -401,13 +365,13 @@ class TestActivationOffloading(unittest.TestCase):
 # Mirrors what `python train.py --training.enable_activation_offload true
 # --debug.seed 42 --debug.deterministic` would check, but without needing
 # the full trainer stack.  Uses a multi-layer transformer-like model,
-# bfloat16 mixed precision, multiple steps with pool recycling, and asserts
-# bit-identical loss and gradients vs. the no-offload baseline.
+# bfloat16 mixed precision, multiple steps, and asserts gradients match
+# the no-offload baseline within float tolerance.
 # ---------------------------------------------------------------------------
 
 
 class _TransformerBlock(nn.Module):
-    """Single transformer block: layernorm → linear → relu → linear."""
+    """Single transformer block: layernorm -> linear -> relu -> linear."""
 
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -462,31 +426,23 @@ class TestNumericalSmoke(unittest.TestCase):
     rather than bit-identical.  The tolerances are deliberately generous to
     survive across GPU generations; they are far smaller than any numerical
     instability that would indicate a real correctness bug (data corruption,
-    stale CPU buffers, premature pool recycling, etc.).
+    stale CPU buffers, etc.).
     """
 
     @unittest.skipUnless(CUDA, "CUDA required for D2H/H2D transfers")
     def test_gradients_match_baseline_float32(self) -> None:
-        """float32, pool-enabled run — gradients must be within float tolerance."""
-        self._run_smoke(dtype=torch.float32, pool_size=512 * 1024)
+        """float32 run — gradients must be within float tolerance."""
+        self._run_smoke(dtype=torch.float32)
 
     @unittest.skipUnless(CUDA, "CUDA required for D2H/H2D transfers")
     def test_gradients_match_baseline_bfloat16(self) -> None:
-        """bfloat16 — exercises pool alignment fix; tolerances match bfloat16 precision."""
-        self._run_smoke(dtype=torch.bfloat16, pool_size=512 * 1024)
-
-    @unittest.skipUnless(CUDA, "CUDA required for D2H/H2D transfers")
-    def test_gradients_match_baseline_pool_exhausted(self) -> None:
-        """Pool too small → per-tensor pin_memory fallback — still within tolerance."""
-        # cudaMallocHost triggered by the fallback can CUDA-sync mid-forward,
-        # perturbing GPU execution order.  We allow wider tolerance here.
-        self._run_smoke(dtype=torch.float32, pool_size=64, atol=1e-2, rtol=1e-2)
+        """bfloat16 — tolerances match bfloat16 precision."""
+        self._run_smoke(dtype=torch.bfloat16)
 
     def _run_smoke(
         self,
         *,
         dtype: torch.dtype,
-        pool_size: int,
         dim: int = 64,
         batch: int = 2,
         seq: int = 8,
@@ -510,7 +466,6 @@ class TestNumericalSmoke(unittest.TestCase):
             use_streams=True,
             min_offload_size=0,
             max_fwd_stash_size=5,
-            cpu_pool_size=pool_size,
         )
 
         # Run 3 independent forward+backward passes (same weights each time)
@@ -584,7 +539,6 @@ class TestFSDP2Composability(unittest.TestCase):
         mgr = ActivationOffloadingManager(
             use_streams=True,
             min_offload_size=0,
-            cpu_pool_size=512 * 1024,
         )
 
         def _grads(model, ctx, x):
@@ -614,6 +568,129 @@ class TestFSDP2Composability(unittest.TestCase):
                     atol=1e-2,
                     rtol=1e-2,
                     msg=f"Gradient mismatch for {k} at step {step}",
+                )
+
+
+# ---------------------------------------------------------------------------
+# Prefetching tests
+#
+# Verifies that register_prefetch_hooks correctly tracks tensor IDs per
+# module and that backward pre-hooks trigger H2D copies before _unpack_hook.
+# ---------------------------------------------------------------------------
+
+
+class TestPrefetching(unittest.TestCase):
+    """Tests for layer-level backward prefetching."""
+
+    @unittest.skipUnless(CUDA, "CUDA required for prefetching")
+    def test_prefetch_hooks_registered(self) -> None:
+        """register_prefetch_hooks should register 3 hooks per module."""
+        model = _SmallTransformer(dim=64).cuda()
+        mgr = ActivationOffloadingManager(
+            use_streams=True,
+            min_offload_size=0,
+        )
+        layers = list(model.layers)
+        mgr.register_prefetch_hooks(layers)
+        # 3 hooks per layer: forward_pre, forward, backward_pre
+        self.assertEqual(len(mgr._hooks), 3 * len(layers))
+        self.assertEqual(mgr._num_tracked_modules, len(layers))
+
+    @unittest.skipUnless(CUDA, "CUDA required for prefetching")
+    def test_prefetch_tracks_tensor_ids(self) -> None:
+        """Forward pass with prefetch hooks should track tensor IDs per module."""
+        model = _SmallTransformer(dim=64).cuda()
+        mgr = ActivationOffloadingManager(
+            use_streams=True,
+            min_offload_size=0,
+        )
+        mgr.register_prefetch_hooks(list(model.layers))
+
+        x = torch.randn(2, 8, 64, device="cuda")
+        with mgr:
+            model(x)
+        # Each layer should have tracked some tensor IDs.
+        for i in range(len(model.layers)):
+            self.assertIn(i, mgr._module_tensor_ids)
+            self.assertGreater(
+                len(mgr._module_tensor_ids[i]),
+                0,
+                f"Layer {i} should have tracked tensor IDs",
+            )
+
+    @unittest.skipUnless(CUDA, "CUDA required for prefetching")
+    def test_prefetch_gradients_correct(self) -> None:
+        """Prefetching must produce correct gradients."""
+        torch.manual_seed(42)
+        device, dim = "cuda", 64
+
+        state = _SmallTransformer(dim=dim).to(device).state_dict()
+        model_ref = _SmallTransformer(dim=dim).to(device)
+        model_ref.load_state_dict(state)
+        model_off = _SmallTransformer(dim=dim).to(device)
+        model_off.load_state_dict(state)
+
+        mgr = ActivationOffloadingManager(
+            use_streams=True,
+            min_offload_size=0,
+        )
+        mgr.register_prefetch_hooks(list(model_off.layers))
+
+        for step in range(3):
+            torch.manual_seed(step)
+            x = torch.randn(2, 8, dim, device=device)
+
+            grads_ref = _one_step_grads(model_ref, contextlib.nullcontext(), x.clone())
+            grads_off = _one_step_grads(model_off, mgr, x.clone())
+
+            for i, (g_ref, g_off) in enumerate(zip(grads_ref, grads_off)):
+                torch.testing.assert_close(
+                    g_ref,
+                    g_off,
+                    atol=1e-4,
+                    rtol=1e-4,
+                    msg=f"Gradient mismatch for param {i} at step {step}",
+                )
+
+    @unittest.skipUnless(CUDA, "CUDA required for prefetching")
+    def test_get_ctx_registers_prefetch_hooks(self) -> None:
+        """get_activation_offloading_ctx should auto-register prefetch hooks."""
+        model = _SmallTransformer(dim=64).cuda()
+        ctx = get_activation_offloading_ctx(model, enable=True, min_offload_size=0)
+        self.assertIsInstance(ctx, ActivationOffloadingManager)
+        # Should have registered hooks on the 6 layers
+        self.assertEqual(ctx._num_tracked_modules, 6)
+        self.assertEqual(len(ctx._hooks), 18)  # 3 * 6
+
+    @unittest.skipUnless(CUDA, "CUDA required for prefetching")
+    def test_prefetch_multiple_steps(self) -> None:
+        """Prefetching across multiple steps must produce correct gradients."""
+        torch.manual_seed(42)
+        device, dim = "cuda", 64
+
+        state = _SmallTransformer(dim=dim).to(device).state_dict()
+        model_ref = _SmallTransformer(dim=dim).to(device)
+        model_ref.load_state_dict(state)
+        model_off = _SmallTransformer(dim=dim).to(device)
+        model_off.load_state_dict(state)
+
+        # Use get_activation_offloading_ctx which auto-registers prefetch hooks
+        mgr = get_activation_offloading_ctx(model_off, enable=True, min_offload_size=0)
+
+        for step in range(5):
+            torch.manual_seed(step)
+            x = torch.randn(2, 8, dim, device=device)
+
+            grads_ref = _one_step_grads(model_ref, contextlib.nullcontext(), x.clone())
+            grads_off = _one_step_grads(model_off, mgr, x.clone())
+
+            for i, (g_ref, g_off) in enumerate(zip(grads_ref, grads_off)):
+                torch.testing.assert_close(
+                    g_ref,
+                    g_off,
+                    atol=1e-4,
+                    rtol=1e-4,
+                    msg=f"Gradient mismatch for param {i} at step {step}",
                 )
 
 
