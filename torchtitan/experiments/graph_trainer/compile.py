@@ -80,6 +80,7 @@ def _apply_jit_compile(
 def _make_precompile_callback(
     model: nn.Module,
     compile_config: GraphTrainerCompileConfig,
+    parallel_dims: ParallelDims,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk.
 
@@ -96,9 +97,15 @@ def _make_precompile_callback(
             "--compile.joint_passes inductor_decomposition"
         )
 
-    from torchtitan.experiments.graph_trainer.precompile import precompile_save
+    from torchtitan.experiments.graph_trainer.precompile import (
+        compute_config_fingerprint,
+        precompile_save,
+    )
 
     storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+    config_fingerprint = compute_config_fingerprint(
+        model, compile_config, parallel_dims
+    )
 
     def on_compile(compiled_fn, in_spec, out_spec):
         precompile_save(
@@ -112,6 +119,7 @@ def _make_precompile_callback(
                 "world_size": torch.distributed.get_world_size(),
                 "rank": torch.distributed.get_rank(),
             },
+            config_fingerprint=config_fingerprint,
         )
 
     return on_compile
@@ -128,13 +136,27 @@ def _apply_aot_compile(
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
 
-    # When precompile is enabled, check if a cached artifact already exists.
-    # If so, skip compilation entirely and load the artifact.
+    # When precompile is enabled, check if a cached artifact already exists
+    # with a matching config fingerprint. If the fingerprint doesn't match
+    # (e.g. the user changed model shapes or parallelism config), we
+    # discard the stale artifact and fall through to recompile.
     if compile_config.precompile:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
 
         if storage.exists(artifact_key):
-            return _apply_aot_compile_load(model, parallel_dims, storage, artifact_key)
+            from torchtitan.experiments.graph_trainer.precompile import (
+                compute_config_fingerprint,
+            )
+
+            config_fingerprint = compute_config_fingerprint(
+                model, compile_config, parallel_dims
+            )
+            try:
+                return _apply_aot_compile_load(
+                    model, parallel_dims, storage, artifact_key, config_fingerprint
+                )
+            except ValueError as e:
+                logger.warning(f"Stale precompile artifact detected, recompiling: {e}")
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(
@@ -155,7 +177,9 @@ def _apply_aot_compile(
 
     serializable = compile_config.precompile
     on_compile = (
-        _make_precompile_callback(model, compile_config) if serializable else None
+        _make_precompile_callback(model, compile_config, parallel_dims)
+        if serializable
+        else None
     )
 
     # Create custom joint_graph_builder with compilers
@@ -185,13 +209,16 @@ def _apply_aot_compile_load(
     parallel_dims: ParallelDims,
     storage: StorageAdapter,
     artifact_key: str,
+    config_fingerprint: str = "",
 ) -> CompiledModule:
     """Load a precompiled artifact and wrap the model with it."""
     from torchtitan.experiments.graph_trainer.precompile import precompile_load
 
     register_blockmask_pytree_node()
 
-    precompiled_fn = precompile_load(model, storage, artifact_key)
+    precompiled_fn = precompile_load(
+        model, storage, artifact_key, expected_fingerprint=config_fingerprint
+    )
 
     def _unused_graph_builder(*args, **kwargs):
         raise RuntimeError(
