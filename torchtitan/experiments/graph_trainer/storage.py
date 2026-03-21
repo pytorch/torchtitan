@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -27,6 +28,11 @@ class StorageAdapter(ABC):
         """Check if an artifact exists for the given key."""
         ...
 
+    @abstractmethod
+    def delete(self, key: str) -> None:
+        """Delete an artifact for the given key. No-op if it doesn't exist."""
+        ...
+
 
 class DiskStorageAdapter(StorageAdapter):
     def __init__(self, base_dir: str | Path) -> None:
@@ -46,6 +52,13 @@ class DiskStorageAdapter(StorageAdapter):
                 f.write(data)
             Path(tmp_path).replace(path)
         except BaseException:
+            # open(fd) with closefd=True (the default) closes fd on
+            # success or write failure. But if open() itself fails
+            # before constructing the file object, fd is still open.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
             Path(tmp_path).unlink(missing_ok=True)
             raise
         return str(path)
@@ -61,3 +74,6 @@ class DiskStorageAdapter(StorageAdapter):
 
     def exists(self, key: str) -> bool:
         return self._path_for(key).exists()
+
+    def delete(self, key: str) -> None:
+        self._path_for(key).unlink(missing_ok=True)
