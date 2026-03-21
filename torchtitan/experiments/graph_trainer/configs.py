@@ -43,7 +43,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
 
     precompile_artifact_dir: str = "/tmp/precompile_artifacts"
-    """Directory where precompile artifacts are stored."""
+    """
+    Directory where precompile artifacts are stored. The default /tmp
+    is ephemeral on most cluster environments. For multi-node setups
+    or persistence across job restarts, set this to a shared filesystem
+    path (e.g. under the job output directory).
+    """
 
 
 @dataclass(kw_only=True, slots=True)
