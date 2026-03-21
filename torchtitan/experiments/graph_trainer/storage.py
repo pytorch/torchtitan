@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -28,7 +29,7 @@ class StorageAdapter(ABC):
 
 
 class DiskStorageAdapter(StorageAdapter):
-    def __init__(self, base_dir: str) -> None:
+    def __init__(self, base_dir: str | Path) -> None:
         self.base_dir = Path(base_dir)
 
     def _path_for(self, key: str) -> Path:
@@ -37,7 +38,16 @@ class DiskStorageAdapter(StorageAdapter):
     def save(self, key: str, data: bytes) -> str:
         path = self._path_for(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        # Write to a temp file then atomically rename to avoid
+        # leaving partial files if the process crashes mid-write.
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent)
+        try:
+            with open(fd, "wb") as f:
+                f.write(data)
+            Path(tmp_path).replace(path)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
         return str(path)
 
     def load(self, key: str) -> bytes:
