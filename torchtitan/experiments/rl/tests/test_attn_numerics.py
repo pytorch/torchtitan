@@ -35,7 +35,7 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config.compilation import CompilationConfig, CUDAGraphMode
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -43,7 +43,11 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    GeneratorCompileConfig,
+    SamplingConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.actors.utils import (
     compute_token_log_probs,
@@ -92,13 +96,13 @@ def create_vllm_engine(config):
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
+        enforce_eager=gen_config.compile.is_eager,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend=gen_config.attention_backend,
-        compilation_config=CompilationConfig(
-            backend="eager",
-            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        ),
     )
+    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    if vllm_compilation_config is not None:
+        engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.seed is not None:
         engine_kwargs["seed"] = gen_config.seed
     engine_args = EngineArgs(**engine_kwargs)
@@ -243,6 +247,9 @@ def _test_config() -> RLTrainer.Config:
             gpu_memory_limit=0.5,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+            ),
+            compile=GeneratorCompileConfig(
+                backend="eager", cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
             ),
             num_samples_per_prompt=1,
             sampling=SamplingConfig(

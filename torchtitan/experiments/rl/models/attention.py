@@ -7,13 +7,9 @@
 import logging
 
 import torch
-from torch.distributed.tensor import DTensor
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
-)
-from torchtitan.experiments.rl.models.vllm_compat_attention import (
-    VLLMCompatibleFlashAttention,
 )
 from torchtitan.models.common.attention import LocalMapAttention
 
@@ -178,16 +174,27 @@ class VLLMAttention(LocalMapAttention):
     ``(batch, num_heads, seq_len, head_dim)`` layout and back.
 
     DTensor handling uses :class:`LocalMapAttention`'s ``local_map`` to strip
-    TP DTensors before ``forward``.  The output is unwrapped back to a local
-    tensor because during vLLM CUDA graph capture with 1-token dummy inputs
-    (``seqlen=1``), ``GQAttention``'s ``view(bs, 1, -1)`` merges three dims
-    ``(1, n_heads, head_dim)`` where the sharded ``n_heads`` dim is not first
-    in the flatten group — a case DTensor cannot propagate without
-    redistribution.  ``wo``'s ``RowwiseParallel`` ``PrepareModuleInput`` hook
-    re-wraps the local tensor as DTensor downstream.
+    TP DTensors before ``forward`` and re-wrap the output as DTensor after.
 
     Used by the **generator** (via :func:`replace_with_vllm_attention`).
     """
+
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        # Capture the original symbolic seq_len from the input BEFORE
+        # entering local map so that the symbol is the same one GQAttention uses
+        # in its .view(bs, seqlen, -1) call.
+        # This is probably due to some symbolic shape propagation error wrt to to_local
+        # See more details in https://github.com/pytorch/pytorch/issues/175690
+        # TODO(@Lucaskabela): remove this once the issue is fixed in pytorch
+        kwargs["seq_len"] = q.size(2)
+        return super().__call__(q, k, v, **kwargs)
+
     def __init__(
         self,
         hidden_size: int,
@@ -235,6 +242,7 @@ class VLLMAttention(LocalMapAttention):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
+        seq_len: int,
         scale: float | None = None,
         enable_gqa: bool = False,
     ) -> torch.Tensor:
@@ -244,12 +252,13 @@ class VLLMAttention(LocalMapAttention):
             q: ``(batch, num_heads, seq_len, head_dim)``
             k: ``(batch, num_kv_heads, seq_len, head_dim)``
             v: ``(batch, num_kv_heads, seq_len, head_dim)``
+            scale: Ignored — vLLM uses its own internal scale.
+            enable_gqa: Ignored — vLLM handles GQA internally.
 
         Returns:
             ``(batch, num_heads, seq_len, head_dim)``
         """
-        batch_size, _, seq_len, head_dim = q.shape
-
+        batch_size, _, _, head_dim = q.shape
         # TODO: may be good to use einops in future as we can explicitly reshape
         # with dimension names - see https://github.com/arogozhnikov/einops
         # Convert from (batch, num_heads, seq_len, head_dim)
@@ -268,7 +277,7 @@ class VLLMAttention(LocalMapAttention):
         # which happens with cudagraph capture for dummy input
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to titan: (batch, seq_len, num_heads_local, head_dim)
+        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
         output = output_flat.view(batch_size, seq_len, -1, head_dim)
         output = output.transpose(1, 2)
 
