@@ -48,3 +48,15 @@ def graph_trainer_llama3_405b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_405b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
+
+
+def graph_trainer_llama3_precompile() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        mode="aot",
+        passes=["full_inductor_compilation"],
+        joint_passes=["inductor_decomposition"],
+        precompile=True,
+    )
+    return config

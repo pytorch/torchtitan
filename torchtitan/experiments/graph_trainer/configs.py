@@ -35,6 +35,25 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
 
+    precompile: bool = False
+    """
+    Enable serializable compilation. On first run, compiles with
+    serializable=True and saves the artifact. On subsequent runs, detects
+    the existing artifact and loads it, skipping compilation entirely.
+    """
+
+    precompile_artifact_dir: str = "/tmp/precompile_artifacts"
+    """Directory where precompile artifacts are stored."""
+
+    fake_tensors: bool = False
+    """
+    Use FakeTensorMode during precompilation. Model weights and inputs are
+    fake tensors — no GPU memory allocated. Requires real torchrun (real PGs)
+    so compiled artifacts have correct process group names. Implies
+    precompile=True. After compilation completes, the process exits since
+    training cannot proceed with fake tensors.
+    """
+
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerConfig(Trainer.Config):
