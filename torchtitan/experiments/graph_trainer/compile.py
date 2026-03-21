@@ -10,6 +10,10 @@ Unified JIT/AOT compilation dispatcher for graph_trainer training.
 Supports two compilation modes via --compile.mode:
 - JIT: standard torch.compile() with custom backend
 - AOT: explicit joint graph export + custom graph passes
+
+Additionally supports pre-compile via --compile.precompile:
+- On first run: compiles with serializable=True, saves the artifact, continues training
+- On subsequent runs: detects existing artifact, loads it, skips compilation
 """
 
 import functools
@@ -36,7 +40,20 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
 from torchtitan.experiments.graph_trainer.jit_backend import (
     get_compile_backend_with_passes,
 )
+from torchtitan.experiments.graph_trainer.storage import (
+    DiskStorageAdapter,
+    StorageAdapter,
+)
 from torchtitan.tools.logging import logger
+
+
+def _get_precompile_storage_and_key(
+    compile_config: GraphTrainerCompileConfig,
+) -> tuple[StorageAdapter, str]:
+    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+    rank = torch.distributed.get_rank()
+    artifact_key = f"default_rank{rank}"
+    return storage, artifact_key
 
 
 def _apply_jit_compile(
@@ -60,6 +77,46 @@ def _apply_jit_compile(
     return model
 
 
+def _make_precompile_callback(
+    model: nn.Module,
+    compile_config: GraphTrainerCompileConfig,
+):
+    """Build the on_compile callback that saves the compiled artifact to disk.
+
+    Also validates that the pass pipeline includes full_inductor_compilation,
+    which is required for serializable compilation (it's the only pass that
+    produces Inductor OutputCode via compile_fx_inner).
+    """
+    if "full_inductor_compilation" not in compile_config.passes:
+        raise ValueError(
+            "precompile requires 'full_inductor_compilation' "
+            "in --compile.passes because the serialization machinery "
+            "needs Inductor OutputCode. Add: "
+            "--compile.passes full_inductor_compilation "
+            "--compile.joint_passes inductor_decomposition"
+        )
+
+    from torchtitan.experiments.graph_trainer.precompile import precompile_save
+
+    storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+
+    def on_compile(compiled_fn, in_spec, out_spec):
+        precompile_save(
+            model,
+            compiled_fn,
+            storage,
+            artifact_key,
+            in_spec=in_spec,
+            out_spec=out_spec,
+            metadata={
+                "world_size": torch.distributed.get_world_size(),
+                "rank": torch.distributed.get_rank(),
+            },
+        )
+
+    return on_compile
+
+
 def _apply_aot_compile(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -70,6 +127,14 @@ def _apply_aot_compile(
 ) -> CompiledModule:
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
+
+    # When precompile is enabled, check if a cached artifact already exists.
+    # If so, skip compilation entirely and load the artifact.
+    if compile_config.precompile:
+        storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+
+        if storage.exists(artifact_key):
+            return _apply_aot_compile_load(model, parallel_dims, storage, artifact_key)
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(
@@ -88,6 +153,11 @@ def _apply_aot_compile(
         compiler_passes, dump_folder=dump_folder
     )
 
+    serializable = compile_config.precompile
+    on_compile = (
+        _make_precompile_callback(model, compile_config) if serializable else None
+    )
+
     # Create custom joint_graph_builder with compilers
     model_joint_graph_builder = functools.partial(
         joint_graph_builder,
@@ -96,13 +166,48 @@ def _apply_aot_compile(
         joint_custom_passes=joint_custom_passes,
         dump_folder=dump_folder,
         compile_config=compile_config,
+        serializable=serializable,
+        on_compile=on_compile,
     )
 
     model = CompiledModule(
         model, parallel_dims, model_joint_graph_builder, parallelize_inputs
     )
-    logger.info("Applied AOT compilation (joint graph export) to the model")
+    msg = "Applied AOT compilation (joint graph export) to the model"
+    if serializable:
+        msg += " with serializable=True (precompile save)"
+    logger.info(msg)
     return model
+
+
+def _apply_aot_compile_load(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+    storage: StorageAdapter,
+    artifact_key: str,
+) -> CompiledModule:
+    """Load a precompiled artifact and wrap the model with it."""
+    from torchtitan.experiments.graph_trainer.precompile import precompile_load
+
+    register_blockmask_pytree_node()
+
+    precompiled_fn = precompile_load(model, storage, artifact_key)
+
+    def _unused_graph_builder(*args, **kwargs):
+        raise RuntimeError(
+            "joint_graph_builder should not be called when "
+            "using a precompiled artifact"
+        )
+
+    compiled_model = CompiledModule(
+        model,
+        parallel_dims,
+        joint_graph_builder=_unused_graph_builder,
+        parallelize_inputs=parallelize_inputs,
+        precompiled_fn=precompiled_fn,
+    )
+    logger.info("Applied precompiled artifact (precompile load) to the model")
+    return compiled_model
 
 
 def apply_compile(
@@ -137,6 +242,12 @@ def apply_compile(
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
     )
+
+    if compile_config.precompile and mode != "aot":
+        logger.warning(
+            f"--compile.precompile is only supported with --compile.mode=aot, "
+            f"but mode is '{mode}'. Precompile will have no effect."
+        )
 
     if mode == "jit":
         if "model" not in compile_config.components:
