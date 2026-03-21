@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,6 +28,44 @@ class PrecompiledArtifact:
     in_spec: Any
     out_spec: Any
     metadata: dict[str, Any] = field(default_factory=dict)
+    config_fingerprint: str = ""
+
+
+def compute_config_fingerprint(
+    model: torch.nn.Module,
+    compile_config: Any,
+    parallel_dims: Any,
+) -> str:
+    """
+    Compute a fingerprint that captures everything affecting the compiled output:
+    model parameter/buffer shapes and dtypes, parallelism dimensions, and
+    compile configuration. Returns the first 16 chars of a SHA-256 hex digest.
+    """
+    h = hashlib.sha256()
+
+    for name, param in model.named_parameters():
+        h.update(f"param:{name}:{list(param.shape)}:{param.dtype}\n".encode())
+    for name, buf in model.named_buffers():
+        h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
+
+    for dim_name in (
+        "world_size",
+        "dp_replicate",
+        "dp_shard",
+        "cp",
+        "tp",
+        "pp",
+        "ep",
+        "etp",
+    ):
+        h.update(f"parallel:{dim_name}:{getattr(parallel_dims, dim_name)}\n".encode())
+
+    h.update(f"compile:mode:{compile_config.mode}\n".encode())
+    h.update(f"compile:backend:{compile_config.backend}\n".encode())
+    h.update(f"compile:passes:{sorted(compile_config.passes)}\n".encode())
+    h.update(f"compile:joint_passes:{sorted(compile_config.joint_passes)}\n".encode())
+
+    return h.hexdigest()[:16]
 
 
 def precompile_save(
@@ -37,6 +76,7 @@ def precompile_save(
     in_spec: Any,
     out_spec: Any,
     metadata: dict[str, Any] | None = None,
+    config_fingerprint: str = "",
 ) -> str:
     """
     Serialize a compiled function and save it via the storage adapter.
@@ -57,6 +97,7 @@ def precompile_save(
         in_spec=in_spec,
         out_spec=out_spec,
         metadata=metadata or {},
+        config_fingerprint=config_fingerprint,
     )
 
     data = pickle.dumps(artifact)
@@ -64,7 +105,8 @@ def precompile_save(
     logger.info(
         f"Precompile artifact saved: key={artifact_key}, "
         f"params={len(params_spec)}, buffers={len(buffers_spec)}, "
-        f"size={len(data)} bytes, path={path}"
+        f"size={len(data)} bytes, fingerprint={config_fingerprint}, "
+        f"path={path}"
     )
     return path
 
@@ -73,6 +115,7 @@ def precompile_load(
     model: torch.nn.Module,
     storage: StorageAdapter,
     artifact_key: str,
+    expected_fingerprint: str = "",
 ) -> Callable:
     """
     Load a precompiled artifact and return a wrapper function that
@@ -95,10 +138,28 @@ def precompile_load(
             f"Saved: {artifact.buffers_spec}, Current: {current_buffers}"
         )
 
+    if expected_fingerprint and artifact.config_fingerprint:
+        if artifact.config_fingerprint != expected_fingerprint:
+            raise ValueError(
+                f"Config fingerprint mismatch: the precompiled artifact was "
+                f"saved with a different model/parallelism/compile configuration. "
+                f"Artifact fingerprint: {artifact.config_fingerprint}, "
+                f"current fingerprint: {expected_fingerprint}. "
+                f"Delete the stale artifact and re-run with precompile to "
+                f"generate a fresh one."
+            )
+    elif expected_fingerprint and not artifact.config_fingerprint:
+        logger.warning(
+            "Precompiled artifact has no config fingerprint (legacy artifact). "
+            "Skipping fingerprint validation. Re-save the artifact to enable "
+            "fingerprint checks."
+        )
+
     logger.info(
         f"Precompile artifact loaded: key={artifact_key}, "
         f"params={len(artifact.params_spec)}, "
         f"buffers={len(artifact.buffers_spec)}, "
+        f"fingerprint={artifact.config_fingerprint}, "
         f"metadata={artifact.metadata}"
     )
 
