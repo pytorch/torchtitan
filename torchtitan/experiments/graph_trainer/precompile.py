@@ -10,7 +10,11 @@ import hashlib
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelDims
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 import torch
 import torch.utils._pytree as pytree
@@ -25,6 +29,9 @@ class PrecompiledArtifact:
     serialized_fn: bytes
     params_spec: list[str]
     buffers_spec: list[str]
+    # in_spec is preserved for debugging and artifact inspection;
+    # it is not used during precompile_load since the deserialized
+    # callable already knows its input format.
     in_spec: Any
     out_spec: Any
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -33,13 +40,18 @@ class PrecompiledArtifact:
 
 def compute_config_fingerprint(
     model: torch.nn.Module,
-    compile_config: Any,
-    parallel_dims: Any,
+    compile_config: GraphTrainerCompileConfig,
+    parallel_dims: ParallelDims,
 ) -> str:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
     model parameter/buffer shapes and dtypes, parallelism dimensions, and
     compile configuration. Returns the first 16 chars of a SHA-256 hex digest.
+
+    Note: pass lists are sorted before hashing so that equivalent configs
+    listed in different orders produce the same fingerprint. If pass ordering
+    ever becomes semantically significant (non-commutative passes), this
+    should be revisited to hash in order instead.
     """
     h = hashlib.sha256()
 
