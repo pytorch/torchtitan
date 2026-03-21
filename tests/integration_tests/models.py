@@ -153,6 +153,44 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "llama4_pp+fsdp+tp+ep+compile",
             ngpu=8,
         ),
+        # Integration Test Cases for Mixtral MoE
+        OverrideDefinitions(
+            [
+                [
+                    "--module mixtral --config mixtral_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "Mixtral FSDP",
+            "mixtral_fsdp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module mixtral --config mixtral_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "Mixtral FSDP+EP",
+            "mixtral_fsdp+ep",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module mixtral --config mixtral_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.expert_tensor_parallel_degree 2",
+                ],
+            ],
+            "Mixtral FSDP+TP+EP+ETP",
+            "mixtral_fsdp+tp+ep+etp",
+            ngpu=4,
+        ),
         # Integration Test Cases for gpt-oss
         OverrideDefinitions(
             [
