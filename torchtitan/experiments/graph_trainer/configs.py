@@ -55,8 +55,8 @@ class GraphTrainerCompileConfig(CompileConfig):
     Use FakeTensorMode during precompilation. Model weights and inputs are
     fake tensors — no GPU memory allocated. Requires real torchrun (real PGs)
     so compiled artifacts have correct process group names. Requires
-    precompile=True. After compilation completes, the process exits since
-    training cannot proceed with fake tensors.
+    precompile=True. Training cannot proceed with fake tensors, so only
+    precompilation is performed when this is enabled.
     """
 
     def __post_init__(self):
