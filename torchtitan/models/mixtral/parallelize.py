@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-_supported_models = frozenset(
-    ["deepseek_v3", "flux", "gpt_oss", "llama3", "llama4", "mixtral", "qwen3"]
-)
+# TODO: Implement full parallelization in step 3.
+
+
+def parallelize_mixtral(model, **kwargs):
+    """Stub — will be replaced with full TP/EP/FSDP parallelization."""
+    return model
