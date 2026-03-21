@@ -127,7 +127,7 @@ def precompile_load(
     model: torch.nn.Module,
     storage: StorageAdapter,
     artifact_key: str,
-    expected_fingerprint: str = "",
+    expected_fingerprint: str,
 ) -> Callable:
     """
     Load a precompiled artifact and return a wrapper function that
@@ -177,7 +177,7 @@ def precompile_load(
 
     out_spec = artifact.out_spec
     serialized_fn_bytes = artifact.serialized_fn
-    compiled_fn_holder: list = []
+    compiled_fn_holder: list[Callable] = []
 
     def wrapper_fn(args, kwargs):
         # Defer deserialization to first call so that Triton kernels
