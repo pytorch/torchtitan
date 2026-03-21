@@ -35,6 +35,16 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
 
+    precompile: bool = False
+    """
+    Enable serializable compilation. On first run, compiles with
+    serializable=True and saves the artifact. On subsequent runs, detects
+    the existing artifact and loads it, skipping compilation entirely.
+    """
+
+    precompile_artifact_dir: str = "/tmp/precompile_artifacts"
+    """Directory where precompile artifacts are stored."""
+
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerConfig(Trainer.Config):
