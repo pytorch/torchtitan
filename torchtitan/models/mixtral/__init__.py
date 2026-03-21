@@ -37,6 +37,7 @@ mixtral_configs = {
                 n_kv_heads=2,
                 head_dim=32,
                 attn_backend="sdpa",
+                rope_backend="cos_sin",
             ),
             moe=MoE.Config(
                 hidden_dim=512,
@@ -55,6 +56,7 @@ mixtral_configs = {
             dim=32,
             max_seq_len=4096,
             theta=1_000_000.0,
+            backend="cos_sin",
         ),
     ),
     "8x7b": MixtralModel.Config(
@@ -72,6 +74,7 @@ mixtral_configs = {
                 n_kv_heads=8,
                 head_dim=128,
                 attn_backend="sdpa",
+                rope_backend="cos_sin",
             ),
             moe=MoE.Config(
                 hidden_dim=14336,
@@ -89,6 +92,7 @@ mixtral_configs = {
             dim=128,
             max_seq_len=32768,
             theta=1_000_000.0,
+            backend="cos_sin",
         ),
     ),
 }
