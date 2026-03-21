@@ -49,6 +49,19 @@ class TestDiskStorageAdapter(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertEqual(storage.load("key"), data)
 
+    def test_delete_existing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", b"data")
+            self.assertTrue(storage.exists("key"))
+            storage.delete("key")
+            self.assertFalse(storage.exists("key"))
+
+    def test_delete_nonexistent_noop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.delete("nonexistent")
+
 
 class TestPrecompiledArtifact(unittest.TestCase):
     def test_artifact_pickle_roundtrip(self):
@@ -194,7 +207,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
             model = torch.nn.Linear(8, 8)
             model.extra = torch.nn.Parameter(torch.zeros(1))
             with self.assertRaises(ValueError, msg="Parameter mismatch"):
-                precompile_load(model, storage, "key")
+                precompile_load(model, storage, "key", expected_fingerprint="")
 
     def test_load_buffer_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -216,7 +229,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
             # nn.Linear has no buffers, so buffers_spec won't match
             model = torch.nn.Linear(4, 4)
             with self.assertRaises(ValueError, msg="Buffer mismatch"):
-                precompile_load(model, storage, "key")
+                precompile_load(model, storage, "key", expected_fingerprint="")
 
     def test_load_fingerprint_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -278,21 +291,6 @@ class TestMakePrecompileCallback(unittest.TestCase):
 
         with self.assertRaises(ValueError, msg="full_inductor_compilation"):
             _make_precompile_callback(model, compile_config, parallel_dims)
-
-
-class TestDiskStorageDelete(unittest.TestCase):
-    def test_delete_existing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.save("key", b"data")
-            self.assertTrue(storage.exists("key"))
-            storage.delete("key")
-            self.assertFalse(storage.exists("key"))
-
-    def test_delete_nonexistent_noop(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.delete("nonexistent")
 
 
 class TestConfigFingerprint(unittest.TestCase):
