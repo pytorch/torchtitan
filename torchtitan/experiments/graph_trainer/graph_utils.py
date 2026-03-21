@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.utils._pytree as pytree
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
 from torch._functorch.aot_autograd import (
     aot_compile_joint_with_descriptors,
@@ -131,7 +132,10 @@ def joint_graph_builder(
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
-        job_config: Job configuration
+        compile_config: Compile configuration
+        serializable: If True, compile with serialization support
+        on_compile: Optional callback invoked after compilation with
+            (compiled_fn, in_spec, out_spec)
     """
     assert isinstance(model_args, tuple)
 
@@ -180,13 +184,23 @@ def joint_graph_builder(
     if on_compile is not None:
         on_compile(fn, joint_with_descriptors.in_spec, joint_with_descriptors.out_spec)
 
+    # When serializable=True, the compiled fn returns flat outputs.
+    # We need to unflatten them using out_spec, matching the load
+    # path in precompile_load. Without this, the save-path (first
+    # training run) would pass flat outputs while the load-path
+    # (subsequent runs) would unflatten — a silent mismatch.
+    out_spec = joint_with_descriptors.out_spec if serializable else None
+
     def wrapper_fn(args, kwargs):
         inputs = [
             *model.parameters(),
             *model.buffers(),
             *args,
         ]
-        return fn(*inputs, **kwargs)
+        result = fn(*inputs, **kwargs)
+        if out_spec is not None:
+            return pytree.tree_unflatten(result, out_spec)
+        return result
 
     return wrapper_fn
 

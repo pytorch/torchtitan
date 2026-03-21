@@ -9,7 +9,7 @@ import pickle
 import tempfile
 import unittest
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -162,6 +162,166 @@ def _make_stub_model(params=None, buffers=None):
     model.named_parameters.return_value = iter(params)
     model.named_buffers.return_value = iter(buffers)
     return model
+
+
+class TestPrecompileSaveLoad(unittest.TestCase):
+    def test_save_load_roundtrip(self):
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_load,
+            precompile_save,
+        )
+
+        model = torch.nn.Linear(4, 4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            compiled_fn = MagicMock()
+            with patch.object(
+                BundledAOTAutogradSerializableCallable,
+                "serialize_compile_artifacts",
+                return_value=b"fake_serialized",
+            ):
+                precompile_save(
+                    model,
+                    compiled_fn,
+                    storage,
+                    "test_key",
+                    in_spec=None,
+                    out_spec=None,
+                    config_fingerprint="abc123",
+                )
+
+            self.assertTrue(storage.exists("test_key"))
+
+            # Load should succeed with matching model
+            wrapper = precompile_load(
+                model, storage, "test_key", expected_fingerprint="abc123"
+            )
+            self.assertTrue(callable(wrapper))
+
+    def test_load_param_mismatch(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_load,
+            PrecompiledArtifact,
+        )
+
+        artifact = PrecompiledArtifact(
+            serialized_fn=b"fake",
+            params_spec=["layer.weight", "layer.bias"],
+            buffers_spec=[],
+            in_spec=None,
+            out_spec=None,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", pickle.dumps(artifact))
+
+            # Model with different params should fail
+            model = torch.nn.Linear(8, 8)
+            model.extra = torch.nn.Parameter(torch.zeros(1))
+            with self.assertRaises(ValueError, msg="Parameter mismatch"):
+                precompile_load(model, storage, "key")
+
+    def test_load_buffer_mismatch(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_load,
+            PrecompiledArtifact,
+        )
+
+        artifact = PrecompiledArtifact(
+            serialized_fn=b"fake",
+            params_spec=["weight", "bias"],
+            buffers_spec=["running_mean"],
+            in_spec=None,
+            out_spec=None,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", pickle.dumps(artifact))
+
+            # nn.Linear has no buffers, so buffers_spec won't match
+            model = torch.nn.Linear(4, 4)
+            with self.assertRaises(ValueError, msg="Buffer mismatch"):
+                precompile_load(model, storage, "key")
+
+    def test_load_fingerprint_mismatch(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_load,
+            PrecompiledArtifact,
+        )
+
+        model = torch.nn.Linear(4, 4)
+        artifact = PrecompiledArtifact(
+            serialized_fn=b"fake",
+            params_spec=[n for n, _ in model.named_parameters()],
+            buffers_spec=[n for n, _ in model.named_buffers()],
+            in_spec=None,
+            out_spec=None,
+            config_fingerprint="old_fingerprint",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", pickle.dumps(artifact))
+
+            with self.assertRaises(ValueError, msg="fingerprint mismatch"):
+                precompile_load(
+                    model, storage, "key", expected_fingerprint="new_fingerprint"
+                )
+
+    def test_load_legacy_artifact_warns(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_load,
+            PrecompiledArtifact,
+        )
+
+        model = torch.nn.Linear(4, 4)
+        artifact = PrecompiledArtifact(
+            serialized_fn=b"fake",
+            params_spec=[n for n, _ in model.named_parameters()],
+            buffers_spec=[n for n, _ in model.named_buffers()],
+            in_spec=None,
+            out_spec=None,
+            config_fingerprint="",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", pickle.dumps(artifact))
+
+            with self.assertLogs(level="WARNING") as cm:
+                precompile_load(model, storage, "key", expected_fingerprint="some_fp")
+            self.assertTrue(any("legacy artifact" in msg for msg in cm.output))
+
+
+class TestMakePrecompileCallback(unittest.TestCase):
+    def test_missing_full_inductor_raises(self):
+        from torchtitan.experiments.graph_trainer.compile import (
+            _make_precompile_callback,
+        )
+
+        model = torch.nn.Linear(4, 4)
+        compile_config = _StubCompileConfig(passes=["some_other_pass"])
+        parallel_dims = _StubParallelDims()
+
+        with self.assertRaises(ValueError, msg="full_inductor_compilation"):
+            _make_precompile_callback(model, compile_config, parallel_dims)
+
+
+class TestDiskStorageDelete(unittest.TestCase):
+    def test_delete_existing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", b"data")
+            self.assertTrue(storage.exists("key"))
+            storage.delete("key")
+            self.assertFalse(storage.exists("key"))
+
+    def test_delete_nonexistent_noop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.delete("nonexistent")
 
 
 class TestConfigFingerprint(unittest.TestCase):

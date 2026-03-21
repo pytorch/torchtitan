@@ -157,6 +157,7 @@ def _apply_aot_compile(
                 )
             except ValueError as e:
                 logger.warning(f"Stale precompile artifact detected, recompiling: {e}")
+                storage.delete(artifact_key)
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(
