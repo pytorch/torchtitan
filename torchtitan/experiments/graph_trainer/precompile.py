@@ -82,6 +82,19 @@ def precompile_load(
     data = storage.load(artifact_key)
     artifact: PrecompiledArtifact = pickle.loads(data)
 
+    current_params = [name for name, _ in model.named_parameters()]
+    current_buffers = [name for name, _ in model.named_buffers()]
+    if current_params != artifact.params_spec:
+        raise ValueError(
+            f"Parameter mismatch between saved artifact and current model. "
+            f"Saved: {artifact.params_spec}, Current: {current_params}"
+        )
+    if current_buffers != artifact.buffers_spec:
+        raise ValueError(
+            f"Buffer mismatch between saved artifact and current model. "
+            f"Saved: {artifact.buffers_spec}, Current: {current_buffers}"
+        )
+
     logger.info(
         f"Precompile artifact loaded: key={artifact_key}, "
         f"params={len(artifact.params_spec)}, "
@@ -99,7 +112,7 @@ def precompile_load(
         # to be set by the time the first forward runs).
         if not compiled_fn_holder:
             logger.info(
-                f"Deserializing compiled fn on device " f"{torch.cuda.current_device()}"
+                f"Deserializing compiled fn on device {torch.cuda.current_device()}"
             )
             compiled_fn_holder.append(
                 BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
