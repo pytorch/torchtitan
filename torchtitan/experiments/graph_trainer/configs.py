@@ -45,6 +45,15 @@ class GraphTrainerCompileConfig(CompileConfig):
     precompile_artifact_dir: str = "/tmp/precompile_artifacts"
     """Directory where precompile artifacts are stored."""
 
+    fake_tensors: bool = False
+    """
+    Use FakeTensorMode during precompilation. Model weights and inputs are
+    fake tensors — no GPU memory allocated. Requires real torchrun (real PGs)
+    so compiled artifacts have correct process group names. Implies
+    precompile=True. After compilation completes, the process exits since
+    training cannot proceed with fake tensors.
+    """
+
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerConfig(Trainer.Config):
