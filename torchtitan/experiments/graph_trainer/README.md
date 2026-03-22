@@ -93,16 +93,20 @@ torchrun --nproc_per_node=8 --virtual-local-rank \
     --parallelism.tensor_parallel_degree 2
 ```
 
-Pre-compile requires AOT mode with `full_inductor_compilation` and
-`inductor_decomposition` passes — these are already set in the `_precompile`
-config variants. Artifacts are stored in `/tmp/precompile_artifacts/` by
-default (configurable via `--compile.precompile_artifact_dir`).
+Pre-compile currently works with the `full_inductor_compilation` pass, which
+produces serializable `OutputCode`. A pre-configured config is provided:
+
+- `graph_trainer_llama3_precompile` — full Inductor compilation
+
+Artifacts are stored in `/tmp/precompile_artifacts/` by default (configurable
+via `--compile.precompile_artifact_dir`).
 
 #### Validation
 
 Pre-compile has been validated for bitwise equivalence on Llama3
-with 2D parallelism (FSDP dp=4, TP=2) on 8 GPUs. The three paths — baseline
-(no precompile), precompile-save (first run), and precompile-load (subsequent
+with 2D parallelism (FSDP dp=4, TP=2) on 8 GPUs using the
+`full_inductor_compilation` pass. The three paths — baseline (no
+precompile), precompile-save (first run), and precompile-load (subsequent
 run) — produce identical loss values across all training steps.
 
 ### Composability Support
