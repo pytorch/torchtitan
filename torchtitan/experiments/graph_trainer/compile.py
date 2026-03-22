@@ -198,7 +198,7 @@ def _apply_aot_compile_load(
     parallel_dims: ParallelDims,
     storage: StorageAdapter,
     artifact_key: str,
-    config_fingerprint: str = "",
+    config_fingerprint: str,
 ) -> CompiledModule:
     """Load a precompiled artifact and wrap the model with it."""
     from torchtitan.experiments.graph_trainer.precompile import precompile_load
@@ -263,8 +263,14 @@ def apply_compile(
 
     if compile_config.precompile and mode != "aot":
         logger.warning(
-            f"--compile.precompile is only supported with --compile.mode=aot, "
+            "--compile.precompile is only supported with --compile.mode=aot, "
             f"but mode is '{mode}'. Precompile will have no effect."
+        )
+
+    if compile_config.precompile and "full_inductor_compilation" not in compile_config.passes:
+        raise ValueError(
+            "--compile.precompile requires 'full_inductor_compilation' in "
+            "--compile.passes to produce serializable output."
         )
 
     if mode == "jit":
