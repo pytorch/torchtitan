@@ -68,6 +68,11 @@ def compute_config_fingerprint(
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
     h.update(f"compile:joint_passes:{list(compile_config.joint_passes)}\n".encode())
 
+    # Include PyTorch version since compiled artifacts (AOT graphs,
+    # Triton kernels) are not guaranteed to be compatible across
+    # different PyTorch versions.
+    h.update(f"torch_version:{torch.__version__}\n".encode())
+
     return h.hexdigest()[:16]
 
 
@@ -148,6 +153,9 @@ def precompile_load(
     joint_graph_builder's wrapper_fn).
     """
     data = storage.load(artifact_key)
+    # SAFETY: pickle.loads executes arbitrary code during deserialization.
+    # This is acceptable here because storage backends are assumed to be
+    # trusted (local disk or controlled shared filesystem).
     artifact: PrecompiledArtifact = pickle.loads(data)
 
     current_params = [name for name, _ in model.named_parameters()]
@@ -197,6 +205,7 @@ def precompile_load(
         # Defer deserialization to first call so that Triton kernels
         # are loaded on the correct CUDA device (which is guaranteed
         # to be set by the time the first forward runs).
+        # NOTE: not thread-safe — assumes single-threaded forward calls.
         if compiled_fn is None:
             logger.info(
                 f"Deserializing compiled fn on device {torch.cuda.current_device()}"
