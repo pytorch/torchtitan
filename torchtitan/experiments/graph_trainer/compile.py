@@ -201,6 +201,8 @@ def _apply_aot_compile_load(
     """Load a precompiled artifact and wrap the model with it."""
     from torchtitan.experiments.graph_trainer.precompile import precompile_load
 
+    # BlockMask must be registered as a pytree node before unpickling
+    # the artifact, which may contain BlockMask objects in its specs.
     register_blockmask_pytree_node()
 
     precompiled_fn = precompile_load(
