@@ -127,6 +127,19 @@ class GraphTrainer(Trainer):
             s.stage_index: (s, self.model_parts[i]) for i, s in enumerate(stages)
         }
 
+        # grad_placements omitted: we are under torch.no_grad()
+        # with fake tensors, so gradients are not relevant.
+        def _to_local(t):
+            if isinstance(t, DTensor):
+                return t.to_local()
+            return t
+
+        # Iterate stages in global order. Each rank only compiles
+        # stages it owns; the blocking send_object_list/recv_object_list
+        # calls naturally pair up across ranks even for non-contiguous
+        # schedules (e.g. V-schedule where rank 0 owns stages [0, 7])
+        # because shape information flows sequentially from stage N to
+        # N+1 and each rank's non-owned stages are skipped.
         prev_output = None
         for stage_idx in range(num_stages):
             if stage_idx not in local_stages:
@@ -169,13 +182,6 @@ class GraphTrainer(Trainer):
             if stage_idx + 1 < num_stages:
                 with self._fake_mode, torch.no_grad():
                     output = model.inner(*dt_args, **dt_kwargs)
-
-                def _to_local(t):
-                    # grad_placements omitted: we are under torch.no_grad()
-                    # with fake tensors, so gradients are not relevant.
-                    if isinstance(t, DTensor):
-                        return t.to_local()
-                    return t
 
                 output = torch.utils._pytree.tree_map(_to_local, output)
 
