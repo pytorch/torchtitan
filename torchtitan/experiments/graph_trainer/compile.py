@@ -267,12 +267,6 @@ def apply_compile(
             f"but mode is '{mode}'. Precompile will have no effect."
         )
 
-    if compile_config.precompile and "full_inductor_compilation" not in compile_config.passes:
-        raise ValueError(
-            "--compile.precompile requires 'full_inductor_compilation' in "
-            "--compile.passes to produce serializable output."
-        )
-
     if mode == "jit":
         if "model" not in compile_config.components:
             return model
