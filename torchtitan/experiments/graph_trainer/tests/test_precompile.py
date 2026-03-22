@@ -84,6 +84,30 @@ class TestPrecompiledArtifact(unittest.TestCase):
         self.assertEqual(loaded.metadata, artifact.metadata)
 
 
+class TestGraphTrainerCompileConfig(unittest.TestCase):
+    def test_precompile_config_defaults(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        config = GraphTrainerCompileConfig()
+        self.assertFalse(config.precompile)
+        self.assertEqual(config.precompile_artifact_dir, "/tmp/precompile_artifacts")
+
+    def test_precompile_config_custom(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        config = GraphTrainerCompileConfig(
+            enable=True,
+            precompile=True,
+            precompile_artifact_dir="/tmp/test_artifacts",
+        )
+        self.assertTrue(config.precompile)
+        self.assertEqual(config.precompile_artifact_dir, "/tmp/test_artifacts")
+
+
 @dataclass
 class _StubCompileConfig:
     mode: str = "aot"
