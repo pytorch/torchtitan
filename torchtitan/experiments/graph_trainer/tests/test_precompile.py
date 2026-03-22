@@ -84,6 +84,30 @@ class TestPrecompiledArtifact(unittest.TestCase):
         self.assertEqual(loaded.metadata, artifact.metadata)
 
 
+class TestGraphTrainerCompileConfig(unittest.TestCase):
+    def test_precompile_config_defaults(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        config = GraphTrainerCompileConfig()
+        self.assertFalse(config.precompile)
+        self.assertEqual(config.precompile_artifact_dir, "/tmp/precompile_artifacts")
+
+    def test_precompile_config_custom(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        config = GraphTrainerCompileConfig(
+            enable=True,
+            precompile=True,
+            precompile_artifact_dir="/tmp/test_artifacts",
+        )
+        self.assertTrue(config.precompile)
+        self.assertEqual(config.precompile_artifact_dir, "/tmp/test_artifacts")
+
+
 @dataclass
 class _StubCompileConfig:
     mode: str = "aot"
@@ -315,6 +339,27 @@ class TestPrecompileSaveValidation(unittest.TestCase):
                     "test_key",
                     out_spec=None,
                 )
+
+    def test_unwrap_from_wrapped_attribute(self):
+        """Test that precompile_save can unwrap a plain function whose
+        __wrapped__ attribute is a BundledAOTAutogradSerializableCallable,
+        matching PyTorch's aot_compile_joint_with_descriptors behavior."""
+        from functools import wraps
+
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import _unwrap_serializable
+
+        inner = MagicMock(spec=BundledAOTAutogradSerializableCallable)
+
+        @wraps(inner)
+        def wrapper(*args, **kwargs):
+            return inner(*args, **kwargs)
+
+        result = _unwrap_serializable(wrapper)
+        self.assertIs(result, inner)
 
 
 class TestConfigFingerprint(unittest.TestCase):

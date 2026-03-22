@@ -69,6 +69,45 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode jit --compile.backend inductor
 ```
 
+### Pre-compile (Serializable Compilation)
+
+Pre-compile lets you save compiled AOT graphs to disk on the first run and
+reload them on subsequent runs, skipping compilation entirely. This is useful
+for large models where compilation time is significant.
+
+```bash
+# First run: compiles with serializable=True, saves artifacts, then trains
+torchrun --nproc_per_node=8 --virtual-local-rank \
+    -m torchtitan.train \
+    --module graph_trainer.llama3 \
+    --config graph_trainer_llama3_precompile \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2
+
+# Subsequent runs: detects existing artifacts, loads them, skips compilation
+torchrun --nproc_per_node=8 --virtual-local-rank \
+    -m torchtitan.train \
+    --module graph_trainer.llama3 \
+    --config graph_trainer_llama3_precompile \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2
+```
+
+Pre-compile requires AOT mode with `full_inductor_compilation` and
+`inductor_decomposition` passes — these are already set in the `_precompile`
+config variants. Artifacts are stored in `/tmp/precompile_artifacts/` by
+default (configurable via `--compile.precompile_artifact_dir`).
+
+The `--virtual-local-rank` flag is required so that each rank sees its GPU as
+device 0, matching the device the Triton kernels were compiled for.
+
+#### Validation
+
+Pre-compile has been validated for bitwise equivalence on Llama3 debugmodel
+with 2D parallelism (FSDP dp=4, TP=2) on 8 GPUs. The three paths — baseline
+(no precompile), precompile-save (first run), and precompile-load (subsequent
+run) — produce identical loss values across all training steps.
+
 ### Composability Support
 
 Some of the features require the updates from PyTorch, with which we are working on providing composability support for the following features:
