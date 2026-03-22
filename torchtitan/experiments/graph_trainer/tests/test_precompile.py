@@ -255,6 +255,50 @@ class TestPrecompileSaveLoad(unittest.TestCase):
                     model, storage, "key", expected_fingerprint="new_fingerprint"
                 )
 
+    def test_load_with_out_spec_unflattens(self):
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_load,
+            PrecompiledArtifact,
+        )
+
+        model = torch.nn.Linear(4, 4)
+        # Build an out_spec from a dict so we can verify unflattening
+        example_output = {"loss": torch.tensor(1.0), "logits": torch.tensor(2.0)}
+        flat_values, out_spec = torch.utils._pytree.tree_flatten(example_output)
+
+        artifact = PrecompiledArtifact(
+            serialized_fn=b"fake",
+            params_spec=[n for n, _ in model.named_parameters()],
+            buffers_spec=[n for n, _ in model.named_buffers()],
+            in_spec=None,
+            out_spec=out_spec,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", pickle.dumps(artifact))
+
+            # Mock deserialize to return a fn that returns flat outputs
+            def fake_compiled_fn(*args, **kwargs):
+                return flat_values
+
+            with patch.object(
+                BundledAOTAutogradSerializableCallable,
+                "deserialize_compile_artifacts",
+                return_value=fake_compiled_fn,
+            ):
+                wrapper = precompile_load(
+                    model, storage, "key", expected_fingerprint=""
+                )
+                result = wrapper((), {})
+
+            self.assertIsInstance(result, dict)
+            self.assertIn("loss", result)
+            self.assertIn("logits", result)
+
     def test_load_legacy_artifact_warns(self):
         from torchtitan.experiments.graph_trainer.precompile import (
             precompile_load,
