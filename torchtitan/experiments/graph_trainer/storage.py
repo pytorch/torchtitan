@@ -69,9 +69,7 @@ class DiskStorageAdapter(StorageAdapter):
     def load(self, key: str) -> bytes:
         path = self._path_for(key)
         if not path.exists():
-            raise FileNotFoundError(
-                f"Artifact not found for key {key!r} at {path}"
-            )
+            raise FileNotFoundError(f"Artifact not found for key {key!r} at {path}")
         return path.read_bytes()
 
     def exists(self, key: str) -> bool:

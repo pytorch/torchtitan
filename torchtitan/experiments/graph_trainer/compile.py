@@ -269,6 +269,19 @@ def apply_compile(
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
 
+    # Precompile serialization requires the compiler pass to produce
+    # OutputCode (not GraphModule). Currently only full_inductor_compilation
+    # satisfies this — regional_inductor returns GraphModule.
+    if (
+        compile_config.precompile
+        and "full_inductor_compilation" not in compile_config.passes
+    ):
+        raise ValueError(
+            "--compile.precompile requires 'full_inductor_compilation' in "
+            "--compile.passes. Only passes that produce OutputCode (via "
+            "compile_fx_inner) support serialization."
+        )
+
     if mode == "jit":
         if "model" not in compile_config.components:
             return model
