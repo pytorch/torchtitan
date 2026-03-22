@@ -39,7 +39,10 @@ class DiskStorageAdapter(StorageAdapter):
         self.base_dir = Path(base_dir)
 
     def _path_for(self, key: str) -> Path:
-        return self.base_dir / f"{key}.bin"
+        path = (self.base_dir / f"{key}.bin").resolve()
+        if not path.is_relative_to(self.base_dir.resolve()):
+            raise ValueError(f"Key {key!r} resolves outside base directory")
+        return path
 
     def save(self, key: str, data: bytes) -> str:
         path = self._path_for(key)
@@ -67,8 +70,7 @@ class DiskStorageAdapter(StorageAdapter):
         path = self._path_for(key)
         if not path.exists():
             raise FileNotFoundError(
-                f"Precompile artifact not found at {path}. "
-                f"Run the precompile save phase first."
+                f"Artifact not found for key {key!r} at {path}"
             )
         return path.read_bytes()
 
