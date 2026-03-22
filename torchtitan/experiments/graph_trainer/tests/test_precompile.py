@@ -172,6 +172,9 @@ def _make_stub_model(params=None, buffers=None):
         buffers = [("running_mean", torch.zeros(4))]
 
     model = MagicMock()
+    # Use side_effect (not return_value) so each call produces a
+    # fresh iterator — just like real nn.Module methods. A single
+    # return_value=iter(...) would be exhausted after the first call.
     model.named_parameters.side_effect = lambda: iter(params)
     model.named_buffers.side_effect = lambda: iter(buffers)
     return model
