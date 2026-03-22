@@ -374,6 +374,27 @@ class TestPrecompileSaveValidation(unittest.TestCase):
                     out_spec=None,
                 )
 
+    def test_unwrap_from_wrapped_attribute(self):
+        """Test that precompile_save can unwrap a plain function whose
+        __wrapped__ attribute is a BundledAOTAutogradSerializableCallable,
+        matching PyTorch's aot_compile_joint_with_descriptors behavior."""
+        from functools import wraps
+
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import _unwrap_serializable
+
+        inner = MagicMock(spec=BundledAOTAutogradSerializableCallable)
+
+        @wraps(inner)
+        def wrapper(*args, **kwargs):
+            return inner(*args, **kwargs)
+
+        result = _unwrap_serializable(wrapper)
+        self.assertIs(result, inner)
+
 
 class TestConfigFingerprint(unittest.TestCase):
     def test_deterministic(self):
