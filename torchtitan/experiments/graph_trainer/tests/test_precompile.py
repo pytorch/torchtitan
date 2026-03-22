@@ -298,6 +298,8 @@ class TestPrecompileSaveLoad(unittest.TestCase):
             self.assertIsInstance(result, dict)
             self.assertIn("loss", result)
             self.assertIn("logits", result)
+            self.assertEqual(result["loss"].item(), 1.0)
+            self.assertEqual(result["logits"].item(), 2.0)
 
     def test_load_legacy_artifact_warns(self):
         from torchtitan.experiments.graph_trainer.precompile import (
