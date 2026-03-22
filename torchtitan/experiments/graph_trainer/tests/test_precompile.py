@@ -107,6 +107,35 @@ class TestGraphTrainerCompileConfig(unittest.TestCase):
         self.assertTrue(config.precompile)
         self.assertEqual(config.precompile_artifact_dir, "/tmp/test_artifacts")
 
+    def test_fake_tensors_config_default(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        config = GraphTrainerCompileConfig()
+        self.assertFalse(config.fake_tensors)
+
+    def test_fake_tensors_config_requires_precompile(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        with self.assertRaises(ValueError):
+            GraphTrainerCompileConfig(enable=True, fake_tensors=True)
+
+    def test_fake_tensors_config_with_precompile(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        config = GraphTrainerCompileConfig(
+            enable=True,
+            fake_tensors=True,
+            precompile=True,
+        )
+        self.assertTrue(config.fake_tensors)
+        self.assertTrue(config.precompile)
+
 
 @dataclass
 class _StubCompileConfig:
