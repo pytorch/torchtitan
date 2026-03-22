@@ -75,6 +75,9 @@ class GraphTrainer(Trainer):
                 input_dict, labels
             )
 
+        # parallelize_inputs wraps fake tensors as DTensors via from_local(),
+        # which only attaches placement metadata without allocating storage.
+        # This runs outside FakeTensorMode so DTensor sees real mesh objects.
         if self.parallel_dims.pp_enabled:
             self._precompile_pp_stages(inputs, extra_inputs, extra_kwargs)
         else:
@@ -192,6 +195,9 @@ class GraphTrainer(Trainer):
                     if isinstance(output, torch.Tensor):
                         shapes = [(tuple(output.shape), output.dtype)]
                     elif isinstance(output, (tuple, list)):
+                        # Only tensor elements are propagated; non-tensor
+                        # values (None, scalars) are dropped. This is safe
+                        # because PP stage outputs are pure tensors today.
                         shapes = [
                             (tuple(t.shape), t.dtype)
                             for t in output
