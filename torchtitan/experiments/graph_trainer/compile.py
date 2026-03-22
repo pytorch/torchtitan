@@ -82,21 +82,7 @@ def _make_precompile_callback(
     compile_config: GraphTrainerCompileConfig,
     parallel_dims: ParallelDims,
 ):
-    """Build the on_compile callback that saves the compiled artifact to disk.
-
-    Also validates that the pass pipeline includes full_inductor_compilation,
-    which is required for serializable compilation (it's the only pass that
-    produces Inductor OutputCode via compile_fx_inner).
-    """
-    if "full_inductor_compilation" not in compile_config.passes:
-        raise ValueError(
-            "precompile requires 'full_inductor_compilation' "
-            "in --compile.passes because the serialization machinery "
-            "needs Inductor OutputCode. Add: "
-            "--compile.passes full_inductor_compilation "
-            "--compile.joint_passes inductor_decomposition"
-        )
-
+    """Build the on_compile callback that saves the compiled artifact to disk."""
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         precompile_save,
