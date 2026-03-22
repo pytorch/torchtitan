@@ -95,6 +95,14 @@ def precompile_save(
 
     Returns the path/URI of the saved artifact.
     """
+    if not isinstance(compiled_fn, BundledAOTAutogradSerializableCallable):
+        raise TypeError(
+            f"precompile_save requires the compiled function to be a "
+            f"BundledAOTAutogradSerializableCallable, but got "
+            f"{type(compiled_fn).__name__}. Ensure your compiler pass "
+            f"pipeline produces serializable output (e.g. by including "
+            f"'full_inductor_compilation' in --compile.passes)."
+        )
     serialized_fn = BundledAOTAutogradSerializableCallable.serialize_compile_artifacts(
         compiled_fn
     )
