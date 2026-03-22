@@ -16,6 +16,7 @@ Additionally supports pre-compile via --compile.precompile:
 - On subsequent runs: detects existing artifact, loads it, skips compilation
 """
 
+import dataclasses
 import functools
 
 import torch
@@ -264,8 +265,9 @@ def apply_compile(
     if compile_config.precompile and mode != "aot":
         logger.warning(
             "--compile.precompile is only supported with --compile.mode=aot, "
-            f"but mode is '{mode}'. Precompile will have no effect."
+            f"but mode is '{mode}'. Ignoring precompile."
         )
+        compile_config = dataclasses.replace(compile_config, precompile=False)
 
     if mode == "jit":
         if "model" not in compile_config.components:
