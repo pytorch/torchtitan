@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry, parallelize_llama
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -30,13 +31,15 @@ class FakeModel(BaseModel):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.linear = nn.Linear(config.hidden, config.hidden)
+        self.linear = Linear.Config().build(
+            in_features=config.hidden, out_features=config.hidden
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
 
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
-        nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
+    def init_weights(self, buffer_device: torch.device | None = None, **kwargs) -> None:
+        self.linear.init_weights()
 
 
 def fake_post_optimizer_build_fn(

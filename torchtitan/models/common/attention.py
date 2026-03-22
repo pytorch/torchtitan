@@ -4,13 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -22,17 +24,19 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
 )
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
 
 __all__ = [
     "FlexAttentionWrapper",
     "GQAttention",
+    "LocalMapAttention",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
     "VarlenMetadata",
@@ -60,16 +64,96 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class VarlenAttentionWrapper(torch.nn.Module):
+class LocalMapAttention(Module):
+    """Base class for inner attention wrappers with DTensor support.
+
+    When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
+    overrides ``__call__`` to wrap ``nn.Module.__call__`` with ``local_map``.
+    This converts TP DTensors to local **before** any ``forward_pre_hook``
+    (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
+    DTensors **after** all ``forward_hook``s complete.
+
+    Placements and device mesh are inferred from the input DTensors.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._local_map_fn: Callable | None = None
+
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        if isinstance(q, DTensor):
+            assert isinstance(k, DTensor) and isinstance(
+                v, DTensor
+            ), "q, k, v should all be DTensors"
+            # All placements must be Shard. We set
+            # out_placements and in_grad_placements equal to
+            # in_placements below. This is only valid for attention
+            # as qkv are sharded on the n_heads dim. CP is handled
+            # independently by _ContextParallel hooks inside
+            # nn.Module.__call__.
+            assert q.placements == k.placements == v.placements, (
+                f"q, k, v must have the same placements, "
+                f"but got q={q.placements}, k={k.placements}, v={v.placements}"
+            )
+            # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
+            # on the n_heads dim (dim 1)
+            # TODO: after full DTensor rewrite, the DP mesh will also be
+            # present, update this check to allow Shard(0) for DP and Shard(1) for TP.
+            for i, p in enumerate(q.placements):
+                assert p == Shard(1), (
+                    f"LocalMapAttention requires Shard(1) placements "
+                    f"(n_heads dim), but got {p} at position {i}"
+                )
+            # return_lse=True (e.g. gpt_oss attention sinks) produces
+            # 2 outputs instead of 1, requiring different out_placements.
+            return_lse = kwargs.get("return_lse", False)
+            out_placements = (
+                (q.placements, q.placements) if return_lse else (q.placements,)
+            )
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    super().__call__,
+                    in_placements=(q.placements, k.placements, v.placements),
+                    out_placements=out_placements,
+                    in_grad_placements=(q.placements, k.placements, v.placements),
+                    device_mesh=q.device_mesh,
+                )
+            # pyrefly: ignore [bad-argument-count]
+            return self._local_map_fn(q, k, v, **kwargs)
+        return super().__call__(q, k, v, **kwargs)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class VarlenAttentionWrapper(LocalMapAttention):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
 
+    # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
         xq: torch.Tensor,
         xk: torch.Tensor,
         xv: torch.Tensor,
+        *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -86,6 +170,13 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xv_packed = xv.transpose(1, 2).flatten(
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
+
+        # Some operators can upcast under AMP, but varlen attention currently only
+        # supports bf16/fp16 inputs. If this changes, or fp16 training support
+        # is added, this may need to be revisited.
+        xq_packed = xq_packed.to(torch.bfloat16)
+        xk_packed = xk_packed.to(torch.bfloat16)
+        xv_packed = xv_packed.to(torch.bfloat16)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
@@ -107,10 +198,10 @@ class VarlenAttentionWrapper(torch.nn.Module):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-        )
+        ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(torch.nn.Module):
+class FlexAttentionWrapper(LocalMapAttention):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -123,17 +214,22 @@ class FlexAttentionWrapper(torch.nn.Module):
         block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
+    inductor_configs: ClassVar[dict[str, bool]] = {
+        # TODO: turn on wrap_inductor_compiled_regions after PyTorch fix is
+        # landed again: https://github.com/pytorch/pytorch/pull/175733.
+        "wrap_inductor_compiled_regions": False,
+        "max_autotune": True,
+        "coordinate_descent_tuning": True,
+        "triton.cudagraphs": False,
+    }
+
+    # pyrefly: ignore[no-matching-overload]
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
-        # This options also encapsulate max-autotune-no-cudagraphs.
-        options={
-            "wrap_inductor_compiled_regions": True,
-            "max_autotune": True,
-            "coordinate_descent_tuning": True,
-            "triton.cudagraphs": False,
-        },
+        options=inductor_configs,
     )
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -164,7 +260,30 @@ class FlexAttentionWrapper(torch.nn.Module):
         )
 
 
-class ScaledDotProductAttentionWrapper(torch.nn.Module):
+@contextmanager
+def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
+    """Annotate FlexAttentionWrapper.forward so regional_inductor compiles flex attention HOPs.
+
+    Uses the same inductor configs as FlexAttentionWrapper._compiled_flex_attn
+    to ensure bitwise-identical kernels between eager and regional_inductor paths.
+    """
+    from torch.fx.traceback import annotate_fn
+
+    orig = FlexAttentionWrapper.forward
+    FlexAttentionWrapper.forward = annotate_fn(
+        {
+            "compile_with_inductor": {
+                "inductor_configs": FlexAttentionWrapper.inductor_configs
+            }
+        }
+    )(orig)
+    try:
+        yield
+    finally:
+        FlexAttentionWrapper.forward = orig
+
+
+class ScaledDotProductAttentionWrapper(LocalMapAttention):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
@@ -187,6 +306,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
                 SDPBackend.MATH,
             ]
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -404,15 +524,20 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        q_norm: RMSNorm.Config | None = None
+        k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        qk_norm: bool = False
-        norm_eps: float = 1e-5
-        bias: bool = False
+        linear_bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+
+        def __post_init__(self):
+            BaseAttention.Config.__post_init__(self)
+            if (self.q_norm is None) != (self.k_norm is None):
+                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
@@ -428,26 +553,31 @@ class GQAttention(BaseAttention):
         self.rope_backend = config.rope_backend
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm: nn.RMSNorm | None = None
-        self.k_norm: nn.RMSNorm | None = None
-        if config.qk_norm:
-            self.q_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
-            self.k_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
+        self.q_norm: RMSNorm | None = None
+        self.k_norm: RMSNorm | None = None
+        if config.q_norm is not None and config.k_norm is not None:
+            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
+            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        self.wq = nn.Linear(dim, self.n_heads * self.head_dim, bias=config.bias)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=config.bias)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=config.bias)
-        self.wo = nn.Linear(self.n_heads * self.head_dim, dim, bias=config.bias)
+        linear_config = Linear.Config(bias=config.linear_bias)
+        self.wq = linear_config.build(
+            in_features=dim, out_features=self.n_heads * self.head_dim
+        )
+        self.wk = linear_config.build(
+            in_features=dim, out_features=self.n_kv_heads * self.head_dim
+        )
+        self.wv = linear_config.build(
+            in_features=dim, out_features=self.n_kv_heads * self.head_dim
+        )
+        self.wo = linear_config.build(
+            in_features=self.n_heads * self.head_dim, out_features=dim
+        )
 
         self.attn_backend = config.attn_backend
-        self.inner_attention: nn.Module
+        self.inner_attention: Module
         match self.attn_backend:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
@@ -520,7 +650,7 @@ class GQAttention(BaseAttention):
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq, xk, xv, attention_masks, **scale_kwargs
+                    xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
                 )
             case "sdpa":
                 assert attention_masks is None
@@ -543,13 +673,9 @@ class GQAttention(BaseAttention):
 
     def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
         for linear in (self.wq, self.wk, self.wv):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-            if linear.bias is not None:
-                trunc_normal_(linear.bias, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        if self.wo.bias is not None:
-            trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            linear.init_weights()
+        self.wo.init_weights(init_std=init_std)
         if self.q_norm is not None:
-            self.q_norm.reset_parameters()
+            self.q_norm.init_weights()
         if self.k_norm is not None:
-            self.k_norm.reset_parameters()
+            self.k_norm.init_weights()

@@ -7,17 +7,19 @@
 import unittest
 
 import torch
-import torch.nn as nn
 
 # o/w putting torch.ops.torch_attn._varlen_attn.default in sac list will hit error
 from torch.nn.attention.varlen import varlen_attn  # noqa
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module, ModuleDict
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -33,24 +35,25 @@ _op_sac_save_list = {
 }
 
 
-class ToyModule(nn.Module):
+class ToyModule(Module):
     def __init__(self):
         super().__init__()
-        self.layers = nn.ModuleDict({"0": TransformerBlock()})
+        self.layers = ModuleDict({"0": TransformerBlock()})
 
     def forward(self, x):
         return self.layers["0"](x)
 
 
-class TransformerBlock(nn.Module):
+class TransformerBlock(Module):
     def __init__(self):
         super().__init__()
-        self.moe = nn.Module()
-        self.moe.router = nn.Module()
-        self.moe.router.gate = nn.Linear(512, 512, bias=False)
-        self.attention = nn.Module()
-        self.attention.wq = nn.Linear(512, 512, bias=False)
-        self.output = nn.Linear(512, 1024, bias=False)
+        linear_config = Linear.Config(bias=False)
+        self.moe = Module()
+        self.moe.router = Module()
+        self.moe.router.gate = linear_config.build(in_features=512, out_features=512)
+        self.attention = Module()
+        self.attention.wq = linear_config.build(in_features=512, out_features=512)
+        self.output = linear_config.build(in_features=512, out_features=1024)
 
     def forward(self, x):
         gate_out = self.moe.router.gate(x)

@@ -30,14 +30,12 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
-from torchtitan.models.llama3.parallelize import apply_ddp
-from torchtitan.models.llama4.parallelize import (
-    apply_compile,
-    apply_fsdp,
-    apply_moe_ep_tp,
-)
+from torchtitan.models.llama3.parallelize import apply_replicate
+from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -46,6 +44,7 @@ from torchtitan.tools.logging import logger
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -79,14 +78,6 @@ def parallelize_qwen3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_backend='{attn_backend}'. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -132,6 +123,7 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
+        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
@@ -151,7 +143,7 @@ def parallelize_qwen3(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -189,13 +181,11 @@ def parallelize_qwen3(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model

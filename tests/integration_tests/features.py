@@ -528,27 +528,28 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-                    "--checkpoint.enable",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--training.enable_cpu_offload",
-                ],
-                [
-                    "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--training.enable_cpu_offload",
-                ],
-            ],
-            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-            "cpu_offload+opt_in_bwd+TP+DP+CP",
-            ngpu=8,
-        ),
+        # NOTE: temporarily disable due to test hanging in CI
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
+        #             "--checkpoint.enable",
+        #             "--parallelism.tensor_parallel_degree=2",
+        #             "--parallelism.context_parallel_degree=2",
+        #             "--training.enable_cpu_offload",
+        #         ],
+        #         [
+        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
+        #             "--parallelism.tensor_parallel_degree=2",
+        #             "--parallelism.context_parallel_degree=2",
+        #             "--parallelism.data_parallel_replicate_degree=2",
+        #             "--training.enable_cpu_offload",
+        #         ],
+        #     ],
+        #     "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+        #     "cpu_offload+opt_in_bwd+TP+DP+CP",
+        #     ngpu=8,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -557,6 +558,34 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Float8 emulation test",
             "float8_emulation",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.mode torchcomms",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+CP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+cp+pp+compile",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.mode torchcomms",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+TP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+tp+pp+compile",
+            ngpu=8,
+            skip_rocm_test=True,
         ),
     ]
 

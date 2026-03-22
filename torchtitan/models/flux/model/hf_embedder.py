@@ -6,11 +6,13 @@
 
 import os
 
-from torch import nn, Tensor
+from torch import Tensor
+
+from torchtitan.protocols.module import Module
 from transformers import CLIPTextModel, T5EncoderModel
 
 
-class FluxEmbedder(nn.Module):
+class FluxEmbedder(Module):
     def __init__(self, version: str, random_init=False, **hf_kwargs):
         super().__init__()
         self.is_clip = "clip" in version.lower()
