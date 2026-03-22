@@ -201,22 +201,22 @@ def precompile_load(
 
     out_spec = artifact.out_spec
     serialized_fn_bytes = artifact.serialized_fn
-    compiled_fn_holder: list[Callable] = []
+    compiled_fn: Callable | None = None
 
     def wrapper_fn(args, kwargs):
+        nonlocal compiled_fn
         # Defer deserialization to first call so that Triton kernels
         # are loaded on the correct CUDA device (which is guaranteed
         # to be set by the time the first forward runs).
-        if not compiled_fn_holder:
+        if compiled_fn is None:
             logger.info(
                 f"Deserializing compiled fn on device {torch.cuda.current_device()}"
             )
-            compiled_fn_holder.append(
+            compiled_fn = (
                 BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
                     serialized_fn_bytes
                 )
             )
-        compiled_fn = compiled_fn_holder[0]
 
         # Build the flat input list: params + buffers + user args.
         # This mirrors the calling convention in joint_graph_builder's
