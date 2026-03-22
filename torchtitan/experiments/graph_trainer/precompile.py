@@ -80,6 +80,29 @@ def compute_config_fingerprint(
     return h.hexdigest()[:16]
 
 
+def _unwrap_serializable(
+    compiled_fn: Any,
+) -> BundledAOTAutogradSerializableCallable:
+    """
+    Extract the BundledAOTAutogradSerializableCallable from compiled_fn.
+    PyTorch's aot_compile_joint_with_descriptors wraps the serializable
+    callable in a plain function via functools.wraps, so we check both
+    the direct object and the __wrapped__ attribute.
+    """
+    if isinstance(compiled_fn, BundledAOTAutogradSerializableCallable):
+        return compiled_fn
+    wrapped = getattr(compiled_fn, "__wrapped__", None)
+    if isinstance(wrapped, BundledAOTAutogradSerializableCallable):
+        return wrapped
+    raise TypeError(
+        f"precompile_save requires the compiled function to be a "
+        f"BundledAOTAutogradSerializableCallable, but got "
+        f"{type(compiled_fn).__name__}. Ensure your compiler pass "
+        f"pipeline produces serializable output (e.g. by including "
+        f"'full_inductor_compilation' in --compile.passes)."
+    )
+
+
 def precompile_save(
     model: torch.nn.Module,
     compiled_fn: BundledAOTAutogradSerializableCallable,
@@ -95,14 +118,7 @@ def precompile_save(
 
     Returns the path/URI of the saved artifact.
     """
-    if not isinstance(compiled_fn, BundledAOTAutogradSerializableCallable):
-        raise TypeError(
-            f"precompile_save requires the compiled function to be a "
-            f"BundledAOTAutogradSerializableCallable, but got "
-            f"{type(compiled_fn).__name__}. Ensure your compiler pass "
-            f"pipeline produces serializable output (e.g. by including "
-            f"'full_inductor_compilation' in --compile.passes)."
-        )
+    compiled_fn = _unwrap_serializable(compiled_fn)
     serialized_fn = BundledAOTAutogradSerializableCallable.serialize_compile_artifacts(
         compiled_fn
     )
