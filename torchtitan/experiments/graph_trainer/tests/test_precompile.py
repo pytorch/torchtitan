@@ -119,8 +119,8 @@ def _make_stub_model(params=None, buffers=None):
         buffers = [("running_mean", torch.zeros(4))]
 
     model = MagicMock()
-    model.named_parameters.return_value = iter(params)
-    model.named_buffers.return_value = iter(buffers)
+    model.named_parameters.side_effect = lambda: iter(params)
+    model.named_buffers.side_effect = lambda: iter(buffers)
     return model
 
 
