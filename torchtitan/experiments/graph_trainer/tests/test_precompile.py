@@ -138,7 +138,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         model = torch.nn.Linear(4, 4)
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            compiled_fn = MagicMock()
+            compiled_fn = MagicMock(spec=BundledAOTAutogradSerializableCallable)
             with patch.object(
                 BundledAOTAutogradSerializableCallable,
                 "serialize_compile_artifacts",
@@ -253,6 +253,27 @@ class TestPrecompileSaveLoad(unittest.TestCase):
             with self.assertLogs(level="WARNING") as cm:
                 precompile_load(model, storage, "key", expected_fingerprint="some_fp")
             self.assertTrue(any("legacy artifact" in msg for msg in cm.output))
+
+
+class TestPrecompileSaveValidation(unittest.TestCase):
+    def test_non_serializable_compiled_fn_raises(self):
+        from torchtitan.experiments.graph_trainer.precompile import precompile_save
+
+        model = torch.nn.Linear(4, 4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            not_serializable = lambda *args: None
+            with self.assertRaises(
+                TypeError, msg="BundledAOTAutogradSerializableCallable"
+            ):
+                precompile_save(
+                    model,
+                    not_serializable,
+                    storage,
+                    "test_key",
+                    in_spec=None,
+                    out_spec=None,
+                )
 
 
 class TestConfigFingerprint(unittest.TestCase):
