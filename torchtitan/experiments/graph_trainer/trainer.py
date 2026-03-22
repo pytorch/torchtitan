@@ -171,6 +171,8 @@ class GraphTrainer(Trainer):
                     output = model.inner(*dt_args, **dt_kwargs)
 
                 def _to_local(t):
+                    # grad_placements omitted: we are under torch.no_grad()
+                    # with fake tensors, so gradients are not relevant.
                     if isinstance(t, DTensor):
                         return t.to_local()
                     return t
@@ -190,7 +192,10 @@ class GraphTrainer(Trainer):
                             if isinstance(t, torch.Tensor)
                         ]
                     else:
-                        shapes = [(tuple(output.shape), output.dtype)]
+                        raise TypeError(
+                            f"Unexpected output type {type(output)} from "
+                            f"stage {stage_idx}; expected Tensor or tuple"
+                        )
                     dist.send_object_list(
                         [shapes], group=pp_group, group_dst=next_pp_rank
                     )
