@@ -54,8 +54,6 @@ def _distribute_dtensor(
     This helps enable Simple FSDP + TP/EP, in which
         inner spec/mesh is TP/EP spec/mesh
         outer spec/mesh is FSDP/DDP/HSDP spec/mesh
-    The logic follows
-    https://github.com/pytorch/pytorch/blob/main/torch/distributed/_composable/fsdp/_fsdp_param.py#L261
     """
     inner_spec = tensor._spec
     outer_mesh, inner_mesh = device_mesh, inner_spec.mesh
