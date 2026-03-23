@@ -423,22 +423,22 @@ def apply_fsdp(
         #   inefficiency due to padding, so we shard on dim-1 (hidden_dim) instead.
         if transformer_block.moe_enabled:
             if ep_degree > 1:
-                experts_fsdp_config = fsdp_config.copy()
-                experts_fsdp_config["mesh"] = edp_mesh
+                efsdp_config = fsdp_config.copy()
+                efsdp_config["mesh"] = edp_mesh
                 assert edp_mesh is not None
-                fsdp_size = edp_mesh["efsdp"].size() * ep_degree
+                efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
             else:
-                experts_fsdp_config = fsdp_config
-                fsdp_size = fsdp_config["mesh"].size()
+                efsdp_config = fsdp_config
+                efsdp_ep_size = fsdp_config["mesh"].size()
 
             _experts_shard_placement_fn = None
             assert hasattr(transformer_block, "moe")
-            if fsdp_size > transformer_block.moe.experts.num_experts:
+            if efsdp_ep_size > transformer_block.moe.experts.num_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(
                 transformer_block.moe.experts,
-                **experts_fsdp_config,
+                **efsdp_config,
                 reshard_after_forward=reshard_after_forward,
                 shard_placement_fn=_experts_shard_placement_fn,
             )

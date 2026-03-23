@@ -102,9 +102,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         model = _build_llama4_model(num_experts=4).to(self.device_type)
 
         apply_fsdp(
-            model, dp_mesh,
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32,
-            pp_enabled=False, ep_degree=1,
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=1,
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 1)
@@ -116,9 +119,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         model = _build_llama4_model(num_experts=8).to(self.device_type)
 
         apply_fsdp(
-            model, dp_mesh,
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32,
-            pp_enabled=False, ep_degree=1,
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=1,
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 0)
@@ -134,9 +140,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         model = _build_llama4_model(num_experts=4).to(self.device_type)
 
         apply_fsdp(
-            model, dp_mesh,
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32,
-            pp_enabled=False, ep_degree=2, edp_mesh=edp_mesh,
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=2,
+            edp_mesh=edp_mesh,
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 1)
