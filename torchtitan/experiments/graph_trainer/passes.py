@@ -95,6 +95,11 @@ def regional_inductor_pass(
 
         if isinstance(result, RegionalOutputCode):
             result._ops_filter = _ops_filter_with_distributed
+        else:
+            logger.warning(
+                "regional_inductor with serializable=True did not produce "
+                "RegionalOutputCode; distributed ops may not serialize correctly."
+            )
         return result
     return regional_inductor(gm, example_inputs)
 
