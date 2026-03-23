@@ -158,7 +158,11 @@ def _register_parametrization(
     module.__class__ = module_cls
     # Expose the dynamically created class as a real, importable symbol
     # so that pickle/GraphPickler can resolve it during serialization.
-    sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
+    # These classes accumulate for the process lifetime without cleanup;
+    # acceptable for experiment code but worth revisiting if this moves
+    # to core.
+    if module_cls.__module__ in sys.modules:
+        sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
 
 
 class ReplicateComputation(Module):
