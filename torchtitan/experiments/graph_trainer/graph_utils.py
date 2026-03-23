@@ -21,6 +21,8 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 
+from torch.utils._pytree import TreeSpec
+
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -118,7 +120,7 @@ def joint_graph_builder(
     dump_folder: str | None = None,
     compile_config: CompileConfig | None = None,
     serializable: bool = False,
-    on_compile: Callable | None = None,
+    on_compile: Callable[[Any, TreeSpec | None], None] | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -494,6 +496,10 @@ def get_compiler_passes_from_config(
         elif pass_name == "regional_inductor" and getattr(
             compile_config, "precompile", False
         ):
+            # Only regional_inductor needs an explicit serializable=True
+            # flag. full_inductor_compilation uses compile_fx_inner which
+            # already produces a serializable CompiledFxGraph; no special
+            # branch is needed for it.
             compiler_passes.append(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],

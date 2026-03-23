@@ -55,6 +55,12 @@ _SERIALIZABLE_PASSES: frozenset[str] = frozenset(
 )
 
 
+def _unused_graph_builder(*args, **kwargs):
+    raise RuntimeError(
+        "joint_graph_builder should not be called when " "using a precompiled artifact"
+    )
+
+
 def _get_precompile_storage_and_key(
     compile_config: GraphTrainerCompileConfig,
 ) -> tuple[StorageAdapter, str]:
@@ -94,6 +100,7 @@ def _make_precompile_callback(
     parallel_dims: ParallelDims,
     storage: StorageAdapter | None = None,
     artifact_key: str | None = None,
+    config_fingerprint: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
     from torchtitan.experiments.graph_trainer.precompile import (
@@ -103,9 +110,10 @@ def _make_precompile_callback(
 
     if storage is None or artifact_key is None:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallel_dims
-    )
+    if config_fingerprint is None:
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, parallel_dims
+        )
 
     # model is read at callback invocation time (synchronous with compilation)
     def on_compile(compiled_fn, out_spec):
@@ -136,27 +144,34 @@ def _apply_aot_compile(
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
 
-    # When precompile is enabled, compute storage/key once and reuse them
-    # for both the load attempt and the save callback to avoid duplicate
-    # DiskStorageAdapter construction and fingerprint computation.
+    # When precompile is enabled, compute storage/key/fingerprint once and
+    # reuse them for both the load attempt and the save callback to avoid
+    # duplicate DiskStorageAdapter construction and fingerprint computation.
     storage: StorageAdapter | None = None
     artifact_key: str | None = None
+    config_fingerprint: str | None = None
     if compile_config.precompile:
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, parallel_dims
+        )
 
         if storage.exists(artifact_key):
-            from torchtitan.experiments.graph_trainer.precompile import (
-                compute_config_fingerprint,
-            )
-
-            config_fingerprint = compute_config_fingerprint(
-                model, compile_config, parallel_dims
-            )
             try:
                 return _apply_aot_compile_load(
                     model, parallel_dims, storage, artifact_key, config_fingerprint
                 )
             except (ValueError, RuntimeError) as e:
+                # ValueError: fingerprint/param/buffer mismatches from our
+                # validation. RuntimeError: intentionally broad to catch
+                # deserialization failures (e.g. pickle errors, shape
+                # mismatches in torch.load) that surface as RuntimeError.
+                # We log the exception type so unrelated errors (CUDA OOM,
+                # NCCL) are distinguishable in logs.
                 logger.warning(
                     f"Stale precompile artifact detected ({type(e).__name__}), "
                     f"recompiling: {e}"
@@ -188,6 +203,7 @@ def _apply_aot_compile(
             parallel_dims,
             storage=storage,
             artifact_key=artifact_key,
+            config_fingerprint=config_fingerprint,
         )
         if serializable
         else None
@@ -232,12 +248,6 @@ def _apply_aot_compile_load(
     precompiled_fn = precompile_load(
         model, storage, artifact_key, expected_fingerprint=config_fingerprint
     )
-
-    def _unused_graph_builder(*args, **kwargs):
-        raise RuntimeError(
-            "joint_graph_builder should not be called when "
-            "using a precompiled artifact"
-        )
 
     compiled_model = CompiledModule(
         model,
@@ -289,6 +299,16 @@ def apply_compile(
             f"but mode is '{mode}'. Ignoring precompile."
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
+
+    if compile_config.precompile and compile_config.precompile_artifact_dir.startswith(
+        "/tmp"
+    ):
+        logger.warning(
+            "precompile_artifact_dir is set to the default /tmp path, which "
+            "is ephemeral and not shared across nodes. Set "
+            "--compile.precompile_artifact_dir to a shared filesystem path "
+            "for multi-node setups or persistence across job restarts."
+        )
 
     if compile_config.precompile and not (
         _SERIALIZABLE_PASSES & set(compile_config.passes)
