@@ -51,6 +51,9 @@ def compute_config_fingerprint(
     for name, buf in model.named_buffers():
         h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
 
+    # These attribute names are intentionally hardcoded rather than
+    # introspected from ParallelDims, because adding a new parallelism
+    # dimension should force a conscious decision about fingerprinting.
     for dim_name in (
         "world_size",
         "dp_replicate",
