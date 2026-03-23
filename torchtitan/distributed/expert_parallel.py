@@ -312,6 +312,10 @@ class DeepEPExpertParallel(BaseExpertParallel):
         self.hybridep_non_blocking_expert_capacity_factor = (
             hybridep_non_blocking_expert_capacity_factor
         )
+        # Import to register custom ops so SAC saves communication outputs
+        # instead of recomputing them. This must happen before apply_ac.
+        if comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Dispatch tokens via DeepEP or HybridEP based on configured backend."""

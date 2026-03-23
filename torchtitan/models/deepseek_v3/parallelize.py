@@ -96,12 +96,6 @@ def parallelize_deepseekv3(
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
-        if comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep  # noqa: F401
-
-        else:
-            import torchtitan.distributed.deepep  # noqa: F401
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(
             parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
