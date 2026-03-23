@@ -71,3 +71,70 @@ repos:
       name: Pyrefly (type checking)
       pass_filenames: false
       language: system
+
+
+- repo: local
+  hooks:
+    # Hook 1: Check hyperlinks
+    - id: lychee-local
+      name: lychee-local
+      language: system
+      verbose: true
+      entry: |
+        /bin/bash -c '
+        if ! command -v lychee >/dev/null 2>&1; then
+            echo "--------------------------------------------------------"
+            echo "warning: lychee (link checker) not found. skipping ... "
+            echo "to enable local link checking, install lychee:"
+            echo "  - macos: brew install lychee"
+            echo "  - linux/windows: https://github.com/lycheeverse/lychee"
+            echo "--------------------------------------------------------"
+            exit 0
+        fi
+        lychee "$@"
+        ' --
+      args:
+        - "--offline"
+        - "--no-progress"
+        - "--exclude-path=(^|/)\\..*"
+        - "--root-dir=."
+        - "**/*.md"
+      pass_filenames: false
+      always_run: true
+
+
+    # Hook 2: Check hyperlinks and external links
+    - id: lychee-ci
+      name: lychee-ci
+      language: system
+      entry: |
+        /bin/bash -c '
+        if ! command -v lychee >/dev/null 2>&1; then
+            echo "--------------------------------------------------------"
+            echo "warning: lychee (link checker) not found. skipping ... "
+            echo "to enable local link checking, install lychee:"
+            echo "  - macos: brew install lychee"
+            echo "  - linux/windows: https://github.com/lycheeverse/lychee"
+            echo ""
+            echo "if this error occurred in ci (github actions), ensure the "
+            echo "installation step in lint.yaml is running correctly."
+            echo "--------------------------------------------------------"
+            exit 1
+        fi
+        lychee "$@"
+        ' --
+      args:
+        - "--verbose"
+        - "--no-progress"
+        - "--exclude-path=(^|/)\\..*"
+        - "--root-dir=."
+        - "--accept=200,403,429,503"
+        - "--exclude=http://localhost:.*"
+        - "--exclude=http://127.0.0.1:.*"
+        - "--max-retries=3"
+        - "--retry-wait-time=5"
+        - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        - "**/*.md"
+      stages: [manual]
+      pass_filenames: false
+      always_run: true
