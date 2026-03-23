@@ -212,7 +212,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
             # Model with different params should fail
             model = torch.nn.Linear(8, 8)
             model.extra = torch.nn.Parameter(torch.zeros(1))
-            with self.assertRaises(ValueError, msg="Parameter mismatch"):
+            with self.assertRaisesRegex(ValueError, "Parameter mismatch"):
                 precompile_load(model, storage, "key", expected_fingerprint="")
 
     def test_load_buffer_mismatch(self):
@@ -233,7 +233,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
             # nn.Linear has no buffers, so buffers_spec won't match
             model = torch.nn.Linear(4, 4)
-            with self.assertRaises(ValueError, msg="Buffer mismatch"):
+            with self.assertRaisesRegex(ValueError, "Buffer mismatch"):
                 precompile_load(model, storage, "key", expected_fingerprint="")
 
     def test_load_fingerprint_mismatch(self):
@@ -254,7 +254,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
             storage = DiskStorageAdapter(tmpdir)
             storage.save("key", pickle.dumps(artifact))
 
-            with self.assertRaises(ValueError, msg="fingerprint mismatch"):
+            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
                 precompile_load(
                     model, storage, "key", expected_fingerprint="new_fingerprint"
                 )
@@ -335,8 +335,8 @@ class TestPrecompileSaveValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
             not_serializable = lambda *args: None
-            with self.assertRaises(
-                TypeError, msg="BundledAOTAutogradSerializableCallable"
+            with self.assertRaisesRegex(
+                TypeError, "BundledAOTAutogradSerializableCallable"
             ):
                 precompile_save(
                     model,
