@@ -35,7 +35,6 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -248,9 +247,10 @@ def _test_config() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
-            compile=GeneratorCompileConfig(
-                backend="eager", cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
-            ),
+            # compile=GeneratorCompileConfig(
+            #     backend="eager", cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+            # ),
+            compile=GeneratorCompileConfig(backend="none", cudagraph_mode="none"),
             num_samples_per_prompt=1,
             sampling=SamplingConfig(
                 temperature=0.0,
