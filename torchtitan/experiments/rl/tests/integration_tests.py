@@ -33,10 +33,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_debug",
+                    "--config rl_grpo_qwen3_0_6b",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--batch_invariant_mode=False",
                     "--generator.compile.backend none",
                     "--generator.compile.cudagraph_mode none",
                 ],
@@ -49,10 +48,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_debug",
+                    "--config rl_grpo_qwen3_0_6b",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--batch_invariant_mode=False",
                 ],
             ],
             "RL GRPO TP=2 compile (debug model)",
