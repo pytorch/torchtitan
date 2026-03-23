@@ -76,8 +76,8 @@ repos:
 - repo: local
   hooks:
     # Hook 1: Check hyperlinks
-    - id: lychee-local
-      name: lychee-local
+    - id: lychee-hyperlinks
+      name: lychee-hyperlinks
       language: system
       verbose: true
       entry: |
@@ -103,8 +103,8 @@ repos:
 
 
     # Hook 2: Check hyperlinks and external links
-    - id: lychee-ci
-      name: lychee-ci
+    - id: lychee-all-links
+      name: lychee-all-links
       language: system
       entry: |
         /bin/bash -c '
