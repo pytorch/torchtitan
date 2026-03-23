@@ -490,6 +490,13 @@ def get_compiler_passes_from_config(
                     fsdp_manual_buckets=get_transformer_block_buckets(model),
                 )
             )
+        elif pass_name == "regional_inductor" and compile_config.precompile:
+            compiler_passes.append(
+                functools.partial(
+                    AVAILABLE_COMPILER_PASSES[pass_name],
+                    serializable=True,
+                )
+            )
         else:
             compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
 
