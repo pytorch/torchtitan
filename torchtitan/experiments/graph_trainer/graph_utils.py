@@ -186,8 +186,9 @@ def joint_graph_builder(
     # Note: when serializable=True, PyTorch's aot_compile_joint_with_descriptors
     # already wraps the compiled function in unflattened_compiled_fn which
     # unflattens outputs using out_spec internally. We must NOT unflatten
-    # again here. The out_spec is only used in precompile_load where we call
-    # the raw deserialized compiled_fn which returns flat outputs.
+    # again here. The out_spec is only used in precompile_load (see
+    # precompile.py:wrapper_fn) where the raw deserialized compiled_fn
+    # returns flat outputs that need explicit unflattening.
 
     def wrapper_fn(args, kwargs):
         inputs = [
@@ -490,7 +491,9 @@ def get_compiler_passes_from_config(
                     fsdp_manual_buckets=get_transformer_block_buckets(model),
                 )
             )
-        elif pass_name == "regional_inductor" and compile_config.precompile:
+        elif pass_name == "regional_inductor" and getattr(
+            compile_config, "precompile", False
+        ):
             compiler_passes.append(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],

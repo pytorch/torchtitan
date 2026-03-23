@@ -51,7 +51,7 @@ from torchtitan.tools.logging import logger
 # full_inductor_compilation produces OutputCode via compile_fx_inner;
 # regional_inductor produces RegionalOutputCode (an OutputCode subclass).
 _SERIALIZABLE_PASSES: frozenset[str] = frozenset(
-    {"full_inductor_compilation", "regional_inductor"}
+    ("full_inductor_compilation", "regional_inductor")
 )
 
 
@@ -92,6 +92,8 @@ def _make_precompile_callback(
     model: nn.Module,
     compile_config: GraphTrainerCompileConfig,
     parallel_dims: ParallelDims,
+    storage: StorageAdapter | None = None,
+    artifact_key: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
     from torchtitan.experiments.graph_trainer.precompile import (
@@ -99,7 +101,8 @@ def _make_precompile_callback(
         precompile_save,
     )
 
-    storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+    if storage is None or artifact_key is None:
+        storage, artifact_key = _get_precompile_storage_and_key(compile_config)
     config_fingerprint = compute_config_fingerprint(
         model, compile_config, parallel_dims
     )
@@ -133,10 +136,11 @@ def _apply_aot_compile(
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
 
-    # When precompile is enabled, check if a cached artifact already exists
-    # with a matching config fingerprint. If the fingerprint doesn't match
-    # (e.g. the user changed model shapes or parallelism config), we
-    # discard the stale artifact and fall through to recompile.
+    # When precompile is enabled, compute storage/key once and reuse them
+    # for both the load attempt and the save callback to avoid duplicate
+    # DiskStorageAdapter construction and fingerprint computation.
+    storage: StorageAdapter | None = None
+    artifact_key: str | None = None
     if compile_config.precompile:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
 
@@ -153,7 +157,10 @@ def _apply_aot_compile(
                     model, parallel_dims, storage, artifact_key, config_fingerprint
                 )
             except (ValueError, RuntimeError) as e:
-                logger.warning(f"Stale precompile artifact detected, recompiling: {e}")
+                logger.warning(
+                    f"Stale precompile artifact detected ({type(e).__name__}), "
+                    f"recompiling: {e}"
+                )
                 storage.delete(artifact_key)
 
     # Get joint custom passes from config
@@ -175,7 +182,13 @@ def _apply_aot_compile(
 
     serializable = compile_config.precompile
     on_compile = (
-        _make_precompile_callback(model, compile_config, parallel_dims)
+        _make_precompile_callback(
+            model,
+            compile_config,
+            parallel_dims,
+            storage=storage,
+            artifact_key=artifact_key,
+        )
         if serializable
         else None
     )
