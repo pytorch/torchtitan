@@ -292,13 +292,21 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+        # Build a boolean routing map via scatter, then sum to count tokens
+        # per expert. This is equivalent to torch.histc but decomposes into
+        # scatter (needs local_map for DTensor) + sum (native DTensor support).
+        routing_map = torch.scatter(
+            torch.zeros(
+                selected_experts_indices.shape[0],
+                self.num_experts,
+                dtype=torch.bool,
+                device=selected_experts_indices.device,
+            ),
+            -1,
+            selected_experts_indices,
+            1,
         )
+        num_tokens_per_expert = routing_map.sum(dim=0)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -340,13 +348,21 @@ class TokenReorderer(Module):
                 - token_indices_experts_sorted: Token indices reordered to match expert ordering
                 - num_tokens_per_expert: Number of tokens assigned to each expert
         """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+        # Build a boolean routing map via scatter, then sum to count tokens
+        # per expert. This is equivalent to torch.histc but decomposes into
+        # scatter (needs local_map for DTensor) + sum (native DTensor support).
+        routing_map = torch.scatter(
+            torch.zeros(
+                selected_experts_indices.shape[0],
+                self.num_experts,
+                dtype=torch.bool,
+                device=selected_experts_indices.device,
+            ),
+            -1,
+            selected_experts_indices,
+            1,
         )
+        num_tokens_per_expert = routing_map.sum(dim=0)
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
