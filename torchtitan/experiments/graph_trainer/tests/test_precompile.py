@@ -58,6 +58,13 @@ class TestDiskStorageAdapter(unittest.TestCase):
             storage = DiskStorageAdapter(tmpdir)
             storage.delete("nonexistent")
 
+    def test_save_overwrites_existing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save("key", b"original")
+            storage.save("key", b"updated")
+            self.assertEqual(storage.load("key"), b"updated")
+
     def test_path_traversal_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
