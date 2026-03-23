@@ -188,7 +188,7 @@ class VLLMGenerator(Actor, Configurable):
 
         # FA2 requires block_size divisible by 256; FA3 (SM 9.0+) supports any
         _sm_90 = torch.cuda.get_device_capability()[0] >= 9
-        block_size = 32 if _sm_90 else 256
+        block_size = 16 if _sm_90 else 256
 
         # Build vLLM engine
         engine_kwargs = dict(
