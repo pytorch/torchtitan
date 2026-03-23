@@ -212,11 +212,7 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
-    compile_config: CompileConfig,
 ):
-    if compile_config.enable and "model" in compile_config.components:
-        apply_compile_to_encoders(t5_model, clip_model, compile_config)
-
     if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -252,35 +248,3 @@ def parallelize_encoders(
             logger.info("Applied FSDP to the T5 encoder model")
 
     return t5_model, clip_model
-
-
-def apply_compile_to_encoders(
-    t5_model: nn.Module,
-    clip_model: nn.Module,
-    compile_config: CompileConfig,
-):
-    """
-    Apply torch.compile to the T5 and CLIP encoder blocks used by Flux.
-    Compilation is applied per-block for efficiency due to repeated structure.
-
-    Note: fullgraph=True is intentionally omitted here because HuggingFace
-    model internals may contain graph-breaking patterns. The encoders are
-    frozen (inference-only), so allowing graph breaks has minimal impact.
-    """
-    # Compile each T5 encoder block
-    # pyrefly: ignore [missing-attribute]
-    for block_id, block in t5_model.hf_module.encoder.block.named_children():
-        block = torch.compile(block, backend=compile_config.backend)
-        # pyrefly: ignore [missing-attribute]
-        t5_model.hf_module.encoder.block.register_module(block_id, block)
-
-    # Compile each CLIP encoder layer
-    # pyrefly: ignore [missing-attribute]
-    clip_encoder_layers = clip_model.hf_module.text_model.encoder.layers
-    for layer_id, layer in clip_encoder_layers.named_children():
-        layer = torch.compile(layer, backend=compile_config.backend)
-        clip_encoder_layers.register_module(layer_id, layer)
-
-    logger.info(
-        "Compiling T5 encoder blocks and CLIP encoder layers with torch.compile"
-    )

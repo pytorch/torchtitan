@@ -87,7 +87,6 @@ class FluxTrainer(Trainer):
             clip_model=self.clip_encoder,
             parallel_dims=self.parallel_dims,
             training=config.training,
-            compile_config=config.compile,
         )
 
         if config.validator.enable:
