@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
@@ -77,20 +77,26 @@ def _run_experts_grouped_mm(
 
 
 class GroupedExperts(Module):
-    def __init__(
-        self,
-        *,
-        dim: int,
-        hidden_dim: int,
-        num_experts: int,
-        use_grouped_mm: bool,
-    ):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int = field(init=False)
+        hidden_dim: int = field(init=False)
+        num_experts: int = field(init=False)
+        use_grouped_mm: bool = True
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.num_experts = num_experts
-        self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.use_grouped_mm = use_grouped_mm
+        self.num_experts = config.num_experts
+        self.w1 = nn.Parameter(
+            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        )
+        self.w2 = nn.Parameter(
+            torch.empty(config.num_experts, config.dim, config.hidden_dim)
+        )
+        self.w3 = nn.Parameter(
+            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        )
+        self.use_grouped_mm = config.use_grouped_mm
 
     def forward(
         self,
@@ -141,47 +147,34 @@ class TokenChoiceTopKRouter(Module):
     Optionally supports node-limited (group-limited) routing where experts are divided into groups
     (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
     This reduces cross-node communication in distributed settings.
-
-    Args:
-        dim: Dimension of input tokens.
-        num_experts: Number of experts in each MoE layer.
-        num_expert_groups: Number of expert groups for node-limited routing. If None, standard
-            top-k routing is used. Must be a divisor of num_experts.
-        num_limited_groups: Number of groups to select in node-limited routing. Required when
-            num_expert_groups is set.
-        top_k: Number of experts each token will be routed to.
-        score_func: Whether to use sigmoid or softmax for router scores.
-        route_norm: Whether to normalize the routing scores when using sigmoid.
-        route_scale: Scaling factor applied to the routing scores.
-        gate_bias: Whether to include a bias term in the router's linear gate.
     """
 
-    def __init__(
-        self,
-        *,
-        dim: int,
-        num_experts: int,
-        num_expert_groups: int | None,
-        num_limited_groups: int | None,
-        top_k: int,
-        score_func: Literal["softmax", "sigmoid"],
-        route_norm: bool,
-        route_scale: float,
-        gate_bias: bool,
-        _debug_force_load_balance: bool = False,
-    ):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int = field(init=False)
+        num_experts: int = field(init=False)
+        num_expert_groups: int | None = None  # must be a divisor of num_experts
+        num_limited_groups: int | None = None
+        top_k: int = 1
+        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        route_norm: bool = False
+        route_scale: float = 1.0
+        gate: Linear.Config = field(default_factory=Linear.Config)
+        _debug_force_load_balance: bool = False
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.gate = Linear.Config(bias=gate_bias).build(
-            in_features=dim, out_features=num_experts
+        self.gate = config.gate.build(
+            in_features=config.dim, out_features=config.num_experts
         )
-        self.num_experts = num_experts
-        self.num_expert_groups = num_expert_groups
-        self.num_limited_groups = num_limited_groups
-        self.top_k = top_k
-        self.score_func = score_func
-        self.route_norm = route_norm
-        self.route_scale = route_scale
-        self._debug_force_load_balance = _debug_force_load_balance
+        self.num_experts = config.num_experts
+        self.num_expert_groups = config.num_expert_groups
+        self.num_limited_groups = config.num_limited_groups
+        self.top_k = config.top_k
+        self.score_func = config.score_func
+        self.route_norm = config.route_norm
+        self.route_scale = config.route_scale
+        self._debug_force_load_balance = config._debug_force_load_balance
 
     def _debug_force_load_balance_routing(
         self, scores: torch.Tensor
@@ -375,52 +368,27 @@ class MoE(Module):
     class Config(Module.Config):
         num_experts: int = 8
         num_shared_experts: int = 1
-
-        # router
-        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
-        route_norm: bool = False
-        route_scale: float = 1.0
-        gate_bias: bool = False
         score_before_experts: bool = True
-
-        # token-choice with optional node limited routing
-        top_k: int = 1
-        num_expert_groups: int | None = None  # must be a divisor of num_experts
-        num_limited_groups: int | None = None
-        # grouped mm or for-loop for the experts computation
-        use_grouped_mm: bool = True
         load_balance_coeff: float | None = 1e-3
-
-        _debug_force_load_balance: bool = False
-        # if True, we force each experts get same amount of token via round-robin
-
         # Expert hidden dimension (replaces old moe_inter_dim)
         hidden_dim: int = 0
+        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
+        router: TokenChoiceTopKRouter.Config = field(
+            default_factory=TokenChoiceTopKRouter.Config
+        )
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
 
         num_experts = config.num_experts
         hidden_dim = config.hidden_dim
-        self.experts = GroupedExperts(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
-            use_grouped_mm=config.use_grouped_mm,
+        self.experts = config.experts.build(
+            dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
-        self.router = TokenChoiceTopKRouter(
-            dim=dim,
-            num_experts=num_experts,
-            num_expert_groups=config.num_expert_groups,
-            num_limited_groups=config.num_limited_groups,
-            top_k=config.top_k,
-            score_func=config.score_func,
-            route_norm=config.route_norm,
-            route_scale=config.route_scale,
-            gate_bias=config.gate_bias,
-            _debug_force_load_balance=config._debug_force_load_balance,
+        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.reorderer = TokenReorderer(
+            num_experts=num_experts, top_k=config.router.top_k
         )
-        self.reorderer = TokenReorderer(num_experts=num_experts, top_k=config.top_k)
         self.shared_experts = (
             FeedForward.Config(
                 hidden_dim=hidden_dim * config.num_shared_experts,
