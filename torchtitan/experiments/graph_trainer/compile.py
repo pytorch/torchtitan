@@ -152,7 +152,7 @@ def _apply_aot_compile(
                 return _apply_aot_compile_load(
                     model, parallel_dims, storage, artifact_key, config_fingerprint
                 )
-            except ValueError as e:
+            except (ValueError, RuntimeError) as e:
                 logger.warning(f"Stale precompile artifact detected, recompiling: {e}")
                 storage.delete(artifact_key)
 

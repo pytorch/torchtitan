@@ -36,11 +36,11 @@ class StorageAdapter(ABC):
 
 class DiskStorageAdapter(StorageAdapter):
     def __init__(self, base_dir: str | Path) -> None:
-        self.base_dir = Path(base_dir)
+        self.base_dir = Path(base_dir).resolve()
 
     def _path_for(self, key: str) -> Path:
         path = (self.base_dir / f"{key}.bin").resolve()
-        if not path.is_relative_to(self.base_dir.resolve()):
+        if not path.is_relative_to(self.base_dir):
             raise ValueError(f"Key {key!r} resolves outside base directory")
         return path
 
