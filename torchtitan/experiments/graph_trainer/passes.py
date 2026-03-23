@@ -93,6 +93,9 @@ def regional_inductor_pass(
             result = regional_inductor(gm, example_inputs)
         from torch._inductor.output_code import RegionalOutputCode
 
+        # Override the ops filter after compilation so that
+        # serialization (which happens later) allows distributed
+        # collective ops like _c10d_functional through GraphPickler.
         if isinstance(result, RegionalOutputCode):
             result._ops_filter = _ops_filter_with_distributed
         else:
