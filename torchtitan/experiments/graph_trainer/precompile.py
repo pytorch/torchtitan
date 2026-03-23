@@ -29,7 +29,7 @@ class PrecompiledArtifact:
     serialized_fn: bytes
     params_spec: list[str]
     buffers_spec: list[str]
-    out_spec: Any
+    out_spec: pytree.TreeSpec | None
     metadata: dict[str, Any] = field(default_factory=dict)
     config_fingerprint: str = ""
 
@@ -104,7 +104,7 @@ def precompile_save(
     compiled_fn: BundledAOTAutogradSerializableCallable,
     storage: StorageAdapter,
     artifact_key: str,
-    out_spec: Any,
+    out_spec: pytree.TreeSpec | None,
     metadata: dict[str, Any] | None = None,
     config_fingerprint: str = "",
 ) -> str:
