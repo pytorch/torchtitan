@@ -8,12 +8,160 @@ import logging
 
 import torch
 from torch.distributed.tensor import DTensor
-from torchtitan.experiments.rl.models.vllm_compat_attention import (
-    VLLMCompatibleFlashAttention,
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
 )
 from torchtitan.protocols.module import Module
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionBackend,
+    FlashAttentionImpl,
+    FlashAttentionMetadata,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+
+
+@register_backend(AttentionBackendEnum.CUSTOM)
+class PyTorchFlashAttentionBackend(FlashAttentionBackend):
+    """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
+
+    This class is not directly referenced in user code. It is registered into
+    vLLM's attention backend registry via the ``@register_backend`` decorator
+    and selected at runtime when the vLLM engine is configured to use a CUSTOM
+    attention backend.
+
+    Inheriting from ``FlashAttentionBackend`` is not strictly required for all
+    backends, but it is convenient here to reuse metadata construction logic.
+    """
+
+    @staticmethod
+    def get_name():
+        # vLLM requires any custom attention backend to return "CUSTOM" as its
+        # name so the backend registry can look it up correctly.
+        return "CUSTOM"
+
+    @staticmethod
+    def get_impl_cls():
+        return PyTorchFlashAttentionImpl
+
+
+class PyTorchFlashAttentionImpl(FlashAttentionImpl):
+    """
+    Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
+    Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel
+    dependency from torch directly while supporting the same interface.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        # Activate PyTorch's FA3 flash attention implementation. This is required for
+        # the varlen attention API to work with paged attention (KV cache in block
+        # layout) because vLLM uses default page size 16 but FA2 only supports
+        # page_size=256. Error out if FA3 is not available in the current environment.
+        if current_flash_attention_impl() != "FA3":
+            activate_flash_attention_impl("FA3")
+
+    # Based on vLLM's FlashAttentionImpl.forward():
+    # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass with FlashAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+        assert output is not None, "Output tensor must be provided."
+        assert (
+            self.vllm_flash_attn_version is not None
+        ), "FlashAttention version not detected."
+
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for FlashAttentionImpl"
+            )
+
+        if attn_metadata is None:
+            # Profiling run.
+            return output.fill_(0)
+
+        attn_type = self.attn_type
+
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        assert attn_type not in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        ), "Encoder-only attention not supported yet."
+
+        # For decoder and cross-attention, use KV cache as before
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        assert not self.kv_cache_dtype.startswith(
+            "fp8"
+        ), "FP8 KV cache not supported yet."
+
+        assert not attn_metadata.use_cascade, "Cascade not supported yet."
+
+        cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_seq_len
+        block_table = attn_metadata.block_table
+
+        assert self.dcp_world_size == 1, "DCP not supported yet."
+
+        if attn_metadata.causal:
+            sliding_window_size = (-1, 0)
+        else:
+            raise RuntimeError("Non-causal attention not supported yet.")
+
+        assert self.alibi_slopes is None, "Alibi slopes not supported yet."
+
+        return torch.nn.attention.varlen.varlen_attn_out(
+            output[:num_actual_tokens],
+            query[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            cu_seqlens_q,
+            None,
+            max_seqlen_q,
+            max_seqlen_k,
+            scale=self.scale,
+            window_size=sliding_window_size,
+            block_table=block_table,
+            seqused_k=seqused_k,
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -187,40 +335,5 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
     logger.info(
         f"Successfully replaced TorchTitan attention with VLLMAttention "
-        f"({len(model.layers)} layers)"
-    )
-
-
-def replace_with_vllm_compatible_flash_attention(model, tp_size=1):
-    """Replace ``inner_attention`` with :class:`VLLMCompatibleFlashAttention`.
-
-    **Trainer side.** Called on the ``PolicyTrainer`` model because:
-
-    1. The generator's ``vllm.Attention`` (see :func:`replace_with_vllm_attention`)
-       uses vLLM's flash-attention kernel internally.  To achieve **bitwise
-       identical** forward outputs between trainer and generator, we patch the
-       trainer's attention to the same flash-attention kernel.
-    2. Training requires gradients.  ``VLLMCompatibleFlashAttention`` wraps
-       vLLM's flash-attention kernel with a custom backward pass so gradients
-       can flow during RL policy updates.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        vllm_attn = VLLMCompatibleFlashAttention()
-
-        layer.attention.inner_attention = vllm_attn
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMCompatibleFlashAttention "
         f"({len(model.layers)} layers)"
     )
