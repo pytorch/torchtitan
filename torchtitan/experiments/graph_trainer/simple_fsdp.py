@@ -129,7 +129,7 @@ def _distribute_dtensor(
     )
 
 
-_wrap_class_counter = 0
+_wrap_class_counter = 0  # Not thread-safe; assumes single-threaded model init
 
 
 def _register_parametrization(
