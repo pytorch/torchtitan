@@ -47,13 +47,10 @@ jobs:
           # Verify installation
           lychee --version
 
-      - name: Install lint utilities
+      - name: Check links with Lychee
         run: |
           pip install pre-commit
-          pre-commit install-hooks
-
-      - name: Check links with Lychee
-        run: pre-commit run lychee-all-links --all-files --hook-stage manual
+          pre-commit run lychee-all-links --all-files --hook-stage manual
 
       - name: Install dependencies
         run: |
@@ -66,4 +63,4 @@ jobs:
 
       - name: Lint modified files
         # Lychee already ran on a clean no-deps installed repo
-        run: SKIP=lychee-local pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
+        run: SKIP=lychee-hyperlinks pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
