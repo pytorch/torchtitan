@@ -13,7 +13,7 @@ test infrastructure but with a custom runner since simple_grpo.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
-    python -m torchtitan.experiments.rl.unified.tests.integration_tests \
+    python -m torchtitan.experiments.rl.tests.integration_tests \
         $OUTPUT_DIR --ngpu 4
 """
 
@@ -32,7 +32,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl.unified",
+                    "--module rl",
                     "--config rl_grpo_qwen3_debug",
                     "--generator.compile.backend none",
                     "--generator.compile.cudagraph_mode none",
@@ -45,7 +45,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl.unified",
+                    "--module rl",
                     "--config rl_grpo_qwen3_debug",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
@@ -61,7 +61,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl.unified",
+                    "--module rl",
                     "--config rl_grpo_qwen3_debug",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
@@ -78,6 +78,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
 def run_single_test(
     test_flavor: OverrideDefinitions,
     output_dir: str,
+    hf_assets_path: str = "",
 ) -> None:
     """Run a single RL integration test.
 
@@ -91,9 +92,11 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/unified/simple_grpo_sum_digits.py",
+            "torchtitan/experiments/rl/simple_grpo_sum_digits.py",
             f"--dump_folder {dump_folder}",
         ]
+        if hf_assets_path:
+            cmd_parts.append(f"--hf_assets_path {hf_assets_path}")
         cmd_parts.extend(override_arg)
         cmd = " ".join(cmd_parts)
 
@@ -123,7 +126,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]) -> None:
             )
             continue
 
-        run_single_test(test_flavor, args.output_dir)
+        run_single_test(test_flavor, args.output_dir, args.hf_assets_path)
         ran_any = True
 
     if not ran_any:
@@ -147,6 +150,11 @@ def main():
         default=4,
         type=int,
         help="Maximum number of GPUs available",
+    )
+    parser.add_argument(
+        "--hf_assets_path",
+        default="",
+        help="Path to HF model checkpoint (weights, tokenizer, config)",
     )
     args = parser.parse_args()
 

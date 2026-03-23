@@ -12,9 +12,6 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.experiments.rl.models.vllm_compat_attention import (
-    VLLMCompatibleFlashAttention,
-)
 from torchtitan.protocols.module import Module
 
 from vllm.model_executor.layers.attention import Attention
@@ -61,18 +58,19 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Activate PyTorch's FA3 if available (supports any page_size for paged
-        # attention). Fall back to FA2 which requires page_size to be a multiple
-        # of 256 — callers must set vLLM's block_size=256 accordingly.
-        if current_flash_attention_impl() != "FA3":
-            try:
-                activate_flash_attention_impl("FA3")
-            except RuntimeError:
-                logger.warning(
-                    "FA3 not available (requires SM 9.0+), falling back to FA2. "
-                    "vLLM block_size must be set to 256 for FA2 paged attention."
-                )
-                activate_flash_attention_impl("FA2")
+        # FA3 requires SM 9.0+ (e.g. H100); check capability explicitly because
+        # activate_flash_attention_impl("FA3") succeeds even on SM80.
+        # Fall back to FA2 which requires page_size to be a multiple
+        # of 256. 
+        if torch.cuda.get_device_capability()[0] >= 9:
+            activate_flash_attention_impl("FA3")
+            self._use_fa3 = True
+        else:
+            logger.warning(
+                "FA3 not available (requires SM 9.0+), falling back to FA2. "
+                "vLLM block_size must be set to 256 for FA2 paged attention."
+            )
+            self._use_fa3 = False
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
@@ -156,13 +154,24 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
+        # FA3 can infer cu_seqlens_k from block_table + seqused_k.
+        # FA2 requires cu_seqlens_k to be explicitly set.
+        if self._use_fa3:
+            cu_seqlens_k = None
+        else:
+            num_seqs = seqused_k.shape[0]
+            cu_seqlens_k = torch.zeros(
+                num_seqs + 1, dtype=torch.int32, device=query.device
+            )
+            cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
+
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
             value_cache,
             cu_seqlens_q,
-            None,
+            cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             scale=self.scale,
@@ -344,40 +353,5 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
     logger.info(
         f"Successfully replaced TorchTitan attention with VLLMAttention "
-        f"({len(model.layers)} layers)"
-    )
-
-
-def replace_with_vllm_compatible_flash_attention(model, tp_size=1):
-    """Replace ``inner_attention`` with :class:`VLLMCompatibleFlashAttention`.
-
-    **Trainer side.** Called on the ``PolicyTrainer`` model because:
-
-    1. The generator's ``vllm.Attention`` (see :func:`replace_with_vllm_attention`)
-       uses vLLM's flash-attention kernel internally.  To achieve **bitwise
-       identical** forward outputs between trainer and generator, we patch the
-       trainer's attention to the same flash-attention kernel.
-    2. Training requires gradients.  ``VLLMCompatibleFlashAttention`` wraps
-       vLLM's flash-attention kernel with a custom backward pass so gradients
-       can flow during RL policy updates.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        vllm_attn = VLLMCompatibleFlashAttention()
-
-        layer.attention.inner_attention = vllm_attn
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMCompatibleFlashAttention "
         f"({len(model.layers)} layers)"
     )

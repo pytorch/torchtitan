@@ -1,15 +1,15 @@
-name: RL Integration Tests
+name: RL Numerics Test on H100 (1 GPU)
 
 on:
   push:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl.yaml'
+      - '.github/workflows/integration_test_h100_rl.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl.yaml'
+      - '.github/workflows/integration_test_h100_rl.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -27,24 +27,14 @@ permissions:
       contents: read
 
 jobs:
-  # Step 1: Dynamically compute the matrix based on conditions
-  set-matrix:
-    uses: ./.github/workflows/set-matrix.yaml
-
-  # Step 2: Use the dynamic matrix in the build-test job
   build-test:
-    needs: set-matrix
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
-      runner: ${{ matrix.runner }}
-      gpu-arch-type: ${{ matrix.gpu-arch-type }}
-      gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      docker-image: ${{ matrix.docker-image }}
+      runner: linux.aws.h100.8
+      gpu-arch-type: cuda
+      gpu-arch-version: "12.8"
+      docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
-      upload-artifact: outputs
       timeout: 45
       script: |
         set -eux
@@ -62,34 +52,20 @@ jobs:
         # Install uv for faster dependency resolution
         pip install uv
 
-        # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.3.0
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-        uv pip install pygtrie portpicker
-
-        # 2. Install Flash Attention 3 kernels
+        # 1. Install Flash Attention 3 kernels
         uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
 
-        # 3. Install PyTorch nightly, vllm, and xformers
+        # 2. Install PyTorch nightly, vllm, and xformers
         uv pip install torch vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
           --index-strategy unsafe-best-match
 
-        # 4. Install torchtitan in editable mode because integration test spawns
-        # python simple_grpo_sum_digits.py as a subprocess
+        # 3. Install torchtitan in editable mode
         uv pip install -e .
 
-        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
-
-        # 5. Download HF model checkpoint for tests
+        # 4. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
-        # Run numerics unit tests (TP=1)
+        # Run numerics unit tests (TP=1) on H100 (FA3)
         MODEL_CHECKPOINT_PATH="$MODEL_PATH" \
           torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/tests/test_numerics.py -v
-
-        # Run E2E RL integration tests (TP=1 on 2 GPUs, TP=2 on 4 GPUs)
-        python -m torchtitan.experiments.rl.tests.integration_tests \
-          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
-          --hf_assets_path "$MODEL_PATH"

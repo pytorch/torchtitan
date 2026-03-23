@@ -186,9 +186,14 @@ class VLLMGenerator(Actor, Configurable):
         self.top_p = config.sampling.top_p
         self.num_samples_per_prompt = config.num_samples_per_prompt
 
+        # FA2 requires block_size divisible by 256; FA3 (SM 9.0+) supports any
+        _sm_90 = torch.cuda.get_device_capability()[0] >= 9
+        block_size = 32 if _sm_90 else 256
+
         # Build vLLM engine
         engine_kwargs = dict(
             model=model_path,
+            block_size=block_size,
             trust_remote_code=True,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,

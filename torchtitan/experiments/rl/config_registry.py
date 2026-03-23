@@ -13,7 +13,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configs import ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
@@ -41,6 +41,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -80,6 +81,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -105,7 +107,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
     return RLTrainer.Config(
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_registry("0.6B"),
         num_steps=5,
         batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(
@@ -119,6 +121,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             compile=GeneratorCompileConfig(
