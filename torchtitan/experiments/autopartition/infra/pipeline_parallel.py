@@ -28,7 +28,8 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.experiments.autopartition.infra.autopipe import auto_partition
+# from torchtitan.experiments.autopartition.infra.autopipe import auto_partition
+from torchtitan.experiments.autopartition.infra._partition import auto_partition
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
@@ -126,6 +127,7 @@ def autopipe_partition(model: nn.Module, num_stages: int, job_config: JobConfig)
         mflops_bwd,
         num_stages,
         2 * num_stages,
+        schedule_type=job_config.parallelism.pipeline_parallel_schedule,
     )
     parts.append(len(model))  # Add the total number of layers
     return parts
@@ -288,8 +290,9 @@ def pipeline_llm(
         parts = autopipe_partition(seq_modules, parallel_dims.pp, job_config)
         module_names_per_stage = [
             flatten_module_names[parts[i] : parts[i + 1]]
-            for i in range(parallel_dims.pp)
+            for i in range(num_virtual_stages)
         ]
+
         del copied_model, seq_modules
 
     for i, stage_ms in enumerate(module_names_per_stage):

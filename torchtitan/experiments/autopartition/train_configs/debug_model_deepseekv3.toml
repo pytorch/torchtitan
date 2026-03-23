@@ -50,6 +50,8 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 4
 pipeline_parallel_schedule = "1F1B"
+#pipeline_parallel_schedule = "Interleaved1F1B"
+#pipeline_parallel_schedule = "InterleavedZeroBubble"
 context_parallel_degree = 1
 expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
@@ -64,7 +66,7 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
-selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+selective_ac_option = '64'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
 enable=false
