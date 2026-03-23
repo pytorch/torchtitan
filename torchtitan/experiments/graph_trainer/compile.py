@@ -272,7 +272,8 @@ def apply_compile(
 
     # Precompile serialization requires the compiler pass to produce
     # OutputCode (not GraphModule). Currently only full_inductor_compilation
-    # satisfies this — regional_inductor returns GraphModule.
+    # satisfies this — regional_inductor's RegionalOutputCode can't yet
+    # serialize SimpleFSDP's dynamically generated module classes.
     if (
         compile_config.precompile
         and "full_inductor_compilation" not in compile_config.passes
