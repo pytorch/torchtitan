@@ -62,12 +62,45 @@ def transformer_block_bucketing_reordering_pass(
     return gm
 
 
+def _ops_filter_with_distributed(name: str) -> bool:
+    """Ops filter that allows distributed collective ops for serialization.
+
+    The default GraphPickler ops filter only allows aten and fbgemm ops.
+    SimpleFSDP uses _c10d_functional collectives that must also be
+    allowed for the graph to serialize correctly.
+    """
+    return name.startswith(
+        (
+            "torch.ops.aten",
+            "torch.ops.fbgemm",
+            "torch.ops._c10d_functional",
+        )
+    )
+
+
 def regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs
+    gm: torch.fx.GraphModule, example_inputs, *, serializable: bool = False
 ) -> torch.fx.GraphModule:
     """
     Apply regional inductor compilation based on user annotation.
+
+    When serializable=True (precompile mode), sets force_autograd_cache
+    so that regional_inductor wraps its output in RegionalOutputCode,
+    and overrides the ops filter to allow distributed collective ops.
     """
+    if serializable:
+        with torch._functorch.config.patch("force_autograd_cache", True):
+            result = regional_inductor(gm, example_inputs)
+        from torch._inductor.output_code import RegionalOutputCode
+
+        if isinstance(result, RegionalOutputCode):
+            result._ops_filter = _ops_filter_with_distributed
+        else:
+            logger.warning(
+                "regional_inductor with serializable=True did not produce "
+                "RegionalOutputCode; distributed ops may not serialize correctly."
+            )
+        return result
     return regional_inductor(gm, example_inputs)
 
 
