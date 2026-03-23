@@ -37,6 +37,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_dense
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
@@ -142,7 +143,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile_dense(model, compile_config)
 
     if parallel_dims.fsdp_enabled:
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
@@ -273,22 +274,6 @@ def apply_tp(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
         "Tensor Parallelism to the model"
     )
-
-
-def apply_compile(model: nn.Module, compile_config: CompileConfig):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(
-            transformer_block, backend=compile_config.backend, fullgraph=True
-        )
-        # pyrefly: ignore [missing-attribute]
-        model.layers.register_module(layer_id, transformer_block)
-
-    logger.info("Compiling each TransformerBlock with torch.compile")
 
 
 def disable_fsdp_gradient_division(model: nn.Module) -> None:

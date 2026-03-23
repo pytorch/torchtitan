@@ -20,7 +20,6 @@ import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor._ops.utils import is_tensor_partial
 
 from torchtitan.config import CommConfig, DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -55,17 +54,21 @@ def _dist_reduce(
         # counting.  This is safe because full_dtensor currently only
         # supports FSDP/HSDP (no TP/PP/EP/CP), so the DTensor mesh and
         # the caller's mesh span the same ranks.
-        is_partial = is_tensor_partial(x._spec)
+        is_partial = any(p.is_partial() for p in x.placements)
         x = x.full_tensor()
 
     if extra_pg is not None:
+        assert not is_partial, (
+            "DTensor with Partial placement should not be used with extra_pg. "
+            "full_dtensor does not support PP, which is the only user of extra_pg."
+        )
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
     if mesh is None or is_partial:
-        return x.item()
+        return float(x.item())
 
     assert x.numel() == 1  # required by `.item()`
-    return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
+    return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
 
 
 # TODO: rename this to maybe_dist_max

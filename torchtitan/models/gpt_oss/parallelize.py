@@ -248,14 +248,6 @@ def apply_non_moe_tp(
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
-            "attention.inner_attention": PrepareModuleInputOutput(
-                input_layouts=(Shard(1), Shard(1), Shard(1)),
-                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
-                use_local_input=True,
-                output_layouts=(Shard(1), Shard(1)),
-                desired_output_layouts=(Shard(1), Shard(1)),
-                use_local_output=False,
-            ),
             "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }

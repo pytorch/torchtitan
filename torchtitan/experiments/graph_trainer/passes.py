@@ -15,6 +15,7 @@ Pass Types:
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
 import operator
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,9 +27,11 @@ from torch._inductor.fx_passes.bucketing import (
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
+from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
@@ -182,6 +185,9 @@ def apply_sac_pass(
         op_list_to_save = _get_default_sac_save_ops()
 
     mm_count = 0
+    ac_region_stats: dict[int, dict[str, int]] = defaultdict(
+        lambda: {"save": 0, "recompute": 0}
+    )
 
     for node in gm.graph.nodes:
         if node.op != "call_function":
@@ -205,25 +211,37 @@ def apply_sac_pass(
                 node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
 
-        node.meta["ac_graph_id"] = 0
+        custom_meta = node.meta.get("custom", {})
+        ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
+        node.meta["ac_graph_id"] = ac_region_id
 
         if node.target is torch.ops.aten.mm.default:
             mm_count += 1
             # Save every odd mm, recompute every even mm
             if mm_count % 2 == 0:
-                node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+                policy = CheckpointPolicy.PREFER_RECOMPUTE
             else:
-                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                policy = CheckpointPolicy.MUST_SAVE
         elif node.target in op_list_to_save:
-            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            policy = CheckpointPolicy.MUST_SAVE
         else:
-            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            policy = CheckpointPolicy.PREFER_RECOMPUTE
+
+        node.meta["recompute"] = policy
+        if policy == CheckpointPolicy.MUST_SAVE:
+            ac_region_stats[ac_region_id]["save"] += 1
+        else:
+            ac_region_stats[ac_region_id]["recompute"] += 1
 
     gm.recompile()
-    logger.info(
-        "Applied selective activation checkpointing (SAC) graph pass "
-        f"({mm_count} mm ops found, {mm_count - mm_count // 2} saved)"
-    )
+    logger.info("Applied selective activation checkpointing (SAC) graph pass.")
+    for ac_region_id in sorted(ac_region_stats):
+        stats = ac_region_stats[ac_region_id]
+        logger.info(
+            f"  AC region {ac_region_id}: "
+            f"{stats['save']} nodes annotated with MUST_SAVE, "
+            f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
+        )
     return gm
 
 
@@ -387,6 +405,44 @@ def reassign_to_pg_pass(
             f"to PG {target_pg_name}"
         )
     gm.recompile()
+    return gm
+
+
+def tlparse_log_graph_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: Sequence[Any],
+    *,
+    graph_name: str,
+) -> torch.fx.GraphModule:
+    """Log the transformed graph to tlparse via trace_structured.
+
+    This pass should be added as the last transform in fwd/bwd_transforms
+    so that the logged graph reflects all prior transformations.
+
+    Args:
+        gm: The graph module to log.
+        example_inputs: The example inputs (unused, required by protocol).
+        graph_name: The name for this graph artifact
+            (e.g. "aot_forward_graph_transformed").
+
+    Returns:
+        The graph module unchanged.
+    """
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": graph_name,
+            "encoding": "string",
+        },
+        payload_fn=lambda: gm.print_readable(
+            print_output=False,
+            include_stride=True,
+            include_device=True,
+            expanded_def=True,
+        ),
+        expect_trace_id=False,
+    )
+
     return gm
 
 

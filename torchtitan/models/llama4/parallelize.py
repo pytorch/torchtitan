@@ -8,9 +8,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointWrapper,
-)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
@@ -38,6 +35,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -58,7 +56,6 @@ from torchtitan.distributed.tensor_parallel import (
     maybe_enable_async_tp,
     NoParallel,
 )
-from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.parallelize import (
     apply_replicate,
     disable_fsdp_gradient_division,
@@ -208,7 +205,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
@@ -646,103 +643,3 @@ def apply_moe_ep_tp(
             device_mesh=experts_mesh,
             parallelize_plan=experts_plan,
         )
-
-
-def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
-    # but it is experimental.
-    torch._dynamo.config.capture_scalar_outputs = True
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.named_children():
-        if transformer_block.moe_enabled:
-            # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
-            # So we must weave compile wrappers around those FSDP hooks to
-            # prevent AC from falling back the whole graph to eager.
-            # TODO: Fix Compile(AC(graph break))
-
-            if isinstance(transformer_block, CheckpointWrapper):
-                # TODO: Make CheckpointWrapper a transparent wrapper
-                # unwrap so that .named_children() works
-                block = transformer_block._checkpoint_wrapped_module
-            else:
-                block = transformer_block
-
-            for attr_name, submod in block.named_children():
-                assert getattr(block, attr_name) == getattr(
-                    transformer_block, attr_name
-                )
-
-                if isinstance(submod, moe_module.MoE):
-                    # avoid graph breaking on the GroupedExperts' FSDP hooks
-                    # by wrapping each submod's forward instead of their __call__
-                    moe = submod
-                    for attr_name, submod in moe.named_children():
-                        if attr_name == "experts":
-                            # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
-                            # https://github.com/pytorch/torchtitan/issues/1940
-                            continue
-                        setattr(
-                            moe,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
-                else:
-                    setattr(
-                        block,
-                        attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
-                    )
-
-        else:
-            # If it's not a MoE layer, there is no FSDP(GroupedExperts)
-            # So we can compile the whole block
-            transformer_block = torch.compile(
-                transformer_block,
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-
-        # pyrefly: ignore [missing-attribute]
-        model.layers.register_module(layer_id, transformer_block)
-
-    # Patch some globals only once (apply_compile is called multiple times for PP setup)
-    already_patched = (
-        "_run_experts_grouped_mm_dynamic"
-        in moe_module._run_experts_grouped_mm.__qualname__
-    )
-    if not already_patched:
-        moe_module._run_experts_grouped_mm = torch.compile(
-            moe_module._run_experts_grouped_mm,
-            backend=compile_config.backend,
-            fullgraph=True,
-        )
-
-        if ep_enabled:
-            compiled_fn = moe_module._run_experts_grouped_mm
-
-            # keep function logic in sync with `already_patched` above
-            def _run_experts_grouped_mm_dynamic(
-                w1: torch.Tensor,
-                w2: torch.Tensor,
-                w3: torch.Tensor,
-                x: torch.Tensor,
-                num_tokens_per_expert: torch.Tensor,
-            ) -> torch.Tensor:
-                # dynamic number of tokens in expert parallel
-                torch._dynamo.mark_dynamic(x, 0)
-                return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
-
-            moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
-
-    # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
-    # https://github.com/pytorch/pytorch/issues/166460
-
-    logger.info("Compiling each TransformerBlock with torch.compile")

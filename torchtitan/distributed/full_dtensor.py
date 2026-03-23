@@ -72,6 +72,7 @@ def _get_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
     mesh_names = [
         n for n in ["dp_replicate", "fsdp"] if parallel_dims.get_optional_mesh(n)
     ]
+    assert mesh_names, "full_dtensor requires at least one DP dimension"
     return parallel_dims.get_mesh(mesh_names)
 
 
@@ -226,13 +227,10 @@ def convert_buffers_to_dtensor(
             parent = model
             for part in parts[:-1]:
                 parent = getattr(parent, part)
-            # Preserve the original buffer's persistence flag
-            persistent = parts[-1] in parent._buffers and parts[-1] not in (
-                parent._non_persistent_buffers_set
-                if hasattr(parent, "_non_persistent_buffers_set")
-                else set()
-            )
-            parent.register_buffer(parts[-1], dtensor_buf, persistent=persistent)
+            # All buffers in torchtitan models (e.g. freqs_cis) are persistent.
+            # Default to persistent=True to avoid relying on the private
+            # nn.Module._non_persistent_buffers_set attribute.
+            parent.register_buffer(parts[-1], dtensor_buf, persistent=True)
 
     logger.info("Converted remaining plain tensor buffers to DTensors")
 
@@ -242,8 +240,11 @@ def parallelize_inputs(
 ) -> tuple[DTensor, DTensor]:
     """Convert inputs and labels to DTensors on the SPMD mesh."""
     mesh = _get_spmd_mesh(parallel_dims)
-    # Each DP dimension shards inputs along batch (dim 0).
-    # TP is not yet supported (validate_config rejects it).
+    # Every DP dimension — including dp_replicate — gets Shard(0) because
+    # each rank owns a unique micro-batch slice of the global batch.
+    # "dp_replicate" replicates *model parameters* (like DDP), not data:
+    # every rank still processes different data, so inputs are sharded
+    # along dim 0 across all DP dimensions.
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -180,19 +180,22 @@ def _run_experts_grouped_mm(
 
 
 class GptOssGroupedExperts(Module):
-    def __init__(
-        self,
-        *,
-        dim: int,
-        hidden_dim: int,
-        num_experts: int,
-        use_grouped_mm: bool,
-        swiglu_limit: float,
-    ):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int = field(init=False)
+        hidden_dim: int = field(init=False)
+        num_experts: int = field(init=False)
+        use_grouped_mm: bool = True
+        swiglu_limit: float = 7.0
+
+    def __init__(self, config: Config):
         super().__init__()
+        dim = config.dim
+        hidden_dim = config.hidden_dim
+        num_experts = config.num_experts
         self.num_experts = num_experts
-        self.use_grouped_mm = use_grouped_mm
-        self.swiglu_limit = swiglu_limit
+        self.use_grouped_mm = config.use_grouped_mm
+        self.swiglu_limit = config.swiglu_limit
 
         self.mlp1_weight = nn.Parameter(
             torch.empty((num_experts, hidden_dim * 2, dim))
@@ -287,10 +290,11 @@ class GptOssMoE(MoE):
 
         # Override the base GroupedExperts with GptOssGroupedExperts
         # pyrefly: ignore [bad-assignment]
-        self.experts = GptOssGroupedExperts(
+        self.experts = GptOssGroupedExperts.Config(
+            swiglu_limit=config.swiglu_limit,
+            use_grouped_mm=config.experts.use_grouped_mm,
+        ).build(
             dim=dim,
             hidden_dim=config.hidden_dim,
             num_experts=config.num_experts,
-            use_grouped_mm=config.use_grouped_mm,
-            swiglu_limit=config.swiglu_limit,
         )
