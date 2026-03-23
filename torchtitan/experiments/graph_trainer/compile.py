@@ -270,18 +270,17 @@ def apply_compile(
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
 
-    # Precompile serialization requires the compiler pass to produce
-    # OutputCode (not GraphModule). Currently only full_inductor_compilation
-    # satisfies this — regional_inductor's RegionalOutputCode can't yet
-    # serialize SimpleFSDP's dynamically generated module classes.
-    if (
-        compile_config.precompile
-        and "full_inductor_compilation" not in compile_config.passes
+    # Precompile serialization requires at least one compiler pass that
+    # produces OutputCode. Currently full_inductor_compilation (via
+    # compile_fx_inner) and regional_inductor (via RegionalOutputCode)
+    # satisfy this requirement.
+    _SERIALIZABLE_PASSES = {"full_inductor_compilation", "regional_inductor"}
+    if compile_config.precompile and not (
+        _SERIALIZABLE_PASSES & set(compile_config.passes)
     ):
         raise ValueError(
-            "--compile.precompile requires 'full_inductor_compilation' in "
-            "--compile.passes. Only passes that produce OutputCode (via "
-            "compile_fx_inner) support serialization."
+            "--compile.precompile requires at least one serializable pass "
+            f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
 
     if mode == "jit":
