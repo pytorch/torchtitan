@@ -41,31 +41,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "JIT 1D+transformer_block_bucketing",
             "jit_1d_transformer_block_bucketing",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
-                ],
-            ],
-            "JIT 1D with selective op AC",
-            "jit_1d_sac_op",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "--activation_checkpoint.mode full",
-                ],
-            ],
-            "JIT 1D with full AC",
-            "jit_1d_full_ac",
-        ),
         # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
             [
@@ -188,6 +163,20 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         # === AOT mode tests ===
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "AOT llama3 FSDP+TP",
+            "aot_llama3_fsdp_tp",
+            ngpu=8,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -371,7 +360,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
-                    "--activation_checkpoint.mode none",
                 ],
             ],
             "AOT deepseek_v3 FSDP+TP+EP",
@@ -388,7 +376,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
-                    "--activation_checkpoint.mode none",
                 ],
             ],
             "AOT deepseek_v3 FSDP+TP+EP+FlexAttention",
@@ -406,7 +393,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
                     "--compile.joint_passes inductor_decomposition",
-                    "--activation_checkpoint.mode none",
                 ],
             ],
             "AOT deepseek_v3 inductor_decomposition",

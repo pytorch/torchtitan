@@ -488,7 +488,7 @@ def get_moe_model_nparams_and_flops(
         nparams_sparse_active = (
             nparams_moe_router
             + nparams_shared_experts
-            + nparams_experts * moe_config.top_k // moe_config.num_experts
+            + nparams_experts * moe_config.router.top_k // moe_config.num_experts
         )
     else:
         nparams_sparse_active = 0

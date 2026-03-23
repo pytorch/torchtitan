@@ -236,16 +236,30 @@ class GptOssModel(Decoder):
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             assert self.layer.moe is not None
-            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
+            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported on SM90 or later",
                 )
-                self.layer.moe.use_grouped_mm = False
+                self.layer.moe.experts.use_grouped_mm = False
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
                     "CP support for gpt-oss model is still in progress."
                 )
+
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layer.attention.n_heads
+                # pyrefly: ignore [missing-attribute]
+                n_kv_heads = self.layer.attention.n_kv_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
 
         # pyrefly: ignore [bad-override]
         def get_nparams_and_flops(
@@ -269,7 +283,6 @@ class GptOssModel(Decoder):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-
         basic_mask_mods = []
         assert isinstance(self.config.layer.attention, Attention.Config)
         sliding_window_mask_mods = [

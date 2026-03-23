@@ -24,7 +24,9 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.compile import apply_compile_dense_rl
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ def parallelize_qwen3(
     *,
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
+    compile_config: CompileConfig | None = None,
     has_position_id: bool = False,
 ):
     """
@@ -44,6 +47,8 @@ def parallelize_qwen3(
     TODO: Change to core torchtitan's Qwen3 parallel plan when full DTensor is ready
 
     Args:
+        compile_config: If provided and enabled, applies per-layer torch.compile
+            after TP (matching the pattern in torchtitan/models/llama3/parallelize.py).
         has_position_id: Whether position IDs are passed as an explicit argument
             to the attention module. True for vLLM inference (generator),
             False for training (trainer).
@@ -59,6 +64,13 @@ def parallelize_qwen3(
             enable_async_tp=parallelism.enable_async_tensor_parallel,
             has_position_id=has_position_id,
         )
+
+    if (
+        compile_config is not None
+        and compile_config.enable
+        and "model" in compile_config.components
+    ):
+        apply_compile_dense_rl(model, compile_config)
 
     return model
 
