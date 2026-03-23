@@ -179,22 +179,6 @@ class VLLMAttention(LocalMapAttention):
     Used by the **generator** (via :func:`replace_with_vllm_attention`).
     """
 
-    def __call__(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        # Capture the original symbolic seq_len from the input BEFORE
-        # entering local map so that the symbol is the same one GQAttention uses
-        # in its .view(bs, seqlen, -1) call.
-        # This is probably due to some symbolic shape propagation error wrt to to_local
-        # See more details in https://github.com/pytorch/pytorch/issues/175690
-        # TODO(@Lucaskabela): remove this once the issue is fixed in pytorch
-        kwargs["seq_len"] = q.size(2)
-        return super().__call__(q, k, v, **kwargs)
-
     def __init__(
         self,
         hidden_size: int,
@@ -242,7 +226,6 @@ class VLLMAttention(LocalMapAttention):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        seq_len: int,
         scale: float | None = None,
         enable_gqa: bool = False,
     ) -> torch.Tensor:
@@ -258,7 +241,12 @@ class VLLMAttention(LocalMapAttention):
         Returns:
             ``(batch, num_heads, seq_len, head_dim)``
         """
-        batch_size, _, _, head_dim = q.shape
+        # This seq_len captured here is wrong probably due to some symbolic shape propagation error wrt to to_local.
+        # Therefore it is breaking compile. We need to fix this in pytorch.
+        # See more details in https://github.com/pytorch/pytorch/issues/175690
+        # TODO(@Lucaskabela): remove this once the issue is fixed in pytorch
+        batch_size, _, seq_len, head_dim = q.shape
+
         # TODO: may be good to use einops in future as we can explicitly reshape
         # with dimension names - see https://github.com/arogozhnikov/einops
         # Convert from (batch, num_heads, seq_len, head_dim)
