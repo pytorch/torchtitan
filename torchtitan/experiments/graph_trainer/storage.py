@@ -6,21 +6,33 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 
 class StorageAdapter(ABC):
+    """Interface for storing and retrieving precompiled artifacts.
+
+    Keys are flat, opaque strings (no hierarchy or path separators).
+    Implementations map keys to storage locations internally — callers
+    should not embed "/" or other filesystem-specific characters in keys.
+    """
+
     @abstractmethod
     def save(self, key: str, data: bytes) -> str:
-        """Save data under the given key. Returns the path/URI of the saved artifact."""
+        """Save data under the given key. Returns the path/URI of the saved artifact.
+
+        If an artifact already exists for the key, it is silently overwritten.
+        """
         ...
 
     @abstractmethod
     def load(self, key: str) -> bytes:
-        """Load data for the given key."""
+        """Load data for the given key.
+
+        Raises FileNotFoundError if no artifact exists for the key.
+        """
         ...
 
     @abstractmethod
@@ -49,21 +61,14 @@ class DiskStorageAdapter(StorageAdapter):
         path.parent.mkdir(parents=True, exist_ok=True)
         # Write to a temp file then atomically rename to avoid
         # leaving partial files if the process crashes mid-write.
-        fd, tmp_path = tempfile.mkstemp(dir=path.parent)
-        try:
-            with open(fd, "wb") as f:
-                f.write(data)
-            Path(tmp_path).replace(path)
-        except BaseException:
-            # open(fd) with closefd=True (the default) closes fd on
-            # success or write failure. But if open() itself fails
-            # before constructing the file object, fd is still open.
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
             try:
-                os.close(fd)
-            except OSError:
-                pass
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
+                f.write(data)
+                f.flush()
+                Path(f.name).replace(path)
+            except BaseException:
+                Path(f.name).unlink(missing_ok=True)
+                raise
         return str(path)
 
     def load(self, key: str) -> bytes:

@@ -183,13 +183,6 @@ def joint_graph_builder(
     if on_compile is not None:
         on_compile(fn, joint_with_descriptors.out_spec)
 
-    # Note: when serializable=True, PyTorch's aot_compile_joint_with_descriptors
-    # already wraps the compiled function in unflattened_compiled_fn which
-    # unflattens outputs using out_spec internally. We must NOT unflatten
-    # again here. The out_spec is only used in precompile_load (see
-    # precompile.py:wrapper_fn) where the raw deserialized compiled_fn
-    # returns flat outputs that need explicit unflattening.
-
     def wrapper_fn(args, kwargs):
         inputs = [
             *model.parameters(),

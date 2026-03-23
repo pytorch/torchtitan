@@ -108,7 +108,6 @@ def _make_precompile_callback(
         model, compile_config, parallel_dims
     )
 
-    # model is read at callback invocation time (synchronous with compilation)
     def on_compile(compiled_fn, out_spec):
         precompile_save(
             model,
