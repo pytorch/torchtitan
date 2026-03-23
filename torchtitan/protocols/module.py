@@ -52,7 +52,7 @@ class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
 
-    Initialization follows a three-phase pattern (inspired by sixlib):
+    Initialization follows a three-phase pattern:
 
     1. ``init_states`` auto-recurses into children, then calls
        ``_init_self_parameters`` and ``_init_self_buffers`` on the current module.
@@ -147,7 +147,7 @@ class Module(nn.Module, Configurable):
         If this module has ``_param_init``, uses it with *name* (local to this
         module).  Otherwise delegates to the nearest Module ancestor, prepending
         ``_module_name`` to build the fully-qualified name.  This mirrors
-        sixlib's parent-walk pattern.
+        the parent-walk pattern.
         """
         if self._param_init is not None:
             self._param_init(name, param)
