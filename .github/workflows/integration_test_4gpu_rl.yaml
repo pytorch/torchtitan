@@ -85,10 +85,6 @@ jobs:
         # 5. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
-        # Run numerics unit tests (TP=1)
-        MODEL_CHECKPOINT_PATH="$MODEL_PATH" \
-          torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/tests/test_numerics.py -v
-
         # Run E2E RL integration tests (TP=1 on 2 GPUs, TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \

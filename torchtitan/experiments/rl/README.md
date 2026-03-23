@@ -27,16 +27,13 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 uv pip install pygtrie portpicker
 ```
 
-2. Install Flash Attention kernels:
+2. Install Flash Attention 3 kernels:
 ```bash
 # Flash Attention v3 (recommended for H100/H200 and newer GPUs)
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
-
-# Flash Attention v2 (for older GPUs like A100 that don't support FA3)
-uv pip install flash-attn --no-build-isolation
 ```
 
-**NOTE:** Most users on H100 or newer only need Flash Attention v3. Install v2 only if your GPU does not support v3.
+**NOTE:** FA2 is bundled with PyTorch and will be used automatically on older GPUs (e.g. A100) that don't support FA3.
 
 3. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
 ```bash
