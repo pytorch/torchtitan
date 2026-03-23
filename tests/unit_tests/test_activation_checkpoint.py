@@ -7,7 +7,6 @@
 import unittest
 
 import torch
-
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -320,7 +319,7 @@ class TestApplyAC(unittest.TestCase):
             ptr_to_name = {
                 mod.weight.data_ptr(): fqn.rsplit(".", 1)[-1]
                 for fqn, mod in m.named_modules()
-                if isinstance(mod, nn.Linear)
+                if isinstance(mod, Linear)
             }
             x = torch.randn(64, 512, requires_grad=True)
             out = m(x)

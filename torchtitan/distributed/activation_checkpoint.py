@@ -8,7 +8,6 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
-from functools import lru_cache
 
 import torch
 import torch._functorch.config
@@ -17,7 +16,10 @@ from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    create_selective_checkpoint_contexts,
+)
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
@@ -79,7 +81,6 @@ _COMM_OPS = [
 ]
 
 
-@lru_cache()
 def _get_save_ops() -> set:
     """Returns the set of ops whose activations should be saved (compute + comm)."""
     aten_op_types = get_default_op_list()
