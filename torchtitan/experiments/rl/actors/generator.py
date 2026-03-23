@@ -145,6 +145,12 @@ class VLLMGenerator(Actor, Configurable):
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
 
+        max_model_len: int | None = None
+        """Maximum context length for vLLM's KV cache allocation. vLLM
+        pre-allocates paged KV cache blocks up to this length; None lets
+        vLLM use the model's max_position_embeddings (e.g. 40960 for
+        Qwen3-0.6B)"""
+
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
@@ -211,6 +217,8 @@ class VLLMGenerator(Actor, Configurable):
         vllm_compilation_config = config.compile.get_vllm_compilation_config()
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
+        if config.max_model_len is not None:
+            engine_kwargs["max_model_len"] = config.max_model_len
         if config.seed is not None:
             engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
