@@ -56,12 +56,6 @@ _SERIALIZABLE_PASSES: frozenset[str] = frozenset(
 )
 
 
-def _unused_graph_builder(*args, **kwargs):
-    raise RuntimeError(
-        "joint_graph_builder should not be called when " "using a precompiled artifact"
-    )
-
-
 def _get_precompile_storage_and_key(
     compile_config: GraphTrainerCompileConfig,
 ) -> tuple[StorageAdapter, str]:
@@ -250,6 +244,12 @@ def _apply_aot_compile_load(
         model, storage, artifact_key, expected_fingerprint=config_fingerprint
     )
 
+    def _unused_graph_builder(*args, **kwargs):
+        raise RuntimeError(
+            "joint_graph_builder should not be called when "
+            "using a precompiled artifact"
+        )
+
     compiled_model = CompiledModule(
         model,
         parallel_dims,
@@ -300,16 +300,6 @@ def apply_compile(
             f"but mode is '{mode}'. Ignoring precompile."
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
-
-    if compile_config.precompile and compile_config.precompile_artifact_dir.startswith(
-        "/tmp"
-    ):
-        logger.warning(
-            "precompile_artifact_dir is set to the default /tmp path, which "
-            "is ephemeral and not shared across nodes. Set "
-            "--compile.precompile_artifact_dir to a shared filesystem path "
-            "for multi-node setups or persistence across job restarts."
-        )
 
     if compile_config.precompile and not (
         _SERIALIZABLE_PASSES & set(compile_config.passes)
