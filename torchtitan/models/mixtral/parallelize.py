@@ -87,13 +87,9 @@ def parallelize_mixtral(
 
         float8_config = find_float8_linear_config(model_converters.converters)
         enable_float8_linear = float8_config is not None
-        float8_is_rowwise = (
-            float8_config is not None
-            and float8_config.recipe_name
-            in (
-                "rowwise",
-                "rowwise_with_gw_hp",
-            )
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
         )
 
         # For now, float8 all-gather with TP is only supported for tensorwise

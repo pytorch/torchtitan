@@ -22,9 +22,7 @@ from .model import MixtralModel
 
 
 class MixtralStateDictAdapter(MoEStateDictAdapter):
-    def __init__(
-        self, model_config: MixtralModel.Config, hf_assets_path: str | None
-    ):
+    def __init__(self, model_config: MixtralModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
@@ -69,9 +67,7 @@ class MixtralStateDictAdapter(MoEStateDictAdapter):
                         abstract_key
                     ] = value.placements
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
-                    self.grouped_expert_weight_mesh[
-                        abstract_key
-                    ] = value.device_mesh
+                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
                     local_expert_fqn = self._get_local_experts_weights(
                         new_abstract_key,
@@ -90,12 +86,8 @@ class MixtralStateDictAdapter(MoEStateDictAdapter):
                         # pyrefly: ignore [missing-attribute]
                         self.model_config.layer.moe.num_experts
                     ):
-                        new_key = new_abstract_key.format(
-                            layer_num, expert_num
-                        )
-                        hf_state_dict[new_key] = (
-                            split_values[expert_num].squeeze()
-                        )
+                        new_key = new_abstract_key.format(layer_num, expert_num)
+                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)

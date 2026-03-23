@@ -15,10 +15,10 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
-    GQAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
+    GQAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -116,10 +116,7 @@ class MixtralModel(Decoder):
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             assert self.layer.moe is not None
-            if (
-                self.layer.moe.experts.use_grouped_mm
-                and not has_cuda_capability(9, 0)
-            ):
+            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported "
                     "on SM90 or later",
@@ -214,9 +211,7 @@ class MixtralModel(Decoder):
             case "block_causal":
                 B = input_batch.shape[0]
                 assert tokenizer.eos_id is not None
-                mask_mods.append(
-                    get_document_mask_mod(input_batch, tokenizer.eos_id)
-                )
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: "

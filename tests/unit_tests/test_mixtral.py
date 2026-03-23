@@ -62,9 +62,7 @@ class TestMixtralModel(unittest.TestCase):
 
         self.assertEqual(logits.shape, (2, 32, 2048))
 
-        loss = torch.nn.functional.cross_entropy(
-            logits.view(-1, 2048), tokens.view(-1)
-        )
+        loss = torch.nn.functional.cross_entropy(logits.view(-1, 2048), tokens.view(-1))
         loss.backward()
 
         grad_count = sum(1 for p in model.parameters() if p.grad is not None)
@@ -138,7 +136,8 @@ class TestMixtralParallelize(DTensorTestBase):
             )
 
             # Model should still be callable after FSDP wrapping
-            tokens = torch.randint(0, 2048, (2, 32))
+            device = f"cuda:{self.rank}"
+            tokens = torch.randint(0, 2048, (2, 32), device=device)
             logits = model(tokens)
             self.assertEqual(logits.shape[-1], 2048)
 
