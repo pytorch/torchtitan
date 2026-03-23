@@ -52,10 +52,10 @@ def _dist_reduce(
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
     if mesh is None:
-        return x.item()
+        return float(x.item())
 
     assert x.numel() == 1  # required by `.item()`
-    return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
+    return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
 
 
 # TODO: rename this to maybe_dist_max
