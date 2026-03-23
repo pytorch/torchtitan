@@ -104,7 +104,7 @@ def _make_precompile_callback(
     config_fingerprint: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
-    from torchtitan.experiments.graph_trainer.precompile import (
+    from .precompile import (
         compute_config_fingerprint,
         precompile_save,
     )
@@ -151,7 +151,7 @@ def _apply_aot_compile(
     artifact_key: str | None = None
     config_fingerprint: str | None = None
     if compile_config.precompile:
-        from torchtitan.experiments.graph_trainer.precompile import (
+        from .precompile import (
             compute_config_fingerprint,
         )
 
@@ -240,7 +240,7 @@ def _apply_aot_compile_load(
     config_fingerprint: str,
 ) -> CompiledModule:
     """Load a precompiled artifact and wrap the model with it."""
-    from torchtitan.experiments.graph_trainer.precompile import precompile_load
+    from .precompile import precompile_load
 
     # BlockMask must be registered as a pytree node before unpickling
     # the artifact, which may contain BlockMask objects in its specs.
