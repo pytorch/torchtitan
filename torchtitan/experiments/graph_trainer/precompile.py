@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import pickle
 from collections.abc import Callable
@@ -51,20 +52,9 @@ def compute_config_fingerprint(
     for name, buf in model.named_buffers():
         h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
 
-    # These attribute names are intentionally hardcoded rather than
-    # introspected from ParallelDims, because adding a new parallelism
-    # dimension should force a conscious decision about fingerprinting.
-    for dim_name in (
-        "world_size",
-        "dp_replicate",
-        "dp_shard",
-        "cp",
-        "tp",
-        "pp",
-        "ep",
-        "etp",
-    ):
-        h.update(f"parallel:{dim_name}:{getattr(parallel_dims, dim_name)}\n".encode())
+    for f in dataclasses.fields(parallel_dims):
+        if not f.name.startswith("_"):
+            h.update(f"parallel:{f.name}:{getattr(parallel_dims, f.name)}\n".encode())
 
     h.update(f"compile:mode:{compile_config.mode}\n".encode())
     h.update(f"compile:backend:{compile_config.backend}\n".encode())
