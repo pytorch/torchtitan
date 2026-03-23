@@ -167,8 +167,9 @@ def apply_compile_dense_rl(model: nn.Module, compile_config: CompileConfig) -> N
     Also fixes some numeric issues we have observed with ``torch.compile()``.
     See https://github.com/pytorch/torchtitan/issues/2673 for more details.
     """
-    # pyrefly: ignore [missing-attribute]
-    for transformer_block in model.layers.named_children.values():
+    # pyrefly: ignore [missing-attribute, not-callable]
+    for _, transformer_block in model.layers.named_children():
+        # pyrefly: ignore [missing-attribute]
         transformer_block.compile(
             backend=compile_config.backend,
             fullgraph=True,
