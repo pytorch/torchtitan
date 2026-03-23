@@ -52,10 +52,10 @@ def _dist_reduce(
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
     if mesh is None:
-        return x.item()
+        return float(x.item())
 
     assert x.numel() == 1  # required by `.item()`
-    return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
+    return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
 
 
 # TODO: rename this to maybe_dist_max
@@ -130,6 +130,16 @@ def set_determinism(
         from torchtitan.models.common.attention import FlexAttentionWrapper
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
+
+    if debug_config.detect_anomaly:
+        logger.warning(
+            "Anomaly detection enabled. This incurs significant overhead "
+            "and is for debugging only."
+        )
+        # check_nan=False disables the NaN/Inf gradient check that internally calls
+        # aten._is_any_true, which has no DTensor sharding strategy and would crash.
+        # Stack trace recording (the useful part) is still enabled.
+        torch.autograd.set_detect_anomaly(True, check_nan=False)
 
     seed = debug_config.seed
     if parallel_dims.world_size == 1:

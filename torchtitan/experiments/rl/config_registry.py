@@ -8,24 +8,24 @@
 Config entry points for the RL/unified experiment.
 
 Each function returns a complete ``RLTrainer.Config`` and is discoverable by
-``ConfigManager`` via ``--module rl.unified --config <function_name>``.
+``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configs import ParallelismConfig, TrainingConfig
-from torchtitan.experiments.rl.unified.actors.generator import (
+from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
     VLLMGenerator,
 )
-from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.simple_grpo_sum_digits import RLTrainer
+from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train)."""
+    """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -41,6 +41,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -49,7 +50,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,
@@ -58,7 +59,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
-            attention_backend="FLASH_ATTN",
+            attention_backend="CUSTOM",
         ),
     )
 
@@ -80,6 +81,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -97,7 +99,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
-            attention_backend="FLASH_ATTN",
+            attention_backend="CUSTOM",
         ),
     )
 
@@ -119,6 +121,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             compile=GeneratorCompileConfig(
@@ -135,6 +138,6 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=50,
             ),
-            attention_backend="FLASH_ATTN",
+            attention_backend="CUSTOM",
         ),
     )
