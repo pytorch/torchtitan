@@ -84,8 +84,8 @@ repos:
         /bin/bash -c '
         if ! command -v lychee >/dev/null 2>&1; then
             echo "--------------------------------------------------------"
-            echo "warning: lychee (link checker) not found. skipping ... "
-            echo "to enable local link checking, install lychee:"
+            echo "Warning: Lychee (link checker) not found. skipping ... "
+            echo "To enable local link checking, install Lychee:"
             echo "  - macos: brew install lychee"
             echo "  - linux/windows: https://github.com/lycheeverse/lychee"
             echo "--------------------------------------------------------"
@@ -110,12 +110,12 @@ repos:
         /bin/bash -c '
         if ! command -v lychee >/dev/null 2>&1; then
             echo "--------------------------------------------------------"
-            echo "warning: lychee (link checker) not found. skipping ... "
-            echo "to enable local link checking, install lychee:"
+            echo "Warning: Lychee (link checker) not found. skipping ... "
+            echo "To enable local link checking, install Lychee:"
             echo "  - macos: brew install lychee"
             echo "  - linux/windows: https://github.com/lycheeverse/lychee"
             echo ""
-            echo "if this error occurred in ci (github actions), ensure the "
+            echo "If this error occurred in CI (GitHub actions), ensure the "
             echo "installation step in lint.yaml is running correctly."
             echo "--------------------------------------------------------"
             exit 1
