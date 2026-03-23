@@ -8,8 +8,7 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
-from collections.abc import Callable
-from functools import lru_cache, partial
+from functools import lru_cache
 
 import torch
 import torch._functorch.config
@@ -18,27 +17,10 @@ from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.utils.checkpoint import CheckpointPolicy
+from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
-
-
-_PolicyFn = Callable[..., CheckpointPolicy]
-
-
-def _sac_policy_fn(
-    ctx,
-    op,
-    *args,
-    compute_intensive_ops: dict,
-    communication_intensive_ops: dict,
-    **kwargs,
-) -> CheckpointPolicy:
-    if op in compute_intensive_ops or op in communication_intensive_ops:
-        return CheckpointPolicy.MUST_SAVE
-
-    return CheckpointPolicy.PREFER_RECOMPUTE
 
 
 def _resolve_ops(op_specs: list) -> dict:
@@ -98,26 +80,16 @@ _COMM_OPS = [
 
 
 @lru_cache()
-def default_activation_checkpoint_policy() -> _PolicyFn:
-    """Returns a checkpointing policy function that saves results of compute and communicate ops."""
+def _get_save_ops() -> set:
+    """Returns the set of ops whose activations should be saved (compute + comm)."""
     aten_op_types = get_default_op_list()
-    compute_intensive_ops = {
-        op.default: CheckpointPolicy.MUST_SAVE  # pyrefly: ignore [missing-attribute]
+    save_ops = {
+        op.default  # pyrefly: ignore [missing-attribute]
         for op in aten_op_types.compute_intensive_ops
     }
-    compute_intensive_ops.update(_resolve_ops(_COMPUTE_OPS))
-
-    communication_intensive_ops = _resolve_ops(_COMM_OPS)
-
-    policy_fn = partial(
-        _sac_policy_fn,
-        compute_intensive_ops=compute_intensive_ops,
-        communication_intensive_ops=communication_intensive_ops,
-    )
-    # pyrefly: ignore [missing-attribute]
-    policy_fn.cache_hash = "default_activation_checkpoint_policy"
-    # pyrefly: ignore [bad-return]
-    return policy_fn
+    save_ops.update(_resolve_ops(_COMPUTE_OPS))
+    save_ops.update(_resolve_ops(_COMM_OPS))
+    return save_ops
 
 
 def _apply_op_sac(
@@ -127,8 +99,6 @@ def _apply_op_sac(
     base_fqn: str | None = None,
 ) -> nn.Module:
     """Apply per-op selective activation checkpointing to the module."""
-    from torch.utils.checkpoint import create_selective_checkpoint_contexts
-
     mm_recompute_shapes = set()
     recompute_fqns = ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
 
@@ -145,16 +115,15 @@ def _apply_op_sac(
             out_f, in_f = submod.weight.shape
             mm_recompute_shapes.add((in_f, out_f))
 
-    base_policy = default_activation_checkpoint_policy()
-    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
-    # instead of decomposing it into aten.mm, so we must handle both.
+    save_ops = _get_save_ops()
     mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
 
-    def _create_wrapped_policy():
+    def _get_custom_policy():
         meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
 
         def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
-            # Always save CUDA→CPU copies (activation offloading).
+            # Always save CUDA→CPU results to avoid recomputing them
+            # (e.g. MoE D2H sync for all-to-all metadata).
             if (
                 func == torch.ops.aten._to_copy.default
                 and "cuda" in str(args[0].device)
@@ -168,6 +137,7 @@ def _apply_op_sac(
 
             if func in mm_ops:
                 weight_shape = args[1].shape
+                # linear weight is (out, in); normalize to (in, out) to match mm
                 if func == torch.ops.aten.linear.default:
                     weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
                 if weight_shape in mm_recompute_shapes:
@@ -175,17 +145,16 @@ def _apply_op_sac(
                 meta[mm_count_key] += 1
 
             # Save all compute/comm ops, except every second mm/linear.
-            base_decision = base_policy(ctx, func, *args, **kwargs)
-            if base_decision == CheckpointPolicy.MUST_SAVE and (
-                func in mm_ops and meta[mm_count_key] % 2 == 0
-            ):
-                return CheckpointPolicy.PREFER_RECOMPUTE
-            return base_decision
+            if func in save_ops:
+                if func in mm_ops and meta[mm_count_key] % 2 == 0:
+                    return CheckpointPolicy.PREFER_RECOMPUTE
+                return CheckpointPolicy.MUST_SAVE
+            return CheckpointPolicy.PREFER_RECOMPUTE
 
         return wrapped_policy
 
     def context_fn():
-        return create_selective_checkpoint_contexts(_create_wrapped_policy())
+        return create_selective_checkpoint_contexts(_get_custom_policy())
 
     return ptd_checkpoint_wrapper(
         module,
