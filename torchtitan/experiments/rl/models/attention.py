@@ -12,9 +12,6 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.experiments.rl.models.vllm_compat_attention import (
-    VLLMCompatibleFlashAttention,
-)
 from torchtitan.protocols.module import Module
 
 from vllm.model_executor.layers.attention import Attention
@@ -338,40 +335,5 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
     logger.info(
         f"Successfully replaced TorchTitan attention with VLLMAttention "
-        f"({len(model.layers)} layers)"
-    )
-
-
-def replace_with_vllm_compatible_flash_attention(model, tp_size=1):
-    """Replace ``inner_attention`` with :class:`VLLMCompatibleFlashAttention`.
-
-    **Trainer side.** Called on the ``PolicyTrainer`` model because:
-
-    1. The generator's ``vllm.Attention`` (see :func:`replace_with_vllm_attention`)
-       uses vLLM's flash-attention kernel internally.  To achieve **bitwise
-       identical** forward outputs between trainer and generator, we patch the
-       trainer's attention to the same flash-attention kernel.
-    2. Training requires gradients.  ``VLLMCompatibleFlashAttention`` wraps
-       vLLM's flash-attention kernel with a custom backward pass so gradients
-       can flow during RL policy updates.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        vllm_attn = VLLMCompatibleFlashAttention()
-
-        layer.attention.inner_attention = vllm_attn
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMCompatibleFlashAttention "
         f"({len(model.layers)} layers)"
     )
