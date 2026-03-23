@@ -82,8 +82,8 @@ class TestPrecompiledArtifact(unittest.TestCase):
 
         artifact = PrecompiledArtifact(
             serialized_fn=b"fake_serialized_data",
-            params_spec=["layer.weight", "layer.bias"],
-            buffers_spec=["running_mean"],
+            params_spec=("layer.weight", "layer.bias"),
+            buffers_spec=("running_mean",),
             out_spec=None,
             metadata={"world_size": 8, "model_name": "test"},
         )
@@ -208,8 +208,8 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
         artifact = PrecompiledArtifact(
             serialized_fn=b"fake",
-            params_spec=["layer.weight", "layer.bias"],
-            buffers_spec=[],
+            params_spec=("layer.weight", "layer.bias"),
+            buffers_spec=(),
             out_spec=None,
         )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -230,8 +230,8 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
         artifact = PrecompiledArtifact(
             serialized_fn=b"fake",
-            params_spec=["weight", "bias"],
-            buffers_spec=["running_mean"],
+            params_spec=("weight", "bias"),
+            buffers_spec=("running_mean",),
             out_spec=None,
         )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -252,8 +252,8 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         model = torch.nn.Linear(4, 4)
         artifact = PrecompiledArtifact(
             serialized_fn=b"fake",
-            params_spec=[n for n, _ in model.named_parameters()],
-            buffers_spec=[n for n, _ in model.named_buffers()],
+            params_spec=tuple(n for n, _ in model.named_parameters()),
+            buffers_spec=tuple(n for n, _ in model.named_buffers()),
             out_spec=None,
             config_fingerprint="old_fingerprint",
         )
@@ -283,8 +283,8 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
         artifact = PrecompiledArtifact(
             serialized_fn=b"fake",
-            params_spec=[n for n, _ in model.named_parameters()],
-            buffers_spec=[n for n, _ in model.named_buffers()],
+            params_spec=tuple(n for n, _ in model.named_parameters()),
+            buffers_spec=tuple(n for n, _ in model.named_buffers()),
             out_spec=out_spec,
         )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -320,8 +320,8 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         model = torch.nn.Linear(4, 4)
         artifact = PrecompiledArtifact(
             serialized_fn=b"fake",
-            params_spec=[n for n, _ in model.named_parameters()],
-            buffers_spec=[n for n, _ in model.named_buffers()],
+            params_spec=tuple(n for n, _ in model.named_parameters()),
+            buffers_spec=tuple(n for n, _ in model.named_buffers()),
             out_spec=None,
             config_fingerprint="",
         )
