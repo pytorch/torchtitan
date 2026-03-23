@@ -145,20 +145,25 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def maybe_disable_eager_ac(
+def apply_graph_ac(
     compile_config: CompileConfig,
     ac_config: "ActivationCheckpointConfig",
 ) -> None:
-    """Disable eager AC when apply_sac graph pass is enabled.
+    """Add apply_sac to compile joint passes for graph-based selective AC.
 
-    When apply_sac is used as a joint graph pass, eager activation checkpointing
-    must be disabled to avoid double-checkpointing. This must be called before
-    the model parallelization step that applies eager AC.
+    Must be called only when ac_config.mode != "none". Only "selective" mode
+    is supported; other modes raise ValueError.
     """
+    if ac_config.mode != "selective":
+        raise ValueError(
+            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
+            f"'none', got '{ac_config.mode}'. Use 'selective' for graph-based SAC."
+        )
+
     joint_pass_names = getattr(compile_config, "joint_passes", [])
-    if "apply_sac" in joint_pass_names:
-        if ac_config.mode != "none":
-            logger.info(
-                "apply_sac graph pass is enabled, overriding eager AC mode to none"
-            )
-            ac_config.mode = "none"
+    if "apply_sac" not in joint_pass_names:
+        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
+        logger.info(
+            "activation_checkpoint.mode is 'selective', added apply_sac to "
+            "compile.joint_passes"
+        )

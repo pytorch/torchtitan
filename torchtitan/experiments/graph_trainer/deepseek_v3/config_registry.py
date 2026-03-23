@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -22,27 +21,23 @@ from . import model_registry
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
-    config.activation_checkpoint = ActivationCheckpointConfig(mode="none")
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> (GraphTrainer.Config):
     config = to_graph_trainer_config(deepseek_v3_debugmodel_flex_attn(), model_registry)
-    config.activation_checkpoint = ActivationCheckpointConfig(mode="none")
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_16b(), model_registry)
-    config.activation_checkpoint = ActivationCheckpointConfig(mode="none")
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
 def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_671b(), model_registry)
-    config.activation_checkpoint = ActivationCheckpointConfig(mode="none")
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config

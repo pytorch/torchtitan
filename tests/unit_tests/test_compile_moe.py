@@ -9,8 +9,8 @@ import unittest
 import torch
 
 from torchtitan.config import CompileConfig
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.llama4.parallelize import apply_compile
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -51,8 +51,8 @@ class TestApplyCompile(unittest.TestCase):
         unused_model2 = TinyModel(num_layers=2, dim=128)
         compile_config = CompileConfig(backend="eager")
 
-        apply_compile(unused_model1, compile_config, ep_enabled=True)
-        apply_compile(unused_model2, compile_config, ep_enabled=True)
+        apply_compile_sparse(unused_model1, compile_config, ep_enabled=True)
+        apply_compile_sparse(unused_model2, compile_config, ep_enabled=True)
 
         from torchtitan.models.common.moe import moe as moe_module
 

@@ -27,6 +27,7 @@ from torch._inductor.fx_passes.bucketing import (
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
@@ -404,6 +405,44 @@ def reassign_to_pg_pass(
             f"to PG {target_pg_name}"
         )
     gm.recompile()
+    return gm
+
+
+def tlparse_log_graph_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: Sequence[Any],
+    *,
+    graph_name: str,
+) -> torch.fx.GraphModule:
+    """Log the transformed graph to tlparse via trace_structured.
+
+    This pass should be added as the last transform in fwd/bwd_transforms
+    so that the logged graph reflects all prior transformations.
+
+    Args:
+        gm: The graph module to log.
+        example_inputs: The example inputs (unused, required by protocol).
+        graph_name: The name for this graph artifact
+            (e.g. "aot_forward_graph_transformed").
+
+    Returns:
+        The graph module unchanged.
+    """
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": graph_name,
+            "encoding": "string",
+        },
+        payload_fn=lambda: gm.print_readable(
+            print_output=False,
+            include_stride=True,
+            include_device=True,
+            expanded_def=True,
+        ),
+        expect_trace_id=False,
+    )
+
     return gm
 
 
