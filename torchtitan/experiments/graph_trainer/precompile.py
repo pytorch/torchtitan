@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import Any, NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
@@ -24,22 +25,24 @@ from torch._dynamo.aot_compile_types import BundledAOTAutogradSerializableCallab
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
+ConfigFingerprint = NewType("ConfigFingerprint", str)
+
 
 @dataclass
 class PrecompiledArtifact:
     serialized_fn: bytes
-    params_spec: list[str]
-    buffers_spec: list[str]
+    params_spec: tuple[str, ...]
+    buffers_spec: tuple[str, ...]
     out_spec: pytree.TreeSpec | None
     metadata: dict[str, Any] = field(default_factory=dict)
-    config_fingerprint: str = ""
+    config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
 
 
 def compute_config_fingerprint(
     model: torch.nn.Module,
     compile_config: GraphTrainerCompileConfig,
     parallel_dims: ParallelDims,
-) -> str:
+) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
     model parameter/buffer shapes and dtypes, parallelism dimensions, and
@@ -73,7 +76,7 @@ def compute_config_fingerprint(
         capability = torch.cuda.get_device_capability()
         h.update(f"cuda_capability:{capability}\n".encode())
 
-    return h.hexdigest()[:16]
+    return ConfigFingerprint(h.hexdigest()[:16])
 
 
 def _unwrap_serializable(
@@ -82,20 +85,20 @@ def _unwrap_serializable(
     """
     Extract the BundledAOTAutogradSerializableCallable from compiled_fn.
     PyTorch's aot_compile_joint_with_descriptors wraps the serializable
-    callable in a plain function via functools.wraps, so we check both
-    the direct object and the __wrapped__ attribute.
+    callable in a plain function via functools.wraps, so we walk the
+    __wrapped__ chain until we find the serializable callable.
     """
-    if isinstance(compiled_fn, BundledAOTAutogradSerializableCallable):
-        return compiled_fn
-    wrapped = getattr(compiled_fn, "__wrapped__", None)
-    if isinstance(wrapped, BundledAOTAutogradSerializableCallable):
-        return wrapped
+    current = compiled_fn
+    while current is not None:
+        if isinstance(current, BundledAOTAutogradSerializableCallable):
+            return current
+        current = getattr(current, "__wrapped__", None)
     raise TypeError(
-        f"precompile_save requires the compiled function to be a "
-        f"BundledAOTAutogradSerializableCallable, but got "
+        "precompile_save requires the compiled function to be a "
+        "BundledAOTAutogradSerializableCallable, but got "
         f"{type(compiled_fn).__name__}. Ensure your compiler pass "
-        f"pipeline produces serializable output (e.g. by including "
-        f"'full_inductor_compilation' in --compile.passes)."
+        "pipeline produces serializable output (e.g. by including "
+        "'full_inductor_compilation' in --compile.passes)."
     )
 
 
@@ -106,7 +109,7 @@ def precompile_save(
     artifact_key: str,
     out_spec: pytree.TreeSpec | None,
     metadata: dict[str, Any] | None = None,
-    config_fingerprint: str = "",
+    config_fingerprint: ConfigFingerprint | None = None,
 ) -> str:
     """
     Serialize a compiled function and save it via the storage adapter.
@@ -118,8 +121,8 @@ def precompile_save(
         compiled_fn
     )
 
-    params_spec = [name for name, _ in model.named_parameters()]
-    buffers_spec = [name for name, _ in model.named_buffers()]
+    params_spec = tuple(name for name, _ in model.named_parameters())
+    buffers_spec = tuple(name for name, _ in model.named_buffers())
 
     artifact = PrecompiledArtifact(
         serialized_fn=serialized_fn,
@@ -127,7 +130,7 @@ def precompile_save(
         buffers_spec=buffers_spec,
         out_spec=out_spec,
         metadata=metadata or {},
-        config_fingerprint=config_fingerprint,
+        config_fingerprint=config_fingerprint or ConfigFingerprint(""),
     )
 
     data = pickle.dumps(artifact)
@@ -145,7 +148,7 @@ def precompile_load(
     model: torch.nn.Module,
     storage: StorageAdapter,
     artifact_key: str,
-    expected_fingerprint: str,
+    expected_fingerprint: ConfigFingerprint,
 ) -> Callable:
     """
     Load a precompiled artifact and return a wrapper function that
@@ -158,8 +161,8 @@ def precompile_load(
     # trusted (local disk or controlled shared filesystem).
     artifact: PrecompiledArtifact = pickle.loads(data)
 
-    current_params = [name for name, _ in model.named_parameters()]
-    current_buffers = [name for name, _ in model.named_buffers()]
+    current_params = tuple(name for name, _ in model.named_parameters())
+    current_buffers = tuple(name for name, _ in model.named_buffers())
     if current_params != artifact.params_spec:
         raise ValueError(
             f"Parameter mismatch between saved artifact and current model. "
@@ -171,16 +174,26 @@ def precompile_load(
             f"Saved: {artifact.buffers_spec}, Current: {current_buffers}"
         )
 
+    skip_fp_check = os.environ.get("TORCHTITAN_SKIP_FINGERPRINT_CHECK", "") == "1"
     if expected_fingerprint and artifact.config_fingerprint:
         if artifact.config_fingerprint != expected_fingerprint:
-            raise ValueError(
-                f"Config fingerprint mismatch: the precompiled artifact was "
-                f"saved with a different model/parallelism/compile configuration. "
-                f"Artifact fingerprint: {artifact.config_fingerprint}, "
-                f"current fingerprint: {expected_fingerprint}. "
-                f"Delete the stale artifact and re-run with precompile to "
-                f"generate a fresh one."
-            )
+            if skip_fp_check:
+                logger.warning(
+                    "Config fingerprint mismatch IGNORED due to "
+                    "TORCHTITAN_SKIP_FINGERPRINT_CHECK=1. "
+                    f"Artifact: {artifact.config_fingerprint}, "
+                    f"current: {expected_fingerprint}."
+                )
+            else:
+                raise ValueError(
+                    f"Config fingerprint mismatch: the precompiled artifact was "
+                    f"saved with a different model/parallelism/compile configuration. "
+                    f"Artifact fingerprint: {artifact.config_fingerprint}, "
+                    f"current fingerprint: {expected_fingerprint}. "
+                    f"Delete the stale artifact and re-run with precompile to "
+                    f"generate a fresh one. Set TORCHTITAN_SKIP_FINGERPRINT_CHECK=1 "
+                    f"to bypass this check."
+                )
     elif expected_fingerprint and not artifact.config_fingerprint:
         logger.warning(
             "Precompiled artifact has no config fingerprint (legacy artifact). "
@@ -216,14 +229,14 @@ def precompile_load(
                 )
             )
 
-        # Build the flat input list: params + buffers + user args.
+        # Build the flat input tuple: params + buffers + user args.
         # This mirrors the calling convention in joint_graph_builder's
         # wrapper_fn (graph_utils.py).
-        inputs = [
+        inputs = (
             *model.parameters(),
             *model.buffers(),
             *args,
-        ]
+        )
         # The deserialized fn returns flat outputs. We need to
         # unflatten them using the saved out_spec to match the
         # original model output structure. See also graph_utils.py:wrapper_fn
