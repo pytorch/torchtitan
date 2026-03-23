@@ -47,6 +47,13 @@ from torchtitan.experiments.graph_trainer.storage import (
 )
 from torchtitan.tools.logging import logger
 
+# Compiler passes whose output supports serialization for precompile.
+# full_inductor_compilation produces OutputCode via compile_fx_inner;
+# regional_inductor produces RegionalOutputCode (an OutputCode subclass).
+_SERIALIZABLE_PASSES: frozenset[str] = frozenset(
+    {"full_inductor_compilation", "regional_inductor"}
+)
+
 
 def _get_precompile_storage_and_key(
     compile_config: GraphTrainerCompileConfig,
@@ -270,11 +277,6 @@ def apply_compile(
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
 
-    # Precompile serialization requires at least one compiler pass that
-    # produces OutputCode. Currently full_inductor_compilation (via
-    # compile_fx_inner) and regional_inductor (via RegionalOutputCode)
-    # satisfy this requirement.
-    _SERIALIZABLE_PASSES = {"full_inductor_compilation", "regional_inductor"}
     if compile_config.precompile and not (
         _SERIALIZABLE_PASSES & set(compile_config.passes)
     ):

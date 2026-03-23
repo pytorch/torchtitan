@@ -156,7 +156,6 @@ def _register_parametrization(
         param_name_to_property,
     )
     module.__class__ = module_cls
-    module_cls.__module__ = module.__class__.__module__
     # Expose the dynamically created class as a real, importable symbol
     # so that pickle/GraphPickler can resolve it during serialization.
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
