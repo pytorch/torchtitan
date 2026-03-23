@@ -14,7 +14,6 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.module import NamedParamInitializer
 from torchtitan.tools.logging import logger
 
 
@@ -160,9 +159,7 @@ class Qwen3Model(Decoder):
     def init_states(
         self,
         *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
+        buffer_device: torch.device | None = None,
     ) -> None:
         if self.enable_weight_tying:
             # Re-tie before init: on meta device the __init__ tying may
@@ -170,4 +167,4 @@ class Qwen3Model(Decoder):
             assert self.tok_embeddings is not None and self.output is not None
             self.tok_embeddings.weight = self.output.weight
 
-        super().init_states(param_init=param_init, param_prefix=param_prefix, **kwargs)
+        super().init_states(buffer_device=buffer_device)

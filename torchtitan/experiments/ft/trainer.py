@@ -22,7 +22,6 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.manager import FTManager, maybe_semi_sync_training
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -229,7 +228,7 @@ class FaultTolerantTrainer(Trainer):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(Decoder, m).init_states(buffer_device=buffer_device)
+                    cast(BaseModel, m).init_states(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console

@@ -19,7 +19,7 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict, NamedParamInitializer
+from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
 
 
@@ -51,7 +51,7 @@ class SliceableModuleDict(ModuleDict):
     def __len__(self):
         return len(self._modules)
 
-    def init_states(self, **kwargs) -> None:
+    def init_states(self, **_kwargs) -> None:
         """No-op: HFTransformerModel handles initialization via HF mechanisms."""
         pass
 
@@ -104,7 +104,9 @@ class HFTransformerModel(BaseModel):
             # Set param_init before Module.Config.build() accesses it.
             # PretrainedConfig.__getattribute__ doesn't recognize the
             # param_init slot inherited from Module.Config.
-            self.param_init = None
+            self.param_init = (
+                None  # noqa: this sets Config.param_init, not Module._param_init
+            )
             assert titan_dense_config is not None, "titan_dense_config is required"
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
@@ -654,9 +656,7 @@ class HFTransformerModel(BaseModel):
     def init_states(
         self,
         *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
+        buffer_device: torch.device | None = None,
     ) -> None:
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)

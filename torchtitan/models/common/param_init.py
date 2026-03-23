@@ -32,9 +32,13 @@ import torch.nn as nn
 
 from torchtitan.protocols.module import NamedParamInitializer, ParamInitializer
 
-# No-op initializer: explicitly skip initialization for a parameter.
-# Useful when a parameter is tied to another (e.g., weight tying).
-SKIP_PARAM_INIT: ParamInitializer = lambda param: None
+
+def skip_param_init(param: nn.Parameter) -> None:
+    """No-op initializer: explicitly skip initialization for a parameter.
+
+    Useful when a parameter is tied to another (e.g., weight tying).
+    """
+    pass
 
 
 class RegexInitializer(NamedParamInitializer):

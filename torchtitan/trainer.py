@@ -377,7 +377,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(Decoder, m).init_states(buffer_device=buffer_device)
+                    cast(BaseModel, m).init_states(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console

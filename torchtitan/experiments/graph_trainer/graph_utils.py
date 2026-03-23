@@ -28,7 +28,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     end_with_pass,
     get_extra_fsdp_pg_name,
 )
-from torchtitan.protocols.module import Module, NamedParamInitializer
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
 
@@ -223,17 +223,13 @@ class CompiledModule(Module):
     def init_states(
         self,
         *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
+        buffer_device: torch.device | None = None,
     ) -> None:
         # Explicitly delegate to inner model. Without this override,
         # Module.init_states would be found via MRO before the overwritten
         # __getattr__ is triggered, silently skipping weight initialization.
         # This is similar to state_dict, load_state_dict, ...
-        self.inner.init_states(
-            param_init=param_init, param_prefix=param_prefix, **kwargs
-        )
+        self.inner.init_states(buffer_device=buffer_device)
 
     def state_dict(self, *args, **kwargs) -> Any:
         return self.inner.state_dict(*args, **kwargs)

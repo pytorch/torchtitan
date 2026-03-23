@@ -13,7 +13,7 @@ from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import (
     make_decoder_param_init,
     RegexInitializer,
-    SKIP_PARAM_INIT,
+    skip_param_init,
 )
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -38,7 +38,7 @@ def _qwen3_param_init(
     if weight_tying:
         # tok_embeddings.weight is tied to output.weight; skip its init
         # so only output.weight's truncated-normal init applies.
-        patterns[r"tok_embeddings\.weight"] = SKIP_PARAM_INIT
+        patterns[r"tok_embeddings\.weight"] = skip_param_init
     return RegexInitializer(patterns)
 
 

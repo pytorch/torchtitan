@@ -36,7 +36,7 @@ class TestModuleInitStates(unittest.TestCase):
         class TestModel(Module):
             def __init__(self, param_init):
                 super().__init__()
-                self.param_init = param_init
+                self._param_init = param_init
                 self.weight = nn.Parameter(torch.empty(4))
 
         param_init = RegexInitializer({r".*": nn.init.zeros_})
@@ -55,7 +55,7 @@ class TestModuleInitStates(unittest.TestCase):
         class Parent(Module):
             def __init__(self, param_init):
                 super().__init__()
-                self.param_init = param_init
+                self._param_init = param_init
                 self.child = Child()
 
         param_init = RegexInitializer({r"child\.weight": nn.init.zeros_})
@@ -79,7 +79,7 @@ class TestModuleInitStates(unittest.TestCase):
         class Root(Module):
             def __init__(self, param_init):
                 super().__init__()
-                self.param_init = param_init
+                self._param_init = param_init
                 self.mid = Mid()
 
         param_init = RegexInitializer({r"mid\.leaf\.weight": nn.init.ones_})
@@ -96,8 +96,8 @@ class TestModuleInitStates(unittest.TestCase):
                 self.register_buffer("buf", torch.zeros(4))
                 self.buffer_device_seen = None
 
-            def _init_self_buffers(self, **kwargs):
-                self.buffer_device_seen = kwargs.get("buffer_device")
+            def _init_self_buffers(self, *, buffer_device=None):
+                self.buffer_device_seen = buffer_device
 
         m = BufferModule()
         m.init_states(buffer_device=torch.device("cpu"))
@@ -285,18 +285,18 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
     """Tests for Config.build() propagating param_init to the instance."""
 
     def test_param_init_on_instance(self):
-        """build() sets param_init on the constructed instance."""
+        """build() sets _param_init on the constructed instance."""
         param_init = RegexInitializer({r".*": nn.init.zeros_})
         config = Linear.Config(param_init=param_init)
         linear = config.build(in_features=4, out_features=4)
-        self.assertTrue(hasattr(linear, "param_init"))
-        self.assertIs(linear.param_init, param_init)
+        self.assertTrue(hasattr(linear, "_param_init"))
+        self.assertIs(linear._param_init, param_init)
 
     def test_no_param_init_by_default(self):
         """build() without param_init leaves it as None."""
         config = Linear.Config()
         linear = config.build(in_features=4, out_features=4)
-        self.assertIsNone(linear.param_init)
+        self.assertIsNone(linear._param_init)
 
     def test_init_states_uses_config_param_init(self):
         """init_states uses param_init from config when available."""

@@ -25,7 +25,7 @@ from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module, ModuleDict, NamedParamInitializer
+from torchtitan.protocols.module import Module, ModuleDict
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -102,18 +102,19 @@ class Decoder(BaseModel):
     def init_states(
         self,
         *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
+        buffer_device: torch.device | None = None,
     ) -> None:
         # Compute buffer_device before recursion so children (RoPE) get
         # the correct device when buffer_device is not explicitly provided.
-        if "buffer_device" not in kwargs or kwargs["buffer_device"] is None:
-            kwargs = {**kwargs, "buffer_device": self.freqs_cis.device}
-        super().init_states(param_init=param_init, param_prefix=param_prefix, **kwargs)
+        if buffer_device is None:
+            buffer_device = self.freqs_cis.device
+        super().init_states(buffer_device=buffer_device)
 
-    def _init_self_buffers(self, **kwargs) -> None:
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        assert buffer_device is None or buffer_device.type != "meta", (
+            f"buffer_device must not be meta, got {buffer_device}. "
+            f"Buffers should be initialized on a real device after to_empty()."
+        )
         if self.rope is not None:
             # RoPE's _init_self_buffers was already called by auto-recursion
             self.freqs_cis = self.rope.cache

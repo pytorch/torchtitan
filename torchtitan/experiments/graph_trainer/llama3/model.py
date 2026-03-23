@@ -6,8 +6,9 @@
 
 from dataclasses import dataclass
 
+import torch
+
 from torchtitan.models.llama3 import Llama3Model
-from torchtitan.protocols.module import NamedParamInitializer
 
 from ..simple_fsdp import disable_active_parametrization
 
@@ -23,11 +24,7 @@ class GraphTrainerLlama3Model(Llama3Model):
     def init_states(
         self,
         *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
+        buffer_device: torch.device | None = None,
     ) -> None:
         with disable_active_parametrization():
-            super().init_states(
-                param_init=param_init, param_prefix=param_prefix, **kwargs
-            )
+            super().init_states(buffer_device=buffer_device)

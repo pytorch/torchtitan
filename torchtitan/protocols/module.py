@@ -8,9 +8,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import torch
 import torch.nn as nn
 
 from torchtitan.config import Configurable
+
+# ParamInitializer and NamedParamInitializer are co-located here because
+# Module.Config uses NamedParamInitializer in its type annotations, and
+# common/param_init.py imports from this file — moving NamedParamInitializer
+# there would create a circular import.  ParamInitializer stays with it
+# for consistency (same family of types).
 
 # Type alias for simple parameter initializers: (param) -> Any
 # Uses Any return type because nn.init.* functions return Tensor,
@@ -27,7 +34,7 @@ class NamedParamInitializer:
     name (e.g., depth-scaled init that parses the layer id from the FQN,
     or regex-based dispatch).
 
-    Instances are set on ``Module.param_init`` or ``Module.Config.param_init``
+    Instances are set on ``Module._param_init`` or ``Module.Config.param_init``
     and called by ``_init_self_parameters`` with ``(fqn, param)``.
     """
 
@@ -49,10 +56,11 @@ class Module(nn.Module, Configurable):
 
     1. ``init_states`` auto-recurses into children, then calls
        ``_init_self_parameters`` and ``_init_self_buffers`` on the current module.
-    2. ``_init_self_parameters`` iterates own parameters and applies the
-       active ``param_init`` callable, which is passed down through kwargs
-       along with a ``param_prefix`` that accumulates the FQN path.
-    3. ``_init_self_buffers`` is a no-op by default.
+    2. ``_init_self_parameters`` iterates own parameters and calls
+       ``_init_param`` for each one.
+    3. ``_init_param`` uses the module's own ``_param_init`` if available,
+       otherwise walks up to the nearest Module ancestor (parent-walk).
+    4. ``_init_self_buffers`` is a no-op by default.
        Override for device-aware buffer init (e.g., RoPE, MoE).
 
     Subclasses should NOT override ``init_states`` unless they need custom
@@ -60,100 +68,106 @@ class Module(nn.Module, Configurable):
     for buffer initialization.
     """
 
-    param_init: NamedParamInitializer | None = None
+    _param_init: NamedParamInitializer | None = None
+    # Set during init_states traversal; points to nearest Module ancestor.
+    # Uses object.__setattr__ to avoid nn.Module submodule registration.
+    _module_parent: "Module | None" = None
+    _module_name: str = ""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: NamedParamInitializer | None = None
 
         def build(self, **kwargs):
+            # slots=True prevents super().build() from working; call explicitly.
+            # Assignment is done here rather than in Module.__init__ because
+            # there is no common Module.__init__ that all subclasses call.
             instance = Configurable.Config.build(self, **kwargs)
             if self.param_init is not None:
-                instance.param_init = self.param_init
+                instance._param_init = self.param_init
             return instance
 
     def init_states(
         self,
         *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
+        buffer_device: torch.device | None = None,
     ) -> None:
         """Initialize all states in the module tree.
 
         1. Recursively calls ``init_states`` on all direct Module children.
-        2. Calls ``self._init_self_parameters(...)``.
+        2. Calls ``self._init_self_parameters()``.
         3. Calls ``self._init_self_buffers(...)``.
 
+        During recursion, each child's ``_module_parent`` and ``_module_name``
+        are temporarily set so that ``_init_param`` can walk up to find an
+        ancestor with ``_param_init``.  They are cleaned up after init.
+
         Args:
-            param_init: The active ``NamedParamInitializer`` passed down from an
-                ancestor. If this module has its own ``self.param_init``, it
-                takes precedence and ``param_prefix`` resets to ``""``.
-            param_prefix: FQN prefix accumulated during recursion, so that
-                ``param_init`` receives fully-qualified parameter names.
-            **kwargs: Forwarded to children and self-init methods
-                (e.g., ``buffer_device``).
+            buffer_device: Device for buffer initialization (e.g., RoPE, MoE).
         """
-        # If this module owns a param_init, it becomes the active one
-        # and the prefix resets (FQNs are relative to the owner).
-        if self.param_init is not None:
-            param_init = self.param_init
-            param_prefix = ""
 
         def prefixed_children(module, prefix):
-            return [(f"{prefix}{n}.", c) for n, c in module.named_children()]
+            return [(f"{prefix}{n}", child) for n, child in module.named_children()]
 
-        queue = prefixed_children(self, param_prefix)
+        queue = prefixed_children(self, "")
         while queue:
-            child_prefix, child = queue.pop()
+            child_name, child = queue.pop()
             if isinstance(child, Module):
-                child.init_states(
-                    param_init=param_init, param_prefix=child_prefix, **kwargs
-                )
+                # Temporarily set parent info for _init_param's parent-walk.
+                # Must use object.__setattr__: nn.Module.__setattr__
+                # registers Module values into _modules, which would make
+                # the parent appear as a submodule of the child (creating
+                # a circular reference that causes infinite recursion).
+                object.__setattr__(child, "_module_parent", self)
+                object.__setattr__(child, "_module_name", child_name)
+                child.init_states(buffer_device=buffer_device)
+                object.__setattr__(child, "_module_parent", None)
+                object.__setattr__(child, "_module_name", "")
             else:
-                # Plain nn.Module (e.g., CheckpointWrapper) — look inside
-                # for Module descendants.
-                queue.extend(prefixed_children(child, child_prefix))
+                # Plain nn.Module (e.g., CheckpointWrapper, torch.compile
+                # wrappers) — look inside for Module descendants.
+                queue.extend(prefixed_children(child, f"{child_name}."))
 
-        self._init_self_parameters(
-            param_init=param_init, param_prefix=param_prefix, **kwargs
-        )
-        self._init_self_buffers(**kwargs)
+        self._init_self_parameters()
+        self._init_self_buffers(buffer_device=buffer_device)
 
-    def _init_self_parameters(
-        self,
-        *,
-        param_init: NamedParamInitializer | None = None,
-        param_prefix: str = "",
-        **kwargs,
-    ) -> None:
-        """Initialize this module's own parameters using ``param_init``.
-
-        Iterates ``named_parameters(recurse=False)`` and applies the active
-        ``param_init`` with fully-qualified names. Raises ``ValueError`` if
-        this module has parameters but no ``param_init`` is available.
+    def _init_self_parameters(self) -> None:
+        """Initialize this module's own parameters via ``_init_param``.
 
         Overridden internally by ``from_nn_module`` to delegate to
         ``reset_parameters``. Not intended for subclass override — configure
         parameter initialization via ``param_init`` on the Config instead.
         """
-        params = list(self.named_parameters(recurse=False))
-        if not params:
-            return
-        if param_init is None:
-            raise ValueError(
-                f"No param_init found for {type(self).__name__}. "
-                f"Set param_init on this module's Config or on an "
-                f"ancestor's Config."
-            )
-        for name, param in params:
-            param_init(f"{param_prefix}{name}", param)
+        for name, param in self.named_parameters(recurse=False):
+            self._init_param(name, param)
 
-    def _init_self_buffers(self, **kwargs) -> None:
+    def _init_param(self, name: str, param: nn.Parameter) -> None:
+        """Initialize a single parameter, walking up to parent if needed.
+
+        If this module has ``_param_init``, uses it with *name* (local to this
+        module).  Otherwise delegates to the nearest Module ancestor, prepending
+        ``_module_name`` to build the fully-qualified name.  This mirrors
+        sixlib's parent-walk pattern.
+        """
+        if self._param_init is not None:
+            self._param_init(name, param)
+            return
+        if self._module_parent is None:
+            raise ValueError(
+                f"No param_init found for parameter '{name}' in "
+                f"{type(self).__name__}. Set param_init on this "
+                f"module's Config or on an ancestor's Config."
+            )
+        self._module_parent._init_param(f"{self._module_name}.{name}", param)
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.
 
         The default is a no-op. Override for device-aware buffer
         initialization (e.g., RoPE cache, MoE counters).
+
+        Args:
+            buffer_device: Target device for buffer creation/initialization.
         """
         pass
 
@@ -184,7 +198,7 @@ class Module(nn.Module, Configurable):
         attrs: dict[str, Any] = {}
         if hasattr(nn_module_cls, "reset_parameters"):
 
-            def _init_self_parameters(self: Any, **kwargs: Any) -> None:
+            def _init_self_parameters(self: Any) -> None:
                 self.reset_parameters()
 
             attrs["_init_self_parameters"] = _init_self_parameters

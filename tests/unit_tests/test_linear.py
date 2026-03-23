@@ -187,7 +187,7 @@ class TestModuleInjection(unittest.TestCase):
                 r"bias": nn.init.zeros_,
             }
         )
-        object.__setattr__(model.fc, "param_init", param_init)
+        object.__setattr__(model.fc, "_param_init", param_init)
 
         with torch.no_grad():
             model.fc.init_states()  # should not raise
