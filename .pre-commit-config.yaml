@@ -91,13 +91,14 @@ repos:
             echo "--------------------------------------------------------"
             exit 0
         fi
-        lychee "$@" $(find . -name "*.md" -not -path "./.*")
+        lychee "$@"
         ' --
       args:
         - "--offline"
         - "--no-progress"
         - "--exclude-path=/\\.[^/]+/"
         - "--root-dir=."
+        - "**/*.md"
       pass_filenames: false
       always_run: true
 
