@@ -496,10 +496,14 @@ def get_compiler_passes_from_config(
         elif pass_name == "regional_inductor" and getattr(
             compile_config, "precompile", False
         ):
-            # Only regional_inductor needs an explicit serializable=True
-            # flag. full_inductor_compilation uses compile_fx_inner which
-            # already produces a serializable CompiledFxGraph; no special
-            # branch is needed for it.
+            # regional_inductor needs an explicit serializable=True at
+            # the pass level so it produces serializable RegionalOutputCode.
+            # full_inductor_compilation does NOT need a pass-level flag:
+            # compile_fx_inner already returns a CompiledFxGraph that is
+            # natively serializable, so aot_compile_joint_with_descriptors
+            # (called with serializable=True in joint_graph_builder) can
+            # bundle it into a BundledAOTAutogradSerializableCallable
+            # without any pass-level cooperation.
             compiler_passes.append(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],

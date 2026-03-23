@@ -18,6 +18,7 @@ Additionally supports pre-compile via --compile.precompile:
 
 import dataclasses
 import functools
+import pickle
 
 import torch
 import torch.nn as nn
@@ -165,13 +166,14 @@ def _apply_aot_compile(
                 return _apply_aot_compile_load(
                     model, parallel_dims, storage, artifact_key, config_fingerprint
                 )
-            except (ValueError, RuntimeError) as e:
+            except (ValueError, pickle.UnpicklingError, RuntimeError) as e:
                 # ValueError: fingerprint/param/buffer mismatches from our
-                # validation. RuntimeError: intentionally broad to catch
-                # deserialization failures (e.g. pickle errors, shape
-                # mismatches in torch.load) that surface as RuntimeError.
-                # We log the exception type so unrelated errors (CUDA OOM,
-                # NCCL) are distinguishable in logs.
+                # validation. pickle.UnpicklingError: corrupted or
+                # incompatible serialized data. RuntimeError: intentionally
+                # broad to catch remaining deserialization failures (e.g.
+                # shape mismatches in torch.load) that surface as
+                # RuntimeError. We log the exception type so unrelated
+                # errors (CUDA OOM, NCCL) are distinguishable in logs.
                 logger.warning(
                     f"Stale precompile artifact detected ({type(e).__name__}), "
                     f"recompiling: {e}"
