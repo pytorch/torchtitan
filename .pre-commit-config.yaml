@@ -91,14 +91,13 @@ repos:
             echo "--------------------------------------------------------"
             exit 0
         fi
-        lychee "$@"
+        lychee "$@" $(find . -name "*.md" -not -path "./.*")
         ' --
       args:
         - "--offline"
         - "--no-progress"
-        - "--exclude-path=(^|/)\\..*"
+        - "--exclude-path=/\\.[^/]+/"
         - "--root-dir=."
-        - "**/*.md"
       pass_filenames: false
       always_run: true
 
@@ -124,9 +123,8 @@ repos:
         lychee "$@"
         ' --
       args:
-        - "--verbose"
         - "--no-progress"
-        - "--exclude-path=(^|/)\\..*"
+        - "--exclude-path=/\\.[^/]+/"
         - "--root-dir=."
         - "--accept=200,403,429,503"
         - "--exclude=http://localhost:.*"
@@ -134,7 +132,6 @@ repos:
         - "--max-retries=3"
         - "--retry-wait-time=5"
         - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        - "**/*.md"
       stages: [manual]
-      pass_filenames: false
-      always_run: true
+      pass_filenames: true
+      types_or: [markdown, python]
