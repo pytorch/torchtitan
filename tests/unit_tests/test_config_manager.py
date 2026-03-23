@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 
 import pytest
@@ -214,6 +215,67 @@ class TestConfigManager(unittest.TestCase):
                     "foo",
                 ]
             )
+
+
+class TestPackSamplesValidation(unittest.TestCase):
+    """Tests for Trainer.Config.__post_init__ pack_samples validation."""
+
+    @classmethod
+    def setUpClass(cls):
+        config_manager = ConfigManager()
+        cls._base_config = config_manager.parse_args(
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
+        )
+
+    def _make_config(self):
+        """Return a deep copy so mutations in one test don't leak into others."""
+        return copy.deepcopy(self._base_config)
+
+    def test_pack_samples_default_passes(self):
+        """Default config (pack_samples=True + flex + block_causal) passes."""
+        config = self._make_config()
+        assert config.dataloader.pack_samples is True
+        config.__post_init__()
+
+    def test_pack_samples_false_skips_validation(self):
+        """pack_samples=False skips validation regardless of attention."""
+        config = self._make_config()
+        config.dataloader.pack_samples = False
+        config.model_spec.model.layer.attention.attn_backend = "sdpa"
+        config.model_spec.model.layer.attention.attn_mask_type = "causal"
+        config.__post_init__()
+
+    def test_pack_samples_sdpa_raises(self):
+        """pack_samples=True + sdpa backend raises ValueError."""
+        config = self._make_config()
+        config.model_spec.model.layer.attention.attn_backend = "sdpa"
+        config.model_spec.model.layer.attention.attn_mask_type = "causal"
+        with pytest.raises(ValueError, match="pack_samples=True requires 'flex'"):
+            config.__post_init__()
+
+    def test_pack_samples_flex_causal_raises(self):
+        """pack_samples=True + flex + causal (not block_causal) raises."""
+        config = self._make_config()
+        config.model_spec.model.layer.attention.attn_mask_type = "causal"
+        with pytest.raises(ValueError, match="attn_mask_type='block_causal'"):
+            config.__post_init__()
+
+    def test_pack_samples_flex_block_causal_passes(self):
+        """pack_samples=True + flex + block_causal passes validation."""
+        config = self._make_config()
+        config.__post_init__()
+
+    def test_pack_samples_varlen_block_causal_passes(self):
+        """pack_samples=True + varlen + block_causal passes validation."""
+        config = self._make_config()
+        config.model_spec.model.layer.attention.attn_backend = "varlen"
+        config.__post_init__()
+
+    def test_pack_samples_model_spec_none_skips(self):
+        """pack_samples=True + model_spec=None skips validation."""
+        config = self._make_config()
+        config.model_spec = None
+        config.__post_init__()
 
 
 if __name__ == "__main__":

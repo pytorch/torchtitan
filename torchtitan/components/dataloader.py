@@ -47,6 +47,10 @@ class BaseDataLoader(Stateful, ABC, Configurable):
         dataset: str = ""
         dataset_path: str | None = None
 
+        pack_samples: bool = False
+        """Whether multiple samples are packed into each training sequence.
+        Requires flex with block_causal masking or varlen attention."""
+
     @abstractmethod
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         ...

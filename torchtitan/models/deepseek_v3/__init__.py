@@ -54,6 +54,8 @@ deepseekv3_configs = {
                 qk_rope_head_dim=64,
                 v_head_dim=128,
                 mscale=0.70,
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 wq=Linear.Config(),
             ),
             feed_forward=FeedForward.Config(

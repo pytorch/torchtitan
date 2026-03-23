@@ -44,7 +44,8 @@ llama3_configs = {
             ),
             attention=GQAttention.Config(
                 n_heads=16,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -190,7 +191,8 @@ llama3_configs = {
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -279,7 +281,8 @@ llama3_configs = {
             attention=GQAttention.Config(
                 n_heads=64,
                 n_kv_heads=8,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -308,7 +311,8 @@ llama3_configs = {
             attention=GQAttention.Config(
                 n_heads=128,
                 n_kv_heads=8,
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
