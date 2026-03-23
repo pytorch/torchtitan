@@ -19,6 +19,7 @@ from torchtitan.models.flux.model.layers import (
     timestep_embedding,
 )
 from torchtitan.protocols import BaseModel
+from torchtitan.protocols.module import ModuleList
 from torchtitan.tools.logging import logger
 
 
@@ -141,11 +142,11 @@ class FluxModel(BaseModel):
             in_features=config.context_in_dim, out_features=self.hidden_size
         )
 
-        self.double_blocks = nn.ModuleList(
+        self.double_blocks = ModuleList(
             [config.double_block_config.build() for _ in range(config.depth)]
         )
 
-        self.single_blocks = nn.ModuleList(
+        self.single_blocks = ModuleList(
             [
                 config.single_block_config.build()
                 for _ in range(config.depth_single_blocks)
