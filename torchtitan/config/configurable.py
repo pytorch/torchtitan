@@ -86,6 +86,10 @@ class Configurable:
                     result[f.name] = val.to_dict()
                 elif dataclasses.is_dataclass(val):
                     result[f.name] = dataclasses.asdict(val)
+                elif isinstance(val, list):
+                    result[f.name] = [
+                        v.to_dict() if hasattr(v, "to_dict") else v for v in val
+                    ]
                 else:
                     result[f.name] = val
             return result
