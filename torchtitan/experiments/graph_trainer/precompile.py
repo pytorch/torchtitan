@@ -76,6 +76,13 @@ def compute_config_fingerprint(
     # different PyTorch versions.
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
+    # Compiled Triton kernels are architecture-specific (e.g. SM80 vs
+    # SM90), so artifacts saved on one GPU type may not work on another.
+    # Include the GPU capability to catch cross-machine mismatches.
+    if torch.cuda.is_available():
+        capability = torch.cuda.get_device_capability()
+        h.update(f"cuda_capability:{capability}\n".encode())
+
     return h.hexdigest()[:16]
 
 
@@ -229,7 +236,9 @@ def precompile_load(
         ]
         # The deserialized fn returns flat outputs. We need to
         # unflatten them using the saved out_spec to match the
-        # original model output structure.
+        # original model output structure. See also graph_utils.py:wrapper_fn
+        # which does NOT unflatten because the live-compiled fn already
+        # handles it via unflattened_compiled_fn.
         flat_outputs = compiled_fn(*inputs, **kwargs)
         if out_spec is not None:
             return pytree.tree_unflatten(flat_outputs, out_spec)
