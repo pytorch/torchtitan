@@ -9,7 +9,7 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -285,11 +285,12 @@ qwen3_configs = {
                 hidden_dim=768,
                 num_experts=64,
                 num_shared_experts=0,
-                top_k=8,
-                score_func="softmax",
-                route_norm=True,
-                route_scale=1.0,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=8,
+                    score_func="softmax",
+                    route_norm=True,
+                ),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=3072,
@@ -326,11 +327,12 @@ qwen3_configs = {
                 hidden_dim=768,
                 num_experts=128,
                 num_shared_experts=0,
-                top_k=8,
-                score_func="softmax",
-                route_norm=True,
-                route_scale=1.0,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=8,
+                    score_func="softmax",
+                    route_norm=True,
+                ),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=6144,
@@ -367,11 +369,12 @@ qwen3_configs = {
                 hidden_dim=1536,
                 num_experts=128,
                 num_shared_experts=0,
-                top_k=8,
-                score_func="softmax",
-                route_norm=True,
-                route_scale=1.0,
                 score_before_experts=False,
+                router=TokenChoiceTopKRouter.Config(
+                    top_k=8,
+                    score_func="softmax",
+                    route_norm=True,
+                ),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=12288,

@@ -31,8 +31,14 @@ def compute_token_log_probs(
         full_sequence, dtype=torch.long, device=device
     ).unsqueeze(0)
 
-    # Forward pass — trainer uses is_position_id=False so positions=None is fine
-    logits = model(full_tensor, attention_masks=None)
+    # NOTE: We should move towards batching to improve efficiency here
+    # See https://github.com/pytorch/torchtitan/issues/2674
+    # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
+    # which breaks torch.compile with symbolic shapes.
+    seq_len = full_tensor.shape[1]
+    positions = torch.arange(seq_len, device=device).unsqueeze(0)
+
+    logits = model(full_tensor, attention_masks=None, positions=positions)
 
     # Convert to float32 for numerical stability
     logits_f32 = logits[:, :-1, :].to(torch.float32)
