@@ -107,7 +107,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B"),
+        model_spec=model_registry("debugmodel"),
         num_steps=5,
         batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(

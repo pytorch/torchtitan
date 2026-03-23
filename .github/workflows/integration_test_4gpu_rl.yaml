@@ -82,10 +82,6 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        # 5. Download HF model checkpoint for tests
-        MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
-
         # Run E2E RL integration tests (TP=1 on 2 GPUs, TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
-          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
-          --hf_assets_path "$MODEL_PATH"
+          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
