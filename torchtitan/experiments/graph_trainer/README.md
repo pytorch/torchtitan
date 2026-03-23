@@ -93,10 +93,12 @@ torchrun --nproc_per_node=8 --virtual-local-rank \
     --parallelism.tensor_parallel_degree 2
 ```
 
-Pre-compile currently works with the `full_inductor_compilation` pass, which
-produces serializable `OutputCode`. A pre-configured config is provided:
+Pre-compile works with any compiler pass that produces serializable output,
+including `full_inductor_compilation` and `regional_inductor`. Two config
+variants are provided:
 
 - `graph_trainer_llama3_precompile` — full Inductor compilation
+- `graph_trainer_llama3_precompile_regional` — regional Inductor compilation
 
 Artifacts are stored in `/tmp/precompile_artifacts/` by default (configurable
 via `--compile.precompile_artifact_dir`).
@@ -104,10 +106,11 @@ via `--compile.precompile_artifact_dir`).
 #### Validation
 
 Pre-compile has been validated for bitwise equivalence on Llama3
-with 2D parallelism (FSDP dp=4, TP=2) on 8 GPUs using the
-`full_inductor_compilation` pass. The three paths — baseline (no
-precompile), precompile-save (first run), and precompile-load (subsequent
-run) — produce identical loss values across all training steps.
+with 2D parallelism (FSDP dp=4, TP=2) on 8 GPUs for both
+`full_inductor_compilation` and `regional_inductor` passes. The three
+paths — baseline (no precompile), precompile-save (first run), and
+precompile-load (subsequent run) — produce identical loss values across all
+training steps.
 
 ### Composability Support
 

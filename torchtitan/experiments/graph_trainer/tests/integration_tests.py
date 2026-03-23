@@ -308,6 +308,19 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_llama3_precompile_full_inductor",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_precompile_regional",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "AOT llama3 precompile regional_inductor",
+            "aot_llama3_precompile_regional_inductor",
+            ngpu=8,
+        ),
     ]
 
 

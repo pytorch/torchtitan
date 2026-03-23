@@ -60,3 +60,14 @@ def graph_trainer_llama3_precompile() -> GraphTrainer.Config:
         precompile=True,
     )
     return config
+
+
+def graph_trainer_llama3_precompile_regional() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        mode="aot",
+        passes=["regional_inductor"],
+        precompile=True,
+    )
+    return config
