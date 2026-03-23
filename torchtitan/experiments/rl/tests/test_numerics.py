@@ -63,9 +63,15 @@ from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
 from torchtitan.models.qwen3 import model_registry
 
-BLOCK_SIZE = 32
-NUM_BLOCKS = 30
 DEFAULT_MODEL_CHECKPOINT = "Qwen/Qwen3-0.6B"
+
+# FA2 requires page_size (block_size) to be a multiple of 256.
+# FA3 (SM 9.0+) supports any block_size.
+_SM_90_AVAILABLE = (
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9
+)
+BLOCK_SIZE = 32 if _SM_90_AVAILABLE else 256
+NUM_BLOCKS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +178,7 @@ def _make_engine_args(checkpoint: str, attention_backend: str | None = None):
         gpu_memory_utilization=0.9,
         tensor_parallel_size=1,
         dtype="bfloat16",
+        block_size=BLOCK_SIZE,
     )
     if attention_backend is not None:
         kwargs["attention_backend"] = attention_backend

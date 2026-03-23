@@ -61,12 +61,18 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Activate PyTorch's FA3 flash attention implementation. This is required for
-        # the varlen attention API to work with paged attention (KV cache in block
-        # layout) because vLLM uses default page size 16 but FA2 only supports
-        # page_size=256. Error out if FA3 is not available in the current environment.
+        # Activate PyTorch's FA3 if available (supports any page_size for paged
+        # attention). Fall back to FA2 which requires page_size to be a multiple
+        # of 256 — callers must set vLLM's block_size=256 accordingly.
         if current_flash_attention_impl() != "FA3":
-            activate_flash_attention_impl("FA3")
+            try:
+                activate_flash_attention_impl("FA3")
+            except RuntimeError:
+                logger.warning(
+                    "FA3 not available (requires SM 9.0+), falling back to FA2. "
+                    "vLLM block_size must be set to 256 for FA2 paged attention."
+                )
+                activate_flash_attention_impl("FA2")
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
