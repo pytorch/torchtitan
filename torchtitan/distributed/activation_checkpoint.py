@@ -100,12 +100,12 @@ def _apply_op_sac(
 ) -> nn.Module:
     """Apply per-op selective activation checkpointing to the module."""
     mm_recompute_shapes = set()
-    recompute_fqns = ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+    mm_recompute_fqns = ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
 
-    if recompute_fqns:
+    if mm_recompute_fqns:
         for module_fqn, submod in module.named_modules():
             fqn = f"{base_fqn}.{module_fqn}" if base_fqn else module_fqn
-            if not any(f in fqn for f in recompute_fqns):
+            if not any(f in fqn for f in mm_recompute_fqns):
                 continue
             if not isinstance(submod, nn.Linear):
                 raise ValueError(
@@ -153,12 +153,9 @@ def _apply_op_sac(
 
         return wrapped_policy
 
-    def context_fn():
-        return create_selective_checkpoint_contexts(_get_custom_policy())
-
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=context_fn,
+        context_fn=lambda: create_selective_checkpoint_contexts(_get_custom_policy()),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
