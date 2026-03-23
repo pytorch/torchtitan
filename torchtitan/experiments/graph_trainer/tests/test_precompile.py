@@ -62,6 +62,12 @@ class TestDiskStorageAdapter(unittest.TestCase):
             storage = DiskStorageAdapter(tmpdir)
             storage.delete("nonexistent")
 
+    def test_path_traversal_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            with self.assertRaises(ValueError):
+                storage.save("../../escape", b"data")
+
 
 class TestPrecompiledArtifact(unittest.TestCase):
     def test_artifact_pickle_roundtrip(self):
