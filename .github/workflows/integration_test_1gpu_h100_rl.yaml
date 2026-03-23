@@ -5,11 +5,11 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_h100_rl.yaml'
+      - '.github/workflows/integration_test_1gpu_h100_rl.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_h100_rl.yaml'
+      - '.github/workflows/integration_test_1gpu_h100_rl.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
