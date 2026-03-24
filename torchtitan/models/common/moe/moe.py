@@ -489,8 +489,13 @@ class MoE(Module):
         out = self.shared_experts(x) if self.shared_experts is not None else None
 
         # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
+        routed_output_unsorted = torch.zeros(  # pyrefly: ignore [no-matching-overload]
+            (
+                bs  # pyrefly: ignore [unsupported-operation]
+                * slen
+                * self.router.top_k,
+                dim,
+            ),
             dtype=routed_output.dtype,
             device=routed_output.device,
         )
@@ -518,10 +523,14 @@ class MoE(Module):
         assert isinstance(buffer_device, torch.device)
 
         with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
+            self.tokens_per_expert = (
+                torch.zeros(  # pyrefly: ignore [no-matching-overload]
+                    self.experts.num_experts, dtype=torch.float32
+                )
             )
             if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
+                self.expert_bias = (
+                    torch.zeros(  # pyrefly: ignore [no-matching-overload]
+                        self.experts.num_experts, dtype=torch.float32
+                    )
                 )

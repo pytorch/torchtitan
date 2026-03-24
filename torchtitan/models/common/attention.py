@@ -556,8 +556,12 @@ class GQAttention(BaseAttention):
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
         if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
-            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
+            self.q_norm = config.q_norm.build(  # pyrefly: ignore [bad-assignment]
+                normalized_shape=self.head_dim
+            )
+            self.k_norm = config.k_norm.build(  # pyrefly: ignore [bad-assignment]
+                normalized_shape=self.head_dim
+            )
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None

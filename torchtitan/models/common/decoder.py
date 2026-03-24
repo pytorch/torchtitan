@@ -86,7 +86,11 @@ class Decoder(BaseModel):
         )
 
         self.rope = config.rope.build()
-        self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
+        self.register_buffer(
+            "freqs_cis",
+            self.rope.cache,  # pyrefly: ignore [bad-argument-type]
+            persistent=False,
+        )
 
         self.layers = ModuleDict()
         for layer_id in range(config.n_layers):
@@ -107,7 +111,7 @@ class Decoder(BaseModel):
         # Compute buffer_device before recursion so children (RoPE) get
         # the correct device when buffer_device is not explicitly provided.
         if buffer_device is None:
-            buffer_device = self.freqs_cis.device
+            buffer_device = self.freqs_cis.device  # pyrefly: ignore [bad-assignment]
         super().init_states(buffer_device=buffer_device)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

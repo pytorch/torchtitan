@@ -17,8 +17,6 @@ from torchtitan.components.quantization.module_utils import (
     verify_module_protocol,
 )
 from torchtitan.models.common.linear import Linear
-
-from torchtitan.models.common.param_init import RegexInitializer
 from torchtitan.protocols.module import Module
 
 
@@ -49,15 +47,15 @@ class TestLinear(unittest.TestCase):
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = Linear.Config(
-            param_init=RegexInitializer(
-                {
-                    r"weight": partial(nn.init.trunc_normal_, std=0.02),
-                    r"bias": nn.init.zeros_,
-                }
-            )
-        )
+        config = Linear.Config()
         linear = config.build(in_features=16, out_features=8)
+        object.__setattr__(
+            linear,
+            "_param_init",
+            {
+                "weight": partial(nn.init.trunc_normal_, std=0.02),
+            },
+        )
 
         with torch.no_grad():
             nn.init.zeros_(linear.weight)
@@ -67,15 +65,15 @@ class TestLinear(unittest.TestCase):
 
     def test_custom_init_std(self):
         """Linear respects custom mean and std."""
-        config = Linear.Config(
-            param_init=RegexInitializer(
-                {
-                    r"weight": partial(nn.init.normal_, mean=0.1, std=0.02),
-                    r"bias": nn.init.zeros_,
-                }
-            )
-        )
+        config = Linear.Config()
         linear = config.build(in_features=1000, out_features=500)
+        object.__setattr__(
+            linear,
+            "_param_init",
+            {
+                "weight": partial(nn.init.normal_, mean=0.1, std=0.02),
+            },
+        )
 
         torch.manual_seed(42)
         with torch.no_grad():
@@ -181,13 +179,14 @@ class TestModuleInjection(unittest.TestCase):
         model = nn.Module()
         model.fc = FakeQuantLinear(8, 4)
         inject_module_protocol(model, Linear)
-        param_init = RegexInitializer(
+        object.__setattr__(
+            model.fc,
+            "_param_init",
             {
-                r"weight": partial(nn.init.trunc_normal_, std=0.02),
-                r"bias": nn.init.zeros_,
-            }
+                "weight": partial(nn.init.trunc_normal_, std=0.02),
+                "bias": nn.init.zeros_,
+            },
         )
-        object.__setattr__(model.fc, "_param_init", param_init)
 
         with torch.no_grad():
             model.fc.init_states()  # should not raise

@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
@@ -18,10 +22,13 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.param_init import (
-    make_decoder_param_init,
-    RegexInitializer,
+    init_decoder_common,
+    init_feed_forward,
+    init_gq_attention,
+    init_moe,
 )
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 
@@ -34,8 +41,38 @@ __all__ = [
 ]
 
 
-def _llama4_param_init(dim: int, n_layers: int) -> RegexInitializer:
-    return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
+def setup_llama4_param_init(model: Llama4Model) -> None:
+    base_std: float = 0.02
+    default: ParamInitializer = partial(nn.init.trunc_normal_, std=base_std)
+    init_decoder_common(model, base_std=base_std)
+    for i, layer in enumerate(model.layers.values()):
+        std = base_std / (2 * (i + 1)) ** 0.5
+        depth: ParamInitializer = partial(nn.init.trunc_normal_, std=std)
+        init_gq_attention(
+            layer.attention,  # pyrefly: ignore [bad-argument-type]
+            default=default,
+            depth=depth,
+        )
+        if layer.moe_enabled:
+            init_moe(
+                layer.moe,  # pyrefly: ignore [bad-argument-type]
+                default=default,
+                depth=depth,
+            )
+        else:
+            init_feed_forward(
+                layer.feed_forward,  # pyrefly: ignore [bad-argument-type]
+                default=default,
+                depth=depth,
+            )
+        set_param_init(
+            layer.attention_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
+        set_param_init(
+            layer.ffn_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
 
 
 llama4_configs = {
@@ -43,7 +80,7 @@ llama4_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        param_init=_llama4_param_init(256, 6),
+        param_init_fn=setup_llama4_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -76,7 +113,7 @@ llama4_configs = {
     "17bx16e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        param_init=_llama4_param_init(5120, 48),
+        param_init_fn=setup_llama4_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -121,7 +158,7 @@ llama4_configs = {
     "17bx128e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        param_init=_llama4_param_init(5120, 48),
+        param_init_fn=setup_llama4_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),

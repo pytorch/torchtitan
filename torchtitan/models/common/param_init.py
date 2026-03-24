@@ -4,146 +4,142 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Parameter initialization utilities and factories for torchtitan models.
+"""Parameter initialization helpers for torchtitan models.
 
-Provides ``RegexInitializer`` for regex-based FQN dispatch,
-``DepthScaledTruncNormal`` for depth-scaled init, and
-``make_decoder_param_init`` for common decoder patterns.
+Provides composable helper functions that recipe functions (``param_init_fn``)
+use to set ``_param_init`` on built model modules via attribute access.
 
 Example usage in a model's ``__init__.py``::
 
     from torchtitan.models.common.param_init import (
-        RegexInitializer,
-        make_decoder_param_init,
+        init_decoder_common,
+        init_gq_attention,
+        init_feed_forward,
     )
 
-    cfg = Llama3Model.Config(
-        ...,
-        param_init=RegexInitializer(
-            make_decoder_param_init(dim=256, n_layers=6)
-        ),
-    )
+    def setup_llama3_param_init(model: Llama3Model) -> None:
+        init_decoder_common(model)
+        for i, layer in enumerate(model.layers.values()):
+            ...
 """
 
-import re
 from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.protocols.module import NamedParamInitializer, ParamInitializer
+from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 
-def skip_param_init(param: nn.Parameter) -> None:
-    """No-op initializer: explicitly skip initialization for a parameter.
-
-    Useful when a parameter is tied to another (e.g., weight tying).
-    """
-    pass
-
-
-class RegexInitializer(NamedParamInitializer):
-    """Regex-match parameter FQNs to initializers.
-
-    First matching pattern wins. Raises ``ValueError`` if no pattern matches.
-    Note that Python dictionary is ordered.
-
-    Dict values can be either:
-    - ``ParamInitializer`` (``Callable[[nn.Parameter], None]``):
-      e.g. ``nn.init.zeros_``, ``partial(nn.init.normal_, std=0.02)``
-    - ``NamedParamInitializer``: for init functions that need the FQN
-      (e.g. ``DepthScaledTruncNormal``)
-    """
-
-    def __init__(
-        self,
-        rules: dict[str, ParamInitializer | NamedParamInitializer],
-    ) -> None:
-        self._compiled = [
-            (re.compile(pattern), init_fn) for pattern, init_fn in rules.items()
-        ]
-
-    def __call__(self, name: str, param: nn.Parameter) -> None:
-        for pattern, init_fn in self._compiled:
-            if pattern.fullmatch(name):
-                if isinstance(init_fn, NamedParamInitializer):
-                    init_fn(name, param)
-                else:
-                    init_fn(param)
-                return
-        raise ValueError(f"No initializer matched '{name}'.")
-
-
-class DepthScaledTruncNormal(NamedParamInitializer):
-    """Truncated normal with depth-dependent std.
-
-    Parses ``layer_id`` from the FQN (e.g., ``layers.5.attention.wo.weight``)
-    and scales std by ``1 / sqrt(2 * (layer_id + 1))``.
-    """
-
-    def __init__(
-        self,
-        *,
-        base_std: float = 0.02,
-        n_layers: int,
-        a: float = -2.0,
-        b: float = 2.0,
-    ) -> None:
-        self._base_std = base_std
-        self._n_layers = n_layers
-        self._a = a
-        self._b = b
-        self._layer_re = re.compile(r"layers\.(\d+)\.")
-
-    def __call__(self, name: str, param: nn.Parameter) -> None:
-        m = self._layer_re.match(name)
-        assert m is not None, (
-            f"Could not parse layer_id from FQN '{name}'. "
-            f"Expected FQN to contain 'layers.<digit>.'."
-        )
-        layer_id = int(m.group(1))
-        std = self._base_std / (2 * (layer_id + 1)) ** 0.5
-        nn.init.trunc_normal_(param, mean=0.0, std=std, a=self._a, b=self._b)
-
-
-def make_decoder_param_init(
-    *,
-    dim: int,
-    n_layers: int,
+def init_decoder_common(
+    model: nn.Module,
     base_std: float = 0.02,
-    tok_emb_std: float = 1.0,
-) -> dict[str, ParamInitializer | NamedParamInitializer]:
-    """Common param_init patterns for Decoder-based models.
+) -> None:
+    """Shared init for Decoder top-level modules: tok_embeddings, norm, output.
 
-    Covers Llama3, Llama4, Qwen3, and DeepSeek V3 (with model-specific
-    extensions merged via dict update). See inline comments for pattern details.
+    Args:
+        model: A Decoder (or subclass) instance with ``tok_embeddings``,
+            ``norm``, ``output`` attributes and ``config.dim``.
+        base_std: Base standard deviation (unused here but kept for API
+            consistency with per-layer helpers).
     """
-    depth_std = DepthScaledTruncNormal(base_std=base_std, n_layers=n_layers)
+    dim: int = model.config.dim  # pyrefly: ignore [bad-assignment]
     final_out_std = dim**-0.5
-    return {
-        # Token embeddings
-        r"tok_embeddings\.weight": partial(nn.init.normal_, std=tok_emb_std),
-        # Depth-scaled output projections in attention and FFN
-        r"layers\..+\.attention\.wo\.weight": depth_std,
-        r"layers\..+\.feed_forward\.w[23]\.weight": depth_std,
-        # MoE expert weights (nn.Parameter, no .weight suffix)
-        r"layers\..+\.moe\.experts\.w[23]": depth_std,
-        # MoE router gate
-        r"layers\..+\.moe\.router\.gate\.weight": depth_std,
-        # MoE shared experts
-        r"layers\..+\.moe\.shared_experts\.w[23]\.weight": depth_std,
-        # Norm weights (RMSNorm, LayerNorm)
-        r".*norm.*\.weight": nn.init.ones_,
-        # Output projection
-        r"output\.weight": partial(
-            nn.init.trunc_normal_,
-            std=final_out_std,
-            a=-3 * final_out_std,
-            b=3 * final_out_std,
-        ),
-        # Default for remaining weights (wq, wk, wv, w1, etc.)
-        r".*\.weight": partial(nn.init.trunc_normal_, std=base_std),
-        # Biases
-        r".*\.bias": nn.init.zeros_,
-        # Catch-all for bare nn.Parameters (e.g., sinks)
-        r".*": partial(nn.init.trunc_normal_, std=base_std),
-    }
+    set_param_init(
+        model.tok_embeddings,  # pyrefly: ignore [bad-argument-type]
+        {"weight": partial(nn.init.normal_, std=1.0)},
+    )
+    set_param_init(
+        model.norm,  # pyrefly: ignore [bad-argument-type]
+        {"weight": nn.init.ones_},
+    )
+    set_param_init(
+        model.output,  # pyrefly: ignore [bad-argument-type]
+        {
+            "weight": partial(
+                nn.init.trunc_normal_,
+                std=final_out_std,
+                a=-3 * final_out_std,
+                b=3 * final_out_std,
+            )
+        },
+    )
+
+
+def init_gq_attention(
+    attn: nn.Module,
+    *,
+    default: ParamInitializer,
+    depth: ParamInitializer,
+) -> None:
+    """Init for GQAttention: wq/wk/wv default, wo depth-scaled.
+
+    Also handles optional q_norm/k_norm (ones) when present.
+
+    Args:
+        attn: A GQAttention instance.
+        default: Initializer for non-depth-scaled projections (wq, wk, wv).
+        depth: Depth-scaled initializer for output projection (wo).
+    """
+    set_param_init(attn.wq, {"weight": default})  # pyrefly: ignore [bad-argument-type]
+    set_param_init(attn.wk, {"weight": default})  # pyrefly: ignore [bad-argument-type]
+    set_param_init(attn.wv, {"weight": default})  # pyrefly: ignore [bad-argument-type]
+    set_param_init(attn.wo, {"weight": depth})  # pyrefly: ignore [bad-argument-type]
+    if getattr(attn, "q_norm", None) is not None:
+        set_param_init(
+            attn.q_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
+        set_param_init(
+            attn.k_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
+
+
+def init_feed_forward(
+    ffn: nn.Module,
+    *,
+    default: ParamInitializer,
+    depth: ParamInitializer,
+) -> None:
+    """Init for FeedForward: w1 default, w2/w3 depth-scaled.
+
+    Args:
+        ffn: A FeedForward instance.
+        default: Initializer for gate projection (w1).
+        depth: Depth-scaled initializer for down projections (w2, w3).
+    """
+    set_param_init(ffn.w1, {"weight": default})  # pyrefly: ignore [bad-argument-type]
+    set_param_init(ffn.w2, {"weight": depth})  # pyrefly: ignore [bad-argument-type]
+    set_param_init(ffn.w3, {"weight": depth})  # pyrefly: ignore [bad-argument-type]
+
+
+def init_moe(
+    moe: nn.Module,
+    *,
+    default: ParamInitializer,
+    depth: ParamInitializer,
+) -> None:
+    """Init for MoE: experts w1 default, w2/w3 depth-scaled, router depth-scaled.
+
+    Also handles optional shared_experts when present.
+
+    Args:
+        moe: A MoE instance.
+        default: Initializer for non-depth-scaled expert weights (w1).
+        depth: Depth-scaled initializer for expert down weights (w2, w3)
+            and router gate.
+    """
+    set_param_init(
+        moe.experts,  # pyrefly: ignore [bad-argument-type]
+        {"w1": default, "w2": depth, "w3": depth},
+    )
+    set_param_init(
+        moe.router.gate,  # pyrefly: ignore [missing-attribute]
+        {"weight": depth},
+    )
+    if getattr(moe, "shared_experts", None) is not None:
+        init_feed_forward(
+            moe.shared_experts,  # pyrefly: ignore [bad-argument-type]
+            default=default,
+            depth=depth,
+        )

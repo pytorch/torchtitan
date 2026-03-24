@@ -10,9 +10,8 @@ import torch.nn as nn
 
 from torchtitan.components.loss import build_mse_loss
 from torchtitan.models.common.linear import Linear
-
-from torchtitan.models.common.param_init import RegexInitializer
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import set_param_init
 
 from .flux_datasets import FluxDataLoader
 from .model.autoencoder import AutoEncoderParams
@@ -35,7 +34,7 @@ __all__ = [
 ]
 
 
-def _flux_param_init() -> RegexInitializer:
+def setup_flux_param_init(model: FluxModel) -> None:
     """DiT-style param_init for Flux flow matching transformer.
 
     Most weights use xavier_uniform (DiT convention). Exceptions:
@@ -43,30 +42,99 @@ def _flux_param_init() -> RegexInitializer:
     - MLPEmbedder weights (time_in, vector_in): normal(std=0.02)
     - RMSNorm weights (QKNorm children): ones
     """
-    return RegexInitializer(
-        {
-            # Modulation layers: zero-init weights for stable training start
-            r".*mod(?:ulation)?\.lin\.weight": nn.init.zeros_,
-            # LastLayer: zero-init weights for output stability
-            r"final_layer\.linear\.weight": nn.init.zeros_,
-            r"final_layer\.adaLN_modulation\.1\.weight": nn.init.zeros_,
-            # MLPEmbedder (time_in, vector_in): normal init for weights
-            r"(?:time_in|vector_in)\.(?:in|out)_layer\.weight": partial(
-                nn.init.normal_, std=0.02
-            ),
-            # RMSNorm weights (QKNorm children)
-            r".*norm.*\.weight": nn.init.ones_,
-            # Default: xavier_uniform for remaining weights (DiT-style)
-            r".*\.weight": nn.init.xavier_uniform_,
-            # Default: zeros for all biases
-            r".*\.bias": nn.init.zeros_,
-        }
+    xavier = nn.init.xavier_uniform_
+    zeros = nn.init.zeros_
+    normal = partial(nn.init.normal_, std=0.02)
+    ones = nn.init.ones_
+
+    set_param_init(model.img_in, {"weight": xavier, "bias": zeros})
+    set_param_init(model.txt_in, {"weight": xavier, "bias": zeros})
+    for emb in (model.time_in, model.vector_in):
+        set_param_init(
+            emb.in_layer,  # pyrefly: ignore [bad-argument-type]
+            {"weight": normal, "bias": zeros},
+        )
+        set_param_init(
+            emb.out_layer,  # pyrefly: ignore [bad-argument-type]
+            {"weight": normal, "bias": zeros},
+        )
+
+    for block in model.double_blocks:
+        # Modulation: zero-init
+        set_param_init(
+            block.img_mod.lin,  # pyrefly: ignore [missing-attribute]
+            {"weight": zeros, "bias": zeros},
+        )
+        set_param_init(
+            block.txt_mod.lin,  # pyrefly: ignore [missing-attribute]
+            {"weight": zeros, "bias": zeros},
+        )
+        # Attention + MLP: xavier
+        for lin in (
+            block.img_attn.qkv,  # pyrefly: ignore [missing-attribute]
+            block.img_attn.proj,  # pyrefly: ignore [missing-attribute]
+            block.txt_attn.qkv,  # pyrefly: ignore [missing-attribute]
+            block.txt_attn.proj,  # pyrefly: ignore [missing-attribute]
+        ):
+            set_param_init(lin, {"weight": xavier, "bias": zeros})
+        for mlp in (block.img_mlp, block.txt_mlp):
+            set_param_init(
+                mlp[0],  # pyrefly: ignore [bad-index, bad-argument-type]
+                {"weight": xavier, "bias": zeros},
+            )
+            set_param_init(
+                mlp[2],  # pyrefly: ignore [bad-index, bad-argument-type]
+                {"weight": xavier, "bias": zeros},
+            )
+        # QKNorm: ones
+        for attn in (block.img_attn, block.txt_attn):
+            set_param_init(
+                attn.norm.query_norm,  # pyrefly: ignore [missing-attribute]
+                {"weight": ones},
+            )
+            set_param_init(
+                attn.norm.key_norm,  # pyrefly: ignore [missing-attribute]
+                {"weight": ones},
+            )
+
+    for block in model.single_blocks:
+        set_param_init(
+            block.modulation.lin,  # pyrefly: ignore [missing-attribute]
+            {"weight": zeros, "bias": zeros},
+        )
+        set_param_init(
+            block.linear1,  # pyrefly: ignore [bad-argument-type]
+            {"weight": xavier, "bias": zeros},
+        )
+        set_param_init(
+            block.linear2,  # pyrefly: ignore [bad-argument-type]
+            {"weight": xavier, "bias": zeros},
+        )
+        set_param_init(
+            block.norm.query_norm,  # pyrefly: ignore [missing-attribute]
+            {"weight": ones},
+        )
+        set_param_init(
+            block.norm.key_norm,  # pyrefly: ignore [missing-attribute]
+            {"weight": ones},
+        )
+
+    # Final layer: zero-init
+    set_param_init(
+        model.final_layer.linear,  # pyrefly: ignore [bad-argument-type]
+        {"weight": zeros, "bias": zeros},
+    )
+    set_param_init(
+        model.final_layer.adaLN_modulation[  # pyrefly: ignore [bad-index, bad-argument-type]
+            1
+        ],
+        {"weight": zeros, "bias": zeros},
     )
 
 
 flux_configs = {
     "flux-dev": FluxModel.Config(
-        param_init=_flux_param_init(),
+        param_init_fn=setup_flux_param_init,
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -131,7 +199,7 @@ flux_configs = {
         ),
     ),
     "flux-schnell": FluxModel.Config(
-        param_init=_flux_param_init(),
+        param_init_fn=setup_flux_param_init,
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -196,7 +264,7 @@ flux_configs = {
         ),
     ),
     "flux-debug": FluxModel.Config(
-        param_init=_flux_param_init(),
+        param_init_fn=setup_flux_param_init,
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,

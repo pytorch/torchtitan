@@ -83,7 +83,7 @@ class Configurable:
                     # field(init=False) not yet set, ignore this field.
                     continue
                 if callable(val) and not dataclasses.is_dataclass(val):
-                    # Skip non-serializable callables (e.g., param_init).
+                    # Skip non-serializable callables (e.g., param_init_fn).
                     continue
                 if hasattr(val, "to_dict"):
                     result[f.name] = val.to_dict()

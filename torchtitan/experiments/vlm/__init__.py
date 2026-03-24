@@ -5,18 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import fields
-from typing import Any
+from functools import partial
 
 import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 
-from torchtitan.models.common.param_init import (
-    make_decoder_param_init,
-    RegexInitializer,
-)
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import llama3_configs, setup_llama3_param_init
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import set_param_init
 
 from .datasets.mm_datasets import HuggingFaceMultiModalDataLoader
 from .infra.parallelize import parallelize_vlm
@@ -31,26 +28,50 @@ __all__ = [
 ]
 
 
-def _get_dict(obj) -> dict[str, Any]:
+def _get_dict(obj) -> dict:
     """Convert dataclass to dict, preserving nested dataclasses (unlike asdict)."""
     return {field.name: getattr(obj, field.name) for field in fields(obj)}
 
 
-def _vlm_param_init(dim: int, n_layers: int) -> RegexInitializer:
-    base = make_decoder_param_init(dim=dim, n_layers=n_layers)
-    # Projector uses xavier_uniform for weights, zeros for biases
-    projector_patterns = {
-        r"projector\.w[12]\.weight": nn.init.xavier_uniform_,
-        r"projector\.w[12]\.bias": nn.init.zeros_,
-    }
-    return RegexInitializer({**projector_patterns, **base})
+def setup_vlm_param_init(model: Llama3Siglip2Transformer) -> None:
+    # Decoder portion (tok_embeddings, layers, norm, output)
+    setup_llama3_param_init(model)
+    # Projector: xavier
+    set_param_init(
+        model.projector.w1,
+        {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_},
+    )
+    set_param_init(
+        model.projector.w2,
+        {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_},
+    )
+    # Encoder (Siglip2) — Linear params; LayerNorm uses reset_parameters via from_nn_module
+    default = partial(nn.init.trunc_normal_, std=0.02)
+    set_param_init(
+        model.encoder.embeddings.patch_embedding,
+        {"weight": default, "bias": nn.init.zeros_},
+    )
+    set_param_init(
+        model.encoder.embeddings.position_embedding,
+        {"weight": default},
+    )
+    for layer in model.encoder.layers.values():
+        for proj in (
+            layer.self_attn.q_proj,
+            layer.self_attn.k_proj,
+            layer.self_attn.v_proj,
+            layer.self_attn.out_proj,
+        ):
+            set_param_init(proj, {"weight": default, "bias": nn.init.zeros_})
+        set_param_init(layer.mlp.fc1, {"weight": default, "bias": nn.init.zeros_})
+        set_param_init(layer.mlp.fc2, {"weight": default, "bias": nn.init.zeros_})
 
 
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2Transformer.Config(
         **{
             **_get_dict(llama3_configs["debugmodel_flex_attn"]),
-            "param_init": _vlm_param_init(256, 6),
+            "param_init_fn": setup_vlm_param_init,
         },
         encoder=Siglip2Config(
             dim=128,

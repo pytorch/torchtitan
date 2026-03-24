@@ -276,7 +276,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # converter, which should guanrantee Module protocol.
         # On the other hand, some parallelism wrappers don't
         # have this guanrantee, e.g., fully_shard.
-        model.verify_module_protocol()
+        model.verify_module_protocol()  # pyrefly: ignore [not-callable]
 
         # Check if any converter uses quantization (FP8, MX, etc.)
         has_quantization = any(

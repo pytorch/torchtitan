@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
@@ -16,10 +20,12 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.param_init import (
-    make_decoder_param_init,
-    RegexInitializer,
+    init_decoder_common,
+    init_feed_forward,
+    init_gq_attention,
 )
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 from .model import Llama3Model, Llama3TransformerBlock
 from .parallelize import parallelize_llama
@@ -32,8 +38,31 @@ __all__ = [
 ]
 
 
-def _llama3_param_init(dim: int, n_layers: int) -> RegexInitializer:
-    return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
+def setup_llama3_param_init(model: Llama3Model) -> None:
+    base_std: float = 0.02
+    default: ParamInitializer = partial(nn.init.trunc_normal_, std=base_std)
+    init_decoder_common(model, base_std=base_std)
+    for i, layer in enumerate(model.layers.values()):
+        std = base_std / (2 * (i + 1)) ** 0.5
+        depth: ParamInitializer = partial(nn.init.trunc_normal_, std=std)
+        init_gq_attention(
+            layer.attention,  # pyrefly: ignore [bad-argument-type]
+            default=default,
+            depth=depth,
+        )
+        init_feed_forward(
+            layer.feed_forward,  # pyrefly: ignore [bad-argument-type]
+            default=default,
+            depth=depth,
+        )
+        set_param_init(
+            layer.attention_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
+        set_param_init(
+            layer.ffn_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
 
 
 llama3_configs = {
@@ -41,7 +70,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        param_init=_llama3_param_init(256, 6),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -70,7 +99,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        param_init=_llama3_param_init(256, 6),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -99,7 +128,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        param_init=_llama3_param_init(256, 6),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -127,7 +156,7 @@ llama3_configs = {
     "8B": Llama3Model.Config(
         dim=4096,
         n_layers=32,
-        param_init=_llama3_param_init(4096, 32),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -157,7 +186,7 @@ llama3_configs = {
     "8B_flex": Llama3Model.Config(
         dim=4096,
         n_layers=32,
-        param_init=_llama3_param_init(4096, 32),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -188,7 +217,7 @@ llama3_configs = {
     "8B_varlen": Llama3Model.Config(
         dim=4096,
         n_layers=32,
-        param_init=_llama3_param_init(4096, 32),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -219,7 +248,7 @@ llama3_configs = {
     "70B": Llama3Model.Config(
         dim=8192,
         n_layers=80,
-        param_init=_llama3_param_init(8192, 80),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -249,7 +278,7 @@ llama3_configs = {
     "405B": Llama3Model.Config(
         dim=16384,
         n_layers=126,
-        param_init=_llama3_param_init(16384, 126),
+        param_init_fn=setup_llama3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),

@@ -4,16 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import (
-    make_decoder_param_init,
-    RegexInitializer,
+    init_decoder_common,
+    init_feed_forward,
+    init_moe,
 )
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 
@@ -27,8 +33,53 @@ __all__ = [
 ]
 
 
-def _deepseekv3_param_init(dim: int, n_layers: int) -> RegexInitializer:
-    return RegexInitializer(make_decoder_param_init(dim=dim, n_layers=n_layers))
+def _init_dsv3_attention(
+    attn: Attention, *, default: ParamInitializer, depth: ParamInitializer
+) -> None:
+    set_param_init(attn.wkv_a, {"weight": default})
+    set_param_init(attn.wkv_b, {"weight": default})
+    if attn.q_lora_rank > 0:
+        set_param_init(attn.wq_a, {"weight": default})
+        set_param_init(attn.wq_b, {"weight": default})
+        set_param_init(attn.q_norm, {"weight": nn.init.ones_})
+    else:
+        set_param_init(attn.wq, {"weight": default})
+    set_param_init(attn.wo, {"weight": depth})
+    set_param_init(attn.kv_norm, {"weight": nn.init.ones_})
+
+
+def setup_deepseekv3_param_init(model: DeepSeekV3Model) -> None:
+    base_std: float = 0.02
+    default: ParamInitializer = partial(nn.init.trunc_normal_, std=base_std)
+    init_decoder_common(model, base_std=base_std)
+    for i, layer in enumerate(model.layers.values()):
+        std = base_std / (2 * (i + 1)) ** 0.5
+        depth: ParamInitializer = partial(nn.init.trunc_normal_, std=std)
+        _init_dsv3_attention(
+            layer.attention,  # pyrefly: ignore [bad-argument-type]
+            default=default,
+            depth=depth,
+        )
+        if layer.moe_enabled:
+            init_moe(
+                layer.moe,  # pyrefly: ignore [bad-argument-type]
+                default=default,
+                depth=depth,
+            )
+        else:
+            init_feed_forward(
+                layer.feed_forward,  # pyrefly: ignore [bad-argument-type]
+                default=default,
+                depth=depth,
+            )
+        set_param_init(
+            layer.attention_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
+        set_param_init(
+            layer.ffn_norm,  # pyrefly: ignore [bad-argument-type]
+            {"weight": nn.init.ones_},
+        )
 
 
 deepseekv3_configs = {
@@ -36,7 +87,7 @@ deepseekv3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=6,
-        param_init=_deepseekv3_param_init(256, 6),
+        param_init_fn=setup_deepseekv3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -86,7 +137,7 @@ deepseekv3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=6,
-        param_init=_deepseekv3_param_init(256, 6),
+        param_init_fn=setup_deepseekv3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -138,7 +189,7 @@ deepseekv3_configs = {
         vocab_size=102400,
         dim=2048,
         n_layers=27,
-        param_init=_deepseekv3_param_init(2048, 27),
+        param_init_fn=setup_deepseekv3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -190,7 +241,7 @@ deepseekv3_configs = {
         vocab_size=102400,
         dim=5120,
         n_layers=60,
-        param_init=_deepseekv3_param_init(5120, 60),
+        param_init_fn=setup_deepseekv3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
@@ -245,7 +296,7 @@ deepseekv3_configs = {
         vocab_size=129280,
         dim=7168,
         n_layers=61,
-        param_init=_deepseekv3_param_init(7168, 61),
+        param_init_fn=setup_deepseekv3_param_init,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
         output=Linear.Config(),
