@@ -262,8 +262,21 @@ def graph_pp_pipeline_llm(
     num_layers = model_config.n_layers
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
-    stages_per_rank = 1  # Graph PP uses 1 stage per rank
+    from torch.distributed.pipelining.schedules import (
+        get_schedule_class,
+        ScheduleDualPipeV,
+        ScheduleZBVZeroBubble,
+    )
+
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
+    is_v_schedule = schedule_class in (ScheduleDualPipeV, ScheduleZBVZeroBubble)
+    stages_per_rank = 2 if is_v_schedule else 1
     num_virtual_stages = parallel_dims.pp * stages_per_rank
+
+    # V-schedules (DualPipeV, ZBV) benefit from split_dI_dW to enable
+    # zero-bubble scheduling where dW is interleaved with the next F.
+    if is_v_schedule:
+        graph_pp_passes.append("split_dI_dW")
 
     logger.info("Graph PP passes: %s", graph_pp_passes)
 
@@ -416,8 +429,10 @@ class _LazyGraphPPAdapter:
         from autoparallel.graph_passes.graph_pp_runner import (
             _get_stage_from_action,
             _run_reduce_grad_module,
+            get_multiplexed_graph_callables,
             GraphPipelineStage,
             GraphPPRunner,
+            overlap_fw_bw,
             stage_backward_input,
             stage_backward_weight,
             stage_forward,
@@ -430,6 +445,7 @@ class _LazyGraphPPAdapter:
             BACKWARD_WEIGHT,
             FORWARD,
             FULL_BACKWARD,
+            OVERLAP_F_B,
             REDUCE_GRAD,
             RESHARD,
             UNSHARD,
@@ -672,8 +688,37 @@ class _LazyGraphPPAdapter:
                 stage.state["sharded_grads"] = sharded_grads
 
         schedule.register_custom_function(REDUCE_GRAD, _patched_stage_reduce_grad)
-        schedule.register_custom_function(BACKWARD_INPUT, stage_backward_input)
-        schedule.register_custom_function(BACKWARD_WEIGHT, stage_backward_weight)
+
+        # DualPipeV emits BACKWARD_INPUT/BACKWARD_WEIGHT actions in its
+        # zero-bubble tail, but without split_dI_dW graph pass, stages
+        # don't have separate bw_dI/bw_dW graphs. Wrap the handlers to
+        # fall back to stage_full_backward when split graphs are missing.
+        def _backward_input_with_fallback(action, ctx):
+            _, _, bw_stage = _get_stage_from_action(action, ctx)
+            if bw_stage.graph_callables.bw_dI is None:
+                from torch.distributed.pipelining.schedules import _Action
+
+                new_action = _Action(
+                    action.stage_index,
+                    FULL_BACKWARD,
+                    action.microbatch_index,
+                    action.sub_actions,
+                )
+                stage_full_backward(new_action, ctx)
+                return
+            stage_backward_input(action, ctx)
+
+        def _backward_weight_with_fallback(action, ctx):
+            _, _, bw_stage = _get_stage_from_action(action, ctx)
+            if bw_stage.graph_callables.bw_dW is None:
+                # Full backward already ran during BACKWARD_INPUT, skip.
+                return
+            stage_backward_weight(action, ctx)
+
+        schedule.register_custom_function(BACKWARD_INPUT, _backward_input_with_fallback)
+        schedule.register_custom_function(
+            BACKWARD_WEIGHT, _backward_weight_with_fallback
+        )
 
         use_inductor = not any(
             "_local_scalar_dense" in str(n)
@@ -687,6 +732,55 @@ class _LazyGraphPPAdapter:
                 "Detected _local_scalar_dense in PP graphs (likely from EP), "
                 "falling back to interpreter execution"
             )
+
+        # DualPipeV wraps FORWARD+FULL_BACKWARD pairs in OVERLAP_F_B actions.
+        # Use multiplexed graphs that fuse F+B into a single graph with
+        # interleaved compute/comm for true overlap when possible.
+        has_overlap_actions = any(
+            a is not None and a.computation_type == OVERLAP_F_B
+            for actions in schedule.pipeline_order.values()
+            for a in actions
+        )
+        if has_overlap_actions:
+            from functools import partial
+
+            from autoparallel.graph_passes.graph_multiplex import (
+                multiplex_fw_bw_graph,
+            )
+
+            stage_graphs = {
+                gs.stage_index: gs.graph_callables for gs in graph_stages
+            }
+            multiplexed_graph_callables = get_multiplexed_graph_callables(
+                stage_graphs,
+                partial(multiplex_fw_bw_graph, overlap_with_annotations=True),
+            )
+            schedule.register_custom_function(
+                OVERLAP_F_B,
+                partial(
+                    overlap_fw_bw,
+                    multiplexed_graph_callables,
+                ),
+            )
+        else:
+            # No OVERLAP_F_B in schedule — register sequential fallback
+            def _overlap_f_b_sequential(action, ctx):
+                assert (
+                    action.sub_actions is not None
+                ), "OVERLAP_F_B requires sub_actions"
+                for sub_a in action.sub_actions:
+                    custom_fn = schedule._comp_type_to_function_map.get(
+                        sub_a.computation_type
+                    )
+                    if custom_fn is not None:
+                        custom_fn(sub_a, ctx)
+                    else:
+                        raise ValueError(
+                            f"No custom function registered for "
+                            f"{sub_a.computation_type} inside OVERLAP_F_B"
+                        )
+
+            schedule.register_custom_function(OVERLAP_F_B, _overlap_f_b_sequential)
         self._runner = GraphPPRunner(schedule, inductor=use_inductor)
 
         # Wire the monkey-patch for schedules without UNSHARD/REDUCE_GRAD
