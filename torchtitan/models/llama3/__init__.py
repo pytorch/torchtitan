@@ -58,7 +58,7 @@ llama3_configs = {
             scaling="llama",
         ),
     ),
-    "debugmodel_flex_attn": Llama3Model.Config(
+    "debugmodel_sdpa_attn": Llama3Model.Config(
         dim=256,
         n_layers=6,
         vocab_size=2048,
@@ -73,8 +73,7 @@ llama3_configs = {
             ),
             attention=GQAttention.Config(
                 n_heads=16,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                attn_backend="sdpa",
                 rope_backend="complex",
             ),
         ),

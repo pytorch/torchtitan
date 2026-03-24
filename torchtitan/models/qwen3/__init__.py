@@ -58,7 +58,7 @@ qwen3_configs = {
             backend="cos_sin",
         ),
     ),
-    "debugmodel_flex": Qwen3Model.Config(
+    "debugmodel_sdpa": Qwen3Model.Config(
         vocab_size=2048,
         dim=256,
         n_layers=8,
@@ -76,8 +76,7 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),

@@ -74,7 +74,7 @@ deepseekv3_configs = {
             original_seq_len=4096,
         ),
     ),
-    "debugmodel_flex_attn": DeepSeekV3Model.Config(
+    "debugmodel_sdpa_attn": DeepSeekV3Model.Config(
         vocab_size=2048,
         dim=256,
         n_layers=6,
@@ -105,8 +105,7 @@ deepseekv3_configs = {
                 qk_rope_head_dim=64,
                 v_head_dim=128,
                 mscale=0.70,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                attn_backend="sdpa",
                 wq=Linear.Config(),
             ),
             feed_forward=FeedForward.Config(

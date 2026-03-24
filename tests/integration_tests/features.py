@@ -494,25 +494,25 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--module llama3 --config llama3_debugmodel_sdpa_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode='full'",
                 ]
             ],
-            "FSDP+FLEX_ATTN",
-            "fsdp+flex_attn",
+            "FSDP+SDPA_ATTN",
+            "fsdp+sdpa_attn",
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--module llama3 --config llama3_debugmodel_sdpa_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
                 ]
             ],
-            "FSDP + FLEX + per op SAC",
-            "fsdp+flex_attn+per_op_sac",
+            "FSDP + SDPA + per op SAC",
+            "fsdp+sdpa_attn+per_op_sac",
             ngpu=4,
         ),
         OverrideDefinitions(
