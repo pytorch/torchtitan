@@ -97,10 +97,7 @@ def _make_precompile_callback(
     artifact_key: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
-    from .precompile import (
-        compute_config_fingerprint,
-        precompile_save,
-    )
+    from .precompile import compute_config_fingerprint, precompile_save
 
     if storage is None or artifact_key is None:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
@@ -145,9 +142,7 @@ def _apply_aot_compile(
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
 
         if storage.exists(artifact_key):
-            from .precompile import (
-                compute_config_fingerprint,
-            )
+            from .precompile import compute_config_fingerprint
 
             config_fingerprint = compute_config_fingerprint(
                 model, compile_config, parallel_dims
