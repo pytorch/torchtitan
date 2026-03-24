@@ -98,10 +98,7 @@ def _make_precompile_callback(
     config_fingerprint: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
-    from .precompile import (
-        compute_config_fingerprint,
-        precompile_save,
-    )
+    from .precompile import compute_config_fingerprint, precompile_save
 
     if storage is None or artifact_key is None:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
@@ -145,9 +142,7 @@ def _apply_aot_compile(
     artifact_key: str | None = None
     config_fingerprint: str | None = None
     if compile_config.precompile:
-        from .precompile import (
-            compute_config_fingerprint,
-        )
+        from .precompile import compute_config_fingerprint
 
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
         config_fingerprint = compute_config_fingerprint(
@@ -300,6 +295,13 @@ def apply_compile(
             f"but mode is '{mode}'. Ignoring precompile."
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
+
+    if compile_config.precompile and not compile_config.precompile_artifact_dir:
+        raise ValueError(
+            "--compile.precompile requires --compile.precompile_artifact_dir "
+            "to be set. Specify the directory where precompile artifacts "
+            "should be stored (e.g. a shared filesystem path)."
+        )
 
     if compile_config.precompile and not (
         _SERIALIZABLE_PASSES & set(compile_config.passes)

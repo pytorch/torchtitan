@@ -105,7 +105,7 @@ class TestGraphTrainerCompileConfig(unittest.TestCase):
 
         config = GraphTrainerCompileConfig()
         self.assertFalse(config.precompile)
-        self.assertEqual(config.precompile_artifact_dir, "/tmp/precompile_artifacts")
+        self.assertEqual(config.precompile_artifact_dir, "")
 
     def test_precompile_config_custom(self):
         from torchtitan.experiments.graph_trainer.configs import (
