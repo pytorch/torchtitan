@@ -23,7 +23,6 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_dense
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.models.llama3.parallelize import (
-    _op_sac_save_list,
     apply_replicate,
     disable_fsdp_gradient_division,
 )
@@ -74,7 +73,6 @@ def parallelize_vlm(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, ac_config)
 

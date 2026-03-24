@@ -113,6 +113,66 @@ llama3_configs = {
             scaling="llama",
         ),
     ),
+    "1B": Llama3Model.Config(
+        dim=2048,
+        n_layers=16,
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
+        output=Linear.Config(),
+        layer=Llama3TransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
+            feed_forward=FeedForward.Config(
+                hidden_dim=compute_ffn_hidden_dim(
+                    2048, multiple_of=1024, ffn_dim_multiplier=1.5
+                ),
+            ),
+            attention=GQAttention.Config(
+                n_heads=32,
+                n_kv_heads=8,
+                attn_backend="sdpa",
+                rope_backend="complex",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=2048 // 32,
+            max_seq_len=131072,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+        ),
+    ),
+    "3B": Llama3Model.Config(
+        dim=3072,
+        n_layers=28,
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
+        output=Linear.Config(),
+        layer=Llama3TransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
+            feed_forward=FeedForward.Config(
+                hidden_dim=compute_ffn_hidden_dim(
+                    3072, multiple_of=1024, ffn_dim_multiplier=1.0
+                ),
+            ),
+            attention=GQAttention.Config(
+                n_heads=24,
+                n_kv_heads=8,
+                attn_backend="sdpa",
+                rope_backend="complex",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=3072 // 24,
+            max_seq_len=131072,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+        ),
+    ),
     "8B": Llama3Model.Config(
         dim=4096,
         n_layers=32,

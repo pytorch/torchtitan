@@ -88,7 +88,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
                     "--activation_checkpoint.mode 'selective'",
-                    "--activation_checkpoint.selective_ac_option 'op'",
                 ],
             ],
             "DeepSeek V3 Flex+PP+FSDP+EP+SACOP",
