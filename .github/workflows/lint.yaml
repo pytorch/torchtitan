@@ -35,32 +35,31 @@ jobs:
           LATEST_TAG=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | jq -r .tag_name)
           echo "Installing Lychee version: $LATEST_TAG"
 
-          # Download and extract the Linux binary
           URL="https://github.com/lycheeverse/lychee/releases/download/${LATEST_TAG}/lychee-x86_64-unknown-linux-gnu.tar.gz"
-          curl -sLO "$URL"
-          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz"
 
-          # Install to /usr/local/bin so 'system' hooks can find it
-          sudo mv lychee /usr/local/bin/
-          rm "lychee-x86_64-unknown-linux-gnu.tar.gz"
+          # Load the archive, extract into temp folder, move the binary, delete the rest
+          mkdir -p lychee_install
+          curl -sLO "$URL"
+          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install
+          sudo mv lychee_install/lychee /usr/local/bin/
+          rm -rf lychee_install "lychee-x86_64-unknown-linux-gnu.tar.gz"
 
           # Verify installation
           lychee --version
 
-      - name: Check links with Lychee
-        run: |
-          pip install pre-commit
-          pre-commit run lychee-all-links --all-files --hook-stage manual
-
-      - name: Install dependencies
+      - name: Install dependencies and lint utilities
         run: |
           python -m pip install -r requirements.txt -r requirements-dev.txt
           python -m pip install --force-reinstall --pre --index-url https://download.pytorch.org/whl/nightly/cu128 torch
+          pre-commit install-hooks
 
       - name: Get changed files
         id: changed-files
         uses: tj-actions/changed-files@22103cc46bda19c2b464ffe86db46df6922fd323 # v45.0.6
 
       - name: Lint modified files
-        # Lychee already ran on a clean no-deps installed repo
-        run: SKIP=lychee-hyperlinks pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
+        run: pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
+
+      - name: Check links with Lychee
+        run: |
+          pre-commit run lychee-link-checker --all-files

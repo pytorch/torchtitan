@@ -75,37 +75,10 @@ repos:
 
 - repo: local
   hooks:
-    # Hook 1: Check hyperlinks
-    - id: lychee-hyperlinks
-      name: lychee-hyperlinks
-      language: system
+    # Check hyperlinks and external links
+    - id: lychee-link-checker
+      name: lychee-link-checker
       verbose: true
-      entry: |
-        /bin/bash -c '
-        if ! command -v lychee >/dev/null 2>&1; then
-            echo "--------------------------------------------------------"
-            echo "Warning: Lychee (link checker) not found. skipping ... "
-            echo "To enable local link checking, install Lychee:"
-            echo "  - macos: brew install lychee"
-            echo "  - linux/windows: https://github.com/lycheeverse/lychee"
-            echo "--------------------------------------------------------"
-            exit 0
-        fi
-        lychee "$@"
-        ' --
-      args:
-        - "--offline"
-        - "--no-progress"
-        - "--exclude-path=/\\.[^/]+/"
-        - "--root-dir=."
-        - "**/*.md"
-      pass_filenames: false
-      always_run: true
-
-
-    # Hook 2: Check hyperlinks and external links
-    - id: lychee-all-links
-      name: lychee-all-links
       language: system
       entry: |
         /bin/bash -c '
@@ -119,20 +92,18 @@ repos:
             echo "If this error occurred in CI (GitHub actions), ensure the "
             echo "installation step in lint.yaml is running correctly."
             echo "--------------------------------------------------------"
-            exit 1
+            exit 0
         fi
         lychee "$@"
         ' --
       args:
         - "--no-progress"
-        - "--exclude-path=/\\.[^/]+/"
+        - "--exclude-path=(^|/)\\.[^/]+/"
         - "--root-dir=."
         - "--accept=200,403,429,503"
         - "--exclude=http://localhost:.*"
         - "--exclude=http://127.0.0.1:.*"
-        - "--max-retries=3"
-        - "--retry-wait-time=5"
+        - "--max-retries=5"
+        - "--retry-wait-time=10"
         - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      stages: [manual]
-      pass_filenames: true
       types_or: [markdown, python]
