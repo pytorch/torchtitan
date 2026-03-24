@@ -117,6 +117,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     )
 
             if self.dataloader.pack_samples and self.model_spec is not None:
+                # pyrefly: ignore [missing-attribute]
                 attn = self.model_spec.model.layer.attention
                 if attn.attn_backend not in ("flex", "varlen"):
                     raise ValueError(
