@@ -25,71 +25,67 @@ from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
 
 
-def _resolve_ops(op_specs: list) -> dict:
-    """Resolve op specs into a dict of op -> CheckpointPolicy.MUST_SAVE.
-
-    Each spec is either:
-      - An op object (always included)
-      - A tuple (root, dotted_path) for conditionally available ops,
-        e.g. (torch.ops, "deepep.dispatch.default")
-    """
-    ops = {}
-    for spec in op_specs:
-        if isinstance(spec, tuple):
-            obj, path = spec
-            try:
-                for part in path.split("."):
-                    obj = getattr(obj, part)
-                ops[obj] = CheckpointPolicy.MUST_SAVE
-            except AttributeError:
-                pass
-        else:
-            ops[spec] = CheckpointPolicy.MUST_SAVE
-    return ops
-
-
-# Ops whose outputs are expensive to recompute (matmuls, attention, etc.)
-_COMPUTE_OPS = [
-    # SDPA variants
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    # For low precision training, always save the absolute maximum used
-    # to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
-    torch._higher_order_ops.flex_attention,
-    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
-    # instead of decomposing it into aten.mm, so include it explicitly.
-    torch.ops.aten.linear.default,
-    # Inductor compiled code (available when torch.compile is used)
-    (torch._higher_order_ops, "inductor_compiled_code"),
-    # torch_attn custom backend
-    (torch.ops, "torch_attn._varlen_attn.default"),
-]
-
-# Communication ops whose outputs should be saved to avoid re-communication.
-_COMM_OPS = [
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops._c10d_functional.all_to_all_single.default,
-    # DeepEP (available when deepep is installed)
-    (torch.ops, "deepep.dispatch.default"),
-    (torch.ops, "deepep.combine.default"),
-    # HybridEP (available when hybridep is installed)
-    (torch.ops, "hybridep.dispatch.default"),
-    (torch.ops, "hybridep.combine.default"),
-]
-
-
 def _get_save_ops() -> set:
-    """Returns the set of ops whose activations should be saved (compute + comm)."""
+    """Returns the set of ops whose activations should be saved (compute + comm).
+
+    Each op spec is either an op object (always included) or a tuple
+    (root, dotted_path) for conditionally available ops — resolved via
+    getattr and silently skipped if not registered.
+    """
+    # Ops whose outputs are expensive to recompute (matmuls, attention, etc.)
+    compute_ops = [
+        # SDPA variants
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+        torch.ops.aten._scaled_dot_product_attention_math.default,
+        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+        # For low precision training, always save the absolute maximum used
+        # to compute the scaling factor for quantization.
+        torch.ops.aten.max.default,
+        # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
+        torch._higher_order_ops.flex_attention,
+        # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
+        # instead of decomposing it into aten.mm, so we must handle both.
+        torch.ops.aten.linear.default,
+        # Inductor compiled code (available when torch.compile is used)
+        (torch._higher_order_ops, "inductor_compiled_code"),
+        # torch_attn custom backend
+        (torch.ops, "torch_attn._varlen_attn.default"),
+    ]
+
+    # Communication ops whose outputs should be saved to avoid re-communication.
+    comm_ops = [
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        torch.ops._c10d_functional.all_to_all_single.default,
+        # DeepEP (available when deepep is installed)
+        (torch.ops, "deepep.dispatch.default"),
+        (torch.ops, "deepep.combine.default"),
+        # HybridEP (available when hybridep is installed)
+        (torch.ops, "hybridep.dispatch.default"),
+        (torch.ops, "hybridep.combine.default"),
+    ]
+
+    def _resolve_ops(op_specs: list) -> dict:
+        ops = {}
+        for spec in op_specs:
+            if isinstance(spec, tuple):
+                obj, path = spec
+                try:
+                    for part in path.split("."):
+                        obj = getattr(obj, part)
+                    ops[obj] = CheckpointPolicy.MUST_SAVE
+                except AttributeError:
+                    pass
+            else:
+                ops[spec] = CheckpointPolicy.MUST_SAVE
+        return ops
+
     aten_op_types = get_default_op_list()
     save_ops = {
         op.default  # pyrefly: ignore [missing-attribute]
         for op in aten_op_types.compute_intensive_ops
     }
-    save_ops.update(_resolve_ops(_COMPUTE_OPS))
-    save_ops.update(_resolve_ops(_COMM_OPS))
+    save_ops.update(_resolve_ops(compute_ops))
+    save_ops.update(_resolve_ops(comm_ops))
     return save_ops
 
 
@@ -100,6 +96,11 @@ def _apply_op_sac(
     base_fqn: str | None = None,
 ) -> nn.Module:
     """Apply per-op selective activation checkpointing to the module."""
+    save_ops = _get_save_ops()
+
+    # Collect weight shapes to force-recompute, stored as mm RHS shape
+    # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
+    # time to match, since linear's weight is (out_f, in_f).
     mm_recompute_shapes = set()
     mm_recompute_fqns = ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
 
@@ -116,7 +117,6 @@ def _apply_op_sac(
             out_f, in_f = submod.weight.shape
             mm_recompute_shapes.add((in_f, out_f))
 
-    save_ops = _get_save_ops()
     mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
 
     def _get_custom_policy():
