@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.traceback import annotate_fn
 
@@ -35,6 +36,32 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
+def _apply_moe_ep_tp_padded(model: nn.Module, parallel_dims: ParallelDims) -> None:
+    """Apply MoE EP/TP using PaddedExpertParallel for compilation compatibility.
+
+    Calls the standard apply_moe_ep_tp but with PaddedExpertParallel swapped in
+    for ExpertParallel. Uses a temporary monkey-patch on the llama4 parallelize
+    module since apply_moe_ep_tp imports ExpertParallel at module level.
+    """
+    from torchtitan.experiments.graph_trainer.padded_expert_parallel import PaddedExpertParallel
+    from torchtitan.models.llama4 import parallelize as llama4_par
+
+    _orig = llama4_par.ExpertParallel
+    llama4_par.ExpertParallel = PaddedExpertParallel
+    try:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+        )
+    finally:
+        llama4_par.ExpertParallel = _orig
+
+    logger.info("Using PaddedExpertParallel for graph-compilation-compatible EP")
+
+
 def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
@@ -50,16 +77,24 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     """
     from torchtitan.distributed.expert_parallel import ExpertParallel
+    from torchtitan.experiments.graph_trainer.padded_expert_parallel import (
+        PaddedExpertParallel,
+    )
     from torchtitan.models.common.attention import FlexAttentionWrapper
     from torchtitan.models.common.moe.moe import MoE
 
-    ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
+    ExpertParallel._token_dispatch = annotate_fn({"comm_region": "token_dispatch"})(
         ExpertParallel._token_dispatch
     )
-    ExpertParallel._token_combine = annotate_fn({"EP": "combine"})(
+    ExpertParallel._token_combine = annotate_fn({"comm_region": "token_combine"})(
         ExpertParallel._token_combine
     )
-    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
+    PaddedExpertParallel._token_dispatch = annotate_fn(
+        {"comm_region": "token_dispatch"}
+    )(PaddedExpertParallel._token_dispatch)
+    PaddedExpertParallel._token_combine = annotate_fn(
+        {"comm_region": "token_combine"}
+    )(PaddedExpertParallel._token_combine)
 
     FlexAttentionWrapper.forward = annotate_fn(
         {"compile_with_inductor": "flex_attention"}
@@ -123,13 +158,25 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            etp_mesh=parallel_dims.get_optional_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-        )
+        # Use PaddedExpertParallel when force-balanced routing is enabled.
+        # This avoids data-dependent ops (_local_scalar_dense) in the exported
+        # graph that Inductor cannot compile.
+        if parallel_dims.ep_enabled:
+            # Always use PaddedExpertParallel in graph_trainer to avoid
+            # data-dependent ops that Inductor cannot compile.
+            _apply_moe_ep_tp_padded(model, parallel_dims)
+            # Force balanced routing on all MoE modules for static graph shapes
+            for _, block in model.layers.items():
+                if hasattr(block, "moe") and hasattr(block.moe, "router"):
+                    block.moe.router._debug_force_load_balance = True
+        else:
+            apply_moe_ep_tp(
+                model,
+                tp_mesh=parallel_dims.get_optional_mesh("tp"),
+                ep_mesh=parallel_dims.get_optional_mesh("ep"),
+                etp_mesh=parallel_dims.get_optional_mesh("etp"),
+                ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            )
 
     if ac_config.mode != "none":
         apply_graph_ac(compile_config, ac_config)
