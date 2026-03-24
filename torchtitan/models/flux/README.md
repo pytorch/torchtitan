@@ -67,7 +67,7 @@ The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating t
 
 **Requirements:**
 - SM100+ GPU (e.g., NVIDIA B200, B100)
-- `torchao` nightly (for `MXInferenceLinear` / `MXLinear` support)
+- `torchao` nightly
 
 ### Using Config Presets
 
@@ -81,15 +81,30 @@ MODULE=flux CONFIG=flux_schnell_mxfp8 ./run_train.sh
 MODULE=flux CONFIG=flux_dev_mxfp8 ./run_train.sh
 ```
 
-### Manual Configuration
+### Custom Configuration
 
-You can also enable MXFP8 on any Flux config by passing CLI flags:
+To create a custom MXFP8 config, define a new function in `config_registry.py`:
 
-```bash
-MODULE=flux CONFIG=flux_schnell ./run_train.sh \
-    --compile.enable \
-    --model_converters '["mxfp8"]' \
-    --model_converters.mxfp8.fqns '["double_blocks","single_blocks","img_in","txt_in","time_in","vector_in","final_layer"]'
+```python
+def my_custom_mxfp8() -> FluxTrainer.Config:
+    config = flux_schnell()  # or flux_dev()
+    config.compile = CompileConfig(enable=True)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            MXFP8Converter.Config(
+                fqns=[
+                    "double_blocks",
+                    "single_blocks",
+                    "img_in",
+                    "txt_in",
+                    "time_in",
+                    "vector_in",
+                    "final_layer",
+                ],
+            ),
+        ],
+    )
+    return config
 ```
 
 The `fqns` parameter specifies which fully qualified module names to quantize. The listed names cover all the linear-layer-containing submodules in the Flux transformer. Dimensions must be aligned to 32 bytes for MXFP8; Flux's default hidden sizes satisfy this requirement.
