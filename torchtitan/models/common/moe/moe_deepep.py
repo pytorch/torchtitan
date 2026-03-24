@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 from torch.distributed.tensor import DTensor, Partial
 
-from torchtitan.distributed.deepep import sync_combine
+from torchtitan.distributed.deepep.deepep import sync_combine
 
 from .moe import MoE
 
