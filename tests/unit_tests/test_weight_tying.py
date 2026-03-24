@@ -85,6 +85,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         trainer_config.training.seq_len = 512
         trainer_config.parallelism.pipeline_parallel_degree = 2
         trainer_config.parallelism.context_parallel_degree = 1
+        trainer_config.parallelism.tensor_parallel_degree = 1
 
         with self.assertRaises(NotImplementedError):
             config.update_from_config(trainer_config=trainer_config)
@@ -99,6 +100,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         trainer_config.training.seq_len = 512
         trainer_config.parallelism.pipeline_parallel_degree = 2
         trainer_config.parallelism.context_parallel_degree = 1
+        trainer_config.parallelism.tensor_parallel_degree = 1
 
         # Should not raise
         config.update_from_config(trainer_config=trainer_config)
