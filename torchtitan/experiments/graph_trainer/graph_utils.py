@@ -21,6 +21,8 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 
+from torch.utils._pytree import TreeSpec
+
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -112,7 +114,7 @@ def joint_graph_builder(
     dump_folder: str | None = None,
     compile_config: CompileConfig | None = None,
     serializable: bool = False,
-    on_compile: Callable | None = None,
+    on_compile: Callable[[Any, TreeSpec | None], None] | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.

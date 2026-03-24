@@ -69,6 +69,62 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode jit --compile.backend inductor
 ```
 
+### Pre-compile (Serializable Compilation)
+
+Pre-compile lets you save compiled AOT graphs to disk on the first run and
+reload them on subsequent runs, skipping compilation entirely. This is useful
+for large models where compilation time is significant.
+
+**Artifact ephemerality:** Precompiled artifacts are tied to the exact PyTorch
+version, CUDA version, model architecture, and parallelism configuration used
+to create them. Changing any of these requires regenerating the artifacts.
+Stale artifacts are detected automatically via config fingerprinting and
+trigger a recompilation with a warning, but it is good practice to delete
+old artifacts when upgrading PyTorch or changing the model/parallelism setup.
+
+```bash
+# First run: compiles with serializable=True, saves artifacts, then trains
+torchrun --nproc_per_node=8 --virtual-local-rank \
+    -m torchtitan.train \
+    --module graph_trainer.llama3 \
+    --config graph_trainer_llama3_precompile \
+    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2
+
+# Subsequent runs: detects existing artifacts, loads them, skips compilation
+torchrun --nproc_per_node=8 --virtual-local-rank \
+    -m torchtitan.train \
+    --module graph_trainer.llama3 \
+    --config graph_trainer_llama3_precompile \
+    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2
+```
+
+Pre-compile works with any compiler pass that produces serializable output,
+including `full_inductor_compilation` and `regional_inductor`. Two config
+variants are provided:
+
+- `graph_trainer_llama3_precompile` — full Inductor compilation
+- `graph_trainer_llama3_precompile_regional` — regional Inductor compilation
+
+You must specify `--compile.precompile_artifact_dir` to tell the system where
+to store and load artifacts. Use a shared filesystem path for multi-node setups.
+
+#### Validating precompile vs JIT equivalence
+
+To verify that precompiled artifacts produce the same numerics as a fresh
+compilation, run three training jobs with `--debug.deterministic --debug.seed=42`
+and compare loss curves:
+
+1. **Baseline** — same passes with `--compile.precompile false`
+2. **Cold run** — `--compile.precompile true` (compiles and saves the artifact)
+3. **Warm run** — `--compile.precompile true` (loads the saved artifact)
+
+Use `scripts/loss_compare.py` to confirm all three produce bitwise-identical
+loss and grad_norm values.
+
 ### Composability Support
 
 Some of the features require the updates from PyTorch, with which we are working on providing composability support for the following features:

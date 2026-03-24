@@ -95,18 +95,17 @@ def _make_precompile_callback(
     parallel_dims: ParallelDims,
     storage: StorageAdapter | None = None,
     artifact_key: str | None = None,
+    config_fingerprint: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
-    from .precompile import (
-        compute_config_fingerprint,
-        precompile_save,
-    )
+    from .precompile import compute_config_fingerprint, precompile_save
 
     if storage is None or artifact_key is None:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallel_dims
-    )
+    if config_fingerprint is None:
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, parallel_dims
+        )
 
     def on_compile(compiled_fn, out_spec):
         precompile_save(
@@ -136,22 +135,21 @@ def _apply_aot_compile(
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
 
-    # When precompile is enabled, compute storage/key once and reuse them
-    # for both the load attempt and the save callback to avoid duplicate
-    # DiskStorageAdapter construction and fingerprint computation.
+    # When precompile is enabled, compute storage/key/fingerprint once and
+    # reuse them for both the load attempt and the save callback to avoid
+    # duplicate DiskStorageAdapter construction and fingerprint computation.
     storage: StorageAdapter | None = None
     artifact_key: str | None = None
+    config_fingerprint: str | None = None
     if compile_config.precompile:
+        from .precompile import compute_config_fingerprint
+
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, parallel_dims
+        )
 
         if storage.exists(artifact_key):
-            from .precompile import (
-                compute_config_fingerprint,
-            )
-
-            config_fingerprint = compute_config_fingerprint(
-                model, compile_config, parallel_dims
-            )
             try:
                 return _apply_aot_compile_load(
                     model, parallel_dims, storage, artifact_key, config_fingerprint
@@ -195,6 +193,7 @@ def _apply_aot_compile(
             parallel_dims,
             storage=storage,
             artifact_key=artifact_key,
+            config_fingerprint=config_fingerprint,
         )
         if serializable
         else None
@@ -296,6 +295,13 @@ def apply_compile(
             f"but mode is '{mode}'. Ignoring precompile."
         )
         compile_config = dataclasses.replace(compile_config, precompile=False)
+
+    if compile_config.precompile and not compile_config.precompile_artifact_dir:
+        raise ValueError(
+            "--compile.precompile requires --compile.precompile_artifact_dir "
+            "to be set. Specify the directory where precompile artifacts "
+            "should be stored (e.g. a shared filesystem path)."
+        )
 
     if compile_config.precompile and not (
         _SERIALIZABLE_PASSES & set(compile_config.passes)
