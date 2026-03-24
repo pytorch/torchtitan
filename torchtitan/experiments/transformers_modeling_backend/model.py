@@ -67,7 +67,9 @@ _TT_TO_HF_MAPPINGS = {
         "norm_eps": "rms_norm_eps",
         "max_seq_len": "max_position_embeddings",
         "eos_id": "eos_token_id",
-    }
+    },
+    # MoE attrs use the same names in TorchTitan and HuggingFace, no remapping needed
+    "moe": {},
 }
 
 # Declarative list of TorchTitan-only attributes (no HF equivalent)
@@ -92,6 +94,7 @@ class HFTransformerModel(BaseModel):
         def __init__(
             self,
             titan_dense_config,
+            titan_moe_config=None,
             # HuggingFace specific args
             attn_implementation: str = "sdpa_torchtitan",
             **kwargs,
@@ -103,13 +106,18 @@ class HFTransformerModel(BaseModel):
             )
             assert titan_dense_config is not None, "titan_dense_config is required"
 
+            self._has_moe = titan_moe_config is not None
+
             # Create getter/setter dynamically for TT <-> HF attribute mappings
-            self._create_getter_setter_dynamically(has_moe=False)
+            self._create_getter_setter_dynamically(has_moe=self._has_moe)
 
             self._titan_injected_model_args = {}
             self._configure_hf_attention(attn_implementation)
 
             self._initialize_dense_attributes(titan_dense_config)
+
+            if titan_moe_config is not None:
+                self._initialize_moe_attributes(titan_moe_config)
 
         def _replace(self, **overrides):
             """Override to use ``copy.copy()`` instead of ``dataclasses.replace()``.
@@ -149,6 +157,13 @@ class HFTransformerModel(BaseModel):
 
             # Update passed_args
             self._titan_injected_model_args.update(titan_dense_config.__dict__)
+
+        def _initialize_moe_attributes(self, titan_moe_config):
+            """Initialize MoE-specific attributes."""
+            for attr_name, value in vars(titan_moe_config).items():
+                if not attr_name.startswith("_"):
+                    setattr(self, attr_name, value)
+            self._titan_injected_model_args.update(titan_moe_config.__dict__)
 
         def _configure_hf_attention(self, attn_implementation: str):
             """Configure HuggingFace attention settings."""
@@ -236,7 +251,7 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not hasattr(self, "inter_dim"):  # Only for llama model
+            if not getattr(self, "_has_moe", False) and not hasattr(self, "inter_dim"):
                 ffn_hidden_size = 4 * self.dim
                 ffn_hidden_size = int(2 * ffn_hidden_size / 3)
                 if self.ffn_dim_multiplier is not None:
@@ -292,6 +307,10 @@ class HFTransformerModel(BaseModel):
                 model_module, f"{model_name_prefix}DecoderLayer", None
             )
 
+            # Discover MoE-specific classes
+            experts_cls = getattr(model_module, f"{model_name_prefix}Experts", None)
+            router_cls = getattr(model_module, f"{model_name_prefix}TopKRouter", None)
+
             required_classes = {
                 "Attention": attention_cls,
                 "DecoderLayer": decoder_layer_cls,
@@ -303,6 +322,8 @@ class HFTransformerModel(BaseModel):
                     decoder_layer_cls=decoder_layer_cls,
                     attention_cls=attention_cls,
                     mlp_cls=mlp_cls,  # mlp_cls can be None
+                    experts_cls=experts_cls,
+                    router_cls=router_cls,
                 )
             else:
                 missing = [name for name, cls in required_classes.items() if not cls]
@@ -317,6 +338,14 @@ class HFTransformerModel(BaseModel):
                 "Weight initialization might not match TorchTitan."
             )
 
+        # Use grouped_mm for expert computation instead of the eager for-loop.
+        # This is faster (fused kernel) and deterministic (reshape+sum instead
+        # of index_add_). Works transparently with hook-based EP/TP because
+        # all hooks preserve the standard (hidden_states, top_k_index,
+        # top_k_weights) interface.
+        if hasattr(config, "_experts_implementation"):
+            config._experts_implementation = "grouped_mm"
+
         self.model = model_cls(config=config)
         self.max_seq_len = config.max_seq_len
         self.cp_mesh = None
@@ -329,12 +358,22 @@ class HFTransformerModel(BaseModel):
             )
 
         for layer in self.model.model.layers.values():
-            layer.moe_enabled = False
+            # Detect MoE layers by checking for gate (router) and experts sub-modules
+            layer.moe_enabled = hasattr(layer.mlp, "gate") and hasattr(
+                layer.mlp, "experts"
+            )
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
 
-    def _patch_hf_llama_like(self, decoder_layer_cls, attention_cls, mlp_cls=None):
+    def _patch_hf_llama_like(
+        self,
+        decoder_layer_cls,
+        attention_cls,
+        mlp_cls=None,
+        experts_cls=None,
+        router_cls=None,
+    ):
         """
         This patch modifies a Hugging Face Llama-like model's weight initialization to match
         the initialization scheme used in TorchTitan. This is crucial for ensuring
@@ -447,6 +486,17 @@ class HFTransformerModel(BaseModel):
                         fan_in, _ = init._calculate_fan_in_and_fan_out(down_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(down_proj.bias, -bound, bound)
+
+            elif experts_cls and isinstance(module, experts_cls):
+                # MoE expert weights are 3D parameter tensors (not nn.Linear)
+                if hasattr(module, "gate_up_proj"):
+                    nn.init.trunc_normal_(module.gate_up_proj, mean=0.0, std=0.02)
+                if hasattr(module, "down_proj"):
+                    nn.init.trunc_normal_(module.down_proj, mean=0.0, std=0.02)
+
+            elif router_cls and isinstance(module, router_cls):
+                if hasattr(module, "weight"):
+                    nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02)
 
             elif module is getattr(
                 self, "lm_head", None

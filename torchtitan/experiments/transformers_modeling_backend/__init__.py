@@ -36,6 +36,17 @@ class TitanDenseModelConfig:
     attn_mask_type: str = "causal"
 
 
+@dataclass
+class TitanMoeModelConfig:
+    """MoE-specific config overrides for TorchTitan model."""
+
+    num_experts: int = 128
+    num_experts_per_tok: int = 8
+    moe_intermediate_size: int = 768
+    decoder_sparse_step: int = 1
+    norm_topk_prob: bool = False
+
+
 flavors = {
     "debugmodel": HFTransformerModel.Config(
         titan_dense_config=TitanDenseModelConfig(
@@ -43,6 +54,19 @@ flavors = {
             n_layers=2,
             n_heads=16,
             n_kv_heads=16,
+        ),
+    ),
+    "debugmodel_moe": HFTransformerModel.Config(
+        titan_dense_config=TitanDenseModelConfig(
+            dim=256,
+            n_layers=8,
+            n_heads=16,
+            n_kv_heads=8,
+        ),
+        titan_moe_config=TitanMoeModelConfig(
+            num_experts=8,
+            num_experts_per_tok=2,
+            moe_intermediate_size=128,
         ),
     ),
     "full": HFTransformerModel.Config(

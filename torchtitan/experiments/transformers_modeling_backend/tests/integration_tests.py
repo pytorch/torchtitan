@@ -34,6 +34,49 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             "transformers_modeling_backend_fsdp+tp+pp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_moe",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend FSDP+EP (MoE)",
+            "transformers_modeling_backend_fsdp+ep",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_moe",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend FSDP+TP+EP (MoE)",
+            "transformers_modeling_backend_fsdp+tp+ep",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_moe",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.tensor_parallel_degree 4",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend FSDP+TP (MoE, no EP)",
+            "transformers_modeling_backend_fsdp+tp_moe",
+            ngpu=8,
+        ),
     ]
     return integration_tests_flavors
 
