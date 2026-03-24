@@ -7,12 +7,22 @@
 import logging
 
 import torch
+from torch.distributed._tensor import DTensor, Shard
+from torch.distributed._tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.models.common.attention import LocalMapAttention
 from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    GQAttention,
+    LocalMapAttention,
+)
+from torchtitan.models.common.rope import (
+    apply_rotary_emb_complex,
+    apply_rotary_emb_cos_sin,
+)
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
@@ -184,16 +194,15 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 logger = logging.getLogger(__name__)
 
 
-class VLLMAttention(LocalMapAttention):
+class VLLMInnerAttention(LocalMapAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
-    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.  This
-    wrapper handles the transpose/reshape from TorchTitan's
-    ``(batch, num_heads, seq_len, head_dim)`` layout and back.
+    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
 
-    DTensor handling uses :class:`LocalMapAttention`'s ``local_map`` to strip
-    TP DTensors before ``forward`` and re-wrap the output as DTensor after.
+    Called by :class:`VLLMGQAttention` with ``(bs, seq, heads, dim)`` layout
+    (heads on dim 2). Overrides ``__call__`` to handle DTensor with
+    ``Shard(2)`` placements accordingly.
 
     Used by the **generator** (via :func:`replace_with_vllm_attention`).
     """
@@ -239,61 +248,136 @@ class VLLMAttention(LocalMapAttention):
             prefix=f"model.layers.{layer_name}.attention.inner_attention",
         )
 
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Handle DTensor inputs in (bs, seq, heads, dim) layout.
+
+        Expects heads sharded on dim 2 (not dim 1 as in base
+        LocalMapAttention), matching VLLMGQAttention's zero-copy path.
+        """
+        if isinstance(q, DTensor):
+            assert isinstance(k, DTensor) and isinstance(v, DTensor)
+            assert q.placements == k.placements == v.placements
+            # qkv are (bs, seq, heads, dim) — heads on dim 2
+            for i, p in enumerate(q.placements):
+                assert p == Shard(2), (
+                    f"VLLMInnerAttention expects Shard(2) placements "
+                    f"(heads dim in bs,seq,heads,dim), but got {p} at position {i}"
+                )
+            # Output is (bs, seq, hidden) — hidden on dim 2 maps to Shard(2)
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    super(LocalMapAttention, self).__call__,
+                    in_placements=(q.placements, k.placements, v.placements),
+                    out_placements=(q.placements,),
+                    in_grad_placements=(q.placements, k.placements, v.placements),
+                    device_mesh=q.device_mesh,
+                )
+            return self._local_map_fn(q, k, v, **kwargs)
+        return super(LocalMapAttention, self).__call__(q, k, v, **kwargs)
+
     def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        *,
-        scale: float | None = None,
-        enable_gqa: bool = False,
-        attention_masks: None = None,  # Unused but needed for GQA varlen inference.
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
+        Called by :class:`VLLMGQAttention` which passes tensors in
+        ``(batch, seq_len, num_heads, head_dim)`` layout — the natural
+        contiguous layout after QKV projection + RoPE. This allows a
+        zero-copy reshape to ``(batch*seq_len, num_heads, head_dim)``
+        for vLLM.
+
         Args:
-            q: ``(batch, num_heads, seq_len, head_dim)``
-            k: ``(batch, num_kv_heads, seq_len, head_dim)``
-            v: ``(batch, num_kv_heads, seq_len, head_dim)``
-            scale: Ignored — vLLM uses its own internal scale.
-            enable_gqa: Ignored — vLLM handles GQA internally.
+            q: ``(batch, seq_len, num_heads, head_dim)``
+            k: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, num_heads, seq_len, head_dim)``
+            ``(batch, seq_len, num_heads * head_dim)`` — ready for ``wo``
         """
-        # This seq_len captured here is wrong probably due to some symbolic shape propagation error wrt to to_local.
-        # Therefore it is breaking compile. We need to fix this in pytorch.
-        # See more details in https://github.com/pytorch/pytorch/issues/175690
-        # TODO(@Lucaskabela): remove this once the issue is fixed in pytorch
-        batch_size, _, seq_len, head_dim = q.shape
+        batch_size, seq_len, _, head_dim = q.shape
 
-        # TODO: may be good to use einops in future as we can explicitly reshape
-        # with dimension names - see https://github.com/arogozhnikov/einops
-        # Convert from (batch, num_heads, seq_len, head_dim)
-        #   to (batch*seq_len, num_heads (or num_kv_heads), head_dim) for vLLM Attn
-        q = q.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        k = k.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        v = v.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
+        # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
+        q = q.reshape(batch_size * seq_len, -1, head_dim)
+        k = k.reshape(batch_size * seq_len, -1, head_dim)
+        v = v.reshape(batch_size * seq_len, -1, head_dim)
 
-        # vLLM attention returns (num_tokens, num_heads/num_kv_heads * head_dim)
         output_flat = self.vllm_attn(q, k, v)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
-        # shape under torch.compile.  Narrow to trim this padding
-        # NOTE: this error only happens when batch_size and seq_len are 1
-        # which happens with cudagraph capture for dummy input
+        # shape under torch.compile.  Narrow to trim this padding.
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to the format expected by GQAttention.forward()
-        # varlen path expects (bs*seqlen, n_heads, head_dim)
-        output = output_flat.view(batch_size * seq_len, -1, head_dim)
+        # (bs*seq, heads*dim) -> (bs, seq, heads*dim)
+        return output_flat.view(batch_size, seq_len, -1)
 
-        return output
+
+class VLLMGQAttention(GQAttention):
+    """GQAttention subclass with zero-copy path for vLLM attention.
+
+    Eliminates redundant transposes between GQAttention and VLLMInnerAttention.
+
+    Standard GQAttention flow:
+      (bs,seq,heads,dim) -> transpose -> (bs,heads,seq,dim)
+      -> VLLMInnerAttention transpose back -> clone -> (bs*seq,heads,dim)
+      -> vllm_attn -> reshape -> transpose -> contiguous  (4 layout ops)
+
+    This subclass:
+      (bs,seq,heads,dim) -> reshape -> (bs*seq,heads,dim)  (1 zero-copy op)
+      -> vllm_attn -> view -> (bs,seq,hidden)
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        bs, seqlen, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        if self.q_norm is not None:
+            xq = self.q_norm(xq)
+        if self.k_norm is not None:
+            xk = self.k_norm(xk)
+
+        if self.use_rope:
+            if self.rope_backend == "cos_sin":
+                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
+            else:
+                xq, xk = apply_rotary_emb_complex(
+                    xq, xk, freqs_cis=rope_cache, positions=positions
+                )
+
+        # The inner_attention will only be VLLMInnerAttention class.
+        assert isinstance(
+            self.inner_attention, VLLMInnerAttention
+        ), "inner_attention must be an instance of VLLMInnerAttention"
+        output = self.inner_attention(xq, xk, xv)
+
+        return self.wo(output)
 
 
 def replace_with_vllm_attention(model, tp_degree=1):
-    """Replace ``inner_attention`` with :class:`VLLMAttention`.
+    """Replace attention modules with zero-copy vLLM attention path.
+
+    Replaces each layer's ``inner_attention`` with :class:`VLLMInnerAttention`
+    and swaps the ``GQAttention`` class to :class:`VLLMGQAttention` to
+    eliminate redundant transpose operations.
 
     **Generator side.** Used by ``TorchTitanVLLMModelWrapper`` because:
 
@@ -330,12 +414,7 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
         # GQA
         head_dim = model_args.layer.attention.head_dim
-
-        # TODO Support flex attention backend later as well.
-        assert (
-            layer.attention.attn_backend == "varlen"
-        ), "Only varlen attention backend is allowed."
-        vllm_attn = VLLMAttention(
+        vllm_attn = VLLMInnerAttention(
             hidden_size=model_args.dim,
             num_heads=model_args.layer.attention.n_heads // tp_degree,
             num_kv_heads=num_kv_heads,
@@ -346,7 +425,10 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
         layer.attention.inner_attention = vllm_attn
 
+        # Swap GQAttention to VLLMGQAttention for zero-copy forward path
+        layer.attention.__class__ = VLLMGQAttention
+
     logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMAttention "
+        f"Successfully replaced TorchTitan attention with VLLMInnerAttention "
         f"({len(model.layers)} layers)"
     )
