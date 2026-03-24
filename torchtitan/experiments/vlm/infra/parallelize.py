@@ -20,10 +20,9 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_dense
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.models.llama3.parallelize import (
-    _op_sac_save_list,
-    apply_compile,
     apply_replicate,
     disable_fsdp_gradient_division,
 )
@@ -74,14 +73,13 @@ def parallelize_vlm(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, ac_config)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if compile_config.enable:
-        apply_compile(model, compile_config)
-        apply_compile(model.encoder, compile_config)
+        apply_compile_dense(model, compile_config)
+        apply_compile_dense(model.encoder, compile_config)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
