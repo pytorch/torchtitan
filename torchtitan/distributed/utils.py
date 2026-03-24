@@ -44,14 +44,27 @@ def _dist_reduce(
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
     """
+    is_partial = False
     if isinstance(x, DTensor):
-        # functional collectives do not support DTensor inputs
+        # functional collectives do not support DTensor inputs.
+        # When the DTensor has Partial placement (e.g. loss output in full
+        # DTensor mode), full_tensor() performs an all-reduce across the
+        # DTensor's SPMD mesh — which covers exactly the same DP ranks as
+        # `mesh`. Skipping the subsequent mesh all-reduce avoids double-
+        # counting.  This is safe because full_dtensor currently only
+        # supports FSDP/HSDP (no TP/PP/EP/CP), so the DTensor mesh and
+        # the caller's mesh span the same ranks.
+        is_partial = any(p.is_partial() for p in x.placements)
         x = x.full_tensor()
 
     if extra_pg is not None:
+        assert not is_partial, (
+            "DTensor with Partial placement should not be used with extra_pg. "
+            "full_dtensor does not support PP, which is the only user of extra_pg."
+        )
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
-    if mesh is None:
+    if mesh is None or is_partial:
         return float(x.item())
 
     assert x.numel() == 1  # required by `.item()`

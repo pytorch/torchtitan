@@ -323,6 +323,28 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.full_dtensor",
+                ]
+            ],
+            "Full DTensor FSDP",
+            "full_dtensor_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.full_dtensor",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "Full DTensor HSDP",
+            "full_dtensor_hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]

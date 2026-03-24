@@ -39,7 +39,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
@@ -250,6 +250,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.model_config = model_config
 
+        if config.training.full_dtensor:
+            full_dtensor.validate_config(parallel_dims, model_config)
+
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
@@ -402,6 +405,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+            # init_weights may overwrite DTensor buffers with plain tensors
+            # (e.g. freqs_cis). Convert them back to DTensors.
+            if config.training.full_dtensor:
+                full_dtensor.convert_buffers_to_dtensor(model, parallel_dims)
             model.train()
 
             self.model_parts = [model]
@@ -629,6 +636,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.config.parallelism.context_parallel_load_balancer,
             )
 
+        # Convert inputs/labels to DTensors on the SPMD mesh
+        if self.config.training.full_dtensor:
+            inputs, labels = full_dtensor.parallelize_inputs(
+                self.parallel_dims, inputs, labels
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
@@ -680,6 +693,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
+
             with self.train_context():
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
