@@ -26,7 +26,6 @@ from torchtitan.experiments.rl.batch_invariant import (
     disable_batch_invariant_mode,
     enable_batch_invariant_mode,
     log_softmax,
-    matmul_persistent,
     set_batch_invariant_mode,
 )
 
@@ -41,7 +40,7 @@ class TestBatchInvariantEndToEnd(unittest.TestCase):
     def tearDown(self):
         disable_batch_invariant_mode()
 
-    def test_transformer_layer_batch_invariance(self):
+    def test_transformer_layer_forward_invariance(self):
         """A simplified transformer layer produces identical outputs for the
         same sequence regardless of batch composition.
 
@@ -67,9 +66,9 @@ class TestBatchInvariantEndToEnd(unittest.TestCase):
 
         def forward(x: torch.Tensor) -> torch.Tensor:
             """Simplified transformer: linear -> log_softmax -> linear."""
-            h = matmul_persistent(x, W1)
+            h = torch.mm(x, W1)
             h = log_softmax(h, dim=-1)
-            return matmul_persistent(h, W2)
+            return torch.mm(h, W2)
 
         with set_batch_invariant_mode():
             # Process each sequence alone
@@ -88,6 +87,96 @@ class TestBatchInvariantEndToEnd(unittest.TestCase):
                     f"Sequence {i} max diff: "
                     f"{(out_alone - out_from_batch).abs().max():.6e}"
                 )
+
+    def test_backward_batch_invariance(self):
+        """Backward pass produces identical gradients for the same sequence
+        regardless of batch composition.
+
+        Uses a real Qwen3 debugmodel to exercise all layers (attention,
+        feed-forward, RMSNorm, embeddings).  Computes cross-entropy loss
+        with mean reduction, which scales gradients by 1/N — the hardest
+        case for batch invariance since the scaling factor changes with
+        batch size.
+        """
+        from torchtitan.models.qwen3 import model_registry
+
+        enable_batch_invariant_mode()
+
+        model_spec = model_registry("debugmodel")
+        old_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        with torch.device("meta"):
+            model = model_spec.model.build()
+        torch.set_default_dtype(old_dtype)
+
+        model.to_empty(device="cuda")
+        torch.manual_seed(42)
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
+        model.train()
+
+        vocab_size = 2048  # debugmodel vocab_size
+        seq_len = 32
+        torch.manual_seed(123)
+
+        # Create 3 sequences
+        sequences = [
+            torch.randint(0, vocab_size, (1, seq_len), device="cuda") for _ in range(3)
+        ]
+        # Target labels for cross-entropy
+        targets = [
+            torch.randint(0, vocab_size, (1, seq_len), device="cuda") for _ in range(3)
+        ]
+
+        # --- Run 1: process sequence 0 alone (batch=1) ---
+        model.zero_grad()
+        out_single = model(sequences[0])
+        loss_single = torch.nn.functional.cross_entropy(
+            out_single.view(-1, vocab_size),
+            targets[0].view(-1),
+            reduction="mean",
+        )
+        loss_single.backward()
+
+        # Save gradients for sequence 0 processed alone
+        grads_single = {
+            name: p.grad.clone()
+            for name, p in model.named_parameters()
+            if p.grad is not None
+        }
+
+        # --- Run 2: process all 3 sequences as a batch ---
+        model.zero_grad()
+        batch_input = torch.cat(sequences, dim=0)
+        batch_target = torch.cat(targets, dim=0)
+        out_batch = model(batch_input)
+
+        # Compute per-sample loss for sequence 0 only (mean over its tokens)
+        out_seq0 = out_batch[0:1]
+        loss_seq0_in_batch = torch.nn.functional.cross_entropy(
+            out_seq0.view(-1, vocab_size),
+            batch_target[0:1].view(-1),
+            reduction="mean",
+        )
+        loss_seq0_in_batch.backward()
+
+        grads_batch = {
+            name: p.grad.clone()
+            for name, p in model.named_parameters()
+            if p.grad is not None
+        }
+
+        # --- Compare gradients ---
+        mismatches = []
+        for name in grads_single:
+            if not torch.equal(grads_single[name], grads_batch[name]):
+                max_diff = (grads_single[name] - grads_batch[name]).abs().max().item()
+                mismatches.append(f"{name}: max_diff={max_diff:.6e}")
+
+        assert len(mismatches) == 0, (
+            f"Backward NOT batch-invariant. "
+            f"{len(mismatches)} parameters differ:\n" + "\n".join(mismatches)
+        )
 
 
 def _run_batch_invariance_tp(tp_degree: int) -> None:
@@ -123,9 +212,9 @@ def _run_batch_invariance_tp(tp_degree: int) -> None:
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    assert world_size == tp_degree, (
-        f"This test requires exactly {tp_degree} GPUs, got {world_size}"
-    )
+    assert (
+        world_size == tp_degree
+    ), f"This test requires exactly {tp_degree} GPUs, got {world_size}"
 
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
     device = torch.device(f"cuda:{local_rank}")

@@ -22,10 +22,8 @@ class VLLMCompatibleFlashAttention(Module):
     def __init__(self) -> None:
         super().__init__()
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
         from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
-        self.vllm_is_batch_invariant = vllm_is_batch_invariant
         self.fa_version = get_flash_attn_version()
 
     def forward(
@@ -87,6 +85,14 @@ class VLLMCompatibleFlashAttention(Module):
         out_varlen = torch.empty(
             (total_tokens, num_heads, head_dim), dtype=q.dtype, device=q.device
         )
+
+        # Determine num_splits at forward time so it reflects the current
+        # batch-invariant mode state (which is enabled after model construction).
+        from torchtitan.experiments.rl.batch_invariant import (
+            is_batch_invariant_mode_enabled,
+        )
+
+        use_deterministic_splits = is_batch_invariant_mode_enabled()
 
         # Wrap Flash Attention with manual backward pass
         class FlashAttnWithBackward(torch.autograd.Function):
@@ -248,7 +254,9 @@ class VLLMCompatibleFlashAttention(Module):
 
                 return grad_q, grad_k, grad_v, None, None, None, None, None, None, None
 
-        # Call Flash Attention varlen with custom backward
+        # Call Flash Attention varlen with custom backward.
+        # num_splits=1 forces deterministic accumulation order for batch
+        # invariance; num_splits=0 lets flash attention auto-tune.
         output_varlen = FlashAttnWithBackward.apply(
             q_varlen,
             k_varlen,
@@ -257,7 +265,7 @@ class VLLMCompatibleFlashAttention(Module):
             cu_seqlens,
             seq_len,
             scale,
-            1 if self.vllm_is_batch_invariant() else 0,
+            1 if use_deterministic_splits else 0,
             self.flash_attn_varlen_func,
             self.fa_version,
         )
