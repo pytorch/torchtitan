@@ -227,29 +227,29 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel_sdpa_attn",
+                    "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "AOT llama3 FSDP+TP+SDPAAttn",
-            "aot_llama3_fsdp_tp_sdpaattn",
+            "AOT llama3 FSDP+TP+FlexAttn",
+            "aot_llama3_fsdp_tp_flexattn",
             ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel_sdpa_attn",
+                    "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes auto_bucketing,regional_inductor",
                 ],
             ],
-            "AOT llama3 FSDP+TP+SDPAAttn autobucketing regional_inductor",
-            "aot_llama3_fsdp_tp_sdpaattn_autobucketing_regional_inductor",
+            "AOT llama3 FSDP+TP+FlexAttn autobucketing regional_inductor",
+            "aot_llama3_fsdp_tp_flexattn_autobucketing_regional_inductor",
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -387,7 +387,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel_sdpa_attn",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -395,8 +395,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
-            "AOT deepseek_v3 FSDP+TP+EP+SDPAAttention",
-            "aot_deepseekv3_fsdp_tp_ep_sdpaattention",
+            "AOT deepseek_v3 FSDP+TP+EP+FlexAttention",
+            "aot_deepseekv3_fsdp_tp_ep_flexattention",
             ngpu=8,
         ),
         OverrideDefinitions(
