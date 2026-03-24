@@ -29,7 +29,6 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 from torch.nn.attention.varlen import varlen_attn
-from torch.types import Number
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -64,8 +63,8 @@ class VarlenMetadata(NamedTuple):
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
-    max_q: Number
-    max_k: Number
+    max_q: int
+    max_k: int
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -187,7 +186,8 @@ class VarlenAttentionWrapper(LocalMapAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        return varlen_attn(
+        # pyrefly: ignore [bad-assignment]
+        res: torch.Tensor = varlen_attn(
             xq_packed,
             xk_packed,
             xv_packed,
@@ -207,7 +207,8 @@ class VarlenAttentionWrapper(LocalMapAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-        ).to(xq.dtype)
+        )
+        return res.to(xq.dtype)
 
 
 class FlexAttentionWrapper(LocalMapAttention):
@@ -488,10 +489,11 @@ def create_varlen_metadata_for_document(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
 
-    max_seqlen = 0
+    max_seqlen: int = 0
     if len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
+        # pyrefly: ignore[bad-assignment]
         max_seqlen = all_seq_lengths.max().item()
 
     return VarlenMetadata(
