@@ -75,6 +75,24 @@ class Configurable:
 
         def to_dict(self) -> dict:
             """Serialize to a dict, safely handling unset ``field(init=False)`` slots."""
+
+            def _convert(val):
+                if hasattr(val, "to_dict"):
+                    return val.to_dict()
+                elif dataclasses.is_dataclass(val):
+                    return dataclasses.asdict(val)
+                elif isinstance(val, (list, tuple)):
+                    return type(val)(_convert(v) for v in val)
+                elif isinstance(val, dict):
+                    return {k: _convert(v) for k, v in val.items()}
+                elif isinstance(val, (str, int, float, bool, type(None))):
+                    return val
+                else:
+                    raise TypeError(
+                        f"Config field value of type {type(val).__name__} "
+                        f"is not JSON serializable"
+                    )
+
             result = {}
             for f in fields(self):
                 try:
@@ -82,16 +100,7 @@ class Configurable:
                 except AttributeError:
                     # field(init=False) not yet set, ignore this field.
                     continue
-                if hasattr(val, "to_dict"):
-                    result[f.name] = val.to_dict()
-                elif dataclasses.is_dataclass(val):
-                    result[f.name] = dataclasses.asdict(val)
-                elif isinstance(val, list):
-                    result[f.name] = [
-                        v.to_dict() if hasattr(v, "to_dict") else v for v in val
-                    ]
-                else:
-                    result[f.name] = val
+                result[f.name] = _convert(val)
             return result
 
         def _replace(self, **overrides):
