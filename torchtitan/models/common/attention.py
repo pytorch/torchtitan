@@ -11,7 +11,7 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
@@ -105,14 +105,15 @@ class LocalMapAttention(Module):
                 f"q, k, v must have the same placements, "
                 f"but got q={q.placements}, k={k.placements}, v={v.placements}"
             )
-            # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
-            # on the n_heads dim (dim 1)
-            # TODO: after full DTensor rewrite, the DP mesh will also be
-            # present, update this check to allow Shard(0) for DP and Shard(1) for TP.
+            # qkv are (bs, n_heads, seqlen, head_dim). Valid placements:
+            # - Shard(1) for TP (sharded on n_heads dim)
+            # - Shard(0) for DP in full DTensor mode (sharded on batch dim)
+            # - Replicate() for DP replicate or single-device dims
+            _VALID_PLACEMENTS = {Shard(0), Shard(1), Replicate()}
             for i, p in enumerate(q.placements):
-                assert p == Shard(1), (
-                    f"LocalMapAttention requires Shard(1) placements "
-                    f"(n_heads dim), but got {p} at position {i}"
+                assert p in _VALID_PLACEMENTS, (
+                    f"LocalMapAttention requires Shard(0), Shard(1), or "
+                    f"Replicate() placements, but got {p} at position {i}"
                 )
             # return_lse=True (e.g. gpt_oss attention sinks) produces
             # 2 outputs instead of 1, requiring different out_placements.
