@@ -117,6 +117,8 @@ def _apply_op_sac(
             out_f, in_f = submod.weight.shape
             mm_recompute_shapes.add((in_f, out_f))
 
+    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
+    # instead of decomposing it into aten.mm, so we must handle both.
     mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
 
     def _get_custom_policy():
