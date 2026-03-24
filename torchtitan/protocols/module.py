@@ -86,6 +86,10 @@ def validate_param_init(model: "Module") -> None:
             continue
         if module._param_init is SKIP_PARAM_INIT:
             continue
+        # Skip modules that override _init_self_parameters (e.g.,
+        # from_nn_module classes that delegate to reset_parameters).
+        if type(module)._init_self_parameters is not Module._init_self_parameters:
+            continue
         if module._param_init is None:
             raise ValueError(
                 f"param_init_fn missed module '{name}' " f"({type(module).__name__})"

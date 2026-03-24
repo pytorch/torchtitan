@@ -10,10 +10,10 @@ import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import (
-    Module,
-    SKIP_PARAM_INIT,
     _SkipParamInitType,
+    Module,
     set_param_init,
+    SKIP_PARAM_INIT,
     validate_param_init,
 )
 

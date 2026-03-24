@@ -33,7 +33,9 @@ def setup_gptoss_param_init(model: GptOssModel) -> None:
     dim: int = model.config.dim
     final_out_std = dim**-0.5
     # GPT-OSS uses std=0.02 for tok_embeddings (not std=1.0 like other decoders)
-    set_param_init(model.tok_embeddings, {"weight": partial(nn.init.normal_, std=base_std)})
+    set_param_init(
+        model.tok_embeddings, {"weight": partial(nn.init.normal_, std=base_std)}
+    )
     set_param_init(model.norm, {"weight": nn.init.ones_})
     set_param_init(
         model.output,
