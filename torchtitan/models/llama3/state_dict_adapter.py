@@ -98,6 +98,8 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     continue
                 new_key = new_key.format(layer_num)
             else:
+                if self.model_config.enable_weight_tying and key == "output.weight":
+                    continue
                 new_key = to_hf_map[key]
 
             hf_state_dict[new_key] = value
@@ -105,6 +107,13 @@ class Llama3StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        if (
+            self.model_config.enable_weight_tying
+            and "lm_head.weight" not in hf_state_dict
+        ):
+            assert "model.embed_tokens.weight" in hf_state_dict
+            hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
+
         n_heads = self.model_config.layer.attention.n_heads
         n_kv_heads = (
             self.model_config.layer.attention.n_kv_heads
