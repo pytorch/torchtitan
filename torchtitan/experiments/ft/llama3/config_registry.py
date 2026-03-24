@@ -48,7 +48,6 @@ def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(
