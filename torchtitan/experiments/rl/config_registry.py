@@ -41,12 +41,13 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            # compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
+                backend="none",
+                cudagraph_mode="none",
             ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
@@ -80,12 +81,13 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            # compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
+                backend="none",
+                cudagraph_mode="none",
             ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
@@ -119,11 +121,12 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
+            # compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
+                backend="none",
+                cudagraph_mode="none",
             ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
