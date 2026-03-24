@@ -43,8 +43,6 @@ def _get_save_ops() -> set:
         torch.ops.aten.max.default,
         # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
-        # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
-        # instead of decomposing it into aten.mm, so we must handle both.
         torch.ops.aten.linear.default,
         # Inductor compiled code (available when torch.compile is used)
         (torch._higher_order_ops, "inductor_compiled_code"),
