@@ -14,11 +14,12 @@ import logging
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -26,7 +27,17 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import apply_compile_dense_rl
+from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.expert_parallel import (
+    ExpertParallel,
+    ExpertTensorParallel,
+    ReordererSequenceParallel,
+    TensorParallel,
+)
+from torchtitan.distributed.tensor_parallel import (
+    ColwiseParallelWithGradPlacement,
+    NoParallel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +51,10 @@ def parallelize_qwen3(
     has_position_id: bool = False,
 ):
     """
-    Apply tensor parallelism to the Qwen3 dense model for RL training/inference.
+    Apply tensor parallelism to the Qwen3 model (dense and MoE) for RL training/inference.
 
     NOTE: The function signature is intentionally simpler than core torchtitan's
-    parallelize_qwen3 — it only accepts the configs needed for TP.
-    TODO: Change to core torchtitan's Qwen3 parallel plan when full DTensor is ready
+    parallelize_qwen3 — it only accepts the configs needed for TP/EP.
 
     Args:
         compile_config: If provided and enabled, applies per-layer torch.compile
@@ -65,12 +75,21 @@ def parallelize_qwen3(
             has_position_id=has_position_id,
         )
 
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+        )
+
     if (
         compile_config is not None
         and compile_config.enable
         and "model" in compile_config.components
     ):
-        apply_compile_dense_rl(model, compile_config)
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
 
     return model
 
@@ -169,15 +188,100 @@ def apply_non_moe_tp(
                     "feed_forward.w3": ColwiseParallel(use_local_output=False),
                 }
             )
-        else:
-            raise ValueError(
-                "Running vLLM inference with torchtitan Qwen3 MoE model is not supported yet."
-            )
-
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
             # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
+        )
+
+
+def apply_moe_ep_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh | None,
+    ep_mesh: DeviceMesh | None,
+    etp_mesh: DeviceMesh | None,
+    ep_etp_mesh: DeviceMesh | None,
+):
+    """Apply MoE parallelism for the RL experiment.
+
+    This is a variant of llama4's apply_moe_ep_tp with use_local_output=False on
+    the "moe" PrepareModuleInputOutput so the output stays as DTensor. This is
+    required because the RL TP plan keeps all intermediate activations as DTensors
+    (use_local_output=False), so `x + self.moe(self.ffn_norm(x))` needs both
+    operands to be DTensors.
+    """
+    assert ep_mesh is not None or tp_mesh is not None
+
+    # pyrefly: ignore [not-callable]
+    for transformer_block in model.layers.values():
+        # pyrefly: ignore [missing-attribute]
+        if not transformer_block.moe_enabled:
+            continue
+
+        if tp_mesh is not None:
+            moe_layer_plan = {
+                # input / output sharding on the seqlen dim
+                # all-gather for input, reduce-scatter for output
+                # use_local_output=False: keep output as DTensor to match
+                # the residual x which is also a DTensor in the RL TP plan.
+                "moe": PrepareModuleInputOutput(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                    use_local_input=False,
+                    output_layouts=(Partial(),),
+                    desired_output_layouts=(Shard(1),),
+                    use_local_output=False,
+                ),
+                # replicate computation for the router
+                "moe.router.gate": NoParallel(
+                    local_output_grad_placements=(Partial(),),
+                ),
+            }
+            if ep_mesh is not None and etp_mesh is None:
+                # pyrefly: ignore [no-matching-overload]
+                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
+            # pyrefly: ignore [missing-attribute]
+            if transformer_block.moe.shared_experts is not None:
+                # pyrefly: ignore [no-matching-overload]
+                moe_layer_plan.update(
+                    {
+                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
+                            local_input_grad_placements=(Partial(),)
+                        ),
+                        "moe.shared_experts.w2": RowwiseParallel(
+                            output_layouts=Partial(),
+                        ),
+                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
+                            local_input_grad_placements=(Partial(),)
+                        ),
+                    }
+                )
+            parallelize_module(
+                # pyrefly: ignore [bad-argument-type]
+                module=transformer_block,
+                device_mesh=tp_mesh,
+                # pyrefly: ignore [bad-argument-type]
+                parallelize_plan=moe_layer_plan,
+            )
+
+        experts_mesh, experts_plan = None, None
+        if ep_mesh is None:
+            assert ep_etp_mesh is None
+            experts_mesh = tp_mesh
+            experts_plan = TensorParallel()
+        elif tp_mesh is None or etp_mesh is None:
+            assert ep_etp_mesh is None
+            experts_mesh = ep_mesh
+            experts_plan = ExpertParallel()
+        else:
+            experts_mesh = ep_etp_mesh
+            experts_plan = ExpertTensorParallel()
+
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=transformer_block.moe.experts,
+            device_mesh=experts_mesh,
+            parallelize_plan=experts_plan,
         )

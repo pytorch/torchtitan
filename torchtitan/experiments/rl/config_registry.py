@@ -79,7 +79,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=1,
             ),
             # compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
@@ -92,6 +92,50 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+            attention_backend="CUSTOM",
+        ),
+    )
+
+
+def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train)."""
+    return RLTrainer.Config(
+        model_spec=model_registry("30B-A3B"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
+        num_steps=10,
+        batch_invariant_mode=True,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                expert_parallel_degree=4,
+                expert_tensor_parallel_degree=1,
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="none",
+                cudagraph_mode="none",
+            ),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                expert_parallel_degree=4,
+                expert_tensor_parallel_degree=1,
             ),
             num_samples_per_prompt=8,
             sampling=SamplingConfig(

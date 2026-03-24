@@ -140,6 +140,7 @@ class PolicyTrainer(Actor, Configurable):
         self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
         self.dp_rank = dist.get_rank() // self.parallel_dims.non_data_parallel_size
         self.dp_enabled = self.parallel_dims.dp_enabled
+        self.tp_degree = parallelism_config.tensor_parallel_degree
 
         logger.debug(
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
@@ -240,7 +241,7 @@ class PolicyTrainer(Actor, Configurable):
         await ts.put_state_dict(
             self.model.state_dict(),
             "model_state_dict",
-            direct_rdma=is_rdma_available(),
+            direct_rdma=False,
             transfer_dtype=self._transfer_dtype,
         )
 
@@ -285,7 +286,8 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
                 token_lps = compute_token_log_probs(
-                    self.ref_model, prompt_toks, gen_toks, device
+                    self.ref_model, prompt_toks, gen_toks, device,
+                    tp_degree=self.tp_degree,
                 )
                 ref_token_log_probs.append(token_lps)
 
@@ -297,6 +299,7 @@ class PolicyTrainer(Actor, Configurable):
             my_advantages,
             ref_token_log_probs,
             kl_coef=0.1,
+            tp_degree=self.tp_degree,
         )
 
         # Verify logprob identity (local shard)

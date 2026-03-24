@@ -13,6 +13,7 @@ def compute_token_log_probs(
     prompt_token_ids: list[int],
     gen_token_ids: list[int],
     device: torch.device,
+    tp_degree: int = 1,
 ) -> torch.Tensor:
     """
     Compute per-token log probabilities for generated tokens.
@@ -22,6 +23,8 @@ def compute_token_log_probs(
         prompt_token_ids: Token IDs for the prompt
         gen_token_ids: Token IDs for the generated completion
         device: Device to run computation on
+        tp_degree: Tensor parallel degree; sequence is padded to be divisible
+            by this value so MoE token splitting works correctly.
 
     Returns:
         Per-token log probabilities for the generated tokens
@@ -38,7 +41,23 @@ def compute_token_log_probs(
     seq_len = full_tensor.shape[1]
     positions = torch.arange(seq_len, device=device).unsqueeze(0)
 
+    # Pad sequence length to be divisible by tp_degree so that MoE's
+    # ReordererSequenceParallel/TensorParallel can evenly split tokens.
+    if tp_degree > 1 and seq_len % tp_degree != 0:
+        pad_len = tp_degree - (seq_len % tp_degree)
+        full_tensor = F.pad(full_tensor, (0, pad_len), value=0)
+        positions = F.pad(positions, (0, pad_len), value=0)
+
+    assert tp_degree <= 1 or full_tensor.shape[1] % tp_degree == 0, (
+        f"Sequence length {full_tensor.shape[1]} not divisible by tp_degree={tp_degree} "
+        f"(original seq_len={seq_len})"
+    )
+
     logits = model(full_tensor, attention_masks=None, positions=positions)
+
+    # Slice back to original sequence length if padded
+    if logits.shape[1] != seq_len:
+        logits = logits[:, :seq_len, :]
 
     # Convert to float32 for numerical stability
     logits_f32 = logits[:, :-1, :].to(torch.float32)
@@ -68,6 +87,7 @@ def compute_policy_gradient_loss(
     kl_coef: float = 0.1,
     ppo_clip_eps: float = 0.2,
     entropy_coef: float = 0.01,
+    tp_degree: int = 1,
 ) -> tuple[torch.Tensor, dict, list[torch.Tensor]]:
     """
     Compute GRPO/PPO policy gradient loss with per-token KL divergence.
@@ -84,6 +104,7 @@ def compute_policy_gradient_loss(
         kl_coef: KL divergence penalty coefficient
         ppo_clip_eps: PPO clipping epsilon
         entropy_coef: Entropy bonus coefficient
+        tp_degree: Tensor parallel degree for sequence padding
 
     Returns:
         loss: Total loss (PG + entropy + KL)
@@ -97,7 +118,9 @@ def compute_policy_gradient_loss(
     batch_token_log_probs = []
 
     for prompt_toks, gen_toks in zip(prompt_token_ids, vllm_token_ids):
-        token_lps = compute_token_log_probs(model, prompt_toks, gen_toks, device)
+        token_lps = compute_token_log_probs(
+            model, prompt_toks, gen_toks, device, tp_degree=tp_degree
+        )
         batch_token_log_probs.append(token_lps)
 
     # Per-token log ratios and KL, averaged across tokens per sample

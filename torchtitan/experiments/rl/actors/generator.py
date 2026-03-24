@@ -325,7 +325,7 @@ class VLLMGenerator(Actor, Configurable):
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=is_rdma_available(),
+            direct_rdma=False,
         )
         self.policy_version = version
         logger.debug(
