@@ -318,14 +318,14 @@ class VLLMGenerator(Actor, Configurable):
         Args:
             version: New policy version number.
         """
-        from monarch.rdma import is_rdma_available
+        from monarch.rdma import is_ibverbs_available
 
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=is_rdma_available(),
+            direct_rdma=is_ibverbs_available(),
         )
         self.policy_version = version
         logger.debug(
