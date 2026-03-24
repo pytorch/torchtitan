@@ -63,7 +63,10 @@ def _run_experts_grouped_mm(
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
-    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+    # Two-step cumsum to work around Inductor lowering bug where
+    # cumsum(..., dtype=torch.int32) produces int64 in post-grad passes.
+    offsets = torch.cumsum(num_tokens_per_expert.to(torch.int32), dim=0)
+    offsets = offsets.to(torch.int32)
 
     h = F.silu(
         torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
