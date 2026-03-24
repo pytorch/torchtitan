@@ -5,8 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import logging
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -88,10 +91,11 @@ class Configurable:
                 elif isinstance(val, (str, int, float, bool, type(None))):
                     return val
                 else:
-                    raise TypeError(
+                    logger.warning(
                         f"Config field value of type {type(val).__name__} "
-                        f"is not JSON serializable"
+                        f"may not be JSON serializable"
                     )
+                    return val
 
             result = {}
             for f in fields(self):
