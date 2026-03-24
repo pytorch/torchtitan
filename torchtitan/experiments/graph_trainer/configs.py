@@ -37,6 +37,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     graph before partitioning. Only used in AOT mode."""
 
 
+
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerConfig(Trainer.Config):
     compile: GraphTrainerCompileConfig = field(
