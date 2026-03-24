@@ -12,6 +12,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+import torch.library
+import triton
+import triton.language as tl
 from torch import nn
 from torch.distributed.tensor import DTensor
 
@@ -142,6 +145,7 @@ def _run_experts_for_loop(
     return out
 
 
+@torch.compile
 def _run_experts_grouped_mm(
     mlp1_weight: torch.Tensor,
     mlp1_bias: torch.Tensor,
@@ -153,28 +157,18 @@ def _run_experts_grouped_mm(
     tp_degree: int = 1,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-    # Pad num_tokens_per_expert with tail slack so that repeat_interleave
-    # with output_size=x.shape[0] directly produces a static-shaped output,
-    # avoiding the D2H sync that repeat_interleave incurs without output_size.
-    tail_slack = (x.shape[0] - offsets[-1]).unsqueeze(0).to(num_tokens_per_expert.dtype)
-    num_tokens_per_expert_long = torch.cat([num_tokens_per_expert, tail_slack]).long()
 
     h = torch._grouped_mm(
         x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets
     )
-
-    b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
-    b1 = b1.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
-    h = h + b1.to(h.dtype)
+    h = expert_bias_add(h, mlp1_bias, offsets)
 
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
 
     # Apply custom autograd function to scale bias in forward but not in backward
-    b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
-    b2 = b2.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
-    b2 = ScaleBiasForward.apply(b2, tp_degree)
-    h = h + b2.to(h.dtype)
+    b2 = ScaleBiasForward.apply(mlp2_bias, tp_degree)
+    h = expert_bias_add(h, b2, offsets)
 
     return h
 
@@ -298,3 +292,183 @@ class GptOssMoE(MoE):
             hidden_dim=config.hidden_dim,
             num_experts=config.num_experts,
         )
+
+
+@torch.library.custom_op("gpt_oss::expert_bias_add", mutates_args=())
+def expert_bias_add(
+    h: torch.Tensor,
+    bias: torch.Tensor,
+    offs: torch.Tensor,
+) -> torch.Tensor:
+    """Add per-expert bias to grouped-mm output without repeat_interleave.
+
+    Replaces bias.repeat_interleave(...) + h + b with a fused Triton kernel
+    that reads bias[e] once per expert and writes directly to the output.
+    No intermediate (T, N) tensor is allocated.
+
+    Implemented as a torch.library.custom_op rather than torch.autograd.Function
+    so that torch.compile can inspect setup_context and know only `offs` is saved
+    for backward. A torch.autograd.Function would force compile to conservatively
+    save all inputs including the large (T, N) `h` tensor, negating the memory
+    benefit. See register_autograd call below for details.
+    """
+    T, N = h.shape
+    E = bias.shape[0]
+    out = torch.empty_like(h)
+    grid = lambda meta: (E, triton.cdiv(N, meta["BLOCK_D"]))  # noqa: E731
+    _expert_bias_add_fwd_kernel[grid](h, bias.to(h.dtype), out, offs, N)
+    return out
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_T": 32, "BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_T": 64, "BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_T": 128, "BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_T": 32, "BLOCK_D": 256}, num_warps=8),
+        triton.Config({"BLOCK_T": 64, "BLOCK_D": 256}, num_warps=8),
+        triton.Config({"BLOCK_T": 128, "BLOCK_D": 256}, num_warps=8),
+        triton.Config({"BLOCK_T": 64, "BLOCK_D": 512}, num_warps=8),
+        triton.Config({"BLOCK_T": 128, "BLOCK_D": 512}, num_warps=8),
+    ],
+    key=["N"],
+)
+@triton.jit
+def _expert_bias_add_fwd_kernel(
+    h_ptr,  # (T, N) bfloat16
+    bias_ptr,  # (E, N) bfloat16
+    out_ptr,  # (T, N) bfloat16
+    offs_ptr,  # (E,)   int32 — offsets[e] = exclusive end of expert e's tokens
+    N,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    e = tl.program_id(0)
+    pid_d = tl.program_id(1)
+
+    # Token range [t_start, t_end) for this expert
+    prev_e = tl.maximum(e - 1, 0)
+    t_start = tl.where(e == 0, 0, tl.load(offs_ptr + prev_e))
+    t_end = tl.load(offs_ptr + e)
+
+    d_offs = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    d_mask = d_offs < N
+
+    # Load bias[e] once for all tokens of this expert
+    bias = tl.load(bias_ptr + e * N + d_offs, mask=d_mask, other=0.0)
+
+    # Tile over tokens
+    for t_base in range(t_start, t_end, BLOCK_T):
+        t_offs = t_base + tl.arange(0, BLOCK_T)
+        t_mask = t_offs < t_end
+
+        ptrs = h_ptr + t_offs[:, None] * N + d_offs[None, :]
+        h = tl.load(ptrs, mask=t_mask[:, None] & d_mask[None, :], other=0.0)
+        tl.store(
+            out_ptr + t_offs[:, None] * N + d_offs[None, :],
+            h + bias[None, :],
+            mask=t_mask[:, None] & d_mask[None, :],
+        )
+
+
+# register_fake teaches torch.compile's fake-tensor / meta-device pass the output
+# shape/dtype without running the real kernel. Required for fullgraph=True compilation.
+@expert_bias_add.register_fake
+def _(h, bias, offs):
+    return torch.empty_like(h)
+
+
+# The backward is also a custom_op rather than an inline Triton call so that
+# torch.compile can trace through it without graph-breaking. A plain Triton call
+# inside a torch.autograd.Function backward would be opaque to the compiler.
+@torch.library.custom_op("gpt_oss::expert_bias_add_bwd", mutates_args=())
+def _expert_bias_add_bwd_op(
+    grad_out: torch.Tensor,
+    offs: torch.Tensor,
+    E: int,
+    N: int,
+) -> torch.Tensor:
+    """Backward pass: grad_bias[e] = sum(grad_out[group_e], dim=0)."""
+    grad_bias = torch.empty(E, N, dtype=torch.float32, device=grad_out.device)
+    grid = lambda meta: (E, triton.cdiv(N, meta["BLOCK_D"]))  # noqa: E731
+    _expert_bias_add_bwd_kernel[grid](grad_out.contiguous(), grad_bias, offs, N)
+    return grad_bias
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_T": 32, "BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_T": 64, "BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_T": 128, "BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_T": 32, "BLOCK_D": 256}, num_warps=8),
+        triton.Config({"BLOCK_T": 64, "BLOCK_D": 256}, num_warps=8),
+        triton.Config({"BLOCK_T": 128, "BLOCK_D": 256}, num_warps=8),
+        triton.Config({"BLOCK_T": 64, "BLOCK_D": 512}, num_warps=8),
+        triton.Config({"BLOCK_T": 128, "BLOCK_D": 512}, num_warps=8),
+    ],
+    key=["N"],
+)
+@triton.jit
+def _expert_bias_add_bwd_kernel(
+    grad_out_ptr,  # (T, N) bfloat16
+    grad_bias_ptr,  # (E, N) float32 — output
+    offs_ptr,  # (E,)   int32
+    N,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    e = tl.program_id(0)
+    pid_d = tl.program_id(1)
+
+    prev_e = tl.maximum(e - 1, 0)
+    t_start = tl.where(e == 0, 0, tl.load(offs_ptr + prev_e))
+    t_end = tl.load(offs_ptr + e)
+
+    d_offs = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    d_mask = d_offs < N
+
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    for t_base in range(t_start, t_end, BLOCK_T):
+        t_offs = t_base + tl.arange(0, BLOCK_T)
+        t_mask = t_offs < t_end
+        g = tl.load(
+            grad_out_ptr + t_offs[:, None] * N + d_offs[None, :],
+            mask=t_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        acc += tl.sum(g, axis=0)
+
+    tl.store(grad_bias_ptr + e * N + d_offs, acc, mask=d_mask)
+
+
+@_expert_bias_add_bwd_op.register_fake
+def _(grad_out, offs, E, N):
+    return torch.empty(E, N, dtype=torch.float32, device=grad_out.device)
+
+
+def _expert_bias_add_setup_context(ctx, inputs, output):
+    _h, bias, offs = inputs
+    ctx.save_for_backward(offs)
+    ctx.E = bias.shape[0]
+    ctx.N = bias.shape[1]
+
+
+def _expert_bias_add_backward(ctx, grad_out):
+    (offs,) = ctx.saved_tensors
+    grad_bias = _expert_bias_add_bwd_op(grad_out, offs, ctx.E, ctx.N)
+    # grad_out is passed through as grad_h (bias add is elementwise, grad is identity)
+    return grad_out, grad_bias, None
+
+
+# We use torch.library.register_autograd instead of torch.autograd.Function so
+# that torch.compile can inspect setup_context and determine the minimal save set
+# for backward. With torch.autograd.Function, compile must conservatively assume
+# all inputs are saved, which would retain the large (T, N) `h` tensor in the
+# activation cache — defeating the memory saving this kernel exists to provide.
+# With register_autograd + setup_context, compile sees that only `offs` is saved,
+# and `h` can be freed immediately after the forward kernel runs.
+torch.library.register_autograd(
+    "gpt_oss::expert_bias_add",
+    _expert_bias_add_backward,
+    setup_context=_expert_bias_add_setup_context,
+)
