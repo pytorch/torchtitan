@@ -15,6 +15,7 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     _score_mod_signature,
+    AuxRequest,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -151,17 +152,18 @@ class FlexAttentionWrapper(torch.nn.Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
-        #    to convert `lse` to be DTensor.
-        return FlexAttentionWrapper._compiled_flex_attn(
+        out = FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
             block_mask=block_mask,
             scale=scale,
             enable_gqa=enable_gqa,
-            return_lse=return_lse,
+            return_aux=AuxRequest(lse=return_lse),
         )
+        if return_lse:
+            return out[0], out[1].lse
+        return out
 
 
 class ScaledDotProductAttentionWrapper(torch.nn.Module):
