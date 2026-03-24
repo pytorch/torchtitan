@@ -7,10 +7,7 @@
 import logging
 
 import torch
-from torch.nn.attention import (
-    activate_flash_attention_impl,
-    current_flash_attention_impl,
-)
+from torch.nn.attention import activate_flash_attention_impl
 from torchtitan.models.common.attention import LocalMapAttention
 
 from vllm.model_executor.layers.attention import Attention
@@ -59,8 +56,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         # FA3 requires SM 9.0+ (e.g. H100); check capability explicitly because
         # activate_flash_attention_impl("FA3") succeeds even on SM80.
-        # Fall back to FA2 which requires page_size to be a multiple
-        # of 256. 
+        # Fall back to FA2 which requires page_size to be a multiple of 256.
         if torch.cuda.get_device_capability()[0] >= 9:
             activate_flash_attention_impl("FA3")
             self._use_fa3 = True

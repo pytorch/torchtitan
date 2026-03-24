@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import logging
 import os
 from dataclasses import dataclass, field
@@ -33,6 +34,20 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
+
+
+def _log_gpu_memory(label: str) -> None:
+    """Log current GPU memory usage for debugging."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+        logger.info(
+            f"[GPU Memory] {label}: "
+            f"allocated={allocated:.2f} GB, "
+            f"reserved={reserved:.2f} GB, "
+            f"max_allocated={max_allocated:.2f} GB"
+        )
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -109,15 +124,18 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
+        _log_gpu_memory("before building policy model")
         model = self._build_model(
             model_spec, config, device_type, batch_invariant_mode, hf_assets_path
         )
         model.train()
         self.model = model
         self.model_parts = [model]
+        _log_gpu_memory("after building policy model")
 
         # Create reference model for KL divergence (frozen copy of initial policy)
         # TODO: Move ref_model to a separate actor so it can live on different GPUs
+        _log_gpu_memory("before building ref model")
         ref_model = self._build_model(
             model_spec, config, device_type, batch_invariant_mode, hf_assets_path
         )
@@ -125,13 +143,16 @@ class PolicyTrainer(Actor, Configurable):
             p.requires_grad = False
         ref_model.eval()
         self.ref_model = ref_model
+        _log_gpu_memory("after building ref model")
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
+        _log_gpu_memory("after building optimizer")
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
         )
+        _log_gpu_memory("after building lr_scheduler")
 
         self.policy_version = 0
         self.generator: Any | None = None
@@ -164,19 +185,30 @@ class PolicyTrainer(Actor, Configurable):
                 "Please provide a valid path to a HuggingFace checkpoint directory."
             )
 
+        _log_gpu_memory("weight_load: start")
         storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_path)
         hf_state_dict = self.sd_adapter.to_hf(model.state_dict())
+        _log_gpu_memory("weight_load: after to_hf")
         dcp.load(hf_state_dict, storage_reader=storage_reader)
+        _log_gpu_memory("weight_load: after dcp.load")
         torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
+        _log_gpu_memory("weight_load: after from_hf")
+        del hf_state_dict
+        gc.collect()
+        _log_gpu_memory("weight_load: after del hf_state_dict")
 
         set_model_state_dict(
             model=model,
             model_state_dict=torchtitan_state_dict,
             options=StateDictOptions(strict=True),
         )
+        _log_gpu_memory("weight_load: after set_model_state_dict")
+        del torchtitan_state_dict
+        gc.collect()
+
         logger.info(
             f"Loaded initial weights from {checkpoint_path} "
-            f"({len(torchtitan_state_dict)} parameters)"
+            f"({len(model.state_dict())} parameters)"
         )
 
     def _build_model(
@@ -212,11 +244,19 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         model.to_empty(device=device_type)
+        _log_gpu_memory("after to_empty")
         with torch.no_grad():
             model.init_weights(buffer_device=None)
+        _log_gpu_memory("after init_weights")
 
         # Load initial weights from HF
         self._load_initial_hf_weights(model, hf_assets_path)
+        _log_gpu_memory("after _load_initial_hf_weights")
+
+        # Free weight loading temporaries
+        gc.collect()
+        torch.cuda.empty_cache()
+        _log_gpu_memory("after gc+empty_cache")
 
         return model
 
