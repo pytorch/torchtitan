@@ -44,7 +44,6 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
                     "--module flux",
                     "--config flux_debugmodel",
                     "--compile.enable",
-                    "--training.local_batch_size 64",
                 ],
             ],
             "Flux FSDP+compile",

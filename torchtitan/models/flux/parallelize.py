@@ -135,6 +135,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     Apply torch.compile to each DoubleStreamBlock and SingleStreamBlock, which
     makes compilation efficient due to repeated structure.
     """
+    # Disable mix_order_reduction to work around an inductor assertion where
+    # MixOrderReduction.get_numel_rnumel asserts that fused split-reduction
+    # sub-nodes share the same numel, but the Flux backward graph contains
+    # reductions with mismatched sizes (hidden_size vs hidden_size * mlp_ratio).
+    # mix_order_reduction was enabled for OSS in pytorch/pytorch#166938.
+    torch._inductor.config.triton.mix_order_reduction = False
     # pyrefly: ignore [missing-attribute]
     for block_id, block in model.double_blocks.named_children():
         block = torch.compile(block, backend=compile_config.backend, fullgraph=True)
