@@ -156,6 +156,21 @@ class VarlenAttention(LocalMapInnerAttention):
     class Config(LocalMapInnerAttention.Config):
         pass
 
+    def __init__(self, *, batch_invariant: bool = False) -> None:
+        super().__init__()
+        self.batch_invariant = batch_invariant
+
+        # num_splits requires FA3. Activate it once when batch-invariant mode
+        # is requested so that varlen_attn can accept the num_splits kwarg.
+        if batch_invariant:
+            from torch.nn.attention import (
+                activate_flash_attention_impl,
+                current_flash_attention_impl,
+            )
+
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -564,6 +579,9 @@ class GQAttention(BaseAttention):
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+        batch_invariant: bool = False
+        """Enable batch-invariant varlen attention (num_splits=1, no compile).
+        Only applies when attn_backend="varlen"."""
 
         def __post_init__(self):
             BaseAttention.Config.__post_init__(self)
