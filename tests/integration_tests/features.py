@@ -559,6 +559,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Float8 emulation test",
             "float8_emulation",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config sft_debugmodel",
+                ],
+            ],
+            "SFT ChatDataset integration test",
+            "sft",
+            ngpu=1,
+        ),
     ]
 
     return integration_tests_flavors
