@@ -12,8 +12,6 @@ OptimizersContainer.state_dict() match the expected hard-coded values
 for the llama3 debugmodel with AdamW optimizer.
 
 Catches regressions from refactoring or upstream PyTorch changes.
-
-Runs on CPU without distributed — no GPU or torchrun required.
 """
 
 import unittest
