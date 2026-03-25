@@ -152,7 +152,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        out = FlexAttentionWrapper._compiled_flex_attn(
+        out, aux = FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
@@ -164,7 +164,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         # Note: return a tuple of Tensor to make converting `lse`
         # to DTensor easier with TP module notation.
         if return_lse:
-            return out[0], out[1].lse
+            return out, aux.lse
         return out
 
 
