@@ -43,7 +43,34 @@ def qwen3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
+        ),
+    )
+
+
+def qwen3_debugmodel_flex() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("debugmodel_flex"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )
 
@@ -70,7 +97,6 @@ def qwen3_0_6b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )
 
@@ -96,7 +122,37 @@ def qwen3_1_7b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
+        ),
+    )
+
+
+def qwen3_14b() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./assets/hf/Qwen3-14B",
+        model_spec=model_registry("14B"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=3000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+            export_dtype="float16",
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="full",
         ),
     )
 
@@ -115,6 +171,12 @@ def qwen3_32b() -> Trainer.Config:
             seq_len=4096,
             steps=3000,
         ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
         checkpoint=CheckpointManager.Config(
             interval=500,
             last_save_model_only=False,
@@ -122,7 +184,6 @@ def qwen3_32b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
-            selective_ac_option="op",
         ),
     )
 
@@ -153,6 +214,5 @@ def qwen3_moe_debug() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )

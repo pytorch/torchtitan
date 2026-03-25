@@ -10,8 +10,9 @@ from typing import Any, TYPE_CHECKING
 
 import torch.nn as nn
 
+from torchtitan.components.checkpoint_utils import init_optim_state
+
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.tools.checkpoint_utils import init_optim_state
 
 if TYPE_CHECKING:
     from torchtitan.experiments.ft.manager import FTManager

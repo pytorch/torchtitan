@@ -15,15 +15,13 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
+from torchtitan.components.checkpoint_utils import (
+    canonical_fqn,
+    get_flat_optim_state_dict,
+    load_flat_optim_state_dict,
+)
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.tools.checkpoint_utils import (
-    clean_name,
-    flatten_optim_state_dict,
-    init_optim_state,
-    optim_state_dict_to_fqn_keys,
-    unflatten_and_load_optim_state_dict,
-)
 
 __all__ = [
     "OptimizersContainer",
@@ -118,7 +116,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.model_parts = model_parts
         for model in self.model_parts:
             named_params = [
-                (clean_name(n), p)
+                (canonical_fqn(n), p)
                 for n, p in model.named_parameters()
                 if p.requires_grad
             ]
@@ -153,16 +151,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         """
         result: dict[str, Any] = {}
         for optim in self.optimizers:
-            init_optim_state(optim)
-            fqn_sd = optim_state_dict_to_fqn_keys(optim.state_dict())
-            flat_sd = flatten_optim_state_dict(fqn_sd)
-            result.update(flat_sd)
+            result.update(get_flat_optim_state_dict(optim))
         return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         for optim in self.optimizers:
-            init_optim_state(optim)
-            unflatten_and_load_optim_state_dict(optim, state_dict)
+            load_flat_optim_state_dict(optim, state_dict)
 
     def _validate_length(self, expected_length: int) -> None:
         assert expected_length == len(self.optimizers), (
@@ -206,7 +200,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
             for name, p in model.named_parameters():
                 if p.requires_grad:
                     optim_dict[p] = optimizer_cls(
-                        [(clean_name(name), p)], **optimizer_kwargs
+                        [(canonical_fqn(name), p)], **optimizer_kwargs
                     )
                 all_params.append(p)
 

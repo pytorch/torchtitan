@@ -13,6 +13,24 @@
 # Note: Performance
 # The quantization modules are intended to be ran under `torch.compile`` for competitive performance
 
+from dataclasses import dataclass
+from typing import ClassVar
+
+from torchtitan.config import Configurable
+
+
+class QuantizationConverter(Configurable):
+    """Base class for quantization converters (FP8, MX, etc.).
+
+    All quantization converter classes should inherit from this so they can be
+    identified via isinstance checks.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        _quantization_type: ClassVar[str]
+
+
 # Module level global constants
 FP8_GROUP_ALIGNMENT_SIZE = 16
 MXFP8_GROUP_ALIGNMENT_SIZE = 32

@@ -31,15 +31,15 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torchtitan.components.checkpoint_utils import (
+    canonical_model_state_dict,
+    load_canonical_model_state_dict,
+)
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
-from torchtitan.tools.checkpoint_utils import (
-    clean_model_load_state_dict,
-    clean_model_state_dict,
-)
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -69,7 +69,7 @@ class ModelWrapper(Stateful):
         return {
             k: v
             for model in self.model
-            for k, v in clean_model_state_dict(model).items()
+            for k, v in canonical_model_state_dict(model).items()
         }
 
     def state_dict(self) -> dict[str, Any]:
@@ -77,7 +77,7 @@ class ModelWrapper(Stateful):
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         for model in self.model:
-            clean_model_load_state_dict(model, state_dict, strict=False)
+            load_canonical_model_state_dict(model, state_dict, strict=False)
         self.cache_state_dict = self._get_state_dict()
 
 
@@ -130,7 +130,7 @@ class CheckpointManager(Configurable):
         The solution to this problem is optimizer flattening (see PR #127071
         https://github.com/pytorch/pytorch/pull/127071). TorchTitan's OptimizersContainer
         flattens optimizer state dicts to FQN-keyed flat dicts using the utilities in
-        torchtitan/tools/checkpoint_utils.py.
+        torchtitan/components/checkpoint_utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds
     challenge (1) by also requiring us to reason about multiple 'optim' objects locally.

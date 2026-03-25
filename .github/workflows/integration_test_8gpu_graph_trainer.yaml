@@ -1,0 +1,77 @@
+name: GraphTrainer 8 GPU Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
+    paths:
+      - 'torchtitan/experiments/graph_trainer/**'
+      - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
+  pull_request:
+    paths:
+      - 'torchtitan/experiments/graph_trainer/**'
+      - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+      id-token: write
+      contents: read
+
+jobs:
+  build-test:
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    with:
+      runner: linux.g5.48xlarge.nvidia.gpu
+      gpu-arch-type: cuda
+      gpu-arch-version: "12.8"
+      docker-image: torchtitan-ubuntu-20.04-clang12
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log GPU info / driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install --force-reinstall --pre \
+          torch --index-url https://download.pytorch.org/whl/nightly/cu128
+
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+
+        # Run the numerics unit tests (Llama3 only; DeepSeek tests run in the H100 workflow)
+        pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestSimpleFSDP -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "not dsv3"
+
+        # Run the graph passes unit tests
+        torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestReassignToPgPass -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestApplySACPass -v
+
+        # Run the make_fx tracer unit tests
+        pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation"
+
+        # Run precompile unit tests
+        pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
+
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
