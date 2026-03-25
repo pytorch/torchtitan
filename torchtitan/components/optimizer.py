@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, TypeVar
@@ -13,14 +12,14 @@ import torch
 import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-from torch.distributed.checkpoint.state_dict import (
-    get_optimizer_state_dict,
-    set_optimizer_state_dict,
-    StateDictOptions,
-)
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
+from torchtitan.components.checkpoint_utils import (
+    canonical_fqn,
+    get_flat_optim_state_dict,
+    load_flat_optim_state_dict,
+)
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 
@@ -51,7 +50,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     This class assumes that all the optimizers are the same type and have the same
     configurations. With this assumption, TorchTitan can support lr scheduler resharding
     (e.g., loading a checkpoint with a different number of GPUs and/or different
-    parallelization strategy). Note that ``get_optimizer_state_dict`` already enables the
+    parallelization strategy). The optimizer state dict flattening already enables the
     resharding for the optimizer state but not for the lr scheduler state, hence the limitation.
 
     Args:
@@ -116,9 +115,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
         for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-            all_params.extend(params)
+            named_params = [
+                (canonical_fqn(n), p)
+                for n, p in model.named_parameters()
+                if p.requires_grad
+            ]
+            self.optimizers.append(optimizer_cls(named_params, **optimizer_kwargs))
+            all_params.extend(p for _, p in named_params)
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
@@ -138,23 +141,22 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             optimizer.zero_grad(*args, **kwargs)
 
     def state_dict(self) -> dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        return {
-            k: v
-            for sd in map(func, self.model_parts, self.optimizers)
-            for k, v in sd.items()
-        }
+        """Return a flat FQN-keyed optimizer state dict.
+
+        Note: This method has a side effect. If the optimizer states have not
+        been initialized yet (i.e., no training step has been taken), it
+        initializes them by performing a zero-grad step via ``init_optim_state``.
+        This is required to produce a valid state dict before the first optimizer
+        step for DCP.
+        """
+        result: dict[str, Any] = {}
+        for optim in self.optimizers:
+            result.update(get_flat_optim_state_dict(optim))
+        return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        list(map(func, self.model_parts, self.optimizers))
+        for optim in self.optimizers:
+            load_flat_optim_state_dict(optim, state_dict)
 
     def _validate_length(self, expected_length: int) -> None:
         assert expected_length == len(self.optimizers), (
@@ -195,9 +197,11 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
         optim_dict = {}
         for model in self.model_parts:
-            for p in model.parameters():
+            for name, p in model.named_parameters():
                 if p.requires_grad:
-                    optim_dict[p] = optimizer_cls([p], **optimizer_kwargs)
+                    optim_dict[p] = optimizer_cls(
+                        [(canonical_fqn(name), p)], **optimizer_kwargs
+                    )
                 all_params.append(p)
 
         def optim_hook(param) -> None:
