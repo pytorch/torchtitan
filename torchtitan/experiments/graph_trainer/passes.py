@@ -31,6 +31,7 @@ from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
+from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
@@ -147,45 +148,6 @@ def validate_flex_attn_annotation_pass(
     return gm
 
 
-def _get_default_sac_save_ops() -> set:
-    """Build the default set of ops whose outputs should be saved (not recomputed)
-    during activation checkpointing.
-
-    Compute-intensive ops are obtained dynamically from PyTorch's partitioner
-    (``get_default_op_list``) so the list stays in sync with upstream changes.
-    """
-    from torch._functorch.partitioners import get_default_op_list
-
-    # Compute-intensive ops from PyTorch's partitioner
-    compute_intensive_ops = {
-        op.default for op in get_default_op_list().compute_intensive_ops
-    }
-
-    # attention variants
-    scaled_dot_product_attention_ops = {
-        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-        torch.ops.aten._scaled_dot_product_attention_math.default,
-        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    }
-
-    higher_order_ops = {
-        torch._higher_order_ops.flex_attention,
-        torch._higher_order_ops.inductor_compiled_code,
-    }
-
-    communication_intensive_ops = {
-        torch.ops._c10d_functional.reduce_scatter_tensor.default,
-        torch.ops._c10d_functional.all_to_all_single.default,
-    }
-
-    return (
-        compute_intensive_ops
-        | scaled_dot_product_attention_ops
-        | higher_order_ops
-        | communication_intensive_ops
-    )
-
-
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
     op_list_to_save: set | None = None,
@@ -212,13 +174,14 @@ def apply_sac_pass(
     Args:
         gm: The joint forward-backward graph module
         op_list_to_save: Set of op targets whose outputs should be saved.
-            Defaults to ``_get_default_sac_save_ops()`` if None.
+            Defaults to ``torchtitan.distributed.activation_checkpoint._get_save_ops()``
+            if None.
 
     Returns:
         The annotated graph module
     """
     if op_list_to_save is None:
-        op_list_to_save = _get_default_sac_save_ops()
+        op_list_to_save = _get_save_ops()
 
     mm_count = 0
     ac_region_stats: dict[int, dict[str, int]] = defaultdict(
