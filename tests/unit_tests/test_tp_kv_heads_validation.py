@@ -77,10 +77,14 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
             ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(_DIM, multiple_of=256),
+                w1=Linear.Config(),
+                w2w3=Linear.Config(),
             ),
             attention=GQAttention.Config(
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
+                wqkv=Linear.Config(),
+                wo=Linear.Config(),
                 attn_backend="sdpa",
                 rope_backend="complex",
             ),
