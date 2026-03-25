@@ -31,6 +31,24 @@ def build_varlen_metadata(
     )
 
 
+from torchtitan.models.common.attention import VarlenMetadata
+
+
+def _make_causal_varlen_metadata(
+    batch_size: int, seq_len: int, device: torch.device
+) -> VarlenMetadata:
+    """Create VarlenMetadata for uniform-length causal sequences."""
+    cu_seqlens = torch.arange(
+        0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=device
+    )
+    return VarlenMetadata(
+        cu_seq_q=cu_seqlens,
+        cu_seq_k=cu_seqlens,
+        max_q=seq_len,
+        max_k=seq_len,
+    )
+
+
 def compute_token_log_probs(
     model: torch.nn.Module,
     prompt_ids: list[int],

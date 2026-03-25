@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
@@ -21,7 +22,12 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import CompileConfig, DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import (
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
@@ -122,6 +128,18 @@ class PolicyTrainer(Actor, Configurable):
 
             enable_batch_invariant_mode()
 
+        # Activate FA3 so that varlen attention on the trainer uses the same
+        # FlashAttention 3 kernel as the generator's CUSTOM backend.  This is
+        # required for bitwise-identical logprobs between the two sides.
+        if batch_invariant_mode:
+            from torch.nn.attention import (
+                activate_flash_attention_impl,
+                current_flash_attention_impl,
+            )
+
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+
         # Initialize state dict adapter for HF checkpoint loading
         if model_spec.state_dict_adapter is not None:
             self.sd_adapter = model_spec.state_dict_adapter(
@@ -216,7 +234,8 @@ class PolicyTrainer(Actor, Configurable):
             model_spec: Model specification for building and parallelizing.
             config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
             device_type: Device type string (e.g. "cuda").
-            batch_invariant_mode: Whether to patch attention for vLLM compatibility.
+            batch_invariant_mode: Whether to override attention to varlen for
+                batch-invariant training.
             hf_assets_path: Path to HF assets folder for checkpoint loading.
 
         Returns:
@@ -232,7 +251,17 @@ class PolicyTrainer(Actor, Configurable):
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
-                model = model_spec.model.build()
+                model = config.build()
+
+        # Disable torch.compile on VarlenAttentionWrapper so the trainer calls
+        # varlen_attn directly (uncompiled), matching the generator's uncompiled
+        # varlen_attn_out path.  torch.compile can change floating-point
+        # accumulation order, breaking bitwise identity.
+        if batch_invariant_mode:
+            from torch.nn.attention.varlen import varlen_attn
+            from torchtitan.models.common.attention import VarlenAttentionWrapper
+
+            VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn
 
         model = model_spec.parallelize_fn(
             model,

@@ -7,23 +7,18 @@
 """
 Batch-invariant mode for reproducible RL training.
 
-When enabled, replaces ``log_softmax`` and ``mean.dim`` with Triton kernels
-that use a fixed tile iteration order, and configures cuBLAS for deterministic
-matmul via ``torch.use_deterministic_algorithms`` plus disabled reduced-precision
-reductions.
+When enabled, replaces ``mm``, ``addmm``, ``log_softmax``, and ``mean.dim``
+with Triton kernels that use a fixed tile iteration order, producing
+bit-identical results for the same input regardless of batch composition.
 
-We intentionally do NOT override ``mm``/``addmm``/``bmm`` with Triton kernels.
-During backward, autograd computes ``grad_weight = activation^T @ grad_output``
-where the K dimension is ``batch * seq``.  Different batch sizes produce
-different K values, which changes the number of K-tiles in a Triton kernel and
-therefore the fp32 accumulation boundaries — breaking batch invariance.  cuBLAS
-deterministic algorithms handle this correctly.
+Also disables reduced-precision reductions and TF32 to prevent
+batch-size-dependent rounding.
 
 The kernels are registered via ``torch.library.Library("aten", "IMPL")``
 so they are transparent to the model code — no changes needed in the model
 definition.
 
-Based on https://github.com/thinking-machines-lab/batch_invariant_ops
+Based on https://github.com/thinking-machines-lab/batch_invariant_ops.
 
 Usage:
     from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
@@ -227,8 +222,108 @@ def mean_dim(
 
 
 # ---------------------------------------------------------------------------
+# Triton kernel: matrix multiplication (mm / addmm)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _matmul_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Fixed-tile-order matmul: C[M, N] = A[M, K] @ B[K, N] in fp32."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_start in range(0, K, BLOCK_K):
+        k_offs = k_start + offs_k
+        mask_a = (offs_m[:, None] < M) & (k_offs[None, :] < K)
+        mask_b = (k_offs[:, None] < K) & (offs_n[None, :] < N)
+        a = tl.load(a_ptrs, mask=mask_a, other=0.0)
+        b = tl.load(b_ptrs, mask=mask_b, other=0.0)
+        acc += tl.dot(a, b)
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+
+    mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=mask_c)
+
+
+def triton_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Batch-invariant matrix multiplication using Triton with fixed tile order."""
+    assert a.ndim == 2 and b.ndim == 2, "inputs must be 2D"
+    assert a.shape[1] == b.shape[0], f"shape mismatch: {a.shape} @ {b.shape}"
+
+    M, K = a.shape
+    _, N = b.shape
+
+    # Ensure contiguous for predictable strides
+    a = a.contiguous()
+    b = b.contiguous()
+
+    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+
+    BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+
+    _matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+    )
+    return c
+
+
+# ---------------------------------------------------------------------------
 # ATen override wrappers
 # ---------------------------------------------------------------------------
+
+
+def _mm_batch_invariant(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Batch-invariant wrapper for aten::mm."""
+    return triton_mm(a, b)
+
+
+def _addmm_batch_invariant(
+    bias: torch.Tensor, a: torch.Tensor, b: torch.Tensor
+) -> torch.Tensor:
+    """Batch-invariant wrapper for aten::addmm."""
+    return triton_mm(a, b) + bias
 
 
 def _log_softmax_batch_invariant(
@@ -284,20 +379,12 @@ def is_batch_invariant_mode_enabled() -> bool:
 def enable_batch_invariant_mode() -> None:
     """Enable batch-invariant mode for reproducible RL training.
 
-    Replaces ``_log_softmax`` and ``mean.dim`` with Triton kernels that
-    produce bit-identical results for the same input regardless of batch
-    composition.
-
-    Matmul operations (``mm``, ``addmm``, ``bmm``) are left to cuBLAS
-    with deterministic algorithms enabled via
-    ``torch.use_deterministic_algorithms(True)``.  Triton matmul kernels
-    cannot be batch-invariant because during backward, autograd computes
-    ``grad_weight = activation^T @ grad_output`` where K = batch * seq —
-    different batch sizes change the K-tile decomposition and therefore
-    the fp32 accumulation boundaries.
+    Replaces ``mm``, ``addmm``, ``_log_softmax``, and ``mean.dim`` with
+    Triton kernels that use a fixed tile iteration order, producing
+    bit-identical results for the same input regardless of batch composition.
 
     Also disables reduced-precision reductions and TF32 to prevent
-    batch-size-dependent rounding in cuBLAS.
+    batch-size-dependent rounding.
 
     Safe to call multiple times (idempotent).
     """
@@ -310,6 +397,8 @@ def enable_batch_invariant_mode() -> None:
     ).upper()
 
     _LIB = torch.library.Library("aten", "IMPL")
+    _LIB.impl("aten::mm", _mm_batch_invariant, dispatch_key)
+    _LIB.impl("aten::addmm", _addmm_batch_invariant, dispatch_key)
     _LIB.impl("aten::_log_softmax", _log_softmax_batch_invariant, dispatch_key)
     _LIB.impl("aten::mean.dim", _mean_batch_invariant, dispatch_key)
 
@@ -338,9 +427,9 @@ def enable_batch_invariant_mode() -> None:
 
     _ENABLED = True
     logger.info(
-        "Batch-invariant mode enabled: _log_softmax, mean.dim overridden "
-        "with Triton kernels; deterministic algorithms enabled; "
-        "reduced-precision reductions and TF32 disabled"
+        "Batch-invariant mode enabled: mm, addmm, _log_softmax, mean.dim "
+        "overridden with Triton kernels; reduced-precision reductions "
+        "and TF32 disabled"
     )
 
 

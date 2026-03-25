@@ -23,7 +23,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
-from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -173,8 +172,10 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
         if batch_invariant_mode:
-            os.environ["VLLM_BATCH_INVARIANT"] = "1"
-            init_batch_invariance(AttentionBackendEnum.CUSTOM)
+            from torchtitan.experiments.rl.batch_invariant import (
+                enable_batch_invariant_mode,
+            )
+            enable_batch_invariant_mode()
 
         # Extract needed fields from configs
         self.model_path = model_path

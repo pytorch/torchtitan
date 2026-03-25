@@ -168,7 +168,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
         # Force num_splits=1 in batch-invariant mode to prevent
         # non-deterministic split-k reductions in flash attention.
-        num_splits = 1 if is_batch_invariant_mode_enabled() else None
+        num_splits = 1 if is_batch_invariant_mode_enabled() else 0
 
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
