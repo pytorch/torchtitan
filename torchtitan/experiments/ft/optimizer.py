@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 import torch.nn as nn
-from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict
+
+from torchtitan.components.checkpoint_utils import init_optim_state
 
 from torchtitan.components.optimizer import OptimizersContainer
 
@@ -39,11 +40,8 @@ class FTOptimizersContainer(OptimizersContainer):
 
         # Force to initialize the optimizer state so that `optim.step()`
         # won't be called by state_dict() and load_state_dict().
-        _ = {
-            k: v
-            for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
-            for k, v in sd.items()
-        }
+        for optim in self.optimizers:
+            init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
         self._ft_optimizer = ft.Optimizer(ft_manager.manager, self)
         # Whether to determine quorum using FT.optimizer,

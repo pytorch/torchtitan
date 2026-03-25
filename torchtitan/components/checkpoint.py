@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import enum
-import functools
 import os
 import queue
 import re
@@ -27,16 +26,15 @@ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
-from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
-    set_model_state_dict,
-    StateDictOptions,
-)
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torchtitan.components.checkpoint_utils import (
+    canonical_model_state_dict,
+    load_canonical_model_state_dict,
+)
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -68,23 +66,18 @@ class ModelWrapper(Stateful):
         self.cache_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        state_dict = {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        return {
+            k: v
+            for model in self.model
+            for k, v in canonical_model_state_dict(model).items()
         }
-        return state_dict
 
     def state_dict(self) -> dict[str, Any]:
         return self.cache_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        func = functools.partial(
-            set_model_state_dict,
-            model_state_dict=state_dict,
-            options=StateDictOptions(strict=False),
-        )
-        list(map(func, self.model))
-        # `set_model_state_dict()` does change the keys of the input state_dict,
-        # we will need to reinitialize the cache_state_dict.
+        for model in self.model:
+            load_canonical_model_state_dict(model, state_dict, strict=False)
         self.cache_state_dict = self._get_state_dict()
 
 
@@ -134,11 +127,10 @@ class CheckpointManager(Configurable):
     referring to layers.1.  When saving, these collide and one of them is lost.  Then when
     reloading, only one stage can restore its optimizer states, others will error.
 
-        The solution to this problem is optimizer flattening: it landed in #127071 and is
-        enabled in TorchTitan by passing the 'flatten_optimizer_state_dict' kwarg to DCP
-        functions called in the OptimizerContainer.
-        See PR #127071 (https://github.com/pytorch/pytorch/pull/127071) for the example of
-        a flattening state_dict.
+        The solution to this problem is optimizer flattening (see PR #127071
+        https://github.com/pytorch/pytorch/pull/127071). TorchTitan's OptimizersContainer
+        flattens optimizer state dicts to FQN-keyed flat dicts using the utilities in
+        torchtitan/components/checkpoint_utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds
     challenge (1) by also requiring us to reason about multiple 'optim' objects locally.
