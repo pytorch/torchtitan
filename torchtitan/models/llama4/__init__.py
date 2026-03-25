@@ -20,15 +20,10 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
-from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.param_init import (
-    init_decoder_common,
-    init_feed_forward,
-    init_gq_attention,
-    init_moe,
-)
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe.moe import GroupedExperts
+from torchtitan.models.common.param_init import depth_scaled_std, PerLayer
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 
@@ -40,39 +35,26 @@ __all__ = [
     "llama4_configs",
 ]
 
+_LINEAR_INIT = {
+    "weight": partial(nn.init.trunc_normal_, std=0.02),
+    "bias": nn.init.zeros_,
+}
+_LINEAR_DEPTH_INIT = PerLayer(
+    lambda layer_id: {
+        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "bias": nn.init.zeros_,
+    }
+)
+_NORM_INIT = {"weight": nn.init.ones_}
+_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 
-def setup_llama4_param_init(model: Llama4Model) -> None:
-    base_std: float = 0.02
-    default: ParamInitializer = partial(nn.init.trunc_normal_, std=base_std)
-    init_decoder_common(model, base_std=base_std)
-    for i, layer in enumerate(model.layers.values()):
-        std = base_std / (2 * (i + 1)) ** 0.5
-        depth: ParamInitializer = partial(nn.init.trunc_normal_, std=std)
-        init_gq_attention(
-            layer.attention,  # pyrefly: ignore [bad-argument-type]
-            default=default,
-            depth=depth,
-        )
-        if layer.moe_enabled:
-            init_moe(
-                layer.moe,  # pyrefly: ignore [bad-argument-type]
-                default=default,
-                depth=depth,
-            )
-        else:
-            init_feed_forward(
-                layer.feed_forward,  # pyrefly: ignore [bad-argument-type]
-                default=default,
-                depth=depth,
-            )
-        set_param_init(
-            layer.attention_norm,  # pyrefly: ignore [bad-argument-type]
-            {"weight": nn.init.ones_},
-        )
-        set_param_init(
-            layer.ffn_norm,  # pyrefly: ignore [bad-argument-type]
-            {"weight": nn.init.ones_},
-        )
+
+def _output_linear_init(dim: int):
+    s = dim**-0.5
+    return {
+        "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
+        "bias": nn.init.zeros_,
+    }
 
 
 llama4_configs = {
@@ -80,25 +62,53 @@ llama4_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        param_init_fn=setup_llama4_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(256)),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             fixed_attn_block_size=256,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256),
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             attention=GQAttention.Config(
                 n_heads=16,
+                wqkv=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
             ),
-            moe=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
+            moe=MoE.Config(
+                hidden_dim=compute_moe_hidden_dim(256),
+                router=TokenChoiceTopKRouter.Config(
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=compute_moe_hidden_dim(256),
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+            ),
         ),
         rope=RoPE.Config(
             dim=256 // 16,
@@ -113,15 +123,14 @@ llama4_configs = {
     "17bx16e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        param_init_fn=setup_llama4_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(5120)),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 num_experts=16,
                 hidden_dim=compute_moe_hidden_dim(
@@ -131,15 +140,48 @@ llama4_configs = {
                     top_k=1,
                     num_shared_experts=1,
                 ),
+                router=TokenChoiceTopKRouter.Config(
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=compute_moe_hidden_dim(
+                        5120,
+                        multiple_of=2048,
+                        ffn_dim_multiplier=1.2,
+                        top_k=1,
+                        num_shared_experts=1,
+                    ),
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     5120, multiple_of=2048, ffn_dim_multiplier=1.2
                 ),
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
                 n_kv_heads=8,
+                wqkv=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",
@@ -158,14 +200,13 @@ llama4_configs = {
     "17bx128e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        param_init_fn=setup_llama4_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(5120)),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 num_experts=128,
                 hidden_dim=compute_moe_hidden_dim(
@@ -175,15 +216,48 @@ llama4_configs = {
                     top_k=1,
                     num_shared_experts=1,
                 ),
+                router=TokenChoiceTopKRouter.Config(
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=compute_moe_hidden_dim(
+                        5120,
+                        multiple_of=2048,
+                        ffn_dim_multiplier=1.2,
+                        top_k=1,
+                        num_shared_experts=1,
+                    ),
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
                     5120, multiple_of=2048, ffn_dim_multiplier=1.2
                 ),
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             attention=GQAttention.Config(
                 n_heads=40,
                 n_kv_heads=8,
+                wqkv=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 attn_backend="flex",
                 attn_mask_type="block_causal",
                 rope_backend="complex",

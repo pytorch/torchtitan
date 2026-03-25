@@ -104,8 +104,8 @@ class HFTransformerModel(BaseModel):
             # Set param_init before Module.Config.build() accesses it.
             # PretrainedConfig.__getattribute__ doesn't recognize the
             # param_init slot inherited from Module.Config.
-            self.param_init_fn = (
-                None  # noqa: this sets Config.param_init_fn, not Module._param_init
+            self.param_init = (
+                None  # noqa: this sets Config.param_init, not Module._param_init
             )
             assert titan_dense_config is not None, "titan_dense_config is required"
 
@@ -254,6 +254,10 @@ class HFTransformerModel(BaseModel):
             self.head_dim = self.dim // self.num_attention_heads
 
             return self
+
+        def expand(self) -> None:
+            """No-op: HFTransformerModel handles init via HF mechanisms."""
+            pass
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

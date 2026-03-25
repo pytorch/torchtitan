@@ -34,15 +34,10 @@ class TestEmbedding(unittest.TestCase):
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = Embedding.Config()
-        emb = config.build(num_embeddings=50, embedding_dim=16)
-        object.__setattr__(
-            emb,
-            "_param_init",
-            {
-                "weight": partial(nn.init.trunc_normal_, std=0.02),
-            },
+        config = Embedding.Config(
+            param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)}
         )
+        emb = config.build(num_embeddings=50, embedding_dim=16)
 
         nn.init.zeros_(emb.weight)
         self.assertTrue(torch.all(emb.weight == 0))
@@ -51,15 +46,10 @@ class TestEmbedding(unittest.TestCase):
 
     def test_custom_init_std(self):
         """Embedding respects custom mean and std."""
-        config = Embedding.Config()
-        emb = config.build(num_embeddings=1000, embedding_dim=160)
-        object.__setattr__(
-            emb,
-            "_param_init",
-            {
-                "weight": partial(nn.init.normal_, mean=0.1, std=0.02),
-            },
+        config = Embedding.Config(
+            param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)}
         )
+        emb = config.build(num_embeddings=1000, embedding_dim=160)
 
         torch.manual_seed(42)
         emb.init_states()

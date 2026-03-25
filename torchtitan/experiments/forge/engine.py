@@ -152,6 +152,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_config.update_from_config(
             trainer_config=config,
         )
+        model_config.expand()
 
         with (
             torch.device("meta"),

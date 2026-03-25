@@ -58,25 +58,6 @@ from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops._c10d_functional.all_to_all_single.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
-}
-
 
 def parallelize_llama(
     model: Llama4Model,
@@ -143,17 +124,6 @@ def parallelize_llama(
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
-        if comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep  # noqa: F401
-
-            _op_sac_save_list.add(torch.ops.hybridep.dispatch.default)
-            _op_sac_save_list.add(torch.ops.hybridep.combine.default)
-        else:
-            import torchtitan.distributed.deepep  # noqa: F401
-
-            _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-            _op_sac_save_list.add(torch.ops.deepep.combine.default)
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(
             parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
@@ -183,17 +153,10 @@ def parallelize_llama(
         compile_config.enable and "model" in compile_config.components
     )
     if ac_config.mode != "none":
-        if ac_config.selective_ac_option == "op":
-            logger.info(
-                f"SAC save list contains {len(_op_sac_save_list)} ops: "
-                f"{sorted([str(op) for op in _op_sac_save_list])}"
-            )
         apply_ac(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
             base_folder=dump_folder,
         )
 
@@ -411,31 +374,31 @@ def apply_fsdp(
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
-        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
-        # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining edp_mesh
-        if transformer_block.moe_enabled and ep_degree > 1:
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = edp_mesh
+        # NOTE: In an MoE layer, we separately wrap the routed experts with FSDP:
+        # - The router and shared experts are sharded with the TransformerBlock.
+        # - The routed experts are sharded separately, using the EP mesh (if EP > 1)
+        #   or the default FSDP mesh (if EP = 1).
+        # - EP already shards the routed experts on dim 0 (num_experts).
+        #   When FSDP degree > num_experts, default dim-0 sharding causes
+        #   inefficiency due to padding, so we shard on dim-1 (hidden_dim) instead.
+        if transformer_block.moe_enabled:
+            if ep_degree > 1:
+                efsdp_config = fsdp_config.copy()
+                efsdp_config["mesh"] = edp_mesh
+                assert edp_mesh is not None
+                efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
+            else:
+                efsdp_config = fsdp_config
+                efsdp_ep_size = fsdp_config["mesh"].size()
 
-            # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
-            #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
-            #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
-            #       Even when EP is not used, we may still want to shard the experts
-            #       on non-0 dim. For now it may not be worth the complexity to support
-            #       shard_placement_fn on the outer TransformerBlock-level FSDP.
             _experts_shard_placement_fn = None
-            assert edp_mesh is not None
             assert hasattr(transformer_block, "moe")
-            if (
-                edp_mesh["efsdp"].size() * ep_degree
-                > transformer_block.moe.experts.num_experts
-            ):
+            if efsdp_ep_size > transformer_block.moe.experts.num_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(
                 transformer_block.moe.experts,
-                **fsdp_mod_ep_config,
+                **efsdp_config,
                 reshard_after_forward=reshard_after_forward,
                 shard_placement_fn=_experts_shard_placement_fn,
             )

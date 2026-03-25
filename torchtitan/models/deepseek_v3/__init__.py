@@ -12,14 +12,9 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import (
-    init_decoder_common,
-    init_feed_forward,
-    init_moe,
-)
+from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.param_init import depth_scaled_std, PerLayer
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 
@@ -32,54 +27,26 @@ __all__ = [
     "deepseekv3_configs",
 ]
 
-
-def _init_dsv3_attention(
-    attn: Attention, *, default: ParamInitializer, depth: ParamInitializer
-) -> None:
-    set_param_init(attn.wkv_a, {"weight": default})
-    set_param_init(attn.wkv_b, {"weight": default})
-    if attn.q_lora_rank > 0:
-        set_param_init(attn.wq_a, {"weight": default})
-        set_param_init(attn.wq_b, {"weight": default})
-        set_param_init(attn.q_norm, {"weight": nn.init.ones_})
-    else:
-        set_param_init(attn.wq, {"weight": default})
-    set_param_init(attn.wo, {"weight": depth})
-    set_param_init(attn.kv_norm, {"weight": nn.init.ones_})
+_LINEAR_INIT = {
+    "weight": partial(nn.init.trunc_normal_, std=0.02),
+    "bias": nn.init.zeros_,
+}
+_LINEAR_DEPTH_INIT = PerLayer(
+    lambda layer_id: {
+        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "bias": nn.init.zeros_,
+    }
+)
+_NORM_INIT = {"weight": nn.init.ones_}
+_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 
 
-def setup_deepseekv3_param_init(model: DeepSeekV3Model) -> None:
-    base_std: float = 0.02
-    default: ParamInitializer = partial(nn.init.trunc_normal_, std=base_std)
-    init_decoder_common(model, base_std=base_std)
-    for i, layer in enumerate(model.layers.values()):
-        std = base_std / (2 * (i + 1)) ** 0.5
-        depth: ParamInitializer = partial(nn.init.trunc_normal_, std=std)
-        _init_dsv3_attention(
-            layer.attention,  # pyrefly: ignore [bad-argument-type]
-            default=default,
-            depth=depth,
-        )
-        if layer.moe_enabled:
-            init_moe(
-                layer.moe,  # pyrefly: ignore [bad-argument-type]
-                default=default,
-                depth=depth,
-            )
-        else:
-            init_feed_forward(
-                layer.feed_forward,  # pyrefly: ignore [bad-argument-type]
-                default=default,
-                depth=depth,
-            )
-        set_param_init(
-            layer.attention_norm,  # pyrefly: ignore [bad-argument-type]
-            {"weight": nn.init.ones_},
-        )
-        set_param_init(
-            layer.ffn_norm,  # pyrefly: ignore [bad-argument-type]
-            {"weight": nn.init.ones_},
-        )
+def _output_linear_init(dim: int):
+    s = dim**-0.5
+    return {
+        "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
+        "bias": nn.init.zeros_,
+    }
 
 
 deepseekv3_configs = {
@@ -87,14 +54,13 @@ deepseekv3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=6,
-        param_init_fn=setup_deepseekv3_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(256)),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 hidden_dim=256,
                 num_experts=8,
@@ -103,11 +69,32 @@ deepseekv3_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     top_k=3,
                     score_func="softmax",
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=512,
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
             ),
             attention=Attention.Config(
-                q_norm=RMSNorm.Config(),
-                kv_norm=RMSNorm.Config(),
+                q_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                kv_norm=RMSNorm.Config(param_init=_NORM_INIT),
                 n_heads=16,
                 q_lora_rank=0,
                 kv_lora_rank=512,
@@ -115,10 +102,15 @@ deepseekv3_configs = {
                 qk_rope_head_dim=64,
                 v_head_dim=128,
                 mscale=0.70,
-                wq=Linear.Config(),
+                wq=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_a=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_b=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=1024,
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
         ),
         rope=RoPE.Config(
@@ -137,14 +129,13 @@ deepseekv3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=6,
-        param_init_fn=setup_deepseekv3_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(256)),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 hidden_dim=256,
                 num_experts=8,
@@ -153,11 +144,32 @@ deepseekv3_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     top_k=3,
                     score_func="softmax",
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=512,
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
             ),
             attention=Attention.Config(
-                q_norm=RMSNorm.Config(),
-                kv_norm=RMSNorm.Config(),
+                q_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                kv_norm=RMSNorm.Config(param_init=_NORM_INIT),
                 n_heads=16,
                 q_lora_rank=0,
                 kv_lora_rank=512,
@@ -167,10 +179,15 @@ deepseekv3_configs = {
                 mscale=0.70,
                 attn_backend="flex",
                 attn_mask_type="block_causal",
-                wq=Linear.Config(),
+                wq=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_a=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_b=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=1024,
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
         ),
         rope=RoPE.Config(
@@ -189,14 +206,13 @@ deepseekv3_configs = {
         vocab_size=102400,
         dim=2048,
         n_layers=27,
-        param_init_fn=setup_deepseekv3_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(2048)),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 hidden_dim=1408,
                 num_experts=64,
@@ -205,11 +221,32 @@ deepseekv3_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     top_k=6,
                     score_func="softmax",
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=2816,
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
             ),
             attention=Attention.Config(
-                q_norm=RMSNorm.Config(),
-                kv_norm=RMSNorm.Config(),
+                q_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                kv_norm=RMSNorm.Config(param_init=_NORM_INIT),
                 n_heads=16,
                 q_lora_rank=0,
                 kv_lora_rank=512,
@@ -219,10 +256,15 @@ deepseekv3_configs = {
                 mscale=0.70,
                 attn_backend="flex",
                 attn_mask_type="block_causal",
-                wq=Linear.Config(),
+                wq=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_a=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_b=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=10944,
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
         ),
         rope=RoPE.Config(
@@ -241,14 +283,13 @@ deepseekv3_configs = {
         vocab_size=102400,
         dim=5120,
         n_layers=60,
-        param_init_fn=setup_deepseekv3_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(5120)),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 hidden_dim=1536,
                 num_experts=160,
@@ -260,11 +301,32 @@ deepseekv3_configs = {
                     num_limited_groups=3,
                     score_func="softmax",
                     route_scale=16.0,
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=3072,
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
             ),
             attention=Attention.Config(
-                q_norm=RMSNorm.Config(),
-                kv_norm=RMSNorm.Config(),
+                q_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                kv_norm=RMSNorm.Config(param_init=_NORM_INIT),
                 n_heads=128,
                 q_lora_rank=1536,
                 kv_lora_rank=512,
@@ -273,11 +335,16 @@ deepseekv3_configs = {
                 v_head_dim=128,
                 attn_backend="flex",
                 attn_mask_type="block_causal",
-                wq_a=Linear.Config(),
-                wq_b=Linear.Config(),
+                wq_a=Linear.Config(param_init=_LINEAR_INIT),
+                wq_b=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_a=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_b=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=12288,
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
         ),
         rope=RoPE.Config(
@@ -296,14 +363,13 @@ deepseekv3_configs = {
         vocab_size=129280,
         dim=7168,
         n_layers=61,
-        param_init_fn=setup_deepseekv3_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(7168)),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=3,
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=MoE.Config(
                 hidden_dim=2048,
                 num_experts=256,
@@ -316,11 +382,32 @@ deepseekv3_configs = {
                     score_func="sigmoid",
                     route_norm=True,
                     route_scale=2.5,
+                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
+                ),
+                experts=GroupedExperts.Config(
+                    param_init=PerLayer(
+                        lambda layer_id: {
+                            "w1": partial(nn.init.trunc_normal_, std=0.02),
+                            "w2": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                            "w3": partial(
+                                nn.init.trunc_normal_,
+                                std=depth_scaled_std(0.02, layer_id),
+                            ),
+                        }
+                    )
+                ),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=2048,
+                    w1=Linear.Config(param_init=_LINEAR_INIT),
+                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
             ),
             attention=Attention.Config(
-                q_norm=RMSNorm.Config(),
-                kv_norm=RMSNorm.Config(),
+                q_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                kv_norm=RMSNorm.Config(param_init=_NORM_INIT),
                 n_heads=128,
                 q_lora_rank=1536,
                 kv_lora_rank=512,
@@ -329,11 +416,16 @@ deepseekv3_configs = {
                 v_head_dim=128,
                 attn_backend="flex",
                 attn_mask_type="block_causal",
-                wq_a=Linear.Config(),
-                wq_b=Linear.Config(),
+                wq_a=Linear.Config(param_init=_LINEAR_INIT),
+                wq_b=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_a=Linear.Config(param_init=_LINEAR_INIT),
+                wkv_b=Linear.Config(param_init=_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=18432,
+                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
         ),
         rope=RoPE.Config(

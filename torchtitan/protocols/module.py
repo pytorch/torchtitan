@@ -13,92 +13,40 @@ import torch.nn as nn
 
 from torchtitan.config import Configurable
 
-# Type alias for simple parameter initializers: (param) -> Any
-# Uses Any return type because nn.init.* functions return Tensor,
-# but the return value is always ignored by the dispatch layer.
-ParamInitializer = Callable[[nn.Parameter], Any]
 
+class PerLayer:
+    """Deferred ``param_init`` that varies per layer.
 
-class _SkipParamInitType:
-    """Sentinel type for modules whose parameters are managed externally.
-
-    Set ``module._param_init = SKIP_PARAM_INIT`` to tell the protocol
-    that this module's parameters are initialized by a parent or other
-    mechanism.  ``_init_self_parameters`` will return immediately without
-    raising.
+    Wraps a factory ``(layer_id) -> dict[str, Callable]``.  Set on a
+    Config's ``param_init`` field in the registry.  During ``expand()``,
+    resolved into a concrete dict for each layer.
     """
 
-    _instance: "_SkipParamInitType | None" = None
+    def __init__(
+        self, factory: Callable[[int], dict[str, Callable[[nn.Parameter], Any]]]
+    ) -> None:
+        self.factory = factory
 
-    def __new__(cls) -> "_SkipParamInitType":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __repr__(self) -> str:
-        return "SKIP_PARAM_INIT"
+    def resolve(self, layer_id: int) -> dict[str, Callable[[nn.Parameter], Any]]:
+        return self.factory(layer_id)
 
 
-SKIP_PARAM_INIT = _SkipParamInitType()
+def resolve_per_layer(cfg: Configurable.Config, layer_id: int) -> None:
+    """Walk a config tree and resolve all ``PerLayer`` param_init fields.
 
-
-def set_param_init(
-    module: "Module",
-    param_init: dict[str, ParamInitializer],
-) -> None:
-    """Set ``_param_init`` on *module*, raising if already set.
-
-    Enforces single-ownership: each module's parameter initialization
-    should be defined by exactly one source (either a parent recipe or
-    the module's own Config).
-
-    Args:
-        module: The Module instance to configure.
-        param_init: Mapping of local parameter names to init callables.
+    Mutates *cfg* in place (intended for use on a deep-copied config).
     """
-    if module._param_init is not None:
-        raise ValueError(
-            f"{type(module).__name__} already has _param_init set. "
-            f"Only one source (parent recipe or child Config) should define it."
-        )
-    object.__setattr__(module, "_param_init", param_init)
+    import dataclasses
 
-
-def validate_param_init(model: "Module") -> None:
-    """Validate that every Module with parameters has ``_param_init`` set.
-
-    Called from ``Module.Config.build()`` after the recipe function runs,
-    to catch missing modules/params at build time rather than at
-    ``init_states`` time.
-
-    Args:
-        model: The root Module to validate.
-
-    Raises:
-        ValueError: If a Module with parameters has no ``_param_init``,
-            or if ``_param_init`` is missing entries for some parameters.
-    """
-    for name, module in model.named_modules():
-        if not isinstance(module, Module):
+    for f in dataclasses.fields(cfg):
+        try:
+            val = getattr(cfg, f.name)
+        except AttributeError:
             continue
-        own_params = list(module.named_parameters(recurse=False))
-        if not own_params:
-            continue
-        if module._param_init is SKIP_PARAM_INIT:
-            continue
-        # Skip modules that override _init_self_parameters (e.g.,
-        # from_nn_module classes that delegate to reset_parameters).
-        if type(module)._init_self_parameters is not Module._init_self_parameters:
-            continue
-        if module._param_init is None:
-            raise ValueError(
-                f"param_init_fn missed module '{name}' " f"({type(module).__name__})"
-            )
-        param_init = module._param_init
-        assert isinstance(param_init, dict)  # narrowed above
-        for param_name, _ in own_params:
-            if param_name not in param_init:
-                raise ValueError(f"param_init_fn missed '{name}.{param_name}'")
+        if isinstance(val, PerLayer):
+            object.__setattr__(cfg, f.name, val.resolve(layer_id))
+        elif dataclasses.is_dataclass(val):
+            resolve_per_layer(val, layer_id)
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -111,39 +59,39 @@ class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
 
-    Initialization follows a two-phase pattern:
+    Initialization follows a three-phase pattern:
 
     1. ``init_states`` auto-recurses into children, then calls
        ``_init_self_parameters`` and ``_init_self_buffers`` on the current module.
-    2. ``_init_self_parameters`` iterates own parameters and applies each
-       entry from ``_param_init``.
-    3. ``_init_self_buffers`` is a no-op by default.
+    2. ``_init_self_parameters`` iterates own parameters and calls
+       ``_init_param`` for each one.
+    3. ``_init_param`` looks up the parameter name in ``_param_init`` (a dict).
+       Raises ``ValueError`` if ``_param_init`` is None or the name is missing.
+    4. ``_init_self_buffers`` is a no-op by default.
        Override for device-aware buffer init (e.g., RoPE, MoE).
 
-    Each module's ``_param_init`` is set by a **recipe function** stored on
-    ``Config.param_init_fn``, called from ``Config.build()`` after
-    construction.  The recipe walks the built model using attribute access
-    and calls ``set_param_init()`` on each module.
+    ``param_init`` is a ``dict[str, Callable]`` mapping parameter names to
+    init functions.  It is set on every sub-config in the model config
+    registry.  ``PerLayer`` markers are resolved during ``expand()``.
 
     Subclasses should NOT override ``init_states`` unless they need custom
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.
     """
 
-    # Runtime type: dict[str, ParamInitializer] | _SkipParamInitType | None
-    # Annotated as Any to avoid pyrefly union-widening in nn.Module.__getattr__.
-    _param_init: Any = None
+    _param_init: dict[str, Callable] | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        param_init_fn: Callable[..., None] | None = None
+        param_init: dict | PerLayer | None = None
 
-        def build(self, **kwargs: Any) -> "Module":
+        def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
+            # Assignment is done here rather than in Module.__init__ because
+            # there is no common Module.__init__ that all subclasses call.
             instance = Configurable.Config.build(self, **kwargs)
-            if self.param_init_fn is not None:
-                self.param_init_fn(instance)
-                validate_param_init(instance)
+            if self.param_init is not None:
+                instance._param_init = self.param_init
             return instance
 
     def init_states(
@@ -154,8 +102,6 @@ class Module(nn.Module, Configurable):
         """Initialize all states in the module tree.
 
         1. Recursively calls ``init_states`` on all direct Module children.
-           Non-Module wrappers (e.g., CheckpointWrapper) are traversed
-           to find Module descendants inside them.
         2. Calls ``self._init_self_parameters()``.
         3. Calls ``self._init_self_buffers(...)``.
 
@@ -163,47 +109,50 @@ class Module(nn.Module, Configurable):
             buffer_device: Device for buffer initialization (e.g., RoPE, MoE).
         """
 
-        # Use a stack (LIFO) to match the traversal order of the
-        # previous implementation, ensuring identical random state
-        # consumption and thus bit-wise identical initialization.
-        stack: list[nn.Module] = list(self.children())
-        while stack:
-            child = stack.pop()
+        def prefixed_children(module, prefix):
+            return [(f"{prefix}{n}", child) for n, child in module.named_children()]
+
+        queue = prefixed_children(self, "")
+        while queue:
+            child_name, child = queue.pop()
             if isinstance(child, Module):
                 child.init_states(buffer_device=buffer_device)
             else:
                 # Plain nn.Module (e.g., CheckpointWrapper, torch.compile
                 # wrappers) — look inside for Module descendants.
-                stack.extend(child.children())
+                queue.extend(prefixed_children(child, f"{child_name}."))
+
         self._init_self_parameters()
         self._init_self_buffers(buffer_device=buffer_device)
 
     def _init_self_parameters(self) -> None:
-        """Initialize this module's own parameters using ``_param_init``.
+        """Initialize this module's own parameters via ``_init_param``.
 
         Overridden internally by ``from_nn_module`` to delegate to
-        ``reset_parameters``.  Not intended for subclass override —
-        configure parameter initialization via recipe functions and
-        ``set_param_init()`` instead.
+        ``reset_parameters``. Not intended for subclass override — configure
+        parameter initialization via ``param_init`` on the Config instead.
         """
-        if self._param_init is SKIP_PARAM_INIT:
-            return
-        own_params = list(self.named_parameters(recurse=False))
-        if not own_params:
-            return
+        for name, param in self.named_parameters(recurse=False):
+            self._init_param(name, param)
+
+    def _init_param(self, name: str, param: nn.Parameter) -> None:
+        """Initialize a single parameter via dict lookup in ``_param_init``.
+
+        Raises ``ValueError`` if ``_param_init`` is None or the name is missing.
+        """
         if self._param_init is None:
             raise ValueError(
-                f"{type(self).__name__} has parameters but no _param_init. "
-                f"Ensure the model's param_init_fn covers all modules."
+                f"No param_init found for parameter '{name}' in "
+                f"{type(self).__name__}. Set param_init on this "
+                f"module's Config or use skip_param_init."
             )
-        param_init = self._param_init
-        assert isinstance(param_init, dict)  # narrowed above
-        for name, param in own_params:
-            if name not in param_init:
-                raise ValueError(
-                    f"No initializer for '{name}' in {type(self).__name__}."
-                )
-            param_init[name](param)
+        if name not in self._param_init:
+            raise ValueError(
+                f"No initializer for parameter '{name}' in "
+                f"{type(self).__name__}. "
+                f"Available: {list(self._param_init.keys())}"
+            )
+        self._param_init[name](param)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.

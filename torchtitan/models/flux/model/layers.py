@@ -6,7 +6,7 @@
 
 # imported from black-forest-labs/FLUX
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from einops import rearrange
@@ -118,10 +118,16 @@ class MLPEmbedder(Module):
 
 
 class QKNorm(Module):
-    def __init__(self, *, dim: int):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        query_norm: RMSNorm.Config
+        key_norm: RMSNorm.Config
+        dim: int = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.query_norm = RMSNorm.Config().build(normalized_shape=dim)
-        self.key_norm = RMSNorm.Config().build(normalized_shape=dim)
+        self.query_norm = config.query_norm.build(normalized_shape=config.dim)
+        self.key_norm = config.key_norm.build(normalized_shape=config.dim)
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         q = self.query_norm(q)
@@ -130,16 +136,22 @@ class QKNorm(Module):
 
 
 class SelfAttention(Module):
-    def __init__(self, *, dim: int, num_heads: int = 8, qkv_bias: bool = False):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        qkv: Linear.Config
+        proj: Linear.Config
+        norm: QKNorm.Config
+        num_heads: int = 8
+        qkv_bias: bool = False
+        dim: int = field(init=False)
 
-        self.qkv = Linear.Config(bias=qkv_bias).build(
-            in_features=dim, out_features=dim * 3
-        )
-        self.norm = QKNorm(dim=head_dim)
-        self.proj = Linear.Config(bias=True).build(in_features=dim, out_features=dim)
+    def __init__(self, config: Config):
+        super().__init__()
+        self.num_heads = config.num_heads
+        head_dim = config.dim // config.num_heads
+        self.qkv = config.qkv.build(in_features=config.dim, out_features=config.dim * 3)
+        self.norm = config.norm.build(dim=head_dim)
+        self.proj = config.proj.build(in_features=config.dim, out_features=config.dim)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
@@ -161,12 +173,18 @@ class ModulationOut:
 
 
 class Modulation(Module):
-    def __init__(self, *, dim: int, double: bool):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        lin: Linear.Config
+        dim: int = field(init=False)
+        double: bool = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.is_double = double
-        self.multiplier = 6 if double else 3
-        self.lin = Linear.Config(bias=True).build(
-            in_features=dim, out_features=self.multiplier * dim
+        self.is_double = config.double
+        self.multiplier = 6 if config.double else 3
+        self.lin = config.lin.build(
+            in_features=config.dim, out_features=self.multiplier * config.dim
         )
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
@@ -185,6 +203,10 @@ class DoubleStreamBlock(Module):
     class Config(Module.Config):
         hidden_size: int
         num_heads: int
+        img_mod: Modulation.Config
+        txt_mod: Modulation.Config
+        img_attn: SelfAttention.Config
+        txt_attn: SelfAttention.Config
         img_mlp_in: Linear.Config
         img_mlp_out: Linear.Config
         txt_mlp_in: Linear.Config
@@ -198,13 +220,11 @@ class DoubleStreamBlock(Module):
         mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.img_mod = Modulation(dim=config.hidden_size, double=True)
+        self.img_mod = config.img_mod.build(dim=config.hidden_size, double=True)
         self.img_norm1 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.img_attn = SelfAttention(
-            dim=config.hidden_size, num_heads=config.num_heads, qkv_bias=config.qkv_bias
-        )
+        self.img_attn = config.img_attn.build(dim=config.hidden_size)
 
         self.img_norm2 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
@@ -219,13 +239,11 @@ class DoubleStreamBlock(Module):
             ),
         )
 
-        self.txt_mod = Modulation(dim=config.hidden_size, double=True)
+        self.txt_mod = config.txt_mod.build(dim=config.hidden_size, double=True)
         self.txt_norm1 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.txt_attn = SelfAttention(
-            dim=config.hidden_size, num_heads=config.num_heads, qkv_bias=config.qkv_bias
-        )
+        self.txt_attn = config.txt_attn.build(dim=config.hidden_size)
 
         self.txt_norm2 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
@@ -303,6 +321,8 @@ class SingleStreamBlock(Module):
         num_heads: int
         linear1: Linear.Config
         linear2: Linear.Config
+        modulation: Modulation.Config
+        norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
 
@@ -325,7 +345,7 @@ class SingleStreamBlock(Module):
             out_features=config.hidden_size,
         )
 
-        self.norm = QKNorm(dim=head_dim)
+        self.norm = config.norm.build(dim=head_dim)
 
         self.hidden_size = config.hidden_size
         self.pre_norm = LayerNorm(
@@ -333,7 +353,7 @@ class SingleStreamBlock(Module):
         )
 
         self.mlp_act = GELU(approximate="tanh")
-        self.modulation = Modulation(dim=config.hidden_size, double=False)
+        self.modulation = config.modulation.build(dim=config.hidden_size, double=False)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:

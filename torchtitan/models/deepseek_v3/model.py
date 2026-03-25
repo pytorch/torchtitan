@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
@@ -39,7 +40,9 @@ class Attention(BaseAttention):
         wq: Linear.Config | None = None
         wq_a: Linear.Config | None = None
         wq_b: Linear.Config | None = None
-        linear_bias: bool = False
+        wkv_a: Linear.Config
+        wkv_b: Linear.Config
+        wo: Linear.Config
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
         q_norm: RMSNorm.Config
@@ -65,13 +68,8 @@ class Attention(BaseAttention):
         self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
 
-        linear_config = Linear.Config(bias=config.linear_bias)
         if self.q_lora_rank == 0:
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
-            assert config.wq.bias == config.linear_bias, (
-                f"wq.bias ({config.wq.bias}) must match "
-                f"linear_bias ({config.linear_bias})"
-            )
             self.wq = config.wq.build(
                 in_features=self.dim, out_features=self.n_heads * self.qk_head_dim
             )
@@ -79,14 +77,6 @@ class Attention(BaseAttention):
             assert (
                 config.wq_a is not None and config.wq_b is not None
             ), "wq_a and wq_b are required when q_lora_rank > 0"
-            assert config.wq_a.bias == config.linear_bias, (
-                f"wq_a.bias ({config.wq_a.bias}) must match "
-                f"linear_bias ({config.linear_bias})"
-            )
-            assert config.wq_b.bias == config.linear_bias, (
-                f"wq_b.bias ({config.wq_b.bias}) must match "
-                f"linear_bias ({config.linear_bias})"
-            )
             self.wq_a = config.wq_a.build(
                 in_features=self.dim, out_features=self.q_lora_rank
             )
@@ -95,16 +85,16 @@ class Attention(BaseAttention):
                 in_features=self.q_lora_rank,
                 out_features=self.n_heads * self.qk_head_dim,
             )
-        self.wkv_a = linear_config.build(
+        self.wkv_a = config.wkv_a.build(
             in_features=self.dim,
             out_features=self.kv_lora_rank + self.qk_rope_head_dim,
         )
         self.kv_norm = config.kv_norm.build(normalized_shape=self.kv_lora_rank)
-        self.wkv_b = linear_config.build(
+        self.wkv_b = config.wkv_b.build(
             in_features=self.kv_lora_rank,
             out_features=self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
         )
-        self.wo = linear_config.build(
+        self.wo = config.wo.build(
             in_features=self.n_heads * self.v_head_dim, out_features=self.dim
         )
         self.softmax_scale = self.qk_head_dim**-0.5
@@ -245,14 +235,11 @@ class DeepSeekV3Model(Decoder):
                 logger.warning(
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
-            # Sync rope max_seq_len
-            import dataclasses as _dc
-
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             # Sync rope fields to attention
             assert isinstance(self.layer.attention, Attention.Config)
-            self.layer.attention = _dc.replace(
+            self.layer.attention = dataclasses.replace(
                 self.layer.attention,
                 rope_max_seq_len=seq_len,
                 rope_factor=self.rope.rope_factor,
@@ -285,10 +272,18 @@ class DeepSeekV3Model(Decoder):
 
                 init_kwargs = {
                     f.name: getattr(self.layer.moe, f.name)
-                    for f in _dc.fields(self.layer.moe)
+                    for f in dataclasses.fields(self.layer.moe)
                     if f.init
                 }
                 self.layer.moe = DeepEPMoE.Config(**init_kwargs)
+
+        def _expand_layer(self, layer_id, layer_cfg):
+            from dataclasses import replace
+
+            assert isinstance(layer_cfg, DeepSeekV3TransformerBlock.Config)
+            if layer_id >= layer_cfg.n_dense_layers:
+                return replace(layer_cfg, feed_forward=None)
+            return replace(layer_cfg, moe=None)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

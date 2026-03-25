@@ -31,9 +31,8 @@ class TestRMSNorm(unittest.TestCase):
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = RMSNorm.Config()
+        config = RMSNorm.Config(param_init={"weight": nn.init.ones_})
         norm = config.build(normalized_shape=16)
-        object.__setattr__(norm, "_param_init", {"weight": nn.init.ones_})
 
         nn.init.zeros_(norm.weight)
         self.assertTrue(torch.all(norm.weight == 0))

@@ -248,6 +248,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_config.update_from_config(
             trainer_config=config,
         )
+        # Expand config tree: create per-layer configs and assign param_init
+        model_config.expand()
         self.model_config = model_config
 
         logger.info(
@@ -276,7 +278,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # converter, which should guanrantee Module protocol.
         # On the other hand, some parallelism wrappers don't
         # have this guanrantee, e.g., fully_shard.
-        model.verify_module_protocol()  # pyrefly: ignore [not-callable]
+        model.verify_module_protocol()
 
         # Check if any converter uses quantization (FP8, MX, etc.)
         has_quantization = any(

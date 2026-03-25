@@ -83,7 +83,20 @@ class Configurable:
                     # field(init=False) not yet set, ignore this field.
                     continue
                 if callable(val) and not dataclasses.is_dataclass(val):
-                    # Skip non-serializable callables (e.g., param_init_fn).
+                    # Skip non-serializable callables.
+                    continue
+                if (
+                    isinstance(val, dict)
+                    and val
+                    and any(callable(v) for v in val.values())
+                ):
+                    # Skip param_init dicts (contain callables).
+                    continue
+                if hasattr(val, "resolve"):
+                    # Skip PerLayer markers (not serializable).
+                    continue
+                if isinstance(val, list):
+                    # Skip expanded layer lists (large, not user-facing).
                     continue
                 if hasattr(val, "to_dict"):
                     result[f.name] = val.to_dict()

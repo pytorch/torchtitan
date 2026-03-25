@@ -52,6 +52,28 @@ class Projector(Module):
         return x_NLD
 
 
+def _set_param_init_recursive(module: nn.Module) -> None:
+    """Set param_init on all Module descendants that have Linear or norm children.
+
+    Walks the module tree and assigns xavier_uniform for weights, zeros for biases,
+    and ones for norm weights. This is used for experiment modules that don't use
+    the Config.expand() system.
+    """
+    for child in module.modules():
+        if isinstance(child, Module) and child._param_init is None:
+            has_params = any(True for _ in child.parameters(recurse=False))
+            if has_params:
+                # Check if this is a norm-like module
+                names = [n for n, _ in child.named_parameters(recurse=False)]
+                if names == ["weight"] and hasattr(child, "normalized_shape"):
+                    child._param_init = {"weight": nn.init.ones_}
+                else:
+                    child._param_init = {
+                        "weight": nn.init.xavier_uniform_,
+                        "bias": nn.init.zeros_,
+                    }
+
+
 class Llama3Siglip2Transformer(Llama3):
     @dataclass(kw_only=True, slots=True)
     class Config(Llama3.Config):
@@ -62,6 +84,11 @@ class Llama3Siglip2Transformer(Llama3):
         self.config = config
         self.encoder = VisionTransformer(config.encoder)
         self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
+
+        # Set param_init on encoder and projector sub-modules.
+        # These are experiment-level modules that don't use Config.expand().
+        _set_param_init_recursive(self.encoder)
+        _set_param_init_recursive(self.projector)
 
     def get_attention_masks(
         self,

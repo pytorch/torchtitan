@@ -23,6 +23,9 @@ class FakeModel(BaseModel):
     class Config(BaseModel.Config):
         hidden: int = 8
 
+        def expand(self):
+            pass
+
         def update_from_config(self, *, trainer_config, **kwargs):
             pass
 

@@ -11,14 +11,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.module import (
-    Module,
-    ModuleDict,
-    ModuleList,
-    Sequential,
-    set_param_init,
-    SKIP_PARAM_INIT,
-)
+from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 
 
 class TestModuleInitStates(unittest.TestCase):
@@ -40,12 +33,13 @@ class TestModuleInitStates(unittest.TestCase):
         """init_states uses param_init to initialize parameters."""
 
         class TestModel(Module):
-            def __init__(self):
+            def __init__(self, param_init):
                 super().__init__()
+                self._param_init = param_init
                 self.weight = nn.Parameter(torch.empty(4))
 
-        m = TestModel()
-        object.__setattr__(m, "_param_init", {"weight": nn.init.zeros_})
+        param_init = {"weight": nn.init.zeros_}
+        m = TestModel(param_init)
         m.init_states()
         self.assertTrue(torch.all(m.weight == 0))
 
@@ -63,31 +57,9 @@ class TestModuleInitStates(unittest.TestCase):
                 self.child = Child()
 
         m = Parent()
-        set_param_init(m.child, {"weight": nn.init.zeros_})
+        m.child._param_init = {"weight": nn.init.zeros_}
         m.init_states()
         self.assertTrue(torch.all(m.child.weight == 0))
-
-    def test_each_module_needs_own_param_init(self):
-        """Each module must have its own _param_init, no delegation."""
-
-        class Leaf(Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = nn.Parameter(torch.empty(4, 3))
-
-        class Root(Module):
-            def __init__(self):
-                super().__init__()
-                self.leaf = Leaf()
-
-        m = Root()
-        # Without setting leaf's _param_init, init_states should raise
-        with self.assertRaises(ValueError):
-            m.init_states()
-        # After setting it, should work
-        set_param_init(m.leaf, {"weight": nn.init.ones_})
-        m.init_states()
-        self.assertTrue(torch.all(m.leaf.weight == 1))
 
     def test__init_self_buffers_called(self):
         """_init_self_buffers is called with kwargs."""
@@ -283,79 +255,37 @@ class TestContainerInitStates(unittest.TestCase):
         self.assertIsInstance(Sequential(), Module)
 
 
-class TestConfigBuildWithParamInitFn(unittest.TestCase):
-    """Tests for Config.build() calling param_init_fn and validating."""
+class TestConfigBuildPropagatesParamInit(unittest.TestCase):
+    """Tests for Config.build() propagating param_init to the instance."""
 
-    def test_param_init_fn_called_on_build(self):
-        """Config.build() calls param_init_fn and validates."""
+    def test_param_init_on_instance(self):
+        """build() sets _param_init on the constructed instance."""
+        param_init = {"weight": nn.init.zeros_}
+        config = Linear.Config(param_init=param_init)
+        linear = config.build(in_features=4, out_features=4)
+        self.assertTrue(hasattr(linear, "_param_init"))
+        self.assertIs(linear._param_init, param_init)
 
-        class SimpleModel(Module):
-            @dataclass(kw_only=True, slots=True)
-            class Config(Module.Config):
-                pass
-
-            def __init__(self, config):
-                super().__init__()
-                self.linear = Linear.Config().build(in_features=4, out_features=4)
-
-        def recipe(model):
-            set_param_init(model.linear, {"weight": nn.init.zeros_})
-
-        config = SimpleModel.Config(param_init_fn=recipe)
-        model = config.build()
-        self.assertIsNotNone(model.linear._param_init)
-        self.assertIn("weight", model.linear._param_init)
-
-    def test_no_param_init_fn_by_default(self):
-        """build() without param_init_fn leaves _param_init as None."""
+    def test_no_param_init_by_default(self):
+        """build() without param_init leaves it as None."""
         config = Linear.Config()
         linear = config.build(in_features=4, out_features=4)
         self.assertIsNone(linear._param_init)
 
-    def test_validate_catches_missing(self):
-        """validate_param_init raises for modules missed by recipe."""
+    def test_init_states_uses_config_param_init(self):
+        """init_states uses param_init from config when available."""
 
-        class SimpleModel(Module):
-            @dataclass(kw_only=True, slots=True)
-            class Config(Module.Config):
-                pass
-
-            def __init__(self, config):
-                super().__init__()
-                self.linear = Linear.Config().build(in_features=4, out_features=4)
-
-        def bad_recipe(model):
-            pass  # doesn't set anything
-
-        config = SimpleModel.Config(param_init_fn=bad_recipe)
-        with self.assertRaises(ValueError):
-            config.build()
-
-    def test_skip_param_init_sentinel(self):
-        """SKIP_PARAM_INIT prevents _init_self_parameters from raising."""
-
-        class Child(Module):
+        class Parent(Module):
             def __init__(self):
                 super().__init__()
-                self.weight = nn.Parameter(torch.ones(4))
+                self.linear = Linear.Config(param_init={"weight": nn.init.ones_}).build(
+                    in_features=4, out_features=4
+                )
 
-        m = Child()
-        object.__setattr__(m, "_param_init", SKIP_PARAM_INIT)
-        m.init_states()  # should not raise
-        self.assertTrue(torch.all(m.weight == 1))  # weight unchanged
-
-    def test_set_param_init_raises_on_double_set(self):
-        """set_param_init raises if _param_init already set."""
-
-        class Child(Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = nn.Parameter(torch.empty(4))
-
-        m = Child()
-        set_param_init(m, {"weight": nn.init.zeros_})
-        with self.assertRaises(ValueError):
-            set_param_init(m, {"weight": nn.init.ones_})
+        m = Parent()
+        nn.init.zeros_(m.linear.weight)
+        m.init_states()
+        self.assertTrue(torch.all(m.linear.weight == 1))
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):

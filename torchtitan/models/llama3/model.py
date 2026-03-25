@@ -6,6 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -30,7 +31,7 @@ class Llama3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
+        pass
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
@@ -67,6 +68,7 @@ class Llama3Model(Decoder):
         dim: int = 4096
         n_layers: int = 32
         vocab_size: int = 128256
+        enable_weight_tying: bool = False
         layer: TransformerBlock.Config
 
         def update_from_config(
@@ -83,9 +85,7 @@ class Llama3Model(Decoder):
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
             # Sync rope max_seq_len
-            import dataclasses as _dc
-
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if (
                 parallelism.context_parallel_degree > 1
@@ -111,6 +111,11 @@ class Llama3Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
+            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
+                raise NotImplementedError(
+                    "Weight tying is not supported with Pipeline Parallel."
+                )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -121,3 +126,24 @@ class Llama3Model(Decoder):
                 2 * (self.dim // self.layer.attention.n_heads),
                 seq_len,
             )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.enable_weight_tying = config.enable_weight_tying
+
+        if self.enable_weight_tying:
+            self.tok_embeddings.weight = self.output.weight
+
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
+        if self.enable_weight_tying:
+            # Re-tie weights before parameter init so that tok_embeddings.weight
+            # (skipped by skip_param_init) and output.weight point to the same
+            # tensor after output is initialized.
+            assert self.tok_embeddings is not None and self.output is not None
+            self.tok_embeddings.weight = self.output.weight
+
+        super().init_states(buffer_device=buffer_device)

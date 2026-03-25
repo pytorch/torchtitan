@@ -60,5 +60,16 @@ class BaseModel(Module):
             pass
 
         @abstractmethod
+        def expand(self) -> None:
+            """Expand the config tree to mirror the module tree.
+
+            Called by the trainer after ``update_from_config()``, before
+            ``build()``.  Populates per-layer configs, resolves structural
+            decisions (MoE vs FFN, iRoPE, etc.), and assigns ``param_init``
+            to every sub-config so that each module has its own initializer.
+            """
+            pass
+
+        @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass

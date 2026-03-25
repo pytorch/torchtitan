@@ -364,6 +364,7 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config = field(
             default_factory=TokenChoiceTopKRouter.Config
         )
+        shared_experts: FeedForward.Config | None = None
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
@@ -378,10 +379,8 @@ class MoE(Module):
             num_experts=num_experts, top_k=config.router.top_k
         )
         self.shared_experts = (
-            FeedForward.Config(
-                hidden_dim=hidden_dim * config.num_shared_experts,
-            ).build(dim=dim)
-            if config.num_shared_experts > 0
+            config.shared_experts.build(dim=dim)
+            if config.shared_experts is not None
             else None
         )
         self.score_before_experts = config.score_before_experts
@@ -489,13 +488,8 @@ class MoE(Module):
         out = self.shared_experts(x) if self.shared_experts is not None else None
 
         # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(  # pyrefly: ignore [no-matching-overload]
-            (
-                bs  # pyrefly: ignore [unsupported-operation]
-                * slen
-                * self.router.top_k,
-                dim,
-            ),
+        routed_output_unsorted = torch.zeros(
+            (bs * slen * self.router.top_k, dim),
             dtype=routed_output.dtype,
             device=routed_output.device,
         )
@@ -523,14 +517,10 @@ class MoE(Module):
         assert isinstance(buffer_device, torch.device)
 
         with torch.device(buffer_device):
-            self.tokens_per_expert = (
-                torch.zeros(  # pyrefly: ignore [no-matching-overload]
-                    self.experts.num_experts, dtype=torch.float32
-                )
+            self.tokens_per_expert = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
-                self.expert_bias = (
-                    torch.zeros(  # pyrefly: ignore [no-matching-overload]
-                        self.experts.num_experts, dtype=torch.float32
-                    )
+                self.expert_bias = torch.zeros(
+                    self.experts.num_experts, dtype=torch.float32
                 )

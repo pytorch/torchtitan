@@ -141,6 +141,25 @@ class Llama4Model(Decoder):
         vocab_size: int = 202048
         layer: TransformerBlock.Config
 
+        def _expand_layer(self, layer_id, layer_cfg):
+            from dataclasses import replace
+
+            assert isinstance(layer_cfg, Llama4TransformerBlock.Config)
+
+            # iRoPE: override use_rope=False on certain layers
+            if layer_cfg.every_n_layers_nope is not None:
+                if layer_id % layer_cfg.every_n_layers_nope == 0:
+                    layer_cfg = replace(
+                        layer_cfg,
+                        attention=replace(layer_cfg.attention, use_rope=False),
+                    )
+
+            # MoE interleaving: keep only the appropriate FFN type per layer
+            moe_enabled = (layer_id + 1) % layer_cfg.interleave_moe_layer_step == 0
+            if moe_enabled:
+                return replace(layer_cfg, feed_forward=None)
+            return replace(layer_cfg, moe=None)
+
         def update_from_config(
             self,
             *,

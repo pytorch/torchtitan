@@ -4,17 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass, field
+from functools import partial
 
 import torch
 from torch import nn, Tensor
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
     MLPEmbedder,
+    Modulation,
+    QKNorm,
+    SelfAttention,
     SingleStreamBlock,
     timestep_embedding,
 )
@@ -76,6 +82,24 @@ class FluxModel(BaseModel):
                 img_mlp_out=Linear.Config(bias=True),
                 txt_mlp_in=Linear.Config(bias=True),
                 txt_mlp_out=Linear.Config(bias=True),
+                img_mod=Modulation.Config(lin=Linear.Config(bias=True)),
+                txt_mod=Modulation.Config(lin=Linear.Config(bias=True)),
+                img_attn=SelfAttention.Config(
+                    qkv=Linear.Config(bias=True),
+                    proj=Linear.Config(bias=True),
+                    norm=QKNorm.Config(
+                        query_norm=RMSNorm.Config(),
+                        key_norm=RMSNorm.Config(),
+                    ),
+                ),
+                txt_attn=SelfAttention.Config(
+                    qkv=Linear.Config(bias=True),
+                    proj=Linear.Config(bias=True),
+                    norm=QKNorm.Config(
+                        query_norm=RMSNorm.Config(),
+                        key_norm=RMSNorm.Config(),
+                    ),
+                ),
                 hidden_size=3072,
                 num_heads=24,
                 mlp_ratio=4.0,
@@ -86,6 +110,11 @@ class FluxModel(BaseModel):
             default_factory=lambda: SingleStreamBlock.Config(
                 linear1=Linear.Config(bias=True),
                 linear2=Linear.Config(bias=True),
+                modulation=Modulation.Config(lin=Linear.Config(bias=True)),
+                norm=QKNorm.Config(
+                    query_norm=RMSNorm.Config(),
+                    key_norm=RMSNorm.Config(),
+                ),
                 hidden_size=3072,
                 num_heads=24,
                 mlp_ratio=4.0,
@@ -101,8 +130,174 @@ class FluxModel(BaseModel):
             )
         )
 
+        # Populated by expand(); one config per block.
+        double_blocks_expanded: list = field(default_factory=list)
+        single_blocks_expanded: list = field(default_factory=list)
+
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass
+
+        def expand(self) -> None:
+            """Expand the config tree and assign per-module param_init.
+
+            Called after ``update_from_config()``, before ``build()``.
+            Assigns param_init to every sub-config so each module has its own
+            initializer without any parent-walk or regex matching.
+
+            Flux DiT-style param_init:
+            - Modulation weights: zero-init for stable training start
+            - LastLayer output weights: zero-init for output stability
+            - MLPEmbedder (time_in, vector_in): normal(std=0.02)
+            - RMSNorm weights (QKNorm children): ones
+            - Default: xavier_uniform for remaining weights
+            - Default: zeros for all biases
+            """
+            # --- img_in / txt_in ---
+            self.img_in = dataclasses.replace(
+                self.img_in,
+                param_init={"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_},
+            )
+            self.txt_in = dataclasses.replace(
+                self.txt_in,
+                param_init={"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_},
+            )
+
+            # --- time_in (MLPEmbedder) ---
+            normal_02 = {
+                "weight": partial(nn.init.normal_, std=0.02),
+                "bias": nn.init.zeros_,
+            }
+            self.time_in_config = dataclasses.replace(
+                self.time_in_config,
+                in_layer=dataclasses.replace(
+                    self.time_in_config.in_layer,
+                    param_init=normal_02,
+                ),
+                out_layer=dataclasses.replace(
+                    self.time_in_config.out_layer,
+                    param_init=normal_02,
+                ),
+            )
+
+            # --- vector_in (MLPEmbedder) ---
+            self.vector_in_config = dataclasses.replace(
+                self.vector_in_config,
+                in_layer=dataclasses.replace(
+                    self.vector_in_config.in_layer,
+                    param_init=normal_02,
+                ),
+                out_layer=dataclasses.replace(
+                    self.vector_in_config.out_layer,
+                    param_init=normal_02,
+                ),
+            )
+
+            # --- double blocks ---
+            zero_linear = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
+            xavier_linear = {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_}
+
+            double_blocks_expanded = []
+            for _ in range(self.depth):
+                cfg = self._expand_double_block_config(
+                    self.double_block_config, zero_linear, xavier_linear
+                )
+                double_blocks_expanded.append(cfg)
+            self.double_blocks_expanded = double_blocks_expanded
+
+            # --- single blocks ---
+            single_blocks_expanded = []
+            for _ in range(self.depth_single_blocks):
+                cfg = self._expand_single_block_config(
+                    self.single_block_config, zero_linear, xavier_linear
+                )
+                single_blocks_expanded.append(cfg)
+            self.single_blocks_expanded = single_blocks_expanded
+
+            # --- final_layer ---
+            self.final_layer_config = dataclasses.replace(
+                self.final_layer_config,
+                linear=dataclasses.replace(
+                    self.final_layer_config.linear,
+                    param_init=zero_linear,
+                ),
+                adaln_linear=dataclasses.replace(
+                    self.final_layer_config.adaln_linear,
+                    param_init=zero_linear,
+                ),
+            )
+
+        @staticmethod
+        def _make_qknorm_config(cfg: QKNorm.Config) -> QKNorm.Config:
+            """Return a QKNorm.Config with ones init on both sub-norms."""
+            return dataclasses.replace(
+                cfg,
+                query_norm=dataclasses.replace(
+                    cfg.query_norm, param_init={"weight": nn.init.ones_}
+                ),
+                key_norm=dataclasses.replace(
+                    cfg.key_norm, param_init={"weight": nn.init.ones_}
+                ),
+            )
+
+        @staticmethod
+        def _make_mod_config(cfg: Modulation.Config, zero_linear) -> Modulation.Config:
+            """Return a Modulation.Config with zero-init on its linear."""
+            return dataclasses.replace(
+                cfg,
+                lin=dataclasses.replace(cfg.lin, param_init=zero_linear),
+            )
+
+        @staticmethod
+        def _make_attn_config(
+            cfg: SelfAttention.Config, xavier_linear
+        ) -> SelfAttention.Config:
+            """Return a SelfAttention.Config with xavier_uniform on qkv/proj."""
+            return dataclasses.replace(
+                cfg,
+                qkv=dataclasses.replace(cfg.qkv, param_init=xavier_linear),
+                proj=dataclasses.replace(cfg.proj, param_init=xavier_linear),
+                norm=FluxModel.Config._make_qknorm_config(cfg.norm),
+            )
+
+        def _expand_double_block_config(
+            self,
+            cfg: DoubleStreamBlock.Config,
+            zero_linear,
+            xavier_linear,
+        ) -> DoubleStreamBlock.Config:
+            return dataclasses.replace(
+                cfg,
+                img_mod=self._make_mod_config(cfg.img_mod, zero_linear),
+                txt_mod=self._make_mod_config(cfg.txt_mod, zero_linear),
+                img_attn=self._make_attn_config(cfg.img_attn, xavier_linear),
+                txt_attn=self._make_attn_config(cfg.txt_attn, xavier_linear),
+                img_mlp_in=dataclasses.replace(
+                    cfg.img_mlp_in, param_init=xavier_linear
+                ),
+                img_mlp_out=dataclasses.replace(
+                    cfg.img_mlp_out, param_init=xavier_linear
+                ),
+                txt_mlp_in=dataclasses.replace(
+                    cfg.txt_mlp_in, param_init=xavier_linear
+                ),
+                txt_mlp_out=dataclasses.replace(
+                    cfg.txt_mlp_out, param_init=xavier_linear
+                ),
+            )
+
+        def _expand_single_block_config(
+            self,
+            cfg: SingleStreamBlock.Config,
+            zero_linear,
+            xavier_linear,
+        ) -> SingleStreamBlock.Config:
+            return dataclasses.replace(
+                cfg,
+                linear1=dataclasses.replace(cfg.linear1, param_init=xavier_linear),
+                linear2=dataclasses.replace(cfg.linear2, param_init=xavier_linear),
+                modulation=self._make_mod_config(cfg.modulation, zero_linear),
+                norm=self._make_qknorm_config(cfg.norm),
+            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -142,16 +337,26 @@ class FluxModel(BaseModel):
             in_features=config.context_in_dim, out_features=self.hidden_size
         )
 
-        self.double_blocks = ModuleList(
-            [config.double_block_config.build() for _ in range(config.depth)]
-        )
+        if config.double_blocks_expanded:
+            self.double_blocks = ModuleList(
+                [cfg.build() for cfg in config.double_blocks_expanded]
+            )
+        else:
+            self.double_blocks = ModuleList(
+                [config.double_block_config.build() for _ in range(config.depth)]
+            )
 
-        self.single_blocks = ModuleList(
-            [
-                config.single_block_config.build()
-                for _ in range(config.depth_single_blocks)
-            ]
-        )
+        if config.single_blocks_expanded:
+            self.single_blocks = ModuleList(
+                [cfg.build() for cfg in config.single_blocks_expanded]
+            )
+        else:
+            self.single_blocks = ModuleList(
+                [
+                    config.single_block_config.build()
+                    for _ in range(config.depth_single_blocks)
+                ]
+            )
 
         self.final_layer = config.final_layer_config.build()
 

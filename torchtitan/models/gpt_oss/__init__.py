@@ -12,12 +12,12 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.param_init import depth_scaled_std, PerLayer
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import ParamInitializer, set_param_init
 
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
-from .moe import GptOssMoE
+from .moe import GptOssGroupedExperts, GptOssMoE
 from .parallelize import parallelize_gptoss
 from .state_dict_adapter import GptOssStateDictAdapter
 
@@ -27,68 +27,50 @@ __all__ = [
     "gptoss_configs",
 ]
 
+_LINEAR_DEPTH_INIT = PerLayer(
+    lambda layer_id: {
+        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "bias": nn.init.zeros_,
+    }
+)
+_NORM_INIT = {"weight": nn.init.ones_}
+# GPT-OSS uses std=0.02 for embeddings (model-specific)
+_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=0.02)}
 
-def setup_gptoss_param_init(model: GptOssModel) -> None:
-    base_std: float = 0.02
-    dim: int = model.config.dim
-    final_out_std = dim**-0.5
-    # GPT-OSS uses std=0.02 for tok_embeddings (not std=1.0 like other decoders)
-    set_param_init(
-        model.tok_embeddings, {"weight": partial(nn.init.normal_, std=base_std)}
-    )
-    set_param_init(model.norm, {"weight": nn.init.ones_})
-    set_param_init(
-        model.output,
-        {
-            "weight": partial(
-                nn.init.trunc_normal_,
-                std=final_out_std,
-                a=-3 * final_out_std,
-                b=3 * final_out_std,
-            )
-        },
-    )
-    for i, layer in enumerate(model.layers.values()):
-        std = base_std / (2 * (i + 1)) ** 0.5
-        depth: ParamInitializer = partial(nn.init.trunc_normal_, std=std)
-        # GPT-OSS: all attention linears + sinks are depth-scaled
-        for proj in (
-            layer.attention.wq,  # pyrefly: ignore [missing-attribute]
-            layer.attention.wk,  # pyrefly: ignore [missing-attribute]
-            layer.attention.wv,  # pyrefly: ignore [missing-attribute]
-            layer.attention.wo,  # pyrefly: ignore [missing-attribute]
-        ):
-            set_param_init(
-                proj,  # pyrefly: ignore [bad-argument-type]
-                {"weight": depth, "bias": nn.init.zeros_},
-            )
-        # sinks is a bare nn.Parameter on the Attention module
-        set_param_init(
-            layer.attention,  # pyrefly: ignore [bad-argument-type]
-            {"sinks": depth},
-        )
-        # GptOss MoE experts
-        set_param_init(
-            layer.moe.experts,  # pyrefly: ignore [missing-attribute]
-            {
-                "mlp1_weight": depth,
-                "mlp1_bias": depth,
-                "mlp2_weight": depth,
-                "mlp2_bias": depth,
-            },
-        )
-        set_param_init(
-            layer.moe.router.gate,  # pyrefly: ignore [missing-attribute]
-            {"weight": depth, "bias": nn.init.zeros_},
-        )
-        set_param_init(
-            layer.attention_norm,  # pyrefly: ignore [bad-argument-type]
-            {"weight": nn.init.ones_},
-        )
-        set_param_init(
-            layer.ffn_norm,  # pyrefly: ignore [bad-argument-type]
-            {"weight": nn.init.ones_},
-        )
+
+def _output_linear_init(dim: int):
+    s = dim**-0.5
+    return {
+        "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
+        "bias": nn.init.zeros_,
+    }
+
+
+_SINKS_INIT = PerLayer(
+    lambda layer_id: {
+        "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
+    }
+)
+
+_GPTOSS_EXPERT_INIT = PerLayer(
+    lambda layer_id: {
+        "mlp1_weight": partial(
+            nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)
+        ),
+        "mlp1_bias": partial(
+            nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)
+        ),
+        "mlp2_weight": partial(
+            nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)
+        ),
+        "mlp2_bias": partial(
+            nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)
+        ),
+    }
+)
+
+# pyrefly: ignore [bad-argument-type]
+_GPTOSS_EXPERTS_CONFIG = GptOssGroupedExperts.Config(param_init=_GPTOSS_EXPERT_INIT)
 
 
 gptoss_configs = {
@@ -96,28 +78,30 @@ gptoss_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=4,
-        param_init_fn=setup_gptoss_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(256)),
         layer=GptOssTransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=8,
                 num_shared_experts=0,
                 score_before_experts=False,
                 load_balance_coeff=1e-3,
+                experts=_GPTOSS_EXPERTS_CONFIG,  # pyrefly: ignore [bad-argument-type]
                 router=TokenChoiceTopKRouter.Config(
                     score_func="softmax",
                     route_norm=True,
-                    gate=Linear.Config(bias=True),
+                    gate=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
                     top_k=4,
                 ),
             ),
             attention=Attention.Config(
-                linear_bias=True,
+                wqkv=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
+                wo=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
+                param_init=_SINKS_INIT,
             ),
         ),
         rope=RoPE.Config(
@@ -134,28 +118,30 @@ gptoss_configs = {
     ),
     "20b": GptOssModel.Config(
         n_layers=24,
-        param_init_fn=setup_gptoss_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(2880)),
         layer=GptOssTransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=32,
                 num_shared_experts=0,
                 score_before_experts=False,
                 load_balance_coeff=1e-3,
+                experts=_GPTOSS_EXPERTS_CONFIG,  # pyrefly: ignore [bad-argument-type]
                 router=TokenChoiceTopKRouter.Config(
                     score_func="softmax",
                     route_norm=True,
-                    gate=Linear.Config(bias=True),
+                    gate=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
                     top_k=4,
                 ),
             ),
             attention=Attention.Config(
-                linear_bias=True,
+                wqkv=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
+                wo=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
+                param_init=_SINKS_INIT,
             ),
         ),
         rope=RoPE.Config(
@@ -172,28 +158,30 @@ gptoss_configs = {
     ),
     "120b": GptOssModel.Config(
         n_layers=36,
-        param_init_fn=setup_gptoss_param_init,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_output_linear_init(2880)),
         layer=GptOssTransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=128,
                 num_shared_experts=0,
                 score_before_experts=False,
                 load_balance_coeff=1e-3,
+                experts=_GPTOSS_EXPERTS_CONFIG,  # pyrefly: ignore [bad-argument-type]
                 router=TokenChoiceTopKRouter.Config(
                     score_func="softmax",
                     route_norm=True,
-                    gate=Linear.Config(bias=True),
+                    gate=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
                     top_k=4,
                 ),
             ),
             attention=Attention.Config(
-                linear_bias=True,
+                wqkv=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
+                wo=Linear.Config(bias=True, param_init=_LINEAR_DEPTH_INIT),
+                param_init=_SINKS_INIT,
             ),
         ),
         rope=RoPE.Config(

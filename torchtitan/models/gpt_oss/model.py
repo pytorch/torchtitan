@@ -40,7 +40,8 @@ class Attention(BaseAttention):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
-        linear_bias: bool = False
+        wqkv: Linear.Config
+        wo: Linear.Config
         attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
         attn_mask_type: str = "causal"
         sliding_window_size: int = 128
@@ -57,17 +58,16 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.wq = linear_config.build(
+        self.wq = config.wqkv.build(
             in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = linear_config.build(
+        self.wk = config.wqkv.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = linear_config.build(
+        self.wv = config.wqkv.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = linear_config.build(
+        self.wo = config.wo.build(
             in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))

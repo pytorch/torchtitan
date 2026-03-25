@@ -75,7 +75,43 @@ class Decoder(BaseModel):
         # and Attention. Also RoPE itself as a standalone module requires PP special
         # handling, see below.
         rope: RoPE.Config
-        layer: TransformerBlock.Config  # required, no default
+        layer: TransformerBlock.Config  # template; expand() creates per-layer configs
+        layers: list | None = None  # populated by expand()
+
+        def expand(self) -> None:
+            """Expand the layer template into per-layer configs.
+
+            Deep-copies the ``layer`` template N times, calls
+            ``_expand_layer`` for structural changes (MoE interleaving,
+            iRoPE, etc.), then resolves ``DepthScaled`` markers.
+
+            ``param_init`` is declared on sub-configs in the config
+            registry — this method does NOT decide init policy.
+            """
+            import copy
+
+            from torchtitan.models.common.param_init import resolve_per_layer
+
+            layers = []
+            for layer_id in range(self.n_layers):
+                layer_cfg = self._expand_layer(layer_id, copy.deepcopy(self.layer))
+                resolve_per_layer(layer_cfg, layer_id)
+                layers.append(layer_cfg)
+            self.layers = layers
+
+        def _expand_layer(
+            self,
+            layer_id: int,
+            layer_cfg: TransformerBlock.Config,
+        ) -> TransformerBlock.Config:
+            """Apply structural changes to a layer config.
+
+            Override for model-specific decisions (MoE interleaving,
+            iRoPE, n_dense_layers).  The default is identity — no
+            structural changes needed for models like Llama3 where
+            all layers are identical.
+            """
+            return layer_cfg
 
     def __init__(self, config: Config):
         super().__init__()
@@ -86,17 +122,19 @@ class Decoder(BaseModel):
         )
 
         self.rope = config.rope.build()
-        self.register_buffer(
-            "freqs_cis",
-            self.rope.cache,  # pyrefly: ignore [bad-argument-type]
-            persistent=False,
-        )
+        self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
         self.layers = ModuleDict()
-        for layer_id in range(config.n_layers):
-            self.layers[str(layer_id)] = config.layer.build(
-                layer_id=layer_id, dim=config.dim, n_layers=config.n_layers
-            )
+        if config.layers is not None:
+            for i, layer_config in enumerate(config.layers):
+                self.layers[str(i)] = layer_config.build(
+                    layer_id=i, dim=config.dim, n_layers=config.n_layers
+                )
+        else:
+            for layer_id in range(config.n_layers):
+                self.layers[str(layer_id)] = config.layer.build(
+                    layer_id=layer_id, dim=config.dim, n_layers=config.n_layers
+                )
 
         self.norm = config.norm.build(normalized_shape=config.dim)
         self.output = config.output.build(
@@ -111,7 +149,7 @@ class Decoder(BaseModel):
         # Compute buffer_device before recursion so children (RoPE) get
         # the correct device when buffer_device is not explicitly provided.
         if buffer_device is None:
-            buffer_device = self.freqs_cis.device  # pyrefly: ignore [bad-assignment]
+            buffer_device = self.freqs_cis.device
         super().init_states(buffer_device=buffer_device)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

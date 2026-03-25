@@ -25,6 +25,7 @@ from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 
 from torchtitan.models.common.linear import Linear
+
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
@@ -524,11 +525,12 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        wqkv: Linear.Config  # shared config for wq, wk, wv
+        wo: Linear.Config  # separate config for wo (depth-scaled init)
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        linear_bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
@@ -556,27 +558,22 @@ class GQAttention(BaseAttention):
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
         if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build(  # pyrefly: ignore [bad-assignment]
-                normalized_shape=self.head_dim
-            )
-            self.k_norm = config.k_norm.build(  # pyrefly: ignore [bad-assignment]
-                normalized_shape=self.head_dim
-            )
+            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
+            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.wq = linear_config.build(
+        self.wq = config.wqkv.build(
             in_features=dim, out_features=self.n_heads * self.head_dim
         )
-        self.wk = linear_config.build(
+        self.wk = config.wqkv.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wv = linear_config.build(
+        self.wv = config.wqkv.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wo = linear_config.build(
+        self.wo = config.wo.build(
             in_features=self.n_heads * self.head_dim, out_features=dim
         )
 
@@ -671,6 +668,5 @@ class GQAttention(BaseAttention):
                 )
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_backend}")
-
         output = output.view(bs, seqlen, -1)
         return self.wo(output)

@@ -6,10 +6,11 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
-from torch import nn
+import torch.nn as nn
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -83,6 +84,14 @@ class Qwen3Model(Decoder):
         enable_weight_tying: bool = False
         layer: TransformerBlock.Config
 
+        def _expand_layer(self, layer_id, layer_cfg):
+            from dataclasses import replace
+
+            assert isinstance(layer_cfg, Qwen3TransformerBlock.Config)
+            if layer_cfg.moe_enabled:
+                return replace(layer_cfg, feed_forward=None)
+            return replace(layer_cfg, moe=None)
+
         def update_from_config(
             self,
             *,
@@ -98,9 +107,7 @@ class Qwen3Model(Decoder):
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
             # Sync rope max_seq_len
-            import dataclasses as _dc
-
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if self.layer.moe is not None:
                 self.layer.moe.router._debug_force_load_balance = (

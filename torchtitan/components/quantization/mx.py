@@ -113,7 +113,7 @@ class MXFP8Converter(QuantizationConverter):
         # We need to first verify if all nn.Linear have been converted to Linear.
         verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_param_init"], nn_module_cls=nn.Linear
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
         )
 
         recipe = MXFP8TrainingRecipe(self.config.recipe_name)
