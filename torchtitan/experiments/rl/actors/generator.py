@@ -20,6 +20,7 @@ from torchtitan.experiments.rl.plugin import (
 )
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
@@ -129,10 +130,6 @@ class VLLMGenerator(Actor, Configurable):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
-        attention_backend: str = "FLASH_ATTN"
-        """vLLM attention backend to use (e.g., FLASH_ATTN).
-        Now we only support / explored FlashAttention"""
-
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
@@ -144,12 +141,6 @@ class VLLMGenerator(Actor, Configurable):
 
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
-
-        max_model_len: int | None = None
-        """Maximum context length for vLLM's KV cache allocation. vLLM
-        pre-allocates paged KV cache blocks up to this length; None lets
-        vLLM use the model's max_position_embeddings (e.g. 40960 for
-        Qwen3-0.6B)"""
 
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
@@ -179,11 +170,11 @@ class VLLMGenerator(Actor, Configurable):
         register_model_to_vllm_model_registry(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
-        os.environ["VLLM_ATTENTION_BACKEND"] = config.attention_backend
+        os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
         if batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
-            init_batch_invariance(AttentionBackendEnum[config.attention_backend])
+            init_batch_invariance(AttentionBackendEnum.CUSTOM)
 
         # Extract needed fields from configs
         self.model_path = model_path
@@ -192,14 +183,9 @@ class VLLMGenerator(Actor, Configurable):
         self.top_p = config.sampling.top_p
         self.num_samples_per_prompt = config.num_samples_per_prompt
 
-        # FA2 requires block_size divisible by 256; FA3 (SM 9.0+) supports any
-        _sm_90 = torch.cuda.get_device_capability()[0] >= 9
-        block_size = 16 if _sm_90 else 256
-
         # Build vLLM engine
         engine_kwargs = dict(
             model=model_path,
-            block_size=block_size,
             trust_remote_code=True,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
@@ -210,15 +196,16 @@ class VLLMGenerator(Actor, Configurable):
             enforce_eager=config.compile.is_eager,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
-                backend=AttentionBackendEnum[config.attention_backend],
+                backend=AttentionBackendEnum.CUSTOM,
             ),
             disable_log_stats=True,
         )
+        # FA2 requires block_size to be a multiple of 256
+        if not has_cuda_capability(9, 0):
+            engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.compile.get_vllm_compilation_config()
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
-        if config.max_model_len is not None:
-            engine_kwargs["max_model_len"] = config.max_model_len
         if config.seed is not None:
             engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
