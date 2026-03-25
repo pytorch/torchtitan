@@ -7,6 +7,7 @@
 from typing import Any
 
 import torch
+import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
