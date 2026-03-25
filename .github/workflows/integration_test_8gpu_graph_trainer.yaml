@@ -63,7 +63,15 @@ jobs:
         # Run the numerics unit tests (Llama3 only; DeepSeek tests run in the H100 workflow)
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestSimpleFSDP -v
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "not dsv3"
+
         # Run the graph passes unit tests
         torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestReassignToPgPass -v
         pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestApplySACPass -v
+
+        # Run the make_fx tracer unit tests
+        pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation"
+
+        # Run precompile unit tests
+        pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
+
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
