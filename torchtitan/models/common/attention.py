@@ -162,6 +162,7 @@ class FlexAttentionWrapper(torch.nn.Module):
             return_aux=AuxRequest(lse=return_lse),
         )
         if return_lse:
+            # Note: return a tuple of Tensor to make converting `lse` to DTensor easier with TP module notation.
             return out[0], out[1].lse
         return out
 
