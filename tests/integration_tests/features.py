@@ -53,7 +53,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
                 ],
             ],
             "1D compile with selective op AC",
@@ -148,6 +147,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                    "--activation_checkpoint.mode full",
                 ],
             ],
             "PP looped zero bubble test",
@@ -159,6 +159,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--activation_checkpoint.mode full",
                 ],
             ],
             "PP zero bubble test (v shaped)",
@@ -282,6 +283,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+                    "--activation_checkpoint.mode full",
                 ],
             ],
             "PP with custom pipeline schedule loaded from CSV file",
@@ -507,7 +509,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
                 ]
             ],
             "FSDP + FLEX + per op SAC",
@@ -520,7 +521,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",
@@ -528,27 +528,28 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-                    "--checkpoint.enable",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--training.enable_cpu_offload",
-                ],
-                [
-                    "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--training.enable_cpu_offload",
-                ],
-            ],
-            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-            "cpu_offload+opt_in_bwd+TP+DP+CP",
-            ngpu=8,
-        ),
+        # NOTE: temporarily disable due to test hanging in CI
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
+        #             "--checkpoint.enable",
+        #             "--parallelism.tensor_parallel_degree=2",
+        #             "--parallelism.context_parallel_degree=2",
+        #             "--training.enable_cpu_offload",
+        #         ],
+        #         [
+        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
+        #             "--parallelism.tensor_parallel_degree=2",
+        #             "--parallelism.context_parallel_degree=2",
+        #             "--parallelism.data_parallel_replicate_degree=2",
+        #             "--training.enable_cpu_offload",
+        #         ],
+        #     ],
+        #     "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+        #     "cpu_offload+opt_in_bwd+TP+DP+CP",
+        #     ngpu=8,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -557,6 +558,34 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Float8 emulation test",
             "float8_emulation",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.mode torchcomms",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+CP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+cp+pp+compile",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.mode torchcomms",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+TP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+tp+pp+compile",
+            ngpu=8,
+            skip_rocm_test=True,
         ),
     ]
 

@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -19,12 +19,16 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.moe import MoE
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
+
+__all__ = ["Decoder", "TransformerBlock"]
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -45,10 +49,11 @@ class TransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        norm_eps: float = 1e-5
         attention: BaseAttention.Config  # required, no default
         feed_forward: FeedForward.Config | None = None
         moe: MoE.Config | None = None
+        attention_norm: RMSNorm.Config
+        ffn_norm: RMSNorm.Config
 
 
 class Decoder(BaseModel):
@@ -63,7 +68,9 @@ class Decoder(BaseModel):
         dim: int
         n_layers: int
         vocab_size: int
-        norm_eps: float = 1e-5
+        output: Linear.Config
+        tok_embeddings: Embedding.Config
+        norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
         # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
         # it causes redundantly passing backend (complex / cos_sin) to both RoPE
@@ -76,19 +83,23 @@ class Decoder(BaseModel):
         super().__init__()
         self.config = config
 
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
+        self.tok_embeddings = config.tok_embeddings.build(
+            num_embeddings=config.vocab_size, embedding_dim=config.dim
+        )
 
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
-        self.layers = torch.nn.ModuleDict()
+        self.layers = ModuleDict()
         for layer_id in range(config.n_layers):
             self.layers[str(layer_id)] = config.layer.build(
                 layer_id=layer_id, dim=config.dim, n_layers=config.n_layers
             )
 
-        self.norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
-        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.norm = config.norm.build(normalized_shape=config.dim)
+        self.output = config.output.build(
+            in_features=config.dim, out_features=config.vocab_size
+        )
 
     def init_weights(
         self,
@@ -105,16 +116,21 @@ class Decoder(BaseModel):
             rope.init_weights(buffer_device=buffer_device)
             self.freqs_cis = rope.cache
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            self.tok_embeddings.init_weights()
         for layer in self.layers.values():
             # pyrefly: ignore [not-callable]
             layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
-            self.norm.reset_parameters()
+            self.norm.init_weights()
+
+        # TODO: this init_weights logic can be the same as others
+        # if we move final_out_std and cutoff_factor logic to
+        # decoder.__init__(). Refactor this logic when we refactor
+        # init_weights.
         final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            trunc_normal_(
+            nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,

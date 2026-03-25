@@ -66,13 +66,16 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        if [ "${{ matrix.gpu-arch-type }}" = "rocm" ]; then
-          python -m pip install --force-reinstall --pre \
-            "torch==${{ matrix.torch-version }}" \
-            --index-url ${{ matrix.index-url }}
-        else
-          python -m pip install --force-reinstall --pre \
-            torch --index-url ${{ matrix.index-url }}
+        TORCH_SPEC="torch"
+        if [ -n "${{ matrix.torch-version }}" ]; then
+          TORCH_SPEC="torch==${{ matrix.torch-version }}"
+        fi
+        python -m pip install --force-reinstall --pre \
+          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
         fi
 
         # Install autoparallel - required dependency for autoparallel experiment

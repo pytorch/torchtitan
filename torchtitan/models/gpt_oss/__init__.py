@@ -6,7 +6,8 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import RoPE
+from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
@@ -20,27 +21,33 @@ __all__ = [
     "gptoss_configs",
 ]
 
-
 gptoss_configs = {
     "debugmodel": GptOssModel.Config(
         vocab_size=2048,
         dim=256,
         n_layers=4,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=GptOssTransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=8,
                 num_shared_experts=0,
-                score_func="softmax",
-                route_norm=True,
-                route_scale=1.0,
-                gate_bias=True,
                 score_before_experts=False,
-                top_k=4,
-                use_grouped_mm=True,
                 load_balance_coeff=1e-3,
+                router=TokenChoiceTopKRouter.Config(
+                    score_func="softmax",
+                    route_norm=True,
+                    gate=Linear.Config(bias=True),
+                    top_k=4,
+                ),
             ),
-            attention=Attention.Config(),
+            attention=Attention.Config(
+                linear_bias=True,
+            ),
         ),
         rope=RoPE.Config(
             dim=64,
@@ -56,21 +63,28 @@ gptoss_configs = {
     ),
     "20b": GptOssModel.Config(
         n_layers=24,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=GptOssTransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=32,
                 num_shared_experts=0,
-                score_func="softmax",
-                route_norm=True,
-                route_scale=1.0,
-                gate_bias=True,
                 score_before_experts=False,
-                top_k=4,
-                use_grouped_mm=True,
                 load_balance_coeff=1e-3,
+                router=TokenChoiceTopKRouter.Config(
+                    score_func="softmax",
+                    route_norm=True,
+                    gate=Linear.Config(bias=True),
+                    top_k=4,
+                ),
             ),
-            attention=Attention.Config(),
+            attention=Attention.Config(
+                linear_bias=True,
+            ),
         ),
         rope=RoPE.Config(
             dim=64,
@@ -86,21 +100,28 @@ gptoss_configs = {
     ),
     "120b": GptOssModel.Config(
         n_layers=36,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
+        output=Linear.Config(),
         layer=GptOssTransformerBlock.Config(
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=128,
                 num_shared_experts=0,
-                score_func="softmax",
-                route_norm=True,
-                route_scale=1.0,
-                gate_bias=True,
                 score_before_experts=False,
-                top_k=4,
-                use_grouped_mm=True,
                 load_balance_coeff=1e-3,
+                router=TokenChoiceTopKRouter.Config(
+                    score_func="softmax",
+                    route_norm=True,
+                    gate=Linear.Config(bias=True),
+                    top_k=4,
+                ),
             ),
-            attention=Attention.Config(),
+            attention=Attention.Config(
+                linear_bias=True,
+            ),
         ),
         rope=RoPE.Config(
             dim=64,

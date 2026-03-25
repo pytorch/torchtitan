@@ -10,22 +10,31 @@ from typing import ClassVar, Literal
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
-
-from torchtitan.config import Configurable
+from torchtitan.components.quantization import (
+    FP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 from torchtitan.distributed import ParallelDims
+
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
+from .module_utils import (
+    capture_module_attrs,
+    inject_module_protocol,
+    verify_module_protocol,
+)
 
 from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8LinearConverter(Configurable):
+class Float8LinearConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "float8"
 
         enable_fsdp_float8_all_gather: bool = False
@@ -177,12 +186,24 @@ class Float8LinearConverter(Configurable):
 
         from torchao.float8 import convert_to_float8_training
 
+        # Capture Module attrs before conversion (Float8 creates new instances).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
+        saved_attrs = capture_module_attrs(
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+        )
+
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
         convert_to_float8_training(
             model,
             config=self.torchao_config,
             module_filter_fn=self.filter_fn,
         )
+
+        # Re-inject Linear protocol and re-attach attrs lost during conversion
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
+
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.torchao_config.enable_fsdp_float8_all_gather}"
@@ -202,9 +223,9 @@ class Float8LinearConverter(Configurable):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8GroupedMMConverter(Configurable):
+class Float8GroupedMMConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "float8"
 
         fqns: list[str] | str = field(default_factory=list)
@@ -253,9 +274,7 @@ class Float8GroupedMMConverter(Configurable):
         from torchao.quantization.quant_api import quantize_
 
         try:
-            from torchao.prototype.moe_training.conversion_utils import (
-                MoETrainingConfig,
-            )
+            from torchao.prototype.moe_training.config import Float8TrainingOpConfig
         except ImportError as e:
             raise ImportError(
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
@@ -267,8 +286,20 @@ class Float8GroupedMMConverter(Configurable):
                     return True
             return False
 
-        config = MoETrainingConfig()
+        # Capture Module attrs before conversion (Float8 creates new instances).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
+        saved_attrs = capture_module_attrs(
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+        )
+
+        config = Float8TrainingOpConfig()
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+
+        # Re-inject Linear protocol and re-attach attrs
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
+
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
             "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"

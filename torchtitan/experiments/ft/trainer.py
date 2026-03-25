@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import json
 import os
 import time
@@ -112,7 +111,7 @@ class FaultTolerantTrainer(Trainer):
 
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(dataclasses.asdict(model_config), indent=2, ensure_ascii=False)}"
+            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
@@ -129,6 +128,9 @@ class FaultTolerantTrainer(Trainer):
             model_compile_enabled=model_compile_enabled,
         )
         model_converters.convert(model)
+
+        # Verify all submodules satisfy the Module protocol
+        model.verify_module_protocol()
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
