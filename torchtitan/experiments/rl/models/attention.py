@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
+import itertools
 import logging
+from dataclasses import dataclass
 
 import torch
-from torch.distributed._tensor import DTensor, Shard
-from torch.distributed._tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -201,10 +202,10 @@ class VLLMInnerAttention(LocalMapAttention):
     but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
 
     Called by :class:`VLLMGQAttention` with ``(bs, seq, heads, dim)`` layout
-    (heads on dim 2). Overrides ``__call__`` to handle DTensor with
-    ``Shard(2)`` placements accordingly.
+    (heads on dim 2). DTensor with ``Shard(2)`` placements is handled by
+    the base class ``LocalMapAttention.__call__``.
 
-    Used by the **generator** (via :func:`replace_with_vllm_attention`).
+    Used by the **generator** (via :class:`VLLMGQAttention`).
     """
 
     def __init__(
@@ -247,39 +248,6 @@ class VLLMInnerAttention(LocalMapAttention):
             quant_config=None,
             prefix=f"model.layers.{layer_name}.attention.inner_attention",
         )
-
-    def __call__(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        """Handle DTensor inputs in (bs, seq, heads, dim) layout.
-
-        Expects heads sharded on dim 2 (not dim 1 as in base
-        LocalMapAttention), matching VLLMGQAttention's zero-copy path.
-        """
-        if isinstance(q, DTensor):
-            assert isinstance(k, DTensor) and isinstance(v, DTensor)
-            assert q.placements == k.placements == v.placements
-            # qkv are (bs, seq, heads, dim) — heads on dim 2
-            for i, p in enumerate(q.placements):
-                assert p == Shard(2), (
-                    f"VLLMInnerAttention expects Shard(2) placements "
-                    f"(heads dim in bs,seq,heads,dim), but got {p} at position {i}"
-                )
-            # Output is (bs, seq, hidden) — hidden on dim 2 maps to Shard(2)
-            if self._local_map_fn is None:
-                self._local_map_fn = local_map(
-                    super(LocalMapAttention, self).__call__,
-                    in_placements=(q.placements, k.placements, v.placements),
-                    out_placements=(q.placements,),
-                    in_grad_placements=(q.placements, k.placements, v.placements),
-                    device_mesh=q.device_mesh,
-                )
-            return self._local_map_fn(q, k, v, **kwargs)
-        return super(LocalMapAttention, self).__call__(q, k, v, **kwargs)
 
     def forward(
         self,
@@ -326,7 +294,7 @@ class VLLMGQAttention(GQAttention):
 
     Eliminates redundant transposes between GQAttention and VLLMInnerAttention.
 
-    Standard GQAttention flow:
+    Standard GQAttention + VLLMInnerAttention flow:
       (bs,seq,heads,dim) -> transpose -> (bs,heads,seq,dim)
       -> VLLMInnerAttention transpose back -> clone -> (bs*seq,heads,dim)
       -> vllm_attn -> reshape -> transpose -> contiguous  (4 layout ops)
@@ -335,6 +303,50 @@ class VLLMGQAttention(GQAttention):
       (bs,seq,heads,dim) -> reshape -> (bs*seq,heads,dim)  (1 zero-copy op)
       -> vllm_attn -> view -> (bs,seq,hidden)
     """
+
+    # Counter to auto-assign layer names when built via config
+    _layer_counter: itertools.count = itertools.count()
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GQAttention.Config):
+        attn_backend: str = "vllm"
+
+        def __post_init__(self):
+            # Skip parent validation which doesn't know about "vllm" backend
+            assert self.n_heads > 0, "n_heads must be > 0"
+
+    def __init__(self, config: Config, *, dim: int):
+        # Use "sdpa" for parent init to avoid ValueError on unknown backend;
+        # inner_attention is immediately replaced below.
+        parent_config = dataclasses.replace(config, attn_backend="sdpa")
+        super().__init__(parent_config, dim=dim)
+
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        tp_degree = vllm_config.parallel_config.tensor_parallel_size
+
+        n_heads = config.n_heads
+        n_kv_heads = config.n_kv_heads or config.n_heads
+        head_dim = config.head_dim if config.head_dim is not None else dim // n_heads
+
+        if n_kv_heads < tp_degree:
+            raise ValueError(
+                f"n_kv_heads ({n_kv_heads}) must be >= "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        assert n_kv_heads % tp_degree == 0
+        assert n_heads % tp_degree == 0
+
+        layer_name = str(next(VLLMGQAttention._layer_counter))
+        self.inner_attention = VLLMInnerAttention(
+            hidden_size=dim,
+            num_heads=n_heads // tp_degree,
+            num_kv_heads=n_kv_heads // tp_degree,
+            head_dim=head_dim,
+            layer_name=layer_name,
+            scale=head_dim**-0.5,
+        )
 
     def forward(
         self,
@@ -363,72 +375,6 @@ class VLLMGQAttention(GQAttention):
                     xq, xk, freqs_cis=rope_cache, positions=positions
                 )
 
-        # The inner_attention will only be VLLMInnerAttention class.
-        assert isinstance(
-            self.inner_attention, VLLMInnerAttention
-        ), "inner_attention must be an instance of VLLMInnerAttention"
         output = self.inner_attention(xq, xk, xv)
 
         return self.wo(output)
-
-
-def replace_with_vllm_attention(model, tp_degree=1):
-    """Replace attention modules with zero-copy vLLM attention path.
-
-    Replaces each layer's ``inner_attention`` with :class:`VLLMInnerAttention`
-    and swaps the ``GQAttention`` class to :class:`VLLMGQAttention` to
-    eliminate redundant transpose operations.
-
-    **Generator side.** Used by ``TorchTitanVLLMModelWrapper`` because:
-
-    1. ``vllm.Attention`` manages KV-cache and paged attention for inference.
-    2. Head counts are divided by *tp_degree* so each TP rank holds the
-       correct shard of Q / KV heads.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-        tp_degree: Tensor-parallel world size.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    model_args = model.config
-
-    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3.py#L80
-    # Calculate num_kv_heads based on TP size
-    total_num_kv_heads = model_args.layer.attention.n_kv_heads
-    if total_num_kv_heads >= tp_degree:
-        # Number of KV heads is greater than TP size, so we partition
-        # the KV heads across multiple tensor parallel GPUs.
-        assert total_num_kv_heads % tp_degree == 0
-        num_kv_heads = total_num_kv_heads // tp_degree
-    else:
-        # TODO: Handle this branch correctly
-        raise ValueError("num_kv_heads are smaller than tp_degree")
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        # GQA
-        head_dim = model_args.layer.attention.head_dim
-        vllm_attn = VLLMInnerAttention(
-            hidden_size=model_args.dim,
-            num_heads=model_args.layer.attention.n_heads // tp_degree,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            layer_name=layer_name,
-            scale=head_dim**-0.5,
-        )
-
-        layer.attention.inner_attention = vllm_attn
-
-        # Swap GQAttention to VLLMGQAttention for zero-copy forward path
-        layer.attention.__class__ = VLLMGQAttention
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMInnerAttention "
-        f"({len(model.layers)} layers)"
-    )

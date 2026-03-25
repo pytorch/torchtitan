@@ -24,7 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.experiments.rl.models.attention import replace_with_vllm_attention
+from torchtitan.experiments.rl.models.attention import VLLMGQAttention
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile
@@ -150,8 +150,20 @@ class TorchTitanVLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Use TorchTitan model config directly (no HF config mapping)
-        self.config = model_spec.model
+        # Swap GQAttention -> VLLMGQAttention at config time so the model
+        # builds with vLLM-compatible attention from the start.
+        model_config = model_spec.model
+        attn_config = model_config.layer.attention
+        vllm_attn_fields = {
+            f.name: getattr(attn_config, f.name)
+            for f in dataclasses.fields(attn_config)
+            if f.init
+        }
+        vllm_attn_fields["attn_backend"] = "vllm"
+        new_layer = dataclasses.replace(
+            model_config.layer, attention=VLLMGQAttention.Config(**vllm_attn_fields)
+        )
+        self.config = dataclasses.replace(model_config, layer=new_layer)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # TODO: Check if it's possible to apply meta init
@@ -166,10 +178,6 @@ class TorchTitanVLLMModelWrapper(Module):
         self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
             vllm_config
         )
-
-        # Replace attention with vLLM compatible flash attention
-        # TODO: Use config system to replace with vllm Attention
-        replace_with_vllm_attention(self.model, tp_degree=self.parallel_dims.tp)
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
