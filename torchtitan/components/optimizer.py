@@ -87,6 +87,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
+        bf16_opt_states: bool = False
+        """
+        Maintain selected optimizer states in bf16 precision to save device memory.
+        Currently this is supported only for AdamW optimizer's exp_avg_sq and
+        exp_avg optimizer states. In future may be extended to other optimizers also.
+        """
+
     optimizers: list[T]
     model_parts: list[nn.Module]
 
@@ -100,6 +107,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     @staticmethod
     def _build_optimizer_kwargs(config: Config) -> dict[str, Any]:
         assert config.implementation in ["fused", "foreach", "for-loop"]
+        if config.bf16_opt_states:
+            config.implementation = "fused"
         return {
             "lr": config.lr,
             "betas": (config.beta1, config.beta2),
@@ -117,8 +126,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.model_parts = model_parts
         for model in self.model_parts:
             params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
+            optimizer = optimizer_cls(params, **optimizer_kwargs)
+            self.optimizers.append(optimizer)
             all_params.extend(params)
+            if config.bf16_opt_states:
+                mp_policy = {
+                    "exp_avg_sq": lambda _: torch.bfloat16,
+                    "exp_avg": lambda _: torch.bfloat16
+                }
+                optimizer.set_dtype_policy(mp_policy)
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
