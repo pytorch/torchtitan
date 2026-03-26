@@ -322,7 +322,9 @@ def inductor_decomposition_pass(
 
     # Build fake inputs directly from the joint graph placeholders' metadata.
     # This handles all inputs including effect tokens (e.g. from MoE load
-    # balancing copy_ mutations) that AOT Autograd prepends as placeholders.
+    # balancing copy_ mutations) that AOT Autograd prepends as placeholders,
+    # as well as opaque inputs (e.g. DeviceMesh FakeScriptObjects) that the
+    # graph lifts when compile-on-one-rank is enabled.
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
     all_inputs = []
     for ph in placeholders:
@@ -332,11 +334,14 @@ def inductor_decomposition_pass(
         all_inputs.append(val)
 
     # The joint graph forward() takes (primals, tangents) as two list args.
-    # Split based on traced_tangents count from fw_metadata.
-    fw_metadata = joint_with_descriptors._aot_state.fw_metadata
-    num_tangents = len(fw_metadata.traced_tangents)
-    primals_fake = all_inputs[: len(all_inputs) - num_tangents]
-    tangents_fake = all_inputs[len(all_inputs) - num_tangents :]
+    # Use the graph's _in_spec (set by AOTAutograd during joint export) to
+    # determine the correct split point rather than
+    # fw_metadata.traced_tangents, because the latter only counts tensor
+    # tangents and misses opaque inputs (e.g. DeviceMesh objects) that may
+    # appear as additional placeholders when compile-on-one-rank is enabled.
+    num_primals = gm._in_spec.child(0).num_children
+    primals_fake = all_inputs[:num_primals]
+    tangents_fake = all_inputs[num_primals:]
 
     # Get the FakeTensorMode from the original joint graph
     fake_mode = None

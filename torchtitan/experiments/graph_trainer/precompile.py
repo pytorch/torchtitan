@@ -117,6 +117,7 @@ def precompile_save(
     Returns the path/URI of the saved artifact.
     """
     compiled_fn = _unwrap_serializable(compiled_fn)
+
     serialized_fn = BundledAOTAutogradSerializableCallable.serialize_compile_artifacts(
         compiled_fn
     )
@@ -223,6 +224,19 @@ def precompile_load(
             logger.info(
                 f"Deserializing compiled fn on device {torch.cuda.current_device()}"
             )
+
+            # CooR-compiled artifacts reference custom ops (e.g.
+            # device_mesh._runtime_compute_coordinate_on_dim) that
+            # are lazily registered. Import the op module so the ops
+            # exist before the generated Inductor code runs.
+            try:
+                from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
+            except ImportError:
+                logger.debug(
+                    "torch.distributed._ops.device_mesh not available, "
+                    "skipping CooR custom op pre-import"
+                )
+
             compiled_fn = (
                 BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
                     serialized_fn_bytes

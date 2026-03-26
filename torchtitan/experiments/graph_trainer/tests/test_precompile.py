@@ -97,6 +97,54 @@ class TestPrecompiledArtifact(unittest.TestCase):
         self.assertEqual(loaded.metadata, artifact.metadata)
 
 
+class TestApplyCompileValidation(unittest.TestCase):
+    """Test that apply_compile raises on invalid precompile configurations."""
+
+    def _make_args(self, **compile_overrides):
+        from torchtitan.config import ParallelismConfig
+        from torchtitan.distributed import ParallelDims
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        compile_config = GraphTrainerCompileConfig(
+            enable=True, mode="aot", **compile_overrides
+        )
+        parallelism = ParallelismConfig()
+        parallel_dims = ParallelDims(
+            dp_shard=2, dp_replicate=1, cp=1, tp=1, pp=1, ep=1, etp=1, world_size=2
+        )
+        return dict(
+            model=torch.nn.Linear(4, 4),
+            compile_config=compile_config,
+            parallelism=parallelism,
+            parallel_dims=parallel_dims,
+            dump_folder="/tmp/test_dump",
+        )
+
+    def test_precompile_without_artifact_dir_raises(self):
+        from torchtitan.experiments.graph_trainer.compile import apply_compile
+
+        args = self._make_args(
+            precompile=True,
+            precompile_artifact_dir="",
+            passes=["full_inductor_compilation"],
+        )
+        with self.assertRaisesRegex(ValueError, "precompile_artifact_dir"):
+            apply_compile(**args)
+
+    def test_precompile_without_serializable_pass_raises(self):
+        from torchtitan.experiments.graph_trainer.compile import apply_compile
+
+        args = self._make_args(
+            precompile=True,
+            precompile_artifact_dir="/tmp/test",
+            passes=["auto_bucketing"],
+        )
+        with self.assertRaisesRegex(ValueError, "serializable pass"):
+            apply_compile(**args)
+
+
 @dataclass
 class _StubCompileConfig:
     mode: str = "aot"
