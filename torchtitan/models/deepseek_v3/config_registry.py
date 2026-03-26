@@ -96,6 +96,12 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
+def deepseek_v3_16b_sdpa() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry("16B_sdpa")
+    return config
+
+
 def deepseek_v3_671b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",

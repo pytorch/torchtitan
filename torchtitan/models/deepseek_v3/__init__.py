@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
@@ -284,6 +286,15 @@ deepseekv3_configs = {
         ),
     ),
 }
+
+
+# 16B_sdpa: 16B with sdpa attention (instead of flex)
+_16b = deepseekv3_configs["16B"]
+_16b_sdpa_attn = dataclasses.replace(
+    _16b.layer.attention, attn_backend="sdpa", attn_mask_type="causal"
+)
+_16b_sdpa_layer = dataclasses.replace(_16b.layer, attention=_16b_sdpa_attn)
+deepseekv3_configs["16B_sdpa"] = dataclasses.replace(_16b, layer=_16b_sdpa_layer)
 
 
 def model_registry(flavor: str) -> ModelSpec:
