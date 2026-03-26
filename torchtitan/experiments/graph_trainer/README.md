@@ -69,6 +69,33 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode jit --compile.backend inductor
 ```
 
+### Graph-based Pipeline Parallelism
+
+Graph PP captures the joint forward/backward graph per pipeline stage, then applies
+graph passes to partition FSDP collectives and enable zero-bubble scheduling. It
+requires AOT mode (`--compile.mode aot`, the default).
+
+Graph PP passes are auto-inferred from the parallelism config:
+- `split_fsdp_collectives` is enabled when FSDP is active
+- `split_dI_dW` is enabled for V-schedules (DualPipeV, ZBV)
+
+#### Training DeepSeek-v3-16B with graph PP (PP=2, FSDP=4, EP=4)
+```bash
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdpa ./run_train.sh \
+  --parallelism.pipeline_parallel_degree 2 \
+  --parallelism.data_parallel_shard_degree 4 \
+  --parallelism.expert_parallel_degree 4
+```
+
+#### Training DeepSeek-v3-16B with graph PP and DualPipeV schedule
+```bash
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdpa ./run_train.sh \
+  --parallelism.pipeline_parallel_degree 2 \
+  --parallelism.data_parallel_shard_degree 4 \
+  --parallelism.expert_parallel_degree 4 \
+  --parallelism.pipeline_parallel_schedule DualPipeV
+```
+
 ### Composability Support
 
 Some of the features require the updates from PyTorch, with which we are working on providing composability support for the following features:
@@ -87,8 +114,8 @@ Some of the features require the updates from PyTorch, with which we are working
 |Float8 Training| ✅ |
 |Expert Parallelism| ✅ |
 |Expert Parallelism + Activation Checkpointing| 🚧 |
-|Expert Parallelism + Pipeline Parallelism| 🚧 |
-|Graph-based Pipeline Parallelism| 🚧 |
+|Expert Parallelism + Pipeline Parallelism| ✅ (AOT mode) |
+|Graph-based Pipeline Parallelism| ✅ (AOT mode) |
 |Micro-batch overlap| 🚧 |
 |Pre-compile| 🚧 |
 
