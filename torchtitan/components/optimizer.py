@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import fnmatch
 import functools
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Generic, Literal, TypeVar
 
 import torch
@@ -23,6 +24,7 @@ from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -78,6 +80,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         weight_decay: float = 0.1
         """Weight decay to use"""
 
+        no_weight_decay_keywords: str = ""
+        """Comma-separated keywords to specify which parameters should not have weight decay applied.
+        For example, "*bias*,*LayerNorm.weight*" will exclude all parameters with "bias" or "LayerNorm.weight" in their names from weight decay."""
+
         implementation: Literal["for-loop", "foreach", "fused"] = "fused"
         """
         Specify which optimizer implementation to use:
@@ -111,16 +117,45 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         optimizer_cls = self._resolve_optimizer_cls(config.name)
-        optimizer_kwargs = self._build_optimizer_kwargs(config)
+        optimizer_wd_kwargs = self._build_optimizer_kwargs(config)
+        optimizer_nowd_kwargs = self._build_optimizer_kwargs(
+            replace(config, weight_decay=0.0)
+        )
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
         for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-            all_params.extend(params)
+            wd_params = [
+                p
+                for n, p in model.named_parameters()
+                if p.requires_grad
+                and not any(
+                    fnmatch.fnmatch(n, pattern)
+                    for pattern in config.no_weight_decay_keywords.split(",")
+                )
+            ]
+            optimizer = optimizer_cls(wd_params, **optimizer_wd_kwargs)
+            all_params.extend(wd_params)
+            if config.no_weight_decay_keywords:
+                nowd_params = [
+                    (n, p)
+                    for n, p in model.named_parameters()
+                    if p.requires_grad
+                    and any(
+                        fnmatch.fnmatch(n, pattern)
+                        for pattern in config.no_weight_decay_keywords.split(",")
+                    )
+                ]
+                logger.info(
+                    f"Not applying weight decay to parameters {[n for n,p in nowd_params]} in model {model._get_name()}"
+                )
+                optimizer.add_param_group(
+                    {"params": [p for n, p in nowd_params], **optimizer_nowd_kwargs}
+                )
+                all_params.extend(p for n, p in nowd_params)
+            self.optimizers.append(optimizer)
         self._validate_length(len(self.model_parts))
-        self._post_init(all_params, optimizer_kwargs)
+        self._post_init(all_params, optimizer_wd_kwargs)
 
     def __iter__(self) -> Iterator[T]:
         return iter(self.optimizers)
