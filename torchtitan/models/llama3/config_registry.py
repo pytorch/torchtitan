@@ -228,7 +228,7 @@ def sft_debugmodel() -> Trainer.Config:
 
     model_spec = model_registry("debugmodel")
     # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.attn_backend = "varlen"
+    model_spec.model.layer.attention.attn_backend = "flex"
     # pyrefly: ignore [missing-attribute]
     model_spec.model.layer.attention.attn_mask_type = "block_causal"
 
