@@ -16,6 +16,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
+from .kernels import apply_router_scores
 from .utils import indices_padding_wrapper
 
 
@@ -324,7 +325,7 @@ class TokenReorderer(Module):
         self,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Reorders token indices to match the order of experts for MoE routing.
 
@@ -335,10 +336,12 @@ class TokenReorderer(Module):
                 shape (batch_size*seq_len, top_k)
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
                 - top_scores_experts_sorted: Scores reordered to match expert ordering
                 - token_indices_experts_sorted: Token indices reordered to match expert ordering
                 - num_tokens_per_expert: Number of tokens assigned to each expert
+                - inv_perm: Inverse permutation of token_indices_experts_sorted (int32),
+                    computed via O(N) scatter to avoid a second argsort in apply_router_scores.
         """
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
@@ -354,12 +357,24 @@ class TokenReorderer(Module):
             selected_experts_indices.view(-1), stable=True
         )
 
+        # Compute inverse permutation in O(N) via scatter instead of a second argsort.
+        # inv_perm[token_indices_experts_sorted[i]] = i, so apply_router_scores can look up
+        # the sorted position for any original flat index without sorting again.
+        N = token_indices_experts_sorted.shape[0]
+        inv_perm = torch.empty(
+            N, dtype=torch.int32, device=token_indices_experts_sorted.device
+        )
+        inv_perm[token_indices_experts_sorted] = torch.arange(
+            N, dtype=torch.int32, device=token_indices_experts_sorted.device
+        )
+
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
 
         return (
             top_scores_experts_sorted,
             token_indices_experts_sorted,
             num_tokens_per_expert,
+            inv_perm,
         )
 
 
@@ -481,6 +496,7 @@ class MoE(Module):
             top_scores_experts_sorted,
             token_indices_experts_sorted,
             num_tokens_per_expert,
+            inv_perm,
         ) = self.reorderer(top_scores, selected_experts_indices)
 
         # shape (bs*slen*top_k, dim)
@@ -500,27 +516,20 @@ class MoE(Module):
         # to "implicitly" overlap the shared expert compute with token combine communication
         out = self.shared_experts(x) if self.shared_experts is not None else None
 
-        # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            -1, self.router.top_k, dim
-        )
         if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
+            out_experts = apply_router_scores(
+                routed_output, token_indices_experts_sorted, top_scores, inv_perm
             )
         else:
-            out_experts = routed_output_unsorted.sum(dim=1)
+            routed_output_unsorted = torch.zeros(
+                (bs * slen * self.router.top_k, dim),
+                dtype=routed_output.dtype,
+                device=routed_output.device,
+            )
+            routed_output_unsorted[token_indices_experts_sorted] = routed_output
+            out_experts = routed_output_unsorted.reshape(
+                -1, self.router.top_k, dim
+            ).sum(dim=1)
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)

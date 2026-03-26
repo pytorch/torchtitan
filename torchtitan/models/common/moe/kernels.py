@@ -9,7 +9,215 @@ import triton
 import triton.language as tl
 
 
-__all__ = ["generate_permute_indices", "fill_indices_wrapper"]
+__all__ = ["generate_permute_indices", "fill_indices_wrapper", "apply_router_scores"]
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_D": 64}, num_warps=2),
+        triton.Config({"BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_D": 256}, num_warps=8),
+    ],
+    key=["D", "top_k"],
+)
+@triton.jit
+def _apply_router_scores_fwd_kernel(
+    routed_output_ptr,  # (N, D) bfloat16
+    inv_perm_ptr,  # (N,) int32  —  inv_perm[j] = i  iff  tidxs[i] = j
+    top_scores_ptr,  # (T, top_k) float32
+    out_ptr,  # (T, D) bfloat16
+    T,
+    D,
+    top_k: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    t = tl.program_id(0)
+    d_block = tl.program_id(1)
+    d_off = d_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask = d_off < D
+
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    for k in tl.static_range(top_k):
+        # inv_perm[t*top_k+k] is the row in routed_output for token t's k-th slot
+        sorted_idx = tl.load(inv_perm_ptr + t * top_k + k)
+        val = tl.load(
+            routed_output_ptr + sorted_idx.to(tl.int64) * D + d_off,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        score = tl.load(top_scores_ptr + t * top_k + k)
+        acc += score * val
+
+    tl.store(out_ptr + t * D + d_off, acc.to(tl.bfloat16), mask=mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_D": 64}, num_warps=2),
+        triton.Config({"BLOCK_D": 128}, num_warps=4),
+        triton.Config({"BLOCK_D": 256}, num_warps=8),
+    ],
+    key=["D"],
+)
+@triton.jit
+def _apply_router_scores_bwd_routed_kernel(
+    d_out_ptr,  # (T, D) bfloat16
+    top_scores_ptr,  # (T, top_k) float32
+    tidxs_ptr,  # (N,) int64  —  token_indices_experts_sorted
+    d_routed_ptr,  # (N, D) bfloat16  output
+    D,
+    top_k: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    # grad wrt routed_output: d_routed[i] = score[t,k] * d_out[t]
+    # where t = tidxs[i] // top_k, k = tidxs[i] % top_k
+    i = tl.program_id(0)
+    d_block = tl.program_id(1)
+    d_off = d_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask = d_off < D
+
+    j = tl.load(tidxs_ptr + i)
+    t = j // top_k
+    k = j % top_k
+    score = tl.load(top_scores_ptr + t * top_k + k)
+    d_out = tl.load(d_out_ptr + t * D + d_off, mask=mask, other=0.0).to(tl.float32)
+    tl.store(d_routed_ptr + i * D + d_off, (score * d_out).to(tl.bfloat16), mask=mask)
+
+
+@triton.jit
+def _apply_router_scores_bwd_scores_kernel(
+    routed_output_ptr,  # (N, D) bfloat16
+    d_out_ptr,  # (T, D) bfloat16
+    inv_perm_ptr,  # (N,) int32
+    d_scores_ptr,  # (T, top_k) float32
+    D,
+    top_k: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    # grad wrt top_scores: d_scores[t,k] = dot(routed_output[inv_perm[t*top_k+k]], d_out[t])
+    t = tl.program_id(0)
+    k = tl.program_id(1)
+
+    sorted_idx = tl.load(inv_perm_ptr + t * top_k + k)
+    # Accumulate element-wise products in a [BLOCK_D] buffer; reduce to scalar at end.
+    # This avoids the tl.zeros([1]) → scalar-ptr store mismatch that breaks
+    # torch.compile's identify_mutated_tensors analysis.
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    for d_start in range(0, D, BLOCK_D):
+        d_off = d_start + tl.arange(0, BLOCK_D)
+        mask = d_off < D
+        ro = tl.load(
+            routed_output_ptr + sorted_idx.to(tl.int64) * D + d_off,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        do = tl.load(d_out_ptr + t * D + d_off, mask=mask, other=0.0).to(tl.float32)
+        acc = acc + ro * do
+
+    tl.store(d_scores_ptr + t * top_k + k, tl.sum(acc))
+
+
+def apply_router_scores(
+    routed_output: torch.Tensor,
+    token_indices_experts_sorted: torch.Tensor,
+    top_scores: torch.Tensor,
+    inv_perm: torch.Tensor,
+) -> torch.Tensor:
+    """Fused scatter + FP32 bmm for MoE output combine.
+
+    Replaces the two-step scatter + bmm in the MoE combine path:
+
+        out_unsorted = zeros(T*top_k, D)
+        out_unsorted[token_indices_experts_sorted] = routed_output   # IndexFuncLargeIndex
+        out_unsorted = out_unsorted.reshape(T, top_k, D)
+        out = bmm(top_scores.reshape(T,1,top_k), out_unsorted.float()).squeeze(1)  # SM80 FP32
+
+    with a single Triton kernel that gathers top_k rows per output token and accumulates
+    the weighted sum in FP32, writing BF16 output. No intermediate (T*top_k, D) tensor
+    is allocated.
+
+    Args:
+        routed_output: (T*top_k, D) bfloat16 — expert outputs, sorted by expert.
+        token_indices_experts_sorted: (T*top_k,) int64 — argsort of expert assignments,
+            maps sorted position i → original flat index j = token*top_k + slot.
+        top_scores: (T, top_k) float32 — routing scores.
+        inv_perm: (T*top_k,) int32 — inverse permutation of token_indices_experts_sorted,
+            pre-computed in TokenReorderer via O(N) scatter to avoid a second argsort.
+
+    Returns:
+        (T, D) bfloat16 — per-token weighted sum of expert outputs.
+    """
+    return _ApplyRouterScoresFunction.apply(
+        routed_output, token_indices_experts_sorted, top_scores, inv_perm
+    )
+
+
+class _ApplyRouterScoresFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        routed_output: torch.Tensor,
+        token_indices_experts_sorted: torch.Tensor,
+        top_scores: torch.Tensor,
+        inv_perm: torch.Tensor,
+    ) -> torch.Tensor:
+        N, D = routed_output.shape
+        T, top_k = top_scores.shape
+
+        out = torch.empty(
+            (T, D), dtype=routed_output.dtype, device=routed_output.device
+        )
+        grid = lambda meta: (T, triton.cdiv(D, meta["BLOCK_D"]))  # noqa: E731
+        _apply_router_scores_fwd_kernel[grid](
+            routed_output,
+            inv_perm,
+            top_scores,
+            out,
+            T,
+            D,
+            top_k=top_k,
+        )
+
+        ctx.save_for_backward(
+            routed_output, token_indices_experts_sorted, inv_perm, top_scores
+        )
+        ctx.top_k = top_k
+        return out
+
+    @staticmethod
+    def backward(
+        ctx, d_out: torch.Tensor
+    ) -> tuple[torch.Tensor, None, torch.Tensor, None]:
+        routed_output, tidxs, inv_perm, top_scores = ctx.saved_tensors
+        top_k = ctx.top_k
+        N, D = routed_output.shape
+        T = top_scores.shape[0]
+
+        d_out = d_out.contiguous()
+
+        d_routed = torch.empty_like(routed_output)
+        grid_r = lambda meta: (N, triton.cdiv(D, meta["BLOCK_D"]))  # noqa: E731
+        _apply_router_scores_bwd_routed_kernel[grid_r](
+            d_out,
+            top_scores,
+            tidxs,
+            d_routed,
+            D,
+            top_k=top_k,
+        )
+
+        d_scores = torch.empty_like(top_scores)
+        _apply_router_scores_bwd_scores_kernel[(T, top_k)](
+            routed_output,
+            d_out,
+            inv_perm,
+            d_scores,
+            D,
+            top_k=top_k,
+            BLOCK_D=128,
+        )
+
+        return d_routed, None, d_scores, None
 
 
 # parallelized kernel
