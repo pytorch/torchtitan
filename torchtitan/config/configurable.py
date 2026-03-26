@@ -95,8 +95,8 @@ class Configurable:
                 if hasattr(val, "resolve"):
                     # Skip PerLayer markers (not serializable).
                     continue
-                if isinstance(val, list):
-                    # Skip expanded layer lists (large, not user-facing).
+                if isinstance(val, list) and val and dataclasses.is_dataclass(val[0]):
+                    # Skip expanded layer config lists (large, not user-facing).
                     continue
                 if hasattr(val, "to_dict"):
                     result[f.name] = val.to_dict()

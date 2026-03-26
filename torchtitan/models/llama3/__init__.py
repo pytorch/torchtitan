@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from copy import deepcopy
 from functools import partial
 
 import torch.nn as nn
@@ -22,6 +23,7 @@ from torchtitan.models.common import (
 from torchtitan.models.common.param_init import (
     depth_scaled_std,
     PerLayer,
+    resolve_per_layer,
     skip_param_init,
 )
 from torchtitan.protocols.model_spec import ModelSpec
@@ -35,6 +37,23 @@ __all__ = [
     "Llama3Model",
     "llama3_configs",
 ]
+
+
+def _expand_layer_configs(configs: dict) -> dict:
+    """Expand the layer template into per-layer configs for each model config.
+
+    Deep-copies the ``layer`` template N times, then resolves ``DepthScaled``
+    markers. Mutates configs in place and returns the same dict.
+    """
+    for config in configs.values():
+        layers = []
+        for layer_id in range(config.n_layers):
+            cfg = deepcopy(config.layer)
+            resolve_per_layer(cfg, layer_id)
+            layers.append(cfg)
+        config.layers = layers
+    return configs
+
 
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
@@ -392,6 +411,9 @@ llama3_configs = {
         ),
     ),
 }
+
+
+_expand_layer_configs(llama3_configs)
 
 
 def model_registry(flavor: str) -> ModelSpec:

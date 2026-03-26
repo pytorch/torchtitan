@@ -31,24 +31,6 @@ class PerLayer:
         return self.factory(layer_id)
 
 
-def resolve_per_layer(cfg: Configurable.Config, layer_id: int) -> None:
-    """Walk a config tree and resolve all ``PerLayer`` param_init fields.
-
-    Mutates *cfg* in place (intended for use on a deep-copied config).
-    """
-    import dataclasses
-
-    for f in dataclasses.fields(cfg):
-        try:
-            val = getattr(cfg, f.name)
-        except AttributeError:
-            continue
-        if isinstance(val, PerLayer):
-            object.__setattr__(cfg, f.name, val.resolve(layer_id))
-        elif dataclasses.is_dataclass(val):
-            resolve_per_layer(val, layer_id)
-
-
 # Cache: maps nn.Module subclass -> created Module wrapper class.
 # Module classes are typically created at import time and live for
 # the process lifetime.

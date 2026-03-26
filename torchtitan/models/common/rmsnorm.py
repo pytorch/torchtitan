@@ -25,8 +25,8 @@ class RMSNorm(nn.RMSNorm, Module):
     from the parent model. See ``Configurable`` docstring to understand
     the design pattern.
 
-    Parameter initialization is handled by the ancestor's ``param_init``
-    callable (e.g., ``.*norm.*weight`` → ``nn.init.ones_``).
+    Parameter initialization is handled by ``param_init`` set on the
+    Config in the model registry (e.g., ``{"weight": nn.init.ones_}``).
     """
 
     @dataclass(kw_only=True, slots=True)

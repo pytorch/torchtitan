@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 
 import torch.nn as nn
@@ -12,7 +14,11 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import depth_scaled_std, PerLayer
+from torchtitan.models.common.param_init import (
+    depth_scaled_std,
+    PerLayer,
+    resolve_per_layer,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, GptOssModel, GptOssTransformerBlock
@@ -26,6 +32,25 @@ __all__ = [
     "GptOssModel",
     "gptoss_configs",
 ]
+
+
+def _expand_layer_configs(configs: dict) -> dict:
+    """Expand the layer template into per-layer configs for each model config.
+
+    Sets use_sliding_attention=True on even-indexed layers.
+    Mutates configs in place and returns the same dict.
+    """
+    for config in configs.values():
+        assert isinstance(config.layer, GptOssTransformerBlock.Config)
+        layers = []
+        for layer_id in range(config.n_layers):
+            cfg = deepcopy(config.layer)
+            cfg = replace(cfg, use_sliding_attention=(layer_id % 2 == 0))
+            resolve_per_layer(cfg, layer_id)
+            layers.append(cfg)
+        config.layers = layers
+    return configs
+
 
 _LINEAR_DEPTH_INIT = PerLayer(
     lambda layer_id: {
@@ -197,6 +222,9 @@ gptoss_configs = {
         ),
     ),
 }
+
+
+_expand_layer_configs(gptoss_configs)
 
 
 def model_registry(flavor: str) -> ModelSpec:

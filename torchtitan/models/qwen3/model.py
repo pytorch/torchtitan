@@ -39,7 +39,7 @@ class Qwen3TransformerBlock(TransformerBlock):
 
         self.attention = config.attention.build(dim=dim)
 
-        self.moe_enabled = config.moe_enabled
+        self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
             self.moe = config.moe.build(dim=dim)
@@ -84,20 +84,13 @@ class Qwen3Model(Decoder):
         enable_weight_tying: bool = False
         layer: TransformerBlock.Config
 
-        def _expand_layer(self, layer_id, layer_cfg):
-            from dataclasses import replace
-
-            assert isinstance(layer_cfg, Qwen3TransformerBlock.Config)
-            if layer_cfg.moe_enabled:
-                return replace(layer_cfg, feed_forward=None)
-            return replace(layer_cfg, moe=None)
-
         def update_from_config(
             self,
             *,
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -109,18 +102,19 @@ class Qwen3Model(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            if self.layer.moe is not None:
-                self.layer.moe.router._debug_force_load_balance = (
-                    debug.moe_force_load_balance
-                )
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    layer_cfg.moe.router._debug_force_load_balance = (
+                        debug.moe_force_load_balance
+                    )
 
             if (
                 parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend == "varlen"
+                and self.layers[0].attention.attn_backend == "varlen"
             ):
                 raise NotImplementedError(
                     f"Context Parallel only supports SDPA and FlexAttention."
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
+                    f"Got attn_backend='{self.layers[0].attention.attn_backend}'. "
                     f"Varlen attention is not supported with CP."
                 )
 
@@ -131,9 +125,9 @@ class Qwen3Model(Decoder):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -146,13 +140,14 @@ class Qwen3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layer.attention, GQAttention.Config)
-            assert self.layer.attention.head_dim is not None
+            assert self.layers is not None
+            assert isinstance(self.layers[0].attention, GQAttention.Config)
+            assert self.layers[0].attention.head_dim is not None
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * self.layer.attention.head_dim,
+                self.layers[0].attention.n_heads,
+                2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
 

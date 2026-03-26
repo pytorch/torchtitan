@@ -20,6 +20,7 @@ from torchtitan.models.common.param_init import (
 )
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.models.llama3 import _expand_layer_configs
 from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 
 _LINEAR_INIT = {
@@ -39,7 +40,7 @@ _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 
 def _make_config(enable_weight_tying: bool = False):
     tok_init = _EMBEDDING_SKIP_INIT if enable_weight_tying else _EMBEDDING_INIT
-    return Llama3Model.Config(
+    config = Llama3Model.Config(
         dim=64,
         n_layers=2,
         vocab_size=256,
@@ -71,6 +72,8 @@ def _make_config(enable_weight_tying: bool = False):
             scaling="llama",
         ),
     )
+    _expand_layer_configs({"_test": config})
+    return config
 
 
 class TestLlama3WeightTying(unittest.TestCase):
@@ -95,7 +98,6 @@ class TestLlama3WeightTying(unittest.TestCase):
     def test_weights_remain_tied_after_init_states(self):
         """Weights must still be shared after calling init_states."""
         config = _make_config(enable_weight_tying=True)
-        config.expand()
         model = Llama3Model(config)
         model.init_states()
         self.assertIs(

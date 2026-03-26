@@ -6,6 +6,8 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 
 import torch.nn as nn
@@ -17,6 +19,7 @@ from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRou
 from torchtitan.models.common.param_init import (
     depth_scaled_std,
     PerLayer,
+    resolve_per_layer,
     skip_param_init,
 )
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -32,6 +35,28 @@ __all__ = [
     "qwen3_configs",
 ]
 
+
+def _expand_layer_configs(configs: dict) -> dict:
+    """Expand the layer template into per-layer configs for each model config.
+
+    Handles MoE vs. dense feed-forward selection based on moe_enabled flag.
+    Mutates configs in place and returns the same dict.
+    """
+    for config in configs.values():
+        assert isinstance(config.layer, Qwen3TransformerBlock.Config)
+        layers = []
+        for layer_id in range(config.n_layers):
+            cfg = deepcopy(config.layer)
+            if cfg.moe_enabled:
+                cfg = replace(cfg, feed_forward=None)
+            else:
+                cfg = replace(cfg, moe=None)
+            resolve_per_layer(cfg, layer_id)
+            layers.append(cfg)
+        config.layers = layers
+    return configs
+
+
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
@@ -45,6 +70,13 @@ _LINEAR_DEPTH_INIT = PerLayer(
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
+_EXPERTS_DEPTH_INIT = PerLayer(
+    lambda layer_id: {
+        "w1": partial(nn.init.trunc_normal_, std=0.02),
+        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+    }
+)
 
 
 def _output_linear_init(dim: int):
@@ -358,21 +390,7 @@ qwen3_configs = {
                     route_norm=True,
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=3072,
@@ -420,21 +438,7 @@ qwen3_configs = {
                     route_norm=True,
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=6144,
@@ -482,21 +486,7 @@ qwen3_configs = {
                     route_norm=True,
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
             ),
             feed_forward=FeedForward.Config(
                 hidden_dim=12288,
@@ -523,6 +513,9 @@ qwen3_configs = {
         ),
     ),
 }
+
+
+_expand_layer_configs(qwen3_configs)
 
 
 def model_registry(flavor: str) -> ModelSpec:

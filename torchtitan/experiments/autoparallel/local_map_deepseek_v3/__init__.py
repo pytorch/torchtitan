@@ -26,7 +26,6 @@ def get_model_args():
         # Just override the configs
         override = get_sample_config()
         override.update_from_config = model_args[config].update_from_config
-        override.expand = model_args[config].expand
         override.get_nparams_and_flops = model_args[config].get_nparams_and_flops
         model_args[config] = override
 

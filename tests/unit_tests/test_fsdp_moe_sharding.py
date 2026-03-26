@@ -36,53 +36,55 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     """Build a tiny Llama4Model with a configurable number of experts."""
     dim = 256
     n_heads = 16
-    return Llama4Model(
-        Llama4Model.Config(
-            dim=dim,
-            n_layers=4,
-            vocab_size=2048,
-            tok_embeddings=Embedding.Config(),
-            norm=RMSNorm.Config(),
-            output=Linear.Config(),
-            layer=Llama4TransformerBlock.Config(
-                every_n_layers_nope=4,
-                fixed_attn_block_size=256,
-                attention_norm=RMSNorm.Config(),
-                ffn_norm=RMSNorm.Config(),
-                feed_forward=FeedForward.Config(
-                    hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+    config = Llama4Model.Config(
+        dim=dim,
+        n_layers=4,
+        vocab_size=2048,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
+        output=Linear.Config(),
+        layer=Llama4TransformerBlock.Config(
+            every_n_layers_nope=4,
+            fixed_attn_block_size=256,
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
+            feed_forward=FeedForward.Config(
+                hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+                w1=Linear.Config(),
+                w2w3=Linear.Config(),
+            ),
+            attention=GQAttention.Config(
+                n_heads=n_heads,
+                wqkv=Linear.Config(),
+                wo=Linear.Config(),
+                attn_backend="flex",
+                attn_mask_type="block_causal",
+                rope_backend="complex",
+            ),
+            moe=MoE.Config(
+                num_experts=num_experts,
+                hidden_dim=compute_moe_hidden_dim(dim),
+                shared_experts=FeedForward.Config(
+                    hidden_dim=compute_moe_hidden_dim(dim),
                     w1=Linear.Config(),
                     w2w3=Linear.Config(),
                 ),
-                attention=GQAttention.Config(
-                    n_heads=n_heads,
-                    wqkv=Linear.Config(),
-                    wo=Linear.Config(),
-                    attn_backend="flex",
-                    attn_mask_type="block_causal",
-                    rope_backend="complex",
-                ),
-                moe=MoE.Config(
-                    num_experts=num_experts,
-                    hidden_dim=compute_moe_hidden_dim(dim),
-                    shared_experts=FeedForward.Config(
-                        hidden_dim=compute_moe_hidden_dim(dim),
-                        w1=Linear.Config(),
-                        w2w3=Linear.Config(),
-                    ),
-                ),
             ),
-            rope=RoPE.Config(
-                dim=dim // n_heads,
-                max_seq_len=2048,
-                theta=500000,
-                backend="complex",
-                scaling="llama",
-                scaling_factor=16.0,
-                high_freq_factor=1.0,
-            ),
-        )
+        ),
+        rope=RoPE.Config(
+            dim=dim // n_heads,
+            max_seq_len=2048,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
     )
+    from torchtitan.models.llama4 import _expand_layer_configs
+
+    _expand_layer_configs({"_test": config})
+    return Llama4Model(config)
 
 
 def _get_expert_shard_dim(model: Llama4Model) -> int | None:

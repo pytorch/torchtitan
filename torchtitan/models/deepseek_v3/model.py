@@ -182,7 +182,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
-        self.moe_enabled = layer_id >= config.n_dense_layers
+        self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
             self.moe = config.moe.build(dim=dim)
@@ -227,6 +227,7 @@ class DeepSeekV3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -237,64 +238,63 @@ class DeepSeekV3Model(Decoder):
                 )
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            # Sync rope fields to attention
-            assert isinstance(self.layer.attention, Attention.Config)
-            self.layer.attention = dataclasses.replace(
-                self.layer.attention,
-                rope_max_seq_len=seq_len,
-                rope_factor=self.rope.rope_factor,
-                rope_original_seq_len=self.rope.original_seq_len,
-            )
-
-            assert self.layer.moe is not None
-            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
-                logger.warning(
-                    "Failed to use grouped mm, which is only supported on SM90 or later",
+            # Sync rope fields to attention for all layers
+            for layer_cfg in self.layers:
+                assert isinstance(layer_cfg.attention, Attention.Config)
+                layer_cfg.attention = dataclasses.replace(
+                    layer_cfg.attention,
+                    rope_max_seq_len=seq_len,
+                    rope_factor=self.rope.rope_factor,
+                    rope_original_seq_len=self.rope.original_seq_len,
                 )
-                self.layer.moe.experts.use_grouped_mm = False
+
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    if (
+                        layer_cfg.moe.experts.use_grouped_mm
+                        and not has_cuda_capability(9, 0)
+                    ):
+                        logger.warning(
+                            "Failed to use grouped mm, which is only supported on SM90 or later",
+                        )
+                        layer_cfg.moe.experts.use_grouped_mm = False
+                    layer_cfg.moe.router._debug_force_load_balance = (
+                        debug.moe_force_load_balance
+                    )
+                    if parallelism.expert_parallel_comm_backend in (
+                        "deepep",
+                        "hybridep",
+                    ):
+                        from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
+
+                        init_kwargs = {
+                            f.name: getattr(layer_cfg.moe, f.name)
+                            for f in dataclasses.fields(layer_cfg.moe)
+                            if f.init
+                        }
+                        layer_cfg.moe = DeepEPMoE.Config(**init_kwargs)
 
             if (
                 parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend != "sdpa"
+                and self.layers[0].attention.attn_backend != "sdpa"
             ):
                 raise NotImplementedError(
                     f"Context Parallel only supports SDPA attention. "
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
+                    f"Got attn_backend='{self.layers[0].attention.attn_backend}'. "
                     f"FlexAttention and varlen attention are not supported with CP."
                 )
-
-            self.layer.moe.router._debug_force_load_balance = (
-                debug.moe_force_load_balance
-            )
-
-            if parallelism.expert_parallel_comm_backend in ("deepep", "hybridep"):
-                from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
-
-                init_kwargs = {
-                    f.name: getattr(self.layer.moe, f.name)
-                    for f in dataclasses.fields(self.layer.moe)
-                    if f.init
-                }
-                self.layer.moe = DeepEPMoE.Config(**init_kwargs)
-
-        def _expand_layer(self, layer_id, layer_cfg):
-            from dataclasses import replace
-
-            assert isinstance(layer_cfg, DeepSeekV3TransformerBlock.Config)
-            if layer_id >= layer_cfg.n_dense_layers:
-                return replace(layer_cfg, feed_forward=None)
-            return replace(layer_cfg, moe=None)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layer.attention, Attention.Config)
+            assert self.layers is not None
+            assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                self.layer.attention.qk_nope_head_dim
-                + self.layer.attention.qk_rope_head_dim
-                + self.layer.attention.v_head_dim,
+                self.layers[0].attention.n_heads,
+                self.layers[0].attention.qk_nope_head_dim
+                + self.layers[0].attention.qk_rope_head_dim
+                + self.layers[0].attention.v_head_dim,
                 seq_len,
             )

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 
 import torch.nn as nn
@@ -22,7 +24,12 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.moe.moe import GroupedExperts
-from torchtitan.models.common.param_init import depth_scaled_std, PerLayer
+from torchtitan.models.common.param_init import (
+    depth_scaled_std,
+    expand_shared_experts,
+    PerLayer,
+    resolve_per_layer,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
@@ -34,6 +41,35 @@ __all__ = [
     "Llama4Model",
     "llama4_configs",
 ]
+
+
+def _expand_layer_configs(configs: dict) -> dict:
+    """Expand the layer template into per-layer configs for each model config.
+
+    Handles iRoPE (NoPE on every N layers) and MoE interleaving.
+    Mutates configs in place and returns the same dict.
+    """
+    for config in configs.values():
+        assert isinstance(config.layer, Llama4TransformerBlock.Config)
+        expand_shared_experts(config.layer.moe)
+        layers = []
+        for layer_id in range(config.n_layers):
+            cfg = deepcopy(config.layer)
+            # iRoPE: override use_rope=False on certain layers
+            if cfg.every_n_layers_nope is not None:
+                if layer_id % cfg.every_n_layers_nope == 0:
+                    cfg = replace(cfg, attention=replace(cfg.attention, use_rope=False))
+            # MoE interleaving: keep only the appropriate FFN type per layer
+            moe_enabled = (layer_id + 1) % cfg.interleave_moe_layer_step == 0
+            if moe_enabled:
+                cfg = replace(cfg, feed_forward=None)
+            else:
+                cfg = replace(cfg, moe=None)
+            resolve_per_layer(cfg, layer_id)
+            layers.append(cfg)
+        config.layers = layers
+    return configs
+
 
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
@@ -47,6 +83,13 @@ _LINEAR_DEPTH_INIT = PerLayer(
 )
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+_EXPERTS_DEPTH_INIT = PerLayer(
+    lambda layer_id: {
+        "w1": partial(nn.init.trunc_normal_, std=0.02),
+        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+    }
+)
 
 
 def _output_linear_init(dim: int):
@@ -88,21 +131,7 @@ llama4_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
                     hidden_dim=compute_moe_hidden_dim(256),
                     w1=Linear.Config(param_init=_LINEAR_INIT),
@@ -143,21 +172,7 @@ llama4_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
                     hidden_dim=compute_moe_hidden_dim(
                         5120,
@@ -219,21 +234,7 @@ llama4_configs = {
                 router=TokenChoiceTopKRouter.Config(
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
                     hidden_dim=compute_moe_hidden_dim(
                         5120,
@@ -272,6 +273,9 @@ llama4_configs = {
         ),
     ),
 }
+
+
+_expand_layer_configs(llama4_configs)
 
 
 def model_registry(flavor: str) -> ModelSpec:

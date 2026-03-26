@@ -139,11 +139,11 @@ class GptOssTransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        pass
+        use_sliding_attention: bool = False
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
-        self.use_sliding_attention = layer_id % 2 == 0
+        self.use_sliding_attention = config.use_sliding_attention
         self.attention = config.attention.build(dim=dim)
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
@@ -207,6 +207,7 @@ class GptOssModel(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -218,12 +219,16 @@ class GptOssModel(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            assert self.layer.moe is not None
-            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
-                logger.warning(
-                    "Failed to use grouped mm, which is only supported on SM90 or later",
-                )
-                self.layer.moe.experts.use_grouped_mm = False
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    if (
+                        layer_cfg.moe.experts.use_grouped_mm
+                        and not has_cuda_capability(9, 0)
+                    ):
+                        logger.warning(
+                            "Failed to use grouped mm, which is only supported on SM90 or later",
+                        )
+                        layer_cfg.moe.experts.use_grouped_mm = False
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -232,9 +237,9 @@ class GptOssModel(Decoder):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -248,12 +253,13 @@ class GptOssModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, float]:
-            assert isinstance(self.layer.attention, Attention.Config)
+            assert self.layers is not None
+            assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * self.layer.attention.head_dim,
+                self.layers[0].attention.n_heads,
+                2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
 

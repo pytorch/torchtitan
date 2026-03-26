@@ -57,6 +57,8 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
     """Build a minimal Llama3Model.Config with the given head counts."""
+    from torchtitan.models.llama3 import _expand_layer_configs
+
     rope_cfg = RoPE.Config(
         dim=_DIM // n_heads,
         max_seq_len=4096,
@@ -64,7 +66,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
         backend="complex",
         scaling="llama",
     )
-    return Llama3Model.Config(
+    config = Llama3Model.Config(
         dim=_DIM,
         n_layers=_N_LAYERS,
         vocab_size=_VOCAB_SIZE,
@@ -90,6 +92,8 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
             ),
         ),
     )
+    _expand_layer_configs({"_test": config})
+    return config
 
 
 @unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")

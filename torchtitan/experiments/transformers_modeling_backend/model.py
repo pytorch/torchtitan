@@ -255,10 +255,6 @@ class HFTransformerModel(BaseModel):
 
             return self
 
-        def expand(self) -> None:
-            """No-op: HFTransformerModel handles init via HF mechanisms."""
-            pass
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:

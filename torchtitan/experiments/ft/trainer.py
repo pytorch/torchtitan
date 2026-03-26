@@ -106,7 +106,6 @@ class FaultTolerantTrainer(Trainer):
         model_config.update_from_config(
             trainer_config=config,
         )
-        model_config.expand()
         self.model_config = model_config
 
         logger.info(

@@ -77,6 +77,7 @@ class Llama3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -89,19 +90,19 @@ class Llama3Model(Decoder):
 
             if (
                 parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend == "varlen"
+                and self.layers[0].attention.attn_backend == "varlen"
             ):
                 raise NotImplementedError(
                     f"Context Parallel only supports SDPA and FlexAttention."
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
+                    f"Got attn_backend='{self.layers[0].attention.attn_backend}'. "
                     f"Varlen attention is not supported with CP."
                 )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -119,11 +120,12 @@ class Llama3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
+            assert self.layers is not None
             return get_dense_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * (self.dim // self.layer.attention.n_heads),
+                self.layers[0].attention.n_heads,
+                2 * (self.dim // self.layers[0].attention.n_heads),
                 seq_len,
             )
 

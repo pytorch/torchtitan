@@ -248,8 +248,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_config.update_from_config(
             trainer_config=config,
         )
-        # Expand config tree: create per-layer configs and assign param_init
-        model_config.expand()
         self.model_config = model_config
 
         logger.info(

@@ -17,7 +17,8 @@ class BaseModel(Module):
     Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
     The model is constructed via ``config.build()``.
 
-    All models must implement ``init_states`` (from Module).
+    ``init_states`` (from Module) auto-recurses; override only for
+    custom ordering (e.g., weight tying before init).
     """
 
     def verify_module_protocol(self) -> None:
@@ -57,17 +58,6 @@ class BaseModel(Module):
             trainer_config,
             **kwargs,
         ) -> None:
-            pass
-
-        @abstractmethod
-        def expand(self) -> None:
-            """Expand the config tree to mirror the module tree.
-
-            Called by the trainer after ``update_from_config()``, before
-            ``build()``.  Populates per-layer configs, resolves structural
-            decisions (MoE vs FFN, iRoPE, etc.), and assigns ``param_init``
-            to every sub-config so that each module has its own initializer.
-            """
             pass
 
         @abstractmethod

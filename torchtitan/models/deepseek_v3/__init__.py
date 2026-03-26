@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 
 import torch.nn as nn
@@ -13,7 +15,12 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import depth_scaled_std, PerLayer
+from torchtitan.models.common.param_init import (
+    depth_scaled_std,
+    expand_shared_experts,
+    PerLayer,
+    resolve_per_layer,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
@@ -27,6 +34,30 @@ __all__ = [
     "deepseekv3_configs",
 ]
 
+
+def _expand_layer_configs(configs: dict) -> dict:
+    """Expand the layer template into per-layer configs for each model config.
+
+    Handles dense vs. MoE layer selection based on n_dense_layers.
+    Mutates configs in place and returns the same dict.
+    """
+    for config in configs.values():
+        assert isinstance(config.layer, DeepSeekV3TransformerBlock.Config)
+        expand_shared_experts(config.layer.moe)
+        n_dense = config.layer.n_dense_layers
+        layers = []
+        for layer_id in range(config.n_layers):
+            cfg = deepcopy(config.layer)
+            if layer_id >= n_dense:
+                cfg = replace(cfg, feed_forward=None)
+            else:
+                cfg = replace(cfg, moe=None)
+            resolve_per_layer(cfg, layer_id)
+            layers.append(cfg)
+        config.layers = layers
+    return configs
+
+
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
@@ -39,6 +70,13 @@ _LINEAR_DEPTH_INIT = PerLayer(
 )
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+_EXPERTS_DEPTH_INIT = PerLayer(
+    lambda layer_id: {
+        "w1": partial(nn.init.trunc_normal_, std=0.02),
+        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+    }
+)
 
 
 def _output_linear_init(dim: int):
@@ -71,23 +109,9 @@ deepseekv3_configs = {
                     score_func="softmax",
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
-                    hidden_dim=512,
+                    hidden_dim=256,
                     w1=Linear.Config(param_init=_LINEAR_INIT),
                     w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
@@ -146,23 +170,9 @@ deepseekv3_configs = {
                     score_func="softmax",
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
-                    hidden_dim=512,
+                    hidden_dim=256,
                     w1=Linear.Config(param_init=_LINEAR_INIT),
                     w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
@@ -223,23 +233,9 @@ deepseekv3_configs = {
                     score_func="softmax",
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
-                    hidden_dim=2816,
+                    hidden_dim=1408,
                     w1=Linear.Config(param_init=_LINEAR_INIT),
                     w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
@@ -303,23 +299,9 @@ deepseekv3_configs = {
                     route_scale=16.0,
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
-                    hidden_dim=3072,
+                    hidden_dim=1536,
                     w1=Linear.Config(param_init=_LINEAR_INIT),
                     w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
@@ -384,21 +366,7 @@ deepseekv3_configs = {
                     route_scale=2.5,
                     gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 ),
-                experts=GroupedExperts.Config(
-                    param_init=PerLayer(
-                        lambda layer_id: {
-                            "w1": partial(nn.init.trunc_normal_, std=0.02),
-                            "w2": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                            "w3": partial(
-                                nn.init.trunc_normal_,
-                                std=depth_scaled_std(0.02, layer_id),
-                            ),
-                        }
-                    )
-                ),
+                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
                 shared_experts=FeedForward.Config(
                     hidden_dim=2048,
                     w1=Linear.Config(param_init=_LINEAR_INIT),
@@ -441,6 +409,9 @@ deepseekv3_configs = {
         ),
     ),
 }
+
+
+_expand_layer_configs(deepseekv3_configs)
 
 
 def model_registry(flavor: str) -> ModelSpec:
