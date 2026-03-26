@@ -147,6 +147,23 @@ class RLTrainer(Configurable):
         # Propagate seed to generator for deterministic sampling
         config.generator.seed = config.seed
 
+        # Batch-invariant mode requires bf16 on both trainer and generator
+        # so that attention kernels (FA3) run identically on both sides
+        # without any dtype casting that could break bitwise identity.
+        if config.batch_invariant_mode:
+            if config.trainer.training.dtype != "bfloat16":
+                logger.warning(
+                    f"batch_invariant_mode requires bfloat16 training dtype, "
+                    f"overriding {config.trainer.training.dtype!r} -> 'bfloat16'"
+                )
+                config.trainer.training.dtype = "bfloat16"
+            if config.generator.model_dtype != "bfloat16":
+                logger.warning(
+                    f"batch_invariant_mode requires bfloat16 generator dtype, "
+                    f"overriding {config.generator.model_dtype!r} -> 'bfloat16'"
+                )
+                config.generator.model_dtype = "bfloat16"
+
         # Patch model_spec to use the RL-specific parallelize function.
         # TODO: Switch to canonical Qwen3 parallel plan
         from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3

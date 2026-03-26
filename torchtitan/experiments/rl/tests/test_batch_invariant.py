@@ -26,7 +26,7 @@ from torchtitan.experiments.rl.batch_invariant import (
     enable_batch_invariant_mode,
 )
 
-_SEQ_LEN = 32
+_SEQ_LEN = 256
 
 
 def _build_debug_model(device="cuda"):
