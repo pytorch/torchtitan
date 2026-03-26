@@ -3,148 +3,234 @@
 #
 # Usage:
 #   cd torchtitan
-#   bash torchtitan/experiments/transformers_modeling_backend/tests/run_moe_tests.sh [NGPU]
+#   bash torchtitan/experiments/transformers_modeling_backend/tests/run_moe_tests.sh [NGPU] [STEPS]
 #
-# Default NGPU=8. All configurations use dp_shard=-1 (auto-computed).
+# Default NGPU=8, STEPS=200. All configurations use dp_shard=-1 (auto-computed).
 # EP borrows from the fsdp*tp product; it does NOT multiply into WORLD_SIZE.
+#
+# When NGPU >= 8, tests that fit on 4 GPUs are run in parallel pairs (2 tests
+# at a time on GPUs 0-3 and 4-7) to halve wall-clock time. Tests requiring
+# 8 GPUs run sequentially on all GPUs.
 
 set -euo pipefail
 
-NGPU=${1:-8}
+TOTAL_GPUS=${1:-8}
 MODULE=transformers_modeling_backend
 CONFIG=transformers_modeling_backend_debugmodel_moe
 STEPS=${2:-200}
-PASSED=0
-FAILED=0
-FAILURES=""
+
+RESULTS_DIR=$(mktemp -d)
+trap "rm -rf $RESULTS_DIR" EXIT
 
 run_test() {
     local name="$1"
-    shift
-    echo ""
-    echo "================================================================"
-    echo "TEST: $name"
-    echo "NGPU=$NGPU, args: $*"
-    echo "================================================================"
+    local gpus="$2"
+    local ngpu="$3"
+    shift 3
 
-    if NGPU=$NGPU MODULE=$MODULE CONFIG=$CONFIG ./run_train.sh \
-        --training.steps $STEPS \
-        "$@" 2>&1; then
-        echo "PASSED: $name"
-        PASSED=$((PASSED + 1))
+    echo "  START: $name (GPUs: $gpus, NGPU=$ngpu)"
+
+    local result_file="$RESULTS_DIR/$(echo "$name" | tr ' /+()' '_____')"
+
+    if CUDA_VISIBLE_DEVICES=$gpus NGPU=$ngpu MODULE=$MODULE CONFIG=$CONFIG \
+        ./run_train.sh --training.steps $STEPS "$@" > "$result_file.log" 2>&1; then
+        echo "PASSED" > "$result_file.status"
+        echo "  PASSED: $name"
     else
-        echo "FAILED: $name"
-        FAILED=$((FAILED + 1))
-        FAILURES="$FAILURES\n  - $name"
+        echo "FAILED" > "$result_file.status"
+        echo "$name" > "$result_file.fail"
+        echo "  FAILED: $name"
     fi
 }
 
-# ── FSDP-only (no TP, no EP) — baseline ──
-run_test "FSDP-only (baseline)" \
-    --parallelism.data_parallel_shard_degree -1
+# Run two 4-GPU tests in parallel on GPUs 0-3 and 4-7
+run_pair() {
+    local name_a="$1"; shift
+    local args_a=()
+    while [ "$1" != "--" ]; do args_a+=("$1"); shift; done
+    shift  # skip --
+    local name_b="$1"; shift
+    local args_b=("$@")
 
-# ── EP-only (no TP) ──
-run_test "FSDP + EP=2" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.expert_parallel_degree 2
+    echo ""
+    echo "================================================================"
+    echo "PARALLEL: $name_a  |  $name_b"
+    echo "================================================================"
 
-run_test "FSDP + EP=4" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.expert_parallel_degree 4
+    run_test "$name_a" "0,1,2,3" 4 "${args_a[@]}" &
+    local pid_a=$!
+    run_test "$name_b" "4,5,6,7" 4 "${args_b[@]}" &
+    local pid_b=$!
+    wait $pid_a $pid_b
+}
 
-# ── TP-only MoE (no EP) ──
-run_test "FSDP + TP=2 (MoE, no EP)" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2
+# Run a single test on all GPUs
+run_single() {
+    local name="$1"; shift
+    echo ""
+    echo "================================================================"
+    echo "SINGLE: $name (all $TOTAL_GPUS GPUs)"
+    echo "================================================================"
+    run_test "$name" "$(seq -s, 0 $((TOTAL_GPUS - 1)))" "$TOTAL_GPUS" "$@"
+}
 
-run_test "FSDP + TP=4 (MoE, no EP)" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 4
+# Run a single test on 4 GPUs (when we can't pair it)
+run_half() {
+    local name="$1"; shift
+    echo ""
+    echo "================================================================"
+    echo "SINGLE: $name (4 GPUs)"
+    echo "================================================================"
+    run_test "$name" "0,1,2,3" 4 "$@"
+}
 
-# ── TP + EP combined ──
-run_test "FSDP + TP=2 + EP=2" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 2
+if [ "$TOTAL_GPUS" -ge 8 ]; then
+    # ── Parallel pairs (4 GPUs each) ──
 
-run_test "FSDP + TP=2 + EP=4" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4
+    run_pair \
+        "FSDP-only (baseline)" \
+            --parallelism.data_parallel_shard_degree -1 \
+        -- \
+        "FSDP + EP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 2
 
-# ── Compile variants ──
-run_test "FSDP + EP=4 + compile" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.expert_parallel_degree 4 \
-    --compile.enable
+    run_pair \
+        "FSDP + EP=4" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 4 \
+        -- \
+        "FSDP + TP=2 (MoE, no EP)" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2
 
-run_test "FSDP + TP=2 + EP=2 + compile" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 2 \
-    --compile.enable
+    run_pair \
+        "FSDP + TP=4 (MoE, no EP)" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 4 \
+        -- \
+        "FSDP + TP=2 + EP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 2
 
-run_test "FSDP + TP=2 (MoE, no EP) + compile" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --compile.enable
+    run_pair \
+        "FSDP + TP=2 + EP=4" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 4 \
+        -- \
+        "FSDP + EP=4 + compile" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 4 \
+            --compile.enable
 
-# ── Pipeline Parallel + MoE ──
-run_test "FSDP + PP=2 + EP=2" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.pipeline_parallel_degree 2 \
-    --parallelism.pipeline_parallel_schedule 1F1B \
-    --parallelism.expert_parallel_degree 2
+    run_pair \
+        "FSDP + TP=2 + EP=2 + compile" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 2 \
+            --compile.enable \
+        -- \
+        "FSDP + TP=2 (MoE, no EP) + compile" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --compile.enable
 
-if [ "$NGPU" -ge 8 ]; then
-run_test "FSDP + TP=2 + PP=2 + EP=2" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.pipeline_parallel_degree 2 \
-    --parallelism.pipeline_parallel_schedule 1F1B \
-    --parallelism.expert_parallel_degree 2
+    run_pair \
+        "FSDP + PP=2 + EP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.pipeline_parallel_degree 2 \
+            --parallelism.pipeline_parallel_schedule 1F1B \
+            --parallelism.expert_parallel_degree 2 \
+        -- \
+        "HSDP + EP=2" \
+            --parallelism.data_parallel_replicate_degree 2 \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 2
+
+    run_pair \
+        "FSDP + EP=2 (no SAC)" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 2 \
+            --activation_checkpoint.mode none \
+        -- \
+        "FSDP + TP=2 + EP=2 (no SAC)" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 2 \
+            --activation_checkpoint.mode none
+
+    run_half \
+        "FSDP + PP=2 + EP=2 + compile" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.pipeline_parallel_degree 2 \
+            --parallelism.pipeline_parallel_schedule 1F1B \
+            --parallelism.expert_parallel_degree 2 \
+            --compile.enable
+
+    # ── 8-GPU-only tests (sequential) ──
+
+    run_single \
+        "FSDP + TP=2 + PP=2 + EP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.pipeline_parallel_degree 2 \
+            --parallelism.pipeline_parallel_schedule 1F1B \
+            --parallelism.expert_parallel_degree 2
+
+    run_single \
+        "HSDP + TP=2 + EP=2" \
+            --parallelism.data_parallel_replicate_degree 2 \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 2
+
+else
+    # ── Sequential mode (< 8 GPUs) ──
+    GPU_LIST=$(seq -s, 0 $((TOTAL_GPUS - 1)))
+
+    for test_args in \
+        "FSDP-only (baseline)|--parallelism.data_parallel_shard_degree -1" \
+        "FSDP + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2" \
+        "FSDP + EP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4" \
+        "FSDP + TP=2 (MoE, no EP)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2" \
+        "FSDP + TP=4 (MoE, no EP)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 4" \
+        "FSDP + TP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2" \
+        "FSDP + TP=2 + EP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+        "FSDP + EP=4 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --compile.enable" \
+        "FSDP + TP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --compile.enable" \
+        "FSDP + TP=2 (MoE, no EP) + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --compile.enable" \
+        "FSDP + PP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2" \
+        "HSDP + EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2" \
+        "FSDP + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none" \
+        "FSDP + TP=2 + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none" \
+        "FSDP + PP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable" \
+    ; do
+        name="${test_args%%|*}"
+        args="${test_args#*|}"
+        echo ""
+        echo "================================================================"
+        echo "TEST: $name"
+        echo "================================================================"
+        # shellcheck disable=SC2086
+        run_test "$name" "$GPU_LIST" "$TOTAL_GPUS" $args
+    done
 fi
-
-# ── HSDP (data parallel replicate + shard) + MoE ──
-run_test "HSDP + EP=2" \
-    --parallelism.data_parallel_replicate_degree 2 \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.expert_parallel_degree 2
-
-if [ "$NGPU" -ge 8 ]; then
-run_test "HSDP + TP=2 + EP=2" \
-    --parallelism.data_parallel_replicate_degree 2 \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 2
-fi
-
-# ── Without SAC (explicit baseline) ──
-run_test "FSDP + EP=2 (no SAC)" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.expert_parallel_degree 2 \
-    --activation_checkpoint.mode none
-
-run_test "FSDP + TP=2 + EP=2 (no SAC)" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 2 \
-    --activation_checkpoint.mode none
-
-# ── PP + compile ──
-run_test "FSDP + PP=2 + EP=2 + compile" \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.pipeline_parallel_degree 2 \
-    --parallelism.pipeline_parallel_schedule 1F1B \
-    --parallelism.expert_parallel_degree 2 \
-    --compile.enable
 
 # ── Summary ──
+PASSED=$(find "$RESULTS_DIR" -name "*.status" -exec grep -l PASSED {} \; | wc -l)
+FAILED=$(find "$RESULTS_DIR" -name "*.status" -exec grep -l FAILED {} \; | wc -l)
+TOTAL=$((PASSED + FAILED))
+
 echo ""
 echo "================================================================"
-echo "RESULTS: $PASSED passed, $FAILED failed"
-if [ $FAILED -gt 0 ]; then
-    echo -e "Failed tests:$FAILURES"
+echo "RESULTS: $PASSED/$TOTAL passed, $FAILED failed"
+if [ "$FAILED" -gt 0 ]; then
+    echo "Failed tests:"
+    for f in "$RESULTS_DIR"/*.fail; do
+        [ -f "$f" ] && echo "  - $(cat "$f")"
+    done
     exit 1
 else
     echo "All tests passed."

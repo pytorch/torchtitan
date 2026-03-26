@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import types
+import functools
+from unittest.mock import patch as _mock_patch
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -52,6 +52,54 @@ from torchtitan.models.llama3.parallelize import (
 )
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
+
+
+_orig_topk = torch.topk
+
+
+def _dtensor_safe_topk(input, *args, **kwargs):
+    """topk that converts DTensor to local first (workaround for PyTorch bug).
+
+    torch.topk backward uses aten.scatter.src which doesn't support
+    mixed tensor/DTensor types. This converts DTensor inputs to local
+    tensors before calling the real topk.
+    """
+    if isinstance(input, DTensor):
+        input = input.to_local()
+    return _orig_topk(input, *args, **kwargs)
+
+
+def _wrap_forward_with_safe_topk(module: nn.Module):
+    """Wrap a module's forward to scope a DTensor-safe topk mock.
+
+    Uses unittest.mock.patch to temporarily replace torch.topk with a
+    version that converts DTensor inputs to local before calling the
+    real topk. Also wraps plain tensor inputs as Replicate DTensors
+    when the module has DTensor params (from _replicate_gate_params),
+    since F.linear requires both operands to be DTensors.
+
+    The original forward runs unchanged — no HF code is copied.
+    Works for any HF MoE router regardless of model variant.
+    """
+    original_forward = module.forward
+
+    @functools.wraps(original_forward)
+    def _wrapped_forward(hidden_states, *args, **kwargs):
+        # Wrap plain tensor as Replicate DTensor for F.linear compatibility
+        # when gate params are DTensors (from _replicate_gate_params)
+        if not isinstance(hidden_states, DTensor):
+            for p in module.parameters():
+                if isinstance(p, DTensor):
+                    hidden_states = DTensor.from_local(
+                        hidden_states, p.device_mesh, (Replicate(),), run_check=False
+                    )
+                    break
+
+        with _mock_patch.object(torch, "topk", _dtensor_safe_topk):
+            return original_forward(hidden_states, *args, **kwargs)
+
+    module.forward = _wrapped_forward
+    module._has_topk_wrapper = True
 
 
 def parallelize_hf_transformers(
@@ -189,42 +237,6 @@ def _replicate_gate_params(moe_block: nn.Module, tp_mesh: DeviceMesh):
                 param_name,
                 nn.Parameter(distribute_tensor(param, tp_mesh, [Replicate()])),
             )
-
-
-def _tp_router_forward(self, hidden_states: torch.Tensor) -> tuple:
-    """Patched router forward that keeps topk on plain tensors.
-
-    When router gate params are Replicate DTensors on the TP mesh,
-    F.linear needs a DTensor input. But topk backward doesn't support
-    DTensor (aten.scatter.src mixed type issue). This forward wraps the
-    input as DTensor for the linear, then converts to local before topk.
-
-    NOTE: This is the only remaining forward monkey-patch. It cannot be
-    replaced with a hook-based approach because topk runs INSIDE the
-    forward — hooks only run before/after the forward, so they can't
-    insert the DTensor→local boundary between linear and topk.
-    """
-    hidden_states = hidden_states.reshape(-1, self.hidden_dim)
-
-    # Wrap as Replicate DTensor for F.linear with DTensor weight
-    if isinstance(self.weight, DTensor) and not isinstance(hidden_states, DTensor):
-        tp_mesh = self.weight.device_mesh
-        hidden_states = DTensor.from_local(
-            hidden_states, tp_mesh, (Replicate(),), run_check=False
-        )
-
-    router_logits = F.linear(hidden_states, self.weight)
-
-    # Convert to local BEFORE topk — topk backward doesn't support DTensor
-    if isinstance(router_logits, DTensor):
-        router_logits = router_logits.to_local(grad_placements=(Partial(),))
-
-    router_logits = F.softmax(router_logits, dtype=torch.float, dim=-1)
-    router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
-    if self.norm_topk_prob:
-        router_top_value /= router_top_value.sum(dim=-1, keepdim=True)
-    router_top_value = router_top_value.to(router_logits.dtype)
-    return router_logits, router_top_value, router_indices
 
 
 def _ep_dispatch_pre_hook(module, args):
@@ -589,14 +601,10 @@ def apply_non_moe_tp(
         elif ep_enabled:
             # MoE with EP: replicate router gate params on TP mesh so
             # they end up on the same (fsdp, tp) mesh as other non-EP
-            # params after FSDP. Patch router forward to insert
-            # DTensor→local boundary before topk (topk backward doesn't
-            # support DTensor).
+            # params after FSDP. Wrap forward with DTensor-safe topk
+            # (topk backward doesn't support DTensor).
             _replicate_gate_params(transformer_block.mlp, tp_mesh)
-            transformer_block.mlp.gate.forward = types.MethodType(
-                _tp_router_forward, transformer_block.mlp.gate
-            )
-            transformer_block.mlp.gate._tp_router_patched = True
+            _wrap_forward_with_safe_topk(transformer_block.mlp.gate)
         else:
             # MoE with TP only (no EP): shard expert weights via TP.
             # All-gather input, run experts with TP-sharded weights
@@ -612,10 +620,7 @@ def apply_non_moe_tp(
             }
             layer_plan.update(mlp_plan)
             _replicate_gate_params(transformer_block.mlp, tp_mesh)
-            transformer_block.mlp.gate.forward = types.MethodType(
-                _tp_router_forward, transformer_block.mlp.gate
-            )
-            transformer_block.mlp.gate._tp_router_patched = True
+            _wrap_forward_with_safe_topk(transformer_block.mlp.gate)
 
         # Some models like Phi-2 don't have post_attention_layernorm
         if not hasattr(transformer_block, "post_attention_layernorm"):
@@ -752,11 +757,11 @@ def _apply_compile_moe(model: nn.Module, compile_config: CompileConfig):
                             # and the HF for-loop runs eagerly.
                             continue
                         if mlp_attr == "gate" and getattr(
-                            mlp_submod, "_tp_router_patched", False
+                            mlp_submod, "_has_topk_wrapper", False
                         ):
-                            # Skip compiling the gate when its forward is
-                            # monkey-patched for TP — the DTensor ops in
-                            # _tp_router_forward are incompatible with
+                            # Skip compiling the gate when it has the
+                            # DTensor-safe topk wrapper — the mock.patch
+                            # context manager is incompatible with
                             # fullgraph=True.
                             continue
                         setattr(

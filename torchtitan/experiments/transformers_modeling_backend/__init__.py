@@ -72,6 +72,21 @@ flavors = {
     "full": HFTransformerModel.Config(
         titan_dense_config=TitanDenseModelConfig(),
     ),
+    "full_moe": HFTransformerModel.Config(
+        titan_dense_config=TitanDenseModelConfig(
+            dim=2048,
+            n_layers=48,
+            n_heads=32,
+            n_kv_heads=4,
+            norm_eps=1e-6,
+        ),
+        titan_moe_config=TitanMoeModelConfig(
+            num_experts=128,
+            num_experts_per_tok=8,
+            moe_intermediate_size=768,
+            norm_topk_prob=True,
+        ),
+    ),
 }
 
 
