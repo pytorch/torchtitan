@@ -59,7 +59,6 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
-            attention_backend="CUSTOM",
         ),
     )
 
@@ -99,7 +98,6 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
-            attention_backend="CUSTOM",
         ),
     )
 
@@ -138,6 +136,5 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=50,
             ),
-            attention_backend="CUSTOM",
         ),
     )

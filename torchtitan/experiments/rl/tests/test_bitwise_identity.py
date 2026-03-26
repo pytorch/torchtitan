@@ -85,9 +85,8 @@ def create_vllm_engine(config):
     model_path = config.hf_assets_path
 
     # Enable batch-invariant mode so vLLM uses the deterministic flash-attn path.
-    init_batch_invariance(AttentionBackendEnum[gen_config.attention_backend])
+    init_batch_invariance(AttentionBackendEnum.CUSTOM)
 
-    assert gen_config.attention_backend == "CUSTOM"
     engine_kwargs = dict(
         model=model_path,
         trust_remote_code=True,
@@ -97,7 +96,7 @@ def create_vllm_engine(config):
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=gen_config.compile.is_eager,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
-        attention_backend=gen_config.attention_backend,
+        attention_backend="CUSTOM",
     )
     vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
     if vllm_compilation_config is not None:
@@ -257,7 +256,6 @@ def _test_config() -> RLTrainer.Config:
                 top_p=1.0,
                 max_tokens=30,
             ),
-            attention_backend="CUSTOM",
         ),
     )
 
