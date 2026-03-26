@@ -13,7 +13,6 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     GQAttention,
@@ -23,6 +22,7 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
 )
+from torchtitan.tools.utils import has_cuda_capability
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
