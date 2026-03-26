@@ -40,7 +40,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.configs import ParallelismConfig
+from torchtitan.config.configs import CompileConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
@@ -239,6 +239,7 @@ def _test_config() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -246,10 +247,7 @@ def _test_config() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
-            # compile=GeneratorCompileConfig(
-            #     backend="eager", cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
-            # ),
-            compile=GeneratorCompileConfig(backend="none", cudagraph_mode="none"),
+            compile=GeneratorCompileConfig(backend="eager", cudagraph_mode="piecewise"),
             num_samples_per_prompt=1,
             sampling=SamplingConfig(
                 temperature=0.0,
