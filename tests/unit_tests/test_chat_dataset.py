@@ -298,9 +298,9 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
         # Verify state has expected keys
         self.assertIn("sample_idx", state)
         self.assertIn("epoch", state)
-        self.assertIn("pack_buffer_input", state)
-        self.assertIn("pack_buffer_label", state)
-        self.assertIn("pack_buffer_positions", state)
+        self.assertIn("inputs_buffer", state)
+        self.assertIn("labels_buffer", state)
+        self.assertIn("positions_buffer", state)
         self.assertGreater(state["sample_idx"], 0)
         self.assertEqual(state["epoch"], 0)
 
