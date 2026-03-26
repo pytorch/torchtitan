@@ -720,18 +720,7 @@ class _LazyGraphPPAdapter:
             BACKWARD_WEIGHT, _backward_weight_with_fallback
         )
 
-        use_inductor = not any(
-            "_local_scalar_dense" in str(n)
-            for stage in graph_stages
-            for gm in [stage.graph_callables.fw, stage.graph_callables.full_bw]
-            if gm is not None
-            for n in gm.graph.nodes
-        )
-        if not use_inductor:
-            logger.warning(
-                "Detected _local_scalar_dense in PP graphs (likely from EP), "
-                "falling back to interpreter execution"
-            )
+        use_inductor = True
 
         # DualPipeV wraps FORWARD+FULL_BACKWARD pairs in OVERLAP_F_B actions.
         # Use multiplexed graphs that fuse F+B into a single graph with

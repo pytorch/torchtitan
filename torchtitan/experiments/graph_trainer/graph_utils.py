@@ -668,6 +668,19 @@ def pp_joint_graph_builder(
         _dump_gm(dump_folder, bw_dW_module, "pp_bw_dW_module")
         logger.info("Applied split_dI_dW pass")
 
+    # Attach shape_env to subgraphs so compile_fx_inner can handle
+    # data-dependent ops (_local_scalar_dense) via unbacked symints.
+    # Without this, compile_fx_inner creates a FakeTensorMode without
+    # allow_scalar_outputs, causing DataDependentOutputException.
+    shape_env = getattr(tracing_context, "fake_mode", None)
+    shape_env = getattr(shape_env, "shape_env", None)
+    for gm in (
+        fw_module, bw_module, bw_dI_module, bw_dW_module,
+        unshard_module, reduce_grad_module,
+    ):
+        if gm is not None and shape_env is not None:
+            gm.shape_env = shape_env
+
     # Step 7: Apply compiler passes to each subgraph
     subgraphs = {
         "fw": fw_module,

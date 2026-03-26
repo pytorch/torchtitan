@@ -288,32 +288,13 @@ deepseekv3_configs = {
 }
 
 
-# debugmodel_balanced: debugmodel with force-balanced MoE routing (for debugging purposes)
-_dm = deepseekv3_configs["debugmodel"]
-_dm_router = dataclasses.replace(
-    _dm.layer.moe.router, _debug_force_load_balance=True
-)
-_dm_moe = dataclasses.replace(_dm.layer.moe, router=_dm_router)
-_dm_layer = dataclasses.replace(_dm.layer, moe=_dm_moe)
-deepseekv3_configs["debugmodel_balanced"] = dataclasses.replace(
-    _dm, layer=_dm_layer
-)
-
-# 16B_sdpa_balanced: 16B with sdpa attention and force-balanced MoE routing
+# 16B_sdpa: 16B with sdpa attention (instead of flex)
 _16b = deepseekv3_configs["16B"]
 _16b_sdpa_attn = dataclasses.replace(
     _16b.layer.attention, attn_backend="sdpa", attn_mask_type="causal"
 )
-_16b_sdpa_router = dataclasses.replace(
-    _16b.layer.moe.router, _debug_force_load_balance=True
-)
-_16b_sdpa_moe = dataclasses.replace(_16b.layer.moe, router=_16b_sdpa_router)
-_16b_sdpa_layer = dataclasses.replace(
-    _16b.layer, attention=_16b_sdpa_attn, moe=_16b_sdpa_moe
-)
-deepseekv3_configs["16B_sdpa_balanced"] = dataclasses.replace(
-    _16b, layer=_16b_sdpa_layer
-)
+_16b_sdpa_layer = dataclasses.replace(_16b.layer, attention=_16b_sdpa_attn)
+deepseekv3_configs["16B_sdpa"] = dataclasses.replace(_16b, layer=_16b_sdpa_layer)
 
 
 def model_registry(flavor: str) -> ModelSpec:

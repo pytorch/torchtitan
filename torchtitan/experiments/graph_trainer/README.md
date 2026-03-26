@@ -79,15 +79,9 @@ Graph PP passes are auto-inferred from the parallelism config:
 - `split_fsdp_collectives` is enabled when FSDP is active
 - `split_dI_dW` is enabled for V-schedules (DualPipeV, ZBV)
 
-> **Note:** Graph PP currently requires balanced MoE routing
-> (`_debug_force_load_balance=True`) to avoid data-dependent ops
-> (`_local_scalar_dense`) that Inductor cannot compile. The `16B_sdpa_balanced`
-> and `debugmodel_balanced` configs have this enabled. This requirement is
-> temporary and will be removed once Inductor supports non-even routing.
-
 #### Training DeepSeek-v3-16B with graph PP (PP=2, FSDP=4, EP=4)
 ```bash
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdpa_balanced ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdpa ./run_train.sh \
   --parallelism.pipeline_parallel_degree 2 \
   --parallelism.data_parallel_shard_degree 4 \
   --parallelism.expert_parallel_degree 4
@@ -95,7 +89,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdp
 
 #### Training DeepSeek-v3-16B with graph PP and DualPipeV schedule
 ```bash
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdpa_balanced ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_sdpa ./run_train.sh \
   --parallelism.pipeline_parallel_degree 2 \
   --parallelism.data_parallel_shard_degree 4 \
   --parallelism.expert_parallel_degree 4 \
@@ -120,8 +114,8 @@ Some of the features require the updates from PyTorch, with which we are working
 |Float8 Training| ✅ |
 |Expert Parallelism| ✅ |
 |Expert Parallelism + Activation Checkpointing| 🚧 |
-|Expert Parallelism + Pipeline Parallelism| ✅ (AOT mode, balanced routing only) |
-|Graph-based Pipeline Parallelism| ✅ (AOT mode, balanced routing only) |
+|Expert Parallelism + Pipeline Parallelism| ✅ (AOT mode) |
+|Graph-based Pipeline Parallelism| ✅ (AOT mode) |
 |Micro-batch overlap| 🚧 |
 |Pre-compile| 🚧 |
 

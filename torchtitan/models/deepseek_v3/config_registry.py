@@ -96,17 +96,9 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_balanced() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel_balanced")
-    config.activation_checkpoint = ActivationCheckpointConfig(mode="none")
-    return config
-
-
-def deepseek_v3_16b_sdpa_balanced() -> Trainer.Config:
+def deepseek_v3_16b_sdpa() -> Trainer.Config:
     config = deepseek_v3_16b()
-    config.model_spec = model_registry("16B_sdpa_balanced")
-    config.activation_checkpoint = ActivationCheckpointConfig(mode="none")
+    config.model_spec = model_registry("16B_sdpa")
     return config
 
 

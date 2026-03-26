@@ -11,10 +11,9 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
-    deepseek_v3_16b_sdpa_balanced,
+    deepseek_v3_16b_sdpa,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
-    deepseek_v3_debugmodel_balanced,
     deepseek_v3_debugmodel_flex_attn,
 )
 
@@ -23,12 +22,6 @@ from . import model_registry
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_deepseek_v3_debugmodel_balanced() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel_balanced(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -45,8 +38,8 @@ def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_16b_sdpa_balanced() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_16b_sdpa_balanced(), model_registry)
+def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(deepseek_v3_16b_sdpa(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
