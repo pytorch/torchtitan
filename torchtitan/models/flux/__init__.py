@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
+from copy import deepcopy
 from functools import partial
 
 import torch.nn as nn
@@ -37,137 +37,32 @@ __all__ = [
     "parallelize_flux",
 ]
 
-
-def _make_qknorm_config(cfg: QKNorm.Config) -> QKNorm.Config:
-    """Return a QKNorm.Config with ones init on both sub-norms."""
-    return dataclasses.replace(
-        cfg,
-        query_norm=dataclasses.replace(
-            cfg.query_norm, param_init={"weight": nn.init.ones_}
-        ),
-        key_norm=dataclasses.replace(
-            cfg.key_norm, param_init={"weight": nn.init.ones_}
-        ),
-    )
-
-
-def _make_mod_config(cfg: Modulation.Config, zero_linear) -> Modulation.Config:
-    """Return a Modulation.Config with zero-init on its linear."""
-    return dataclasses.replace(
-        cfg,
-        lin=dataclasses.replace(cfg.lin, param_init=zero_linear),
-    )
-
-
-def _make_attn_config(cfg: SelfAttention.Config, xavier_linear) -> SelfAttention.Config:
-    """Return a SelfAttention.Config with xavier_uniform on qkv/proj."""
-    return dataclasses.replace(
-        cfg,
-        qkv=dataclasses.replace(cfg.qkv, param_init=xavier_linear),
-        proj=dataclasses.replace(cfg.proj, param_init=xavier_linear),
-        norm=_make_qknorm_config(cfg.norm),
-    )
-
-
-def _expand_double_block(
-    cfg: DoubleStreamBlock.Config,
-    zero_linear,
-    xavier_linear,
-) -> DoubleStreamBlock.Config:
-    return dataclasses.replace(
-        cfg,
-        img_mod=_make_mod_config(cfg.img_mod, zero_linear),
-        txt_mod=_make_mod_config(cfg.txt_mod, zero_linear),
-        img_attn=_make_attn_config(cfg.img_attn, xavier_linear),
-        txt_attn=_make_attn_config(cfg.txt_attn, xavier_linear),
-        img_mlp_in=dataclasses.replace(cfg.img_mlp_in, param_init=xavier_linear),
-        img_mlp_out=dataclasses.replace(cfg.img_mlp_out, param_init=xavier_linear),
-        txt_mlp_in=dataclasses.replace(cfg.txt_mlp_in, param_init=xavier_linear),
-        txt_mlp_out=dataclasses.replace(cfg.txt_mlp_out, param_init=xavier_linear),
-    )
-
-
-def _expand_single_block(
-    cfg: SingleStreamBlock.Config,
-    zero_linear,
-    xavier_linear,
-) -> SingleStreamBlock.Config:
-    return dataclasses.replace(
-        cfg,
-        linear1=dataclasses.replace(cfg.linear1, param_init=xavier_linear),
-        linear2=dataclasses.replace(cfg.linear2, param_init=xavier_linear),
-        modulation=_make_mod_config(cfg.modulation, zero_linear),
-        norm=_make_qknorm_config(cfg.norm),
-    )
+# Flux DiT-style param_init constants:
+# - Modulation weights: zero-init for stable training start
+# - LastLayer output weights: zero-init for output stability
+# - MLPEmbedder (time_in, vector_in): normal(std=0.02)
+# - RMSNorm weights (QKNorm children): ones
+# - Default: xavier_uniform for remaining weights
+# - Default: zeros for all biases
+_ZERO_LINEAR = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
+_XAVIER_LINEAR = {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_}
+_NORMAL_02 = {"weight": partial(nn.init.normal_, std=0.02), "bias": nn.init.zeros_}
+_NORM_INIT = {"weight": nn.init.ones_}
 
 
 def _expand_layer_configs(configs: dict) -> dict:
-    """Expand block templates and assign per-block param_init for each Flux config.
-
-    Flux DiT-style param_init:
-    - Modulation weights: zero-init for stable training start
-    - LastLayer output weights: zero-init for output stability
-    - MLPEmbedder (time_in, vector_in): normal(std=0.02)
-    - RMSNorm weights (QKNorm children): ones
-    - Default: xavier_uniform for remaining weights
-    - Default: zeros for all biases
+    """Expand block templates into per-block configs via deepcopy.
 
     Mutates configs in place and returns the same dict.
     """
-    zero_linear = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
-    xavier_linear = {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_}
-    normal_02 = {"weight": partial(nn.init.normal_, std=0.02), "bias": nn.init.zeros_}
-
     for config in configs.values():
-        # --- img_in / txt_in ---
-        config.img_in = dataclasses.replace(config.img_in, param_init=xavier_linear)
-        config.txt_in = dataclasses.replace(config.txt_in, param_init=xavier_linear)
-
-        # --- time_in (MLPEmbedder) ---
-        config.time_in_config = dataclasses.replace(
-            config.time_in_config,
-            in_layer=dataclasses.replace(
-                config.time_in_config.in_layer, param_init=normal_02
-            ),
-            out_layer=dataclasses.replace(
-                config.time_in_config.out_layer, param_init=normal_02
-            ),
-        )
-
-        # --- vector_in (MLPEmbedder) ---
-        config.vector_in_config = dataclasses.replace(
-            config.vector_in_config,
-            in_layer=dataclasses.replace(
-                config.vector_in_config.in_layer, param_init=normal_02
-            ),
-            out_layer=dataclasses.replace(
-                config.vector_in_config.out_layer, param_init=normal_02
-            ),
-        )
-
-        # --- double blocks ---
         config.double_blocks_expanded = [
-            _expand_double_block(config.double_block_config, zero_linear, xavier_linear)
-            for _ in range(config.depth)
+            deepcopy(config.double_block_config) for _ in range(config.depth)
         ]
-
-        # --- single blocks ---
         config.single_blocks_expanded = [
-            _expand_single_block(config.single_block_config, zero_linear, xavier_linear)
+            deepcopy(config.single_block_config)
             for _ in range(config.depth_single_blocks)
         ]
-
-        # --- final_layer ---
-        config.final_layer_config = dataclasses.replace(
-            config.final_layer_config,
-            linear=dataclasses.replace(
-                config.final_layer_config.linear, param_init=zero_linear
-            ),
-            adaln_linear=dataclasses.replace(
-                config.final_layer_config.adaln_linear, param_init=zero_linear
-            ),
-        )
-
     return configs
 
 
@@ -182,32 +77,36 @@ def _make_double_block_config(
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         qkv_bias=qkv_bias,
-        img_mod=Modulation.Config(lin=Linear.Config(bias=True)),
-        txt_mod=Modulation.Config(lin=Linear.Config(bias=True)),
+        img_mod=Modulation.Config(
+            lin=Linear.Config(bias=True, param_init=_ZERO_LINEAR)
+        ),
+        txt_mod=Modulation.Config(
+            lin=Linear.Config(bias=True, param_init=_ZERO_LINEAR)
+        ),
         img_attn=SelfAttention.Config(
-            qkv=Linear.Config(bias=qkv_bias),
-            proj=Linear.Config(bias=True),
+            qkv=Linear.Config(bias=qkv_bias, param_init=_XAVIER_LINEAR),
+            proj=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
             norm=QKNorm.Config(
-                query_norm=RMSNorm.Config(),
-                key_norm=RMSNorm.Config(),
+                query_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                key_norm=RMSNorm.Config(param_init=_NORM_INIT),
             ),
             num_heads=num_heads,
             qkv_bias=qkv_bias,
         ),
         txt_attn=SelfAttention.Config(
-            qkv=Linear.Config(bias=qkv_bias),
-            proj=Linear.Config(bias=True),
+            qkv=Linear.Config(bias=qkv_bias, param_init=_XAVIER_LINEAR),
+            proj=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
             norm=QKNorm.Config(
-                query_norm=RMSNorm.Config(),
-                key_norm=RMSNorm.Config(),
+                query_norm=RMSNorm.Config(param_init=_NORM_INIT),
+                key_norm=RMSNorm.Config(param_init=_NORM_INIT),
             ),
             num_heads=num_heads,
             qkv_bias=qkv_bias,
         ),
-        img_mlp_in=Linear.Config(bias=True),
-        img_mlp_out=Linear.Config(bias=True),
-        txt_mlp_in=Linear.Config(bias=True),
-        txt_mlp_out=Linear.Config(bias=True),
+        img_mlp_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        img_mlp_out=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        txt_mlp_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        txt_mlp_out=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
     )
 
 
@@ -220,12 +119,14 @@ def _make_single_block_config(
         hidden_size=hidden_size,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
-        linear1=Linear.Config(bias=True),
-        linear2=Linear.Config(bias=True),
-        modulation=Modulation.Config(lin=Linear.Config(bias=True)),
+        linear1=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        linear2=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        modulation=Modulation.Config(
+            lin=Linear.Config(bias=True, param_init=_ZERO_LINEAR)
+        ),
         norm=QKNorm.Config(
-            query_norm=RMSNorm.Config(),
-            key_norm=RMSNorm.Config(),
+            query_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            key_norm=RMSNorm.Config(param_init=_NORM_INIT),
         ),
     )
 
@@ -244,8 +145,8 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        img_in=Linear.Config(bias=True),
-        txt_in=Linear.Config(bias=True),
+        img_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        txt_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -261,14 +162,14 @@ flux_configs = {
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
             hidden_dim=3072,
-            in_layer=Linear.Config(bias=True),
-            out_layer=Linear.Config(bias=True),
+            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
         ),
         vector_in_config=MLPEmbedder.Config(
             in_dim=768,
             hidden_dim=3072,
-            in_layer=Linear.Config(bias=True),
-            out_layer=Linear.Config(bias=True),
+            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
         ),
         double_block_config=_make_double_block_config(
             hidden_size=3072,
@@ -285,8 +186,8 @@ flux_configs = {
             hidden_size=3072,
             patch_size=1,
             out_channels=64,
-            linear=Linear.Config(bias=True),
-            adaln_linear=Linear.Config(bias=True),
+            linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
+            adaln_linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
         ),
     ),
     "flux-schnell": FluxModel.Config(
@@ -302,8 +203,8 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        img_in=Linear.Config(bias=True),
-        txt_in=Linear.Config(bias=True),
+        img_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        txt_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -319,14 +220,14 @@ flux_configs = {
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
             hidden_dim=3072,
-            in_layer=Linear.Config(bias=True),
-            out_layer=Linear.Config(bias=True),
+            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
         ),
         vector_in_config=MLPEmbedder.Config(
             in_dim=768,
             hidden_dim=3072,
-            in_layer=Linear.Config(bias=True),
-            out_layer=Linear.Config(bias=True),
+            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
         ),
         double_block_config=_make_double_block_config(
             hidden_size=3072,
@@ -343,8 +244,8 @@ flux_configs = {
             hidden_size=3072,
             patch_size=1,
             out_channels=64,
-            linear=Linear.Config(bias=True),
-            adaln_linear=Linear.Config(bias=True),
+            linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
+            adaln_linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
         ),
     ),
     "flux-debug": FluxModel.Config(
@@ -360,8 +261,8 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        img_in=Linear.Config(bias=True),
-        txt_in=Linear.Config(bias=True),
+        img_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        txt_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -377,14 +278,14 @@ flux_configs = {
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
             hidden_dim=1536,
-            in_layer=Linear.Config(bias=True),
-            out_layer=Linear.Config(bias=True),
+            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
         ),
         vector_in_config=MLPEmbedder.Config(
             in_dim=768,
             hidden_dim=1536,
-            in_layer=Linear.Config(bias=True),
-            out_layer=Linear.Config(bias=True),
+            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
         ),
         double_block_config=_make_double_block_config(
             hidden_size=1536,
@@ -401,8 +302,8 @@ flux_configs = {
             hidden_size=1536,
             patch_size=1,
             out_channels=64,
-            linear=Linear.Config(bias=True),
-            adaln_linear=Linear.Config(bias=True),
+            linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
+            adaln_linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
         ),
     ),
 }

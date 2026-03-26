@@ -66,7 +66,7 @@ def expand_shared_experts(moe_config: object) -> None:
     """
     if moe_config is None or getattr(moe_config, "shared_experts", None) is None:
         return
-    moe_config.shared_experts = dataclasses.replace(
+    moe_config.shared_experts = dataclasses.replace(  # pyrefly: ignore [missing-attribute]
         moe_config.shared_experts,
         hidden_dim=moe_config.hidden_dim * moe_config.num_shared_experts,
     )
