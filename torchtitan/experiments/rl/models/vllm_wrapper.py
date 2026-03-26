@@ -159,7 +159,7 @@ class TorchTitanVLLMModelWrapper(Module):
             for f in dataclasses.fields(attn_config)
             if f.init
         }
-        vllm_attn_fields["attn_backend"] = "vllm"
+        vllm_attn_fields["attn_backend"] = "varlen"
         new_layer = dataclasses.replace(
             model_config.layer, attention=VLLMGQAttention.Config(**vllm_attn_fields)
         )

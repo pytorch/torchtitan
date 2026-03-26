@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import itertools
 import logging
 from dataclasses import dataclass
@@ -208,19 +207,24 @@ class VLLMInnerAttention(LocalMapAttention):
     Used by the **generator** (via :class:`VLLMGQAttention`).
     """
 
+    # vLLM requires a unique prefix per Attention layer for
+    # static_forward_context registration.
+    # TODO: Pass layer_id through the build chain instead of using a
+    # global counter. The counter breaks with pipeline parallelism
+    # where layers are built on different ranks.
+    _layer_counter: itertools.count = itertools.count()
+
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
-        layer_name: str,
         scale: float | None = None,
     ) -> None:
         super().__init__()
 
         self.hidden_size = hidden_size
-        self.layer_name = layer_name
 
         from vllm.config import get_current_vllm_config
 
@@ -239,6 +243,7 @@ class VLLMInnerAttention(LocalMapAttention):
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        layer_id = next(VLLMInnerAttention._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
@@ -246,7 +251,7 @@ class VLLMInnerAttention(LocalMapAttention):
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
-            prefix=f"model.layers.{layer_name}.attention.inner_attention",
+            prefix=f"model.layers.{layer_id}.attention.inner_attention",
         )
 
     def forward(
@@ -304,22 +309,12 @@ class VLLMGQAttention(GQAttention):
       -> vllm_attn -> view -> (bs,seq,hidden)
     """
 
-    # Counter to auto-assign layer names when built via config
-    _layer_counter: itertools.count = itertools.count()
-
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
-        attn_backend: str = "vllm"
-
-        def __post_init__(self):
-            # Skip parent validation which doesn't know about "vllm" backend
-            assert self.n_heads > 0, "n_heads must be > 0"
+        attn_backend: str = "varlen"
 
     def __init__(self, config: Config, *, dim: int):
-        # Use "sdpa" for parent init to avoid ValueError on unknown backend;
-        # inner_attention is immediately replaced below.
-        parent_config = dataclasses.replace(config, attn_backend="sdpa")
-        super().__init__(parent_config, dim=dim)
+        super().__init__(config, dim=dim)
 
         from vllm.config import get_current_vllm_config
 
@@ -338,13 +333,11 @@ class VLLMGQAttention(GQAttention):
         assert n_kv_heads % tp_degree == 0
         assert n_heads % tp_degree == 0
 
-        layer_name = str(next(VLLMGQAttention._layer_counter))
         self.inner_attention = VLLMInnerAttention(
             hidden_size=dim,
             num_heads=n_heads // tp_degree,
             num_kv_heads=n_kv_heads // tp_degree,
             head_dim=head_dim,
-            layer_name=layer_name,
             scale=head_dim**-0.5,
         )
 
