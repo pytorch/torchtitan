@@ -53,7 +53,11 @@ __all__ = [
     "get_document_mask_mod",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
+    "BLACKWELL_FLASH_BLOCK_SIZE",
 ]
+
+
+BLACKWELL_FLASH_BLOCK_SIZE: tuple[int, int] = (256, 128)
 
 
 class VarlenMetadata(NamedTuple):
@@ -236,6 +240,10 @@ class FlexAttentionWrapper(LocalMapAttention):
         options=inductor_configs,
     )
 
+    def __init__(self, kernel_options: dict | None = None):
+        super().__init__()
+        self.kernel_options = kernel_options
+
     # pyrefly: ignore [bad-override]
     def forward(
         self,
@@ -262,6 +270,7 @@ class FlexAttentionWrapper(LocalMapAttention):
             scale=scale,
             enable_gqa=enable_gqa,
             return_aux=AuxRequest(lse=return_lse),
+            kernel_options=self.kernel_options,
         )
         # Note: return a tuple of Tensor to make converting `lse`
         # to DTensor easier with TP module notation.
@@ -502,6 +511,7 @@ class BaseAttention(Module):
         n_heads: int
         attn_backend: str
         attn_mask_type: str
+        flex_attention_block_size: int | tuple[int, int] | None = None
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
@@ -543,6 +553,7 @@ class GQAttention(BaseAttention):
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+        flex_attention_kernel_options: dict | None = None
 
         def __post_init__(self):
             BaseAttention.Config.__post_init__(self)
@@ -590,7 +601,9 @@ class GQAttention(BaseAttention):
         self.inner_attention: Module
         match self.attn_backend:
             case "flex":
-                self.inner_attention = FlexAttentionWrapper()
+                self.inner_attention = FlexAttentionWrapper(
+                    kernel_options=config.flex_attention_kernel_options
+                )
             case "varlen":
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":

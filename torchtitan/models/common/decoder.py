@@ -6,11 +6,14 @@
 
 from dataclasses import dataclass
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
+
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -174,8 +177,18 @@ class Decoder(BaseModel):
                     f"Unknown attention mask type: {self.attn_config.attn_mask_type}"
                 )
 
+        kwargs = {}
+        attn_config = cast(BaseAttention.Config, self.attn_config)
+        if attn_config.flex_attention_block_size is not None:
+            kwargs["BLOCK_SIZE"] = attn_config.flex_attention_block_size
+
         return create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+            and_masks(*mask_mods),
+            B,
+            None,
+            input_batch.shape[1],
+            input_batch.shape[1],
+            **kwargs,
         )
 
     def get_attention_masks(

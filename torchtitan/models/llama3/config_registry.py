@@ -68,6 +68,12 @@ def llama3_debugmodel_flex_attn() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_flex_flash() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.model_spec = model_registry("debugmodel_flex_flash")
+    return config
+
+
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel_varlen_attn")
