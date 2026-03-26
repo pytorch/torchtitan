@@ -166,7 +166,12 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._inputs_buffer = state_dict["inputs_buffer"]
-        self._positions_buffer = state_dict["positions_buffer"]
+        if "positions_buffer" not in state_dict:
+            logger.warning(
+                "Checkpoint missing 'positions_buffer'. Falling back to empty buffer. "
+                "RoPE positions may be incorrect with block_causal attention."
+            )
+        self._positions_buffer = state_dict.get("positions_buffer", [])
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
@@ -393,7 +398,7 @@ class ChatDataset(IterableDataset, Stateful):
                     self._labels_buffer.extend([IGNORE_INDEX] * pad_len)
                     self._positions_buffer.extend(range(pad_len))
 
-                    yield self._flush_pack_buffer()
+                    yield self._flush_buffers()
 
                 # Add example to buffer with positions resetting to 0
                 self._inputs_buffer.extend(input_ids)
@@ -401,7 +406,7 @@ class ChatDataset(IterableDataset, Stateful):
                 self._positions_buffer.extend(range(len(input_ids)))
 
                 if len(self._inputs_buffer) == self.seq_len:
-                    yield self._flush_pack_buffer()
+                    yield self._flush_buffers()
 
             # Flush remaining buffer at end of data
             if len(self._inputs_buffer) > 0:
@@ -411,7 +416,7 @@ class ChatDataset(IterableDataset, Stateful):
                     self._labels_buffer.extend([IGNORE_INDEX] * pad_len)
                     self._positions_buffer.extend(range(pad_len))
 
-                yield self._flush_pack_buffer()
+                yield self._flush_buffers()
 
             if not self.infinite:
                 logger.warning(f"Chat dataset '{self._dataset_id}' has run out of data")
@@ -430,8 +435,8 @@ class ChatDataset(IterableDataset, Stateful):
                     f"(epoch {self._epoch})"
                 )
 
-    def _flush_pack_buffer(self):
-        """Convert pack buffers to tensors, clear them, and return the batch."""
+    def _flush_buffers(self):
+        """Convert buffers to tensors, clear them, and return the batch."""
         input_tensor = torch.tensor(self._inputs_buffer, dtype=torch.long)
         label_tensor = torch.tensor(self._labels_buffer, dtype=torch.long)
         positions_tensor = torch.tensor(self._positions_buffer, dtype=torch.long)
@@ -486,7 +491,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
         infinite: bool = True
-        """Whether to loop the dataset infinitely."""
+        """Whether to loop the dataset infinitely. Might hang on multi-GPU."""
 
     def __init__(
         self,
