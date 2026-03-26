@@ -222,7 +222,10 @@ def main():
     )
 
     # Run one forward pass with dummy inputs to trigger compilation.
-    # The on_compile callback will save the artifact.
+    # The on_compile callback will save the artifact. The backward graph
+    # is compiled eagerly (not lazily) because serializable=True in
+    # joint_graph_builder sets force_non_lazy_backward_lowering=True
+    # inside aot_compile_joint_with_descriptors.
     seq_len = config.training.seq_len
     local_batch_size = config.training.local_batch_size
     vocab_size = model_config.vocab_size
@@ -231,20 +234,7 @@ def main():
         0, vocab_size, (local_batch_size, seq_len), device=device
     )
     logger.info("Running forward pass to trigger AOT compilation...")
-    output = compiled_model(dummy_input)
-
-    # Trigger backward to compile the backward graph as well.
-    if isinstance(output, torch.Tensor):
-        output.sum().backward()
-    elif isinstance(output, (tuple, list)):
-        output[0].sum().backward()
-    elif isinstance(output, dict):
-        next(iter(output.values())).sum().backward()
-    else:
-        raise TypeError(
-            f"Unexpected model output type {type(output).__name__}. "
-            f"Expected Tensor, tuple, list, or dict."
-        )
+    compiled_model(dummy_input)
 
     logger.info(
         f"Precompile complete. Artifact saved to "
