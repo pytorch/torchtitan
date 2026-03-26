@@ -8,15 +8,21 @@
 """
 Test bitwise parity between vLLM generator and TorchTitan trainer log-probs.
 
-Instead of comparing decode logprobs (which differ due to incremental decode vs
-full-sequence forward), this test establishes parity via three checks:
+vLLM decode logprobs come from incremental KV-cache decoding (one token at a
+time), while the trainer computes logprobs via a single full-sequence forward
+pass.  These two paths use different attention implementations internally, so
+directly comparing them is not meaningful.
 
-  Test 1: Trainer prefill == vLLM prefill
-          (both do a single forward pass over prompt tokens)
-  Test 2: vLLM decode == vLLM 2nd-pass prefill
-          (decode logprobs should match re-prefilling the full sequence)
-  Test 3: Trainer prefill == vLLM 2nd-pass prefill (full sequence)
-          (trainer forward over [prompt + generated] matches vLLM prefill)
+Instead, we use a **2nd-pass prefill**: after generating tokens via decode, we
+concatenate [prompt + generated] and run a *second* vLLM prefill over the full
+sequence.  This prefill uses the same full-sequence attention as the trainer,
+so its logprobs are directly comparable.
+
+The test establishes parity via three checks:
+
+  Test 1: Trainer prefill == vLLM prefill (prompt-only)
+  Test 2: vLLM decode == vLLM 2nd-pass prefill (generated positions)
+  Test 3: Trainer full-seq forward == vLLM 2nd-pass prefill
 
 By transitivity: trainer == vLLM decode.
 
@@ -24,13 +30,13 @@ Run:
     torchrun --nproc_per_node=1 \
         torchtitan/experiments/rl/tests/test_bitwise_parity.py
 
-    # With batch size and max generation length:
     torchrun --nproc_per_node=1 \
         torchtitan/experiments/rl/tests/test_bitwise_parity.py \
-        --batch-size 2 --prompt-length 4000
+        --batch-size 2 --prompt-length 4000 --gen-tokens 100
 """
 
 import argparse
+import dataclasses
 import logging
 import os
 
@@ -38,14 +44,18 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
-
-from vllm import SamplingParams
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
+from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
-from torchtitan.config import CommConfig
+from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
@@ -57,289 +67,20 @@ from torchtitan.experiments.rl.actors.utils import (
     compute_token_log_probs,
 )
 from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-from torchtitan.experiments.rl.plugin import register_model_to_vllm_model_registry
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
-from torchtitan.experiments.rl.tests.test_attn_numerics import (
-    build_trainer_model,
-    create_vllm_engine,
+from torchtitan.experiments.rl.plugin import (
+    register_model_to_vllm_model_registry,
+    VLLM_MODEL_NAME,
 )
+from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def extract_vllm_prefill_logprobs(output, prompt_token_ids):
-    """Extract per-token prefill logprobs from a vLLM RequestOutput.
-
-    vLLM's prompt_logprobs[0] is None (no logprob for the first token).
-    For positions 1..N-1, we look up the actual token's logprob.
-
-    Returns a list of floats with len = len(prompt_token_ids) - 1.
-    """
-    logprobs = []
-    for i, token_lp_dict in enumerate(output.prompt_logprobs):
-        if token_lp_dict is None:
-            # Position 0 has no logprob
-            continue
-        actual_token_id = prompt_token_ids[i]
-        if actual_token_id in token_lp_dict:
-            logprobs.append(token_lp_dict[actual_token_id].logprob)
-        else:
-            logger.warning(
-                f"Token {actual_token_id} not found at position {i}, "
-                f"available: {list(token_lp_dict.keys())}"
-            )
-            best = max(token_lp_dict.values(), key=lambda x: x.logprob)
-            logprobs.append(best.logprob)
-    return logprobs
-
-
-def compute_trainer_prefill_logprobs(model, token_ids, device):
-    """Compute next-token logprobs over a token sequence using the trainer model.
-
-    Returns a float32 tensor of logprobs with len = len(token_ids) - 1.
-    """
-    input_tensor = torch.tensor(token_ids, dtype=torch.long, device=device).unsqueeze(0)
-    seq_len = input_tensor.shape[1]
-    positions = torch.arange(seq_len, device=device).unsqueeze(0)
-
-    attn_backend = getattr(
-        getattr(getattr(model, "config", None), "layer", None),
-        "attention",
-        None,
-    )
-    if (
-        attn_backend is not None
-        and getattr(attn_backend, "attn_backend", None) == "varlen"
-    ):
-        attention_masks = _make_causal_varlen_metadata(1, seq_len, device)
-    else:
-        attention_masks = None
-
-    logits = model(input_tensor, attention_masks=attention_masks, positions=positions)
-    logits_f32 = logits[:, :-1, :].to(torch.float32)
-    log_probs = F.log_softmax(logits_f32, dim=-1)
-
-    targets = input_tensor[:, 1:]
-    token_lps = log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)
-    return token_lps[0]  # Remove batch dim
-
-
-def compare_logprobs(name, logprobs_a, logprobs_b, label_a="A", label_b="B"):
-    """Compare two logprob sequences and log results. Returns True if bitwise identical."""
-    if isinstance(logprobs_a, list):
-        logprobs_a = torch.tensor(logprobs_a, dtype=torch.float32)
-    if isinstance(logprobs_b, list):
-        logprobs_b = torch.tensor(logprobs_b, dtype=torch.float32)
-
-    logprobs_a = logprobs_a.detach().cpu().float()
-    logprobs_b = logprobs_b.detach().cpu().float()
-
-    n = min(len(logprobs_a), len(logprobs_b))
-    a, b = logprobs_a[:n], logprobs_b[:n]
-
-    bitwise = torch.equal(a, b)
-    diff = a - b
-    max_delta = diff.abs().max().item() if n > 0 else 0.0
-    mse = (diff**2).mean().item() if n > 0 else 0.0
-    num_different = (a != b).sum().item()
-
-    logger.info(f"  {name}")
-    logger.info(f"    Bitwise identical : {bitwise}")
-    logger.info(f"    Tokens checked    : {n}")
-    logger.info(f"    Tokens different  : {num_different}")
-    logger.info(f"    Max delta         : {max_delta:.6e}")
-    logger.info(f"    MSE               : {mse:.6e}")
-
-    if not bitwise and n > 0:
-        n_preview = min(5, n)
-        logger.info(f"    {label_a}[:5] : {a[:n_preview].tolist()}")
-        logger.info(f"    {label_b}[:5] : {b[:n_preview].tolist()}")
-
-    return bitwise
-
-
-# ---------------------------------------------------------------------------
-# vLLM operations
-# ---------------------------------------------------------------------------
-
-
-def vllm_prefill(engine, prompt_token_ids):
-    """Run vLLM prefill only (max_tokens=1) and extract prompt logprobs.
-
-    Args:
-        prompt_token_ids: Single list of token IDs, or list of lists for batched.
-
-    Returns:
-        List of logprobs (single) or list of list of logprobs (batched).
-    """
-    # Normalize to list-of-lists
-    if isinstance(prompt_token_ids[0], int):
-        batched_ids = [prompt_token_ids]
-        single = True
-    else:
-        batched_ids = prompt_token_ids
-        single = False
-
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=1,
-        logprobs=1,
-        prompt_logprobs=1,
-        output_kind=RequestOutputKind.FINAL_ONLY,
-    )
-
-    for i, ids in enumerate(batched_ids):
-        engine.add_request(f"prefill_{i}", {"prompt_token_ids": ids}, sampling_params)
-
-    outputs = []
-    while engine.has_unfinished_requests():
-        step_outputs = engine.step()
-        outputs.extend(step_outputs)
-
-    # Sort by request_id to maintain order
-    outputs.sort(key=lambda o: o.request_id)
-    assert len(outputs) == len(batched_ids)
-
-    all_logprobs = []
-    for output, ids in zip(outputs, batched_ids):
-        logprobs = extract_vllm_prefill_logprobs(output, ids)
-        logger.info(f"vLLM prefill: extracted {len(logprobs)} logprobs")
-        all_logprobs.append(logprobs)
-
-    return all_logprobs[0] if single else all_logprobs
-
-
-def vllm_generate(engine, prompt_token_ids, max_tokens):
-    """Generate tokens via vLLM and return generated IDs + decode logprobs.
-
-    Args:
-        prompt_token_ids: Single list of token IDs, or list of lists for batched.
-
-    Returns:
-        (generated_ids, decode_logprobs) for single, or lists of them for batched.
-    """
-    if isinstance(prompt_token_ids[0], int):
-        batched_ids = [prompt_token_ids]
-        single = True
-    else:
-        batched_ids = prompt_token_ids
-        single = False
-
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=max_tokens,
-        logprobs=1,
-        prompt_logprobs=None,
-        output_kind=RequestOutputKind.FINAL_ONLY,
-    )
-
-    for i, ids in enumerate(batched_ids):
-        engine.add_request(f"generate_{i}", {"prompt_token_ids": ids}, sampling_params)
-
-    outputs = []
-    while engine.has_unfinished_requests():
-        step_outputs = engine.step()
-        outputs.extend(step_outputs)
-
-    outputs.sort(key=lambda o: o.request_id)
-    assert len(outputs) == len(batched_ids)
-
-    all_generated = []
-    all_decode_lps = []
-    for output in outputs:
-        sample = output.outputs[0]
-        generated_ids = list(sample.token_ids)
-        decode_logprobs = [
-            list(lp_dict.values())[0].logprob for lp_dict in sample.logprobs
-        ]
-        logger.info(f"vLLM generate: {len(generated_ids)} tokens")
-        all_generated.append(generated_ids)
-        all_decode_lps.append(decode_logprobs)
-
-    if single:
-        return all_generated[0], all_decode_lps[0]
-    return all_generated, all_decode_lps
-
-
-def vllm_2nd_pass_prefill(engine, prompt_token_ids, generated_token_ids):
-    """Run a 2nd prefill over [prompt + generated] and extract logprobs for generated positions.
-
-    Args:
-        prompt_token_ids: Single list or list of lists.
-        generated_token_ids: Single list or list of lists (matching prompt_token_ids).
-
-    Returns:
-        List of logprobs (single) or list of list of logprobs (batched).
-    """
-    if isinstance(prompt_token_ids[0], int):
-        batched_prompt = [prompt_token_ids]
-        batched_gen = [generated_token_ids]
-        single = True
-    else:
-        batched_prompt = prompt_token_ids
-        batched_gen = generated_token_ids
-        single = False
-
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=1,
-        logprobs=1,
-        prompt_logprobs=1,
-        output_kind=RequestOutputKind.FINAL_ONLY,
-    )
-
-    all_combined = []
-    for i, (p_ids, g_ids) in enumerate(zip(batched_prompt, batched_gen)):
-        combined = list(p_ids) + list(g_ids)
-        all_combined.append(combined)
-        engine.add_request(
-            f"2nd_prefill_{i}", {"prompt_token_ids": combined}, sampling_params
-        )
-
-    outputs = []
-    while engine.has_unfinished_requests():
-        step_outputs = engine.step()
-        outputs.extend(step_outputs)
-
-    outputs.sort(key=lambda o: o.request_id)
-    assert len(outputs) == len(batched_prompt)
-
-    all_logprobs = []
-    for output, p_ids, combined in zip(outputs, batched_prompt, all_combined):
-        prompt_len = len(p_ids)
-        logprobs = []
-        for i, token_lp_dict in enumerate(output.prompt_logprobs):
-            if token_lp_dict is None:
-                continue
-            if i < prompt_len:
-                continue
-            actual_token_id = combined[i]
-            if actual_token_id in token_lp_dict:
-                logprobs.append(token_lp_dict[actual_token_id].logprob)
-            else:
-                best = max(token_lp_dict.values(), key=lambda x: x.logprob)
-                logprobs.append(best.logprob)
-        logger.info(
-            f"vLLM 2nd-pass prefill: extracted {len(logprobs)} logprobs "
-            f"for generated positions"
-        )
-        all_logprobs.append(logprobs)
-
-    return all_logprobs[0] if single else all_logprobs
-
-
-# ---------------------------------------------------------------------------
-# Config & Main
+# Config
 # ---------------------------------------------------------------------------
 
 
@@ -360,195 +101,391 @@ def _test_config(tp: int = 1) -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             gpu_memory_limit=0.5,
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=tp,
-            ),
+            parallelism=ParallelismConfig(tensor_parallel_degree=tp),
             compile=GeneratorCompileConfig(backend="none", cudagraph_mode="none"),
             num_samples_per_prompt=1,
-            sampling=SamplingConfig(
-                temperature=0.0,
-                top_p=1.0,
-                max_tokens=50,
-            ),
+            sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=50),
             attention_backend="CUSTOM",
         ),
     )
 
 
-def run_scenario(
-    engine, trainer_model, device, tokenizer, prompts, max_gen_tokens, label
-):
-    """Run all 3 tests for a given prompt/gen length configuration.
+# ---------------------------------------------------------------------------
+# Model setup
+# ---------------------------------------------------------------------------
 
-    Args:
-        prompts: Single prompt string, list of prompt strings, or list of
-            token ID lists (for pre-tokenized sequences).
+
+def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
+    """Create a vLLM LLMEngine with torchtitan model from the RL config."""
+    gen_config = config.generator
+
+    if config.batch_invariant_mode:
+        from torchtitan.experiments.rl.batch_invariant import (
+            enable_batch_invariant_mode,
+        )
+
+        enable_batch_invariant_mode()
+
+    engine_kwargs = dict(
+        model=config.hf_assets_path,
+        trust_remote_code=True,
+        dtype=gen_config.model_dtype,
+        tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        distributed_executor_backend="external_launcher",
+        gpu_memory_utilization=gen_config.gpu_memory_limit,
+        enforce_eager=gen_config.compile.is_eager,
+        hf_overrides={"architectures": [VLLM_MODEL_NAME]},
+        attention_backend=gen_config.attention_backend,
+    )
+    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    if vllm_compilation_config is not None:
+        engine_kwargs["compilation_config"] = vllm_compilation_config
+    if gen_config.seed is not None:
+        engine_kwargs["seed"] = gen_config.seed
+
+    engine = LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
+    if dist.get_rank() == 0:
+        logger.info("vLLM LLMEngine ready.")
+    return engine
+
+
+def build_trainer_model(
+    config: RLTrainer.Config,
+) -> tuple[torch.nn.Module, torch.device]:
+    """Build, parallelize, and load weights for the trainer model.
+
+    Mirrors PolicyTrainer._build_model() without the Monarch actor framework.
     """
-    if isinstance(prompts, str):
-        prompts = [prompts]
+    model_spec = config.model_spec
+    hf_assets_path = config.hf_assets_path
 
-    # Detect whether prompts are strings or pre-tokenized
-    if isinstance(prompts[0], str):
-        all_prompt_ids = [tokenizer.encode(p) for p in prompts]
+    if config.batch_invariant_mode:
+        from torchtitan.experiments.rl.batch_invariant import (
+            enable_batch_invariant_mode,
+        )
+
+        enable_batch_invariant_mode()
+
+        attn_cfg = model_spec.model.layer.attention
+        new_attn = dataclasses.replace(attn_cfg, attn_backend="varlen")
+        new_layer = dataclasses.replace(model_spec.model.layer, attention=new_attn)
+        model_config = dataclasses.replace(model_spec.model, layer=new_layer)
     else:
-        all_prompt_ids = prompts
+        model_config = model_spec.model
 
-    batch_size = len(all_prompt_ids)
+    # Device setup
+    device_module, device_type = utils.device_module, utils.device_type
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device = torch.device(f"{device_type}:{local_rank}")
+    device_module.set_device(device)
+
+    parallelism = config.trainer.parallelism
+    parallel_dims = ParallelDims(
+        dp_shard=parallelism.data_parallel_shard_degree,
+        dp_replicate=parallelism.data_parallel_replicate_degree,
+        cp=parallelism.context_parallel_degree,
+        tp=parallelism.tensor_parallel_degree,
+        pp=parallelism.pipeline_parallel_degree,
+        ep=parallelism.expert_parallel_degree,
+        etp=parallelism.expert_tensor_parallel_degree,
+        world_size=dist.get_world_size(),
+    )
+
+    # Build on meta device, parallelize, then materialize
+    with torch.device("meta"):
+        with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
+            model = model_config.build()
+
+    # Disable compile on VarlenAttentionWrapper to match generator's path
+    if config.batch_invariant_mode:
+        from torch.nn.attention.varlen import varlen_attn
+
+        from torchtitan.models.common.attention import VarlenAttentionWrapper
+
+        VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn
+
+    model = parallelize_qwen3(
+        model, parallel_dims=parallel_dims, parallelism=parallelism
+    )
+    model.to_empty(device=device_type)
+    with torch.no_grad():
+        model.init_weights(buffer_device=None)
+
+    # Load HF checkpoint
+    if model_spec.state_dict_adapter is not None:
+        sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
+        storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
+        hf_state_dict = sd_adapter.to_hf(model.state_dict())
+        dcp.load(hf_state_dict, storage_reader=storage_reader)
+        tt_state_dict = sd_adapter.from_hf(hf_state_dict)
+        set_model_state_dict(
+            model=model,
+            model_state_dict=tt_state_dict,
+            options=StateDictOptions(strict=False),
+        )
+        if dist.get_rank() == 0:
+            logger.info(f"Loaded HF weights ({len(tt_state_dict)} params)")
+
+    model.eval()
+    return model, device
+
+
+# ---------------------------------------------------------------------------
+# Logprob helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_logprobs_from_prompt(output, token_ids, start_pos: int = 0):
+    """Extract per-token logprobs from vLLM prompt_logprobs starting at start_pos.
+
+    Position 0 always has None (no logprob for first token).
+    Returns a list of floats.
+    """
+    logprobs = []
+    for i, lp_dict in enumerate(output.prompt_logprobs):
+        if lp_dict is None or i < start_pos:
+            continue
+        tok = token_ids[i]
+        if tok in lp_dict:
+            logprobs.append(lp_dict[tok].logprob)
+        else:
+            logger.warning(f"Token {tok} not in logprobs at position {i}")
+            logprobs.append(max(lp_dict.values(), key=lambda x: x.logprob).logprob)
+    return logprobs
+
+
+def compute_trainer_prefill_logprobs(model, token_ids, device):
+    """Compute next-token logprobs over a token sequence using the trainer model.
+
+    Returns a float32 tensor with len = len(token_ids) - 1.
+    """
+    input_tensor = torch.tensor(token_ids, dtype=torch.long, device=device).unsqueeze(0)
+    seq_len = input_tensor.shape[1]
+    positions = torch.arange(seq_len, device=device).unsqueeze(0)
+
+    attn_cfg = getattr(
+        getattr(getattr(model, "config", None), "layer", None), "attention", None
+    )
+    if attn_cfg is not None and getattr(attn_cfg, "attn_backend", None) == "varlen":
+        attention_masks = _make_causal_varlen_metadata(1, seq_len, device)
+    else:
+        attention_masks = None
+
+    logits = model(input_tensor, attention_masks=attention_masks, positions=positions)
+    log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
+    return log_probs.gather(2, input_tensor[:, 1:].unsqueeze(-1)).squeeze(-1)[0]
+
+
+def compare_logprobs(name, a, b, label_a="A", label_b="B") -> bool:
+    """Compare two logprob sequences. Returns True if bitwise identical."""
+    if isinstance(a, list):
+        a = torch.tensor(a, dtype=torch.float32)
+    else:
+        a = a.detach().cpu().float()
+    if isinstance(b, list):
+        b = torch.tensor(b, dtype=torch.float32)
+    else:
+        b = b.detach().cpu().float()
+    n = min(len(a), len(b))
+    a, b = a[:n], b[:n]
+
+    bitwise = torch.equal(a, b)
+    max_delta = (a - b).abs().max().item() if n > 0 else 0.0
+
+    logger.info(
+        f"  {name}: {'PASS' if bitwise else 'FAIL'} (max_delta={max_delta:.2e})"
+    )
+    if not bitwise and n > 0:
+        logger.info(f"    {label_a}[:5]: {a[:5].tolist()}")
+        logger.info(f"    {label_b}[:5]: {b[:5].tolist()}")
+
+    return bitwise
+
+
+# ---------------------------------------------------------------------------
+# vLLM operations
+# ---------------------------------------------------------------------------
+
+# Greedy sampling params shared by prefill and 2nd-pass prefill
+_PREFILL_PARAMS = SamplingParams(
+    temperature=0.0,
+    top_p=1.0,
+    max_tokens=1,
+    logprobs=1,
+    prompt_logprobs=1,
+    output_kind=RequestOutputKind.FINAL_ONLY,
+)
+
+
+def _run_engine(engine, request_prefix, batched_ids, sampling_params):
+    """Submit requests to vLLM, run to completion, return outputs sorted by ID."""
+    for i, ids in enumerate(batched_ids):
+        engine.add_request(
+            f"{request_prefix}_{i}", {"prompt_token_ids": ids}, sampling_params
+        )
+    outputs = []
+    while engine.has_unfinished_requests():
+        outputs.extend(engine.step())
+    outputs.sort(key=lambda o: o.request_id)
+    assert len(outputs) == len(batched_ids)
+    return outputs
+
+
+def vllm_prefill(engine, all_prompt_ids: list[list[int]]) -> list[list[float]]:
+    """Run vLLM prefill and extract prompt logprobs for each sequence."""
+    outputs = _run_engine(engine, "prefill", all_prompt_ids, _PREFILL_PARAMS)
+    return [
+        _extract_logprobs_from_prompt(out, ids)
+        for out, ids in zip(outputs, all_prompt_ids)
+    ]
+
+
+def vllm_generate(
+    engine, all_prompt_ids: list[list[int]], max_tokens: int
+) -> tuple[list[list[int]], list[list[float]]]:
+    """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
+    params = SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=max_tokens,
+        logprobs=1,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+    )
+    outputs = _run_engine(engine, "generate", all_prompt_ids, params)
+
+    all_ids, all_lps = [], []
+    for out in outputs:
+        sample = out.outputs[0]
+        all_ids.append(list(sample.token_ids))
+        all_lps.append([list(d.values())[0].logprob for d in sample.logprobs])
+    return all_ids, all_lps
+
+
+def vllm_2nd_pass_prefill(
+    engine,
+    all_prompt_ids: list[list[int]],
+    all_gen_ids: list[list[int]],
+) -> list[list[float]]:
+    """Re-prefill [prompt + generated] and extract logprobs for generated positions."""
+    all_combined = [list(p) + list(g) for p, g in zip(all_prompt_ids, all_gen_ids)]
+    outputs = _run_engine(engine, "2nd_prefill", all_combined, _PREFILL_PARAMS)
+    return [
+        _extract_logprobs_from_prompt(out, combined, start_pos=len(p))
+        for out, combined, p in zip(outputs, all_combined, all_prompt_ids)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Test execution
+# ---------------------------------------------------------------------------
+
+
+def run_test_case(engine, trainer_model, device, all_prompt_ids, max_gen_tokens, label):
+    """Run all 3 parity tests for a given prompt/gen-length configuration."""
 
     if dist.get_rank() == 0:
-        logger.info(f"\n{'#' * 60}")
-        logger.info(f"SCENARIO: {label}")
-        logger.info(f"  Batch size: {batch_size}")
-        prompt_lens = [len(ids) for ids in all_prompt_ids]
-        logger.info(f"  Prompt lengths: {prompt_lens}")
-        logger.info(f"  Max gen tokens: {max_gen_tokens}")
-        logger.info(f"{'#' * 60}")
+        lens = [len(ids) for ids in all_prompt_ids]
+        logger.info(
+            f"\n{'#' * 60}\n"
+            f"SCENARIO: {label}\n"
+            f"  Batch={len(all_prompt_ids)}, prompt_lens={lens}, gen={max_gen_tokens}\n"
+            f"{'#' * 60}"
+        )
 
-    # Run vLLM operations with all prompts batched together
-    vllm_prefill_lps_list = vllm_prefill(engine, all_prompt_ids)
-    all_generated_ids, all_decode_lps = vllm_generate(
-        engine, all_prompt_ids, max_gen_tokens
-    )
-    all_prefill_2nd_lps = vllm_2nd_pass_prefill(
-        engine, all_prompt_ids, all_generated_ids
-    )
+    # vLLM operations (batched)
+    prefill_lps = vllm_prefill(engine, all_prompt_ids)
+    gen_ids, decode_lps = vllm_generate(engine, all_prompt_ids, max_gen_tokens)
+    prefill_2nd_lps = vllm_2nd_pass_prefill(engine, all_prompt_ids, gen_ids)
 
-    # Run trainer per-sequence (batch_size=1 each) and compare
+    # Compare per-sequence
     results = {"t1": True, "t2": True, "t3": True}
-
-    for seq_idx in range(batch_size):
-        prompt_ids = all_prompt_ids[seq_idx]
-        gen_ids = all_generated_ids[seq_idx]
-        vllm_pf_lps = vllm_prefill_lps_list[seq_idx]
-        decode_lps = all_decode_lps[seq_idx]
-        pf2_lps = all_prefill_2nd_lps[seq_idx]
-
+    for i in range(len(all_prompt_ids)):
         with torch.no_grad():
-            trainer_prefill_lps = compute_trainer_prefill_logprobs(
-                trainer_model, prompt_ids, device
+            trainer_pf = compute_trainer_prefill_logprobs(
+                trainer_model, all_prompt_ids[i], device
             )
-            trainer_full_lps = compute_token_log_probs(
-                trainer_model, prompt_ids, gen_ids, device
+            trainer_full = compute_token_log_probs(
+                trainer_model, all_prompt_ids[i], gen_ids[i], device
             )
 
         if dist.get_rank() == 0:
-            seq_label = f"[seq {seq_idx}]" if batch_size > 1 else ""
-            logger.info("=" * 60)
-
-            t1 = compare_logprobs(
-                f"Test 1 {seq_label}: Trainer prefill vs vLLM prefill",
-                trainer_prefill_lps,
-                vllm_pf_lps,
-                label_a="Trainer",
-                label_b="vLLM",
+            tag = f" [seq {i}]" if len(all_prompt_ids) > 1 else ""
+            results["t1"] &= compare_logprobs(
+                f"T1{tag}: Trainer prefill vs vLLM prefill",
+                trainer_pf,
+                prefill_lps[i],
+                "Trainer",
+                "vLLM",
             )
-            t2 = compare_logprobs(
-                f"Test 2 {seq_label}: vLLM decode vs vLLM 2nd-pass prefill",
-                decode_lps,
-                pf2_lps,
-                label_a="Decode",
-                label_b="2nd Prefill",
+            results["t2"] &= compare_logprobs(
+                f"T2{tag}: vLLM decode vs vLLM 2nd-pass prefill",
+                decode_lps[i],
+                prefill_2nd_lps[i],
+                "Decode",
+                "2ndPrefill",
             )
-            t3 = compare_logprobs(
-                f"Test 3 {seq_label}: Trainer prefill vs vLLM 2nd-pass prefill (full seq)",
-                trainer_full_lps,
-                pf2_lps,
-                label_a="Trainer",
-                label_b="vLLM 2nd Prefill",
+            results["t3"] &= compare_logprobs(
+                f"T3{tag}: Trainer full vs vLLM 2nd-pass prefill",
+                trainer_full,
+                prefill_2nd_lps[i],
+                "Trainer",
+                "2ndPrefill",
             )
-
-            results["t1"] = results["t1"] and t1
-            results["t2"] = results["t2"] and t2
-            results["t3"] = results["t3"] and t3
-
-            logger.info("-" * 60)
-            logger.info(f"  Test 1 {seq_label}: {'PASS' if t1 else 'FAIL'}")
-            logger.info(f"  Test 2 {seq_label}: {'PASS' if t2 else 'FAIL'}")
-            logger.info(f"  Test 3 {seq_label}: {'PASS' if t3 else 'FAIL'}")
 
     return results
 
 
-def _make_long_token_sequences(batch_size, prompt_length, tokenizer):
-    """Create token ID sequences of varying lengths up to prompt_length.
+_FILLER_TEXT = (
+    "You are a highly skilled mathematician and teacher. Your goal is to "
+    "solve complex mathematical problems with detailed step-by-step reasoning. "
+    "When presented with a problem, first identify the type of problem and "
+    "the relevant mathematical concepts. Then, break down the solution into "
+    "clear logical steps. Show all intermediate calculations and explain "
+    "each transformation. Finally, verify your answer by substituting back "
+    "or using an alternative method. Be precise with notation and careful "
+    "with arithmetic. If the problem has multiple valid approaches, mention "
+    "the alternatives briefly. Always state your final answer clearly."
+)
 
-    Creates synthetic sequences by encoding text and truncating to target
-    lengths that vary across the batch (e.g. 3487 and 1150 for batch_size=2).
 
-    Returns a list of token ID lists.
+def _make_prompt_tokens(batch_size, prompt_length, tokenizer):
+    """Create token ID sequences of the given prompt_length.
+
+    For batch_size > 1, varies lengths across the batch (first seq at max,
+    last seq ~40% of max) to test batch invariance with mixed lengths.
     """
-    # Target lengths: distribute across the range [prompt_length//3, prompt_length]
-    # to create sequences of varying lengths like MSL's real data
-    target_lengths = []
-    for i in range(batch_size):
-        # Spread lengths: first seq close to max, others shorter
-        frac = 1.0 - (i * 0.6 / max(batch_size - 1, 1))
-        target_lengths.append(max(128, int(prompt_length * frac)))
-
-    # Generate a long text block by repeating diverse passages
-    passages = [
-        "You are a helpful assistant that solves math problems step by step. "
-        "Show your reasoning clearly and carefully before giving the final answer. ",
-        "The fundamental theorem of calculus establishes the relationship between "
-        "differentiation and integration. It states that if f is continuous on [a,b] "
-        "and F is an antiderivative of f on [a,b], then the integral from a to b "
-        "of f(x) dx equals F(b) minus F(a). ",
-        "In reinforcement learning, an agent interacts with an environment to "
-        "maximize cumulative reward. The policy maps states to actions, and the "
-        "value function estimates expected future returns. ",
-        "Consider the following optimization problem: minimize f(x) subject to "
-        "g(x) <= 0 and h(x) = 0. The Lagrangian dual formulation introduces "
-        "multipliers for each constraint. ",
-        "The attention mechanism computes a weighted sum of values, where weights "
-        "are determined by the compatibility between queries and keys. Multi-head "
-        "attention projects inputs into multiple subspaces. ",
-    ]
-
     all_sequences = []
-    for idx, target_len in enumerate(target_lengths):
-        # Use different starting passage per sequence for diversity
+    for idx in range(batch_size):
+        frac = 1.0 - (idx * 0.6 / max(batch_size - 1, 1))
+        target_len = max(16, int(prompt_length * frac))
+
         text = ""
-        passage_idx = idx
         while True:
-            text += passages[passage_idx % len(passages)]
+            text += _FILLER_TEXT + " "
             tokens = tokenizer.encode(text)
             if len(tokens) >= target_len:
                 break
-            passage_idx += 1
-        # Truncate to target length
         all_sequences.append(tokens[:target_len])
 
     return all_sequences
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test bitwise parity")
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Number of sequences to batch in vLLM (default: 1)",
-    )
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument(
         "--prompt-length",
         type=int,
         default=0,
-        help="Max prompt sequence length in tokens. Sequences of varying "
-        "lengths up to this value are created. (default: use built-in scenarios)",
+        help="Token length for custom scenario (0 = use defaults)",
     )
-    parser.add_argument(
-        "--gen-tokens",
-        type=int,
-        default=50,
-        help="Number of tokens to generate for decode tests (default: 50)",
-    )
-    parser.add_argument(
-        "--tp",
-        type=int,
-        default=1,
-        help="Tensor parallel degree (default: 1)",
-    )
-    # Filter out torchrun args (everything before --)
+    parser.add_argument("--gen-tokens", type=int, default=50)
+    parser.add_argument("--tp", type=int, default=1)
     args, _ = parser.parse_known_args()
 
     config = _test_config(tp=args.tp)
@@ -562,67 +499,42 @@ def main():
     if current_flash_attention_impl() != "FA3":
         activate_flash_attention_impl("FA3")
 
+    # Register torchtitan model to vllm Engine
     register_model_to_vllm_model_registry(config.model_spec)
     dist_utils.init_distributed(CommConfig())
 
-    # ---- Build vLLM engine ----
-    engine = create_vllm_engine(config)
+    engine = build_inference_engine(config)
     tokenizer = engine.get_tokenizer()
-
-    # ---- Build trainer model ----
     trainer_model, device = build_trainer_model(config)
 
-    # ---- Define scenarios ----
-    if args.prompt_length > 0:
-        # Custom scenario: long prompt sequences with specified batch size
-        token_sequences = _make_long_token_sequences(
-            args.batch_size, args.prompt_length, tokenizer
-        )
-        seq_lens = [len(s) for s in token_sequences]
-        label = f"BS={args.batch_size}, prompt_lens={seq_lens}, gen={args.gen_tokens}"
-        scenarios = [(token_sequences, args.gen_tokens, label)]
-    else:
-        # Default scenarios with short text prompts
-        short_prompt = (
-            "You are a helpful assistant that solves math problems step by step. "
-            "Show your reasoning clearly and carefully before giving the final answer."
-        )
-        long_prompt = (
-            "You are a highly skilled mathematician and teacher. Your goal is to "
-            "solve complex mathematical problems with detailed step-by-step reasoning. "
-            "When presented with a problem, first identify the type of problem and "
-            "the relevant mathematical concepts. Then, break down the solution into "
-            "clear logical steps. Show all intermediate calculations and explain "
-            "each transformation. Finally, verify your answer by substituting back "
-            "or using an alternative method. Be precise with notation and careful "
-            "with arithmetic. If the problem has multiple valid approaches, mention "
-            "the alternatives briefly. Always state your final answer clearly."
-        )
-        scenarios = [
-            (short_prompt, 50, "Short prompt (25 tok) + 50 gen tokens"),
-            (short_prompt, 200, "Short prompt (25 tok) + 200 gen tokens"),
-            (long_prompt, 50, "Long prompt (~150 tok) + 50 gen tokens"),
-            (long_prompt, 200, "Long prompt (~150 tok) + 200 gen tokens"),
-        ]
+    # Build test_cases: vary prompt length and generation length
+    prompt_lengths = [args.prompt_length] if args.prompt_length > 0 else [25, 150]
+    gen_lengths = [args.gen_tokens] if args.prompt_length > 0 else [50, 200]
+
+    test_cases = []
+    for pl in prompt_lengths:
+        seqs = _make_prompt_tokens(args.batch_size, pl, tokenizer)
+        for gl in gen_lengths:
+            lens = [len(s) for s in seqs]
+            test_cases.append((seqs, gl, f"prompt_lens={lens}, gen={gl}"))
 
     all_results = []
-    for prompt, max_gen, label in scenarios:
-        results = run_scenario(
-            engine, trainer_model, device, tokenizer, prompt, max_gen, label
+    for prompt_ids, max_gen, label in test_cases:
+        results = run_test_case(
+            engine, trainer_model, device, prompt_ids, max_gen, label
         )
         all_results.append((label, results))
 
-    # ---- Final summary ----
+    # Summary
     if dist.get_rank() == 0:
         logger.info("\n" + "=" * 70)
-        logger.info("FINAL SUMMARY ACROSS ALL SCENARIOS")
+        logger.info("SUMMARY")
         logger.info("=" * 70)
-        for label, results in all_results:
-            t1 = "PASS" if results.get("t1") else "FAIL"
-            t2 = "PASS" if results.get("t2") else "FAIL"
-            t3 = "PASS" if results.get("t3") else "FAIL"
-            logger.info(f"  {label}")
-            logger.info(f"    T1={t1}  T2={t2}  T3={t3}")
+        for label, r in all_results:
+            t1 = "PASS" if r["t1"] else "FAIL"
+            t2 = "PASS" if r["t2"] else "FAIL"
+            t3 = "PASS" if r["t3"] else "FAIL"
+            logger.info(f"  {label}: T1={t1} T2={t2} T3={t3}")
         logger.info("=" * 70)
 
 

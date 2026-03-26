@@ -170,7 +170,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
         # non-deterministic split-k reductions in flash attention.
         num_splits = 1 if is_batch_invariant_mode_enabled() else 0
 
-        return torch.nn.attention.varlen.varlen_attn_out(
+        torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
@@ -185,6 +185,8 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
             seqused_k=seqused_k,
             num_splits=num_splits,
         )
+
+        return output
 
 
 logger = logging.getLogger(__name__)

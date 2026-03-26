@@ -25,9 +25,7 @@ Usage:
     enable_batch_invariant_mode()
 """
 
-import contextlib
 import logging
-from collections.abc import Generator
 from typing import Any
 
 import torch
@@ -411,6 +409,19 @@ def enable_batch_invariant_mode() -> None:
         "deterministic": torch.are_deterministic_algorithms_enabled(),
     }
 
+    # Set NCCL env vars for deterministic inter-GPU collectives (all-reduce
+    # in TP/DP). Must be set BEFORE dist.init_process_group so NCCL picks
+    # them up. Without these, NCCL may use Tree/CollNet algorithms or
+    # multiple channels, changing the floating-point summation order.
+    import os
+
+    os.environ["NCCL_ALGO"] = "Ring"
+    os.environ["NCCL_MIN_NCHANNELS"] = "1"
+    os.environ["NCCL_MAX_NCHANNELS"] = "1"
+    os.environ["NCCL_PROTO"] = "Simple"
+    os.environ["NCCL_COLLNET_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+
     # Disable reduced-precision reductions: these allow cuBLAS to use
     # lower-precision accumulation that can round differently depending
     # on batch size / tile decomposition.
@@ -452,19 +463,3 @@ def disable_batch_invariant_mode() -> None:
     _ENABLED = False
     _LIB = None
     _SAVED_STATE = None
-
-
-@contextlib.contextmanager
-def set_batch_invariant_mode(
-    enabled: bool = True,
-) -> Generator[None, None, None]:
-    """Context manager to temporarily enable/disable batch-invariant mode."""
-    global _ENABLED, _LIB, _SAVED_STATE
-    old_data = (_ENABLED, _LIB, _SAVED_STATE)
-    if enabled:
-        enable_batch_invariant_mode()
-    else:
-        disable_batch_invariant_mode()
-    yield
-    disable_batch_invariant_mode()
-    _ENABLED, _LIB, _SAVED_STATE = old_data

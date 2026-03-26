@@ -122,11 +122,6 @@ class RLTrainer(Configurable):
         """Base RNG seed for reproducibility. Propagated to trainer,
         generator, and task."""
 
-        deterministic: bool = False
-        """Enable fully deterministic mode: deterministic algorithms,
-        NCCL determinism, TF32 disabled, and batch-invariant kernels.
-        Required for cross-run bit-wise identity."""
-
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
@@ -320,7 +315,6 @@ class RLTrainer(Configurable):
             hf_assets_path=config.hf_assets_path,
             transfer_dtype=config.generator.model_dtype,
             seed=config.seed,
-            deterministic=config.deterministic,
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -485,34 +479,6 @@ class RLTrainer(Configurable):
                 f"max={metrics['logprob_diff_max']:.4e} | "
                 f"Time: {t_step:.1f}s"
             )
-
-            # --- DEBUG: Print detailed logprob comparison ---
-            if "dbg_gen_lps_first5" in metrics:
-                logger.info(
-                    f"  [DEBUG] prompt_len={metrics['dbg_prompt_len']}, "
-                    f"gen_len={metrics['dbg_gen_len']}, "
-                    f"logprob_len: gen={metrics['dbg_logprob_len_gen']}, "
-                    f"train={metrics['dbg_logprob_len_train']}"
-                )
-                logger.info(
-                    f"  [DEBUG] Generator first5: {metrics['dbg_gen_lps_first5']}"
-                )
-                logger.info(
-                    f"  [DEBUG] Trainer   first5: {metrics['dbg_train_lps_first5']}"
-                )
-                logger.info(
-                    f"  [DEBUG] Delta     first5: {metrics['dbg_delta_first5']}"
-                )
-                logger.info(
-                    f"  [DEBUG] Max delta at token {metrics['dbg_max_delta_idx']}: "
-                    f"gen={metrics['dbg_max_delta_gen']:.8f}, "
-                    f"train={metrics['dbg_max_delta_train']:.8f}, "
-                    f"delta={metrics['dbg_max_delta_val']:.8e}"
-                )
-                logger.info(
-                    f"  [DEBUG] Generator raw type: {metrics['dbg_gen_raw_type']}, "
-                    f"val={metrics['dbg_gen_raw_val']}"
-                )
 
             # Check for divergence
             if not torch.isfinite(torch.tensor(metrics["loss"])):
