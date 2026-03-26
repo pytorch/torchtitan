@@ -14,7 +14,6 @@ __all__ = ["generate_permute_indices", "fill_indices_wrapper", "apply_router_sco
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_D": 64}, num_warps=2),
         triton.Config({"BLOCK_D": 128}, num_warps=4),
         triton.Config({"BLOCK_D": 256}, num_warps=8),
     ],
@@ -53,7 +52,6 @@ def _apply_router_scores_fwd_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_D": 64}, num_warps=2),
         triton.Config({"BLOCK_D": 128}, num_warps=4),
         triton.Config({"BLOCK_D": 256}, num_warps=8),
     ],
