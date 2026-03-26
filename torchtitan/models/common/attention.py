@@ -115,9 +115,10 @@ class LocalMapAttention(Module):
             for i, p in enumerate(q.placements):
                 assert isinstance(p, Shard), (
                     f"LocalMapAttention requires Shard placements "
-                    f"(heads dim), but got {p} at position {i}"
+                    f"(n_heads dim), but got {p} at position {i}"
                 )
             # Ensure all Shard placements use the same tensor dim
+            # pyrefly: ignore [missing-attribute]
             shard_dims = {p.dim for p in q.placements}
             assert len(shard_dims) == 1, (
                 f"All Shard placements must shard on the same dim, "
