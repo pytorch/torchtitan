@@ -25,6 +25,7 @@ from torchtitan.experiments.rl.batch_invariant import (
     disable_batch_invariant_mode,
     enable_batch_invariant_mode,
 )
+from torchtitan.tools.utils import set_default_dtype
 
 _SEQ_LEN = 256
 
@@ -34,11 +35,9 @@ def _build_debug_model(device="cuda"):
     from torchtitan.models.qwen3 import model_registry
 
     model_spec = model_registry("debugmodel")
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.bfloat16)
-    with torch.device("meta"):
-        model = model_spec.model.build()
-    torch.set_default_dtype(old_dtype)
+    with set_default_dtype(torch.bfloat16):
+        with torch.device("meta"):
+            model = model_spec.model.build()
 
     model.to_empty(device=device)
     torch.manual_seed(42)
