@@ -12,6 +12,7 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torchtitan.models.common.attention import LocalMapAttention
+from torchtitan.tools.utils import has_cuda_capability
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
@@ -57,12 +58,19 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Activate PyTorch's FA3 flash attention implementation. This is required for
-        # the varlen attention API to work with paged attention (KV cache in block
-        # layout) because vLLM uses default page size 16 but FA2 only supports
-        # page_size=256. Error out if FA3 is not available in the current environment.
-        if current_flash_attention_impl() != "FA3":
-            activate_flash_attention_impl("FA3")
+        # FA3 requires SM 9.0+ (e.g. H100); check capability explicitly because
+        # activate_flash_attention_impl("FA3") succeeds even on SM80.
+        # Fall back to FA2 which requires page_size to be a multiple of 256.
+        if has_cuda_capability(9, 0):
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+            self._use_fa3 = True
+        else:
+            logger.warning(
+                "FA3 not available (requires SM 9.0+), falling back to FA2. "
+                "vLLM block_size must be set to 256 for FA2 paged attention."
+            )
+            self._use_fa3 = False
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
@@ -146,13 +154,24 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
+        # FA3 can infer cu_seqlens_k from block_table + seqused_k.
+        # FA2 requires cu_seqlens_k to be explicitly set.
+        if self._use_fa3:
+            cu_seqlens_k = None
+        else:
+            num_seqs = seqused_k.shape[0]
+            cu_seqlens_k = torch.zeros(
+                num_seqs + 1, dtype=torch.int32, device=query.device
+            )
+            cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
+
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
             value_cache,
             cu_seqlens_q,
-            None,
+            cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             scale=self.scale,
