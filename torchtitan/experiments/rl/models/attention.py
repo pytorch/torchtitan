@@ -7,7 +7,10 @@
 import logging
 
 import torch
-from torch.nn.attention import activate_flash_attention_impl
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+)
 from torchtitan.models.common.attention import LocalMapAttention
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -59,7 +62,8 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
         # activate_flash_attention_impl("FA3") succeeds even on SM80.
         # Fall back to FA2 which requires page_size to be a multiple of 256.
         if has_cuda_capability(9, 0):
-            activate_flash_attention_impl("FA3")
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
             self._use_fa3 = True
         else:
             logger.warning(
