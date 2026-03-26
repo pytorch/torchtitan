@@ -7,7 +7,6 @@
 from dataclasses import fields
 from typing import Any
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -49,7 +48,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=llama3_siglip2_configs[flavor],
         parallelize_fn=parallelize_vlm,
         pipelining_fn=None,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=None,
     )

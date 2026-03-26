@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -145,7 +144,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=gptoss_configs[flavor],
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=None,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
     )

@@ -20,7 +20,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import IGNORE_INDEX, Loss, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -103,6 +103,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
+        loss: Loss.Config = field(default_factory=Loss.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
 
         def __post_init__(self):
@@ -317,9 +318,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims
-        )
+        self.loss_fn = config.loss.build()
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -684,7 +683,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     # Compute loss sum (reduction='sum')
-                    loss_sum = self.loss_fn(pred, labels)
+                    loss_sum = self.loss_fn(pred, labels).main
 
                     # Scale the loss by the inverse of the total weight denominator before backward
                     # This ensures gradients are properly normalized across all microbatches

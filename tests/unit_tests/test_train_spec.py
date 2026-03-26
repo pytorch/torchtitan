@@ -9,7 +9,6 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.linear import Linear
@@ -62,7 +61,6 @@ class TestModelSpec:
         assert spec.flavor == "debugmodel"
         assert spec.model is not None
         assert spec.parallelize_fn == parallelize_llama
-        assert spec.build_loss_fn == build_cross_entropy_loss
 
     def test_model_spec_creation(self):
         fake_config = FakeModel.Config()
@@ -72,7 +70,6 @@ class TestModelSpec:
             model=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=None,
-            build_loss_fn=build_cross_entropy_loss,
             post_optimizer_build_fn=None,
             state_dict_adapter=None,
         )
@@ -89,7 +86,6 @@ class TestModelSpec:
             model=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=None,
-            build_loss_fn=build_cross_entropy_loss,
             post_optimizer_build_fn=fake_post_optimizer_build_fn,
             state_dict_adapter=None,
         )
