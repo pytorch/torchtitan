@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.traceback import annotate_fn
 
@@ -51,15 +52,13 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     """
     from torchtitan.distributed.expert_parallel import ExpertParallel
     from torchtitan.models.common.attention import FlexAttentionWrapper
-    from torchtitan.models.common.moe.moe import MoE
 
-    ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
+    ExpertParallel._token_dispatch = annotate_fn({"comm_region": "token_dispatch"})(
         ExpertParallel._token_dispatch
     )
-    ExpertParallel._token_combine = annotate_fn({"EP": "combine"})(
+    ExpertParallel._token_combine = annotate_fn({"comm_region": "token_combine"})(
         ExpertParallel._token_combine
     )
-    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
     FlexAttentionWrapper.forward = annotate_fn(
         {"compile_with_inductor": "flex_attention"}
