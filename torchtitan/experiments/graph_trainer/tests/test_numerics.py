@@ -150,6 +150,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    def test_llama3_aot_fx_trace_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
+        )
+
     def test_llama3_jit_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode jit"),
@@ -179,6 +184,13 @@ class TestGraphTrainerNumerics(unittest.TestCase):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
                 test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
+            ),
+        )
+
+    def test_dsv3_aot_fx_trace_vs_eager(self):
+        self.assertTrue(
+            _run_deepseek_v3_loss_compare(
+                test_options_extra="--compile.mode aot_fx_trace"
             ),
         )
 
