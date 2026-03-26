@@ -7,11 +7,11 @@ on:
       - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_2gpu_rl_numerics.yaml'
+      - '.github/workflows/integration_test_2gpu_rl_h100.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_2gpu_rl_numerics.yaml'
+      - '.github/workflows/integration_test_2gpu_rl_h100.yaml'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}

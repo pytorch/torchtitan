@@ -175,6 +175,7 @@ class VLLMGenerator(Actor, Configurable):
             from torchtitan.experiments.rl.batch_invariant import (
                 enable_batch_invariant_mode,
             )
+
             enable_batch_invariant_mode()
 
         # Extract needed fields from configs
