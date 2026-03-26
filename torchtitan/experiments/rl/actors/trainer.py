@@ -22,12 +22,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import (
-    CompileConfig,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
@@ -112,15 +107,10 @@ class PolicyTrainer(Actor, Configurable):
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
-        # Enable deterministic mode: seeding, deterministic algorithms
-        if batch_invariant_mode:
-            debug_config = DebugConfig(seed=seed, deterministic=True)
-            dist_utils.set_determinism(
-                self.parallel_dims,
-                self.device,
-                debug_config,
-                distinct_seed_mesh_dims=[],
-            )
+        # Seed RNG for reproducibility. Deterministic algorithms are already
+        # enabled by enable_batch_invariant_mode() above.
+        if batch_invariant_mode and seed is not None:
+            torch.manual_seed(seed)
 
         # Activate FA3 so that varlen attention on the trainer uses the same
         # FlashAttention 3 kernel as the generator's CUSTOM backend.  This is

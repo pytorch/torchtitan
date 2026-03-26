@@ -38,14 +38,12 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
@@ -78,14 +76,12 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
