@@ -141,7 +141,9 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 self._epoch += 1
                 logger.warning(f"Dataset {self.dataset_name} is being re-looped")
                 if isinstance(self._data, Dataset):
-                    self._data = cast(Dataset, self._data.shuffle(seed=42 + self._epoch))
+                    self._data = cast(
+                        Dataset, self._data.shuffle(seed=42 + self._epoch)
+                    )
                 elif hasattr(self._data, "set_epoch"):
                     self._data.set_epoch(self._epoch)
 
@@ -228,8 +230,8 @@ class ChatDataset(IterableDataset, Stateful):
     """Dataset for single-turn chat/instruction-tuning.
 
     Tokenizes [user, assistant] message pairs, masks prompt tokens with
-    IGNORE_INDEX in labels, and supports greedy sequence packing or
-    per-example padding. Implements Stateful for checkpointing.
+    IGNORE_INDEX in labels, and uses greedy sequence packing with
+    per-document positions. Implements Stateful for checkpointing.
     """
 
     def __init__(
@@ -241,12 +243,11 @@ class ChatDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
-        pack_sequences: bool = True,
     ) -> None:
         if tokenizer.eos_id is None:
             raise ValueError(
                 "Tokenizer does not have an eos_id set. "
-                "ChatDataset requires a tokenizer with a valid EOS token for padding."
+                "ChatDataset requires a tokenizer with a valid EOS token."
             )
 
         self._data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
@@ -254,7 +255,6 @@ class ChatDataset(IterableDataset, Stateful):
         self._eos_id = tokenizer.eos_id
         self.seq_len = seq_len
         self.infinite = infinite
-        self.pack_sequences = pack_sequences
         self._sample_processor = sample_processor
 
         self._dataset_id = f"{dataset.info.dataset_name}/{dataset.split}"
@@ -269,8 +269,6 @@ class ChatDataset(IterableDataset, Stateful):
         self._logged_first_sample = False
 
     def _get_data_iter(self):
-        # For map-style datasets, resume by skipping to the correct index
-        # For iterable-style datasets, the underlying iterator already points to the correct index
         if isinstance(self._data, Dataset):
             if self._sample_idx == len(self._data):
                 return iter([])
@@ -281,6 +279,7 @@ class ChatDataset(IterableDataset, Stateful):
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
         """Validate that messages are a single-turn [user, assistant] pair."""
+        # TODO: expand this to multi-turn
         if len(messages) != 2:
             raise ValueError(
                 f"Expected single-turn [user, assistant], got {len(messages)} messages"
@@ -311,9 +310,11 @@ class ChatDataset(IterableDataset, Stateful):
         self._validate_messages(messages)
 
         full_text = self._tokenizer.apply_chat_template(messages)
-        # Chat templates already end with <|im_end|>\n, so adding another EOS
-        # would create a redundant token that inflates loss.
+        # Strip extra newline and ensure the sequence ends with EOS without duplicates
+        full_text = full_text.rstrip("\n")
         full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self._eos_id:
+            full_tokens.append(self._eos_id)
 
         if not self._logged_first_sample:
             logger.info(f"[ChatDataset] First sample full:\n{full_text}")
@@ -338,72 +339,17 @@ class ChatDataset(IterableDataset, Stateful):
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         prompt_len = len(prompt_tokens)
 
-        # Mask prompt tokens in labels. After the pre-shift (input=tokens[:-1],
-        # label=tokens[1:]), label[i] is the target for input[i]. The prompt
-        # occupies input positions [0, prompt_len), so labels [0, prompt_len)
-        # should be masked.
+        # Mask prompt tokens in labels [0, prompt_len).
         mask_end = min(prompt_len, len(label_ids))
         label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
 
         return input_ids, label_ids
 
     def __iter__(self):
-        if self.pack_sequences:
-            yield from self._iter_greedy_packed()
-        else:
-            yield from self._iter_unpacked()
-
-    def _iter_unpacked(self):
-        """Yield each example independently, padded to seq_len."""
-        while True:
-            for sample in self._get_data_iter():
-                # pyrefly: ignore [bad-argument-type]
-                result = self._tokenize_sample(sample)
-                self._sample_idx += 1
-                if result is None:
-                    continue
-
-                input_ids, label_ids = result
-
-                # TODO: EOS padding wastes attention FLOPS (each pad token self-attends).
-                # Could add a padding mask_mod to flex attention to zero these out.
-                pad_len = self.seq_len - len(input_ids)
-                if pad_len > 0:
-                    input_ids = input_ids + [self._eos_id] * pad_len
-                    label_ids = label_ids + [IGNORE_INDEX] * pad_len
-
-                input_tensor = torch.tensor(input_ids, dtype=torch.long)
-                label_tensor = torch.tensor(label_ids, dtype=torch.long)
-                yield {"input": input_tensor}, label_tensor
-
-            if not self.infinite:
-                logger.warning(f"Chat dataset '{self._dataset_id}' has run out of data")
-                break
-            else:
-                self._sample_idx = 0
-                self._epoch += 1
-                if isinstance(self._data, Dataset):
-                    self._data = cast(Dataset, self._data.shuffle(seed=42 + self._epoch))
-                elif hasattr(self._data, "set_epoch"):
-                    self._data.set_epoch(self._epoch)
-                logger.warning(
-                    f"Chat dataset '{self._dataset_id}' is being re-looped "
-                    f"(epoch {self._epoch})"
-                )
-
-    def _flush_pack_buffer(self):
-        """Convert pack buffers to tensors, clear them, and return the batch."""
-        input_tensor = torch.tensor(self._pack_buffer_input, dtype=torch.long)
-        label_tensor = torch.tensor(self._pack_buffer_label, dtype=torch.long)
-        positions_tensor = torch.tensor(self._pack_buffer_positions, dtype=torch.long)
-        self._pack_buffer_input = []
-        self._pack_buffer_label = []
-        self._pack_buffer_positions = []
-        return {"input": input_tensor, "positions": positions_tensor}, label_tensor
+        yield from self._iter_greedy_packed()
 
     def _iter_greedy_packed(self):
         """Greedy packing: pack examples sequentially until seq_len is full.
-
         Document boundaries are marked by EOS tokens between packed examples.
         The model's flex/varlen attention mask uses these EOS positions to
         prevent cross-document attention.
@@ -424,14 +370,14 @@ class ChatDataset(IterableDataset, Stateful):
                     pad_len = remaining
                     self._pack_buffer_input.extend([self._eos_id] * pad_len)
                     self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
-                    self._pack_buffer_positions.extend(list(range(pad_len)))
+                    self._pack_buffer_positions.extend(range(pad_len))
 
                     yield self._flush_pack_buffer()
 
                 # Add example to buffer with positions resetting to 0
                 self._pack_buffer_input.extend(input_ids)
                 self._pack_buffer_label.extend(label_ids)
-                self._pack_buffer_positions.extend(list(range(len(input_ids))))
+                self._pack_buffer_positions.extend(range(len(input_ids)))
 
                 if len(self._pack_buffer_input) == self.seq_len:
                     yield self._flush_pack_buffer()
@@ -442,7 +388,7 @@ class ChatDataset(IterableDataset, Stateful):
                 if pad_len > 0:
                     self._pack_buffer_input.extend([self._eos_id] * pad_len)
                     self._pack_buffer_label.extend([IGNORE_INDEX] * pad_len)
-                    self._pack_buffer_positions.extend(list(range(pad_len)))
+                    self._pack_buffer_positions.extend(range(pad_len))
 
                 yield self._flush_pack_buffer()
 
@@ -453,13 +399,25 @@ class ChatDataset(IterableDataset, Stateful):
                 self._sample_idx = 0
                 self._epoch += 1
                 if isinstance(self._data, Dataset):
-                    self._data = cast(Dataset, self._data.shuffle(seed=42 + self._epoch))
+                    self._data = cast(
+                        Dataset, self._data.shuffle(seed=42 + self._epoch)
+                    )
                 elif hasattr(self._data, "set_epoch"):
                     self._data.set_epoch(self._epoch)
                 logger.warning(
                     f"Chat dataset '{self._dataset_id}' is being re-looped "
                     f"(epoch {self._epoch})"
                 )
+
+    def _flush_pack_buffer(self):
+        """Convert pack buffers to tensors, clear them, and return the batch."""
+        input_tensor = torch.tensor(self._pack_buffer_input, dtype=torch.long)
+        label_tensor = torch.tensor(self._pack_buffer_label, dtype=torch.long)
+        positions_tensor = torch.tensor(self._pack_buffer_positions, dtype=torch.long)
+        self._pack_buffer_input = []
+        self._pack_buffer_label = []
+        self._pack_buffer_positions = []
+        return {"input": input_tensor, "positions": positions_tensor}, label_tensor
 
     def state_dict(self):
         _state_dict: dict[str, Any] = {
@@ -509,9 +467,6 @@ class ChatDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely."""
 
-        pack_sequences: bool = True
-        """Whether to pack multiple examples into a single sequence."""
-
     def __init__(
         self,
         config: Config,
@@ -529,14 +484,6 @@ class ChatDataLoader(ParallelAwareDataloader):
                 "(e.g., 'openai/gsm8k' or 'json')."
             )
 
-        if config.pack_sequences:
-            logger.warning(
-                "ChatDataLoader: pack_sequences=True requires block_causal "
-                "attention (flex or varlen backend) to prevent cross-document "
-                "attention leakage. Ensure your model config sets "
-                "attn_backend='flex' or 'varlen' and attn_mask_type='block_causal'."
-            )
-
         dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)
 
         chat_ds = ChatDataset(
@@ -547,7 +494,6 @@ class ChatDataLoader(ParallelAwareDataloader):
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             infinite=config.infinite,
-            pack_sequences=config.pack_sequences,
         )
 
         dataloader_kwargs = {

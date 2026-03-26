@@ -567,7 +567,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "SFT ChatDataset integration test",
             "sft",
-            ngpu=1,
+            ngpu=2,
         ),
     ]
 

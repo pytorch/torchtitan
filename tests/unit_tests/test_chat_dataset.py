@@ -7,7 +7,6 @@
 import os
 import unittest
 
-import torch
 from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
@@ -47,7 +46,6 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=2048,
-            pack_sequences=False,
             infinite=False,
         )
 
@@ -82,7 +80,6 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=2048,
-            pack_sequences=False,
             infinite=False,
         )
 
@@ -120,50 +117,6 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         )
 
 
-class TestChatDatasetUnpacked(unittest.TestCase):
-    """Single sample padded to seq_len with EOS padding and IGNORE_INDEX labels."""
-
-    def test_padding(self):
-        tokenizer = _load_tokenizer()
-        ds = _load_dataset()
-        seq_len = 2048
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=seq_len,
-            pack_sequences=False,
-            infinite=False,
-        )
-
-        batch, labels = next(iter(chat_ds))
-        input_ids = batch["input"]
-        label_ids = labels
-
-        self.assertEqual(input_ids.shape[0], seq_len)
-        self.assertEqual(label_ids.shape[0], seq_len)
-
-        sample = ds[0]
-        messages = _process_sample(sample)
-        full_text = tokenizer.apply_chat_template(messages)
-        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
-        actual_len = len(full_tokens) - 1
-
-        # Padding region should be EOS in input_ids and IGNORE_INDEX in labels
-        pad_input = input_ids[actual_len:]
-        pad_labels = label_ids[actual_len:]
-        eos_id = tokenizer.eos_id
-
-        self.assertTrue(
-            (pad_input == eos_id).all(),
-            "Padding input tokens should all be EOS",
-        )
-        self.assertTrue(
-            (pad_labels == IGNORE_INDEX).all(),
-            "Padding label tokens should all be IGNORE_INDEX",
-        )
-
-
 class TestChatDatasetGreedyPacking(unittest.TestCase):
     """Multiple short samples packed into one sequence with small seq_len."""
 
@@ -177,7 +130,6 @@ class TestChatDatasetGreedyPacking(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=seq_len,
-            pack_sequences=True,
             infinite=False,
         )
 
@@ -206,7 +158,6 @@ class TestChatDatasetPerDocumentPositions(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=seq_len,
-            pack_sequences=True,
             infinite=False,
         )
 
@@ -243,28 +194,11 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
     def test_all_dropped_with_tiny_seq_len(self):
         tokenizer = _load_tokenizer()
         ds = _load_dataset()
-        # All samples have effective_len >= 79, so seq_len=32 drops everything
         chat_ds = ChatDataset(
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=32,
-            pack_sequences=False,
-            infinite=False,
-        )
-
-        batches = list(chat_ds)
-        self.assertEqual(len(batches), 0, "All samples should be dropped at seq_len=32")
-
-    def test_all_dropped_packed(self):
-        tokenizer = _load_tokenizer()
-        ds = _load_dataset()
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=32,
-            pack_sequences=True,
             infinite=False,
         )
 
@@ -290,7 +224,6 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=bad_processor,
             seq_len=2048,
-            pack_sequences=False,
             infinite=False,
         )
 
@@ -312,7 +245,6 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=bad_processor,
             seq_len=2048,
-            pack_sequences=False,
             infinite=False,
         )
 
@@ -335,7 +267,6 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=bad_processor,
             seq_len=2048,
-            pack_sequences=False,
             infinite=False,
         )
 
@@ -349,18 +280,17 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
     def test_state_dict_round_trip(self):
         tokenizer = _load_tokenizer()
         ds = _load_dataset()
+        seq_len = 128
         chat_ds = ChatDataset(
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            seq_len=2048,
-            pack_sequences=False,
+            seq_len=seq_len,
             infinite=False,
         )
 
-        # Consume some samples
+        # Consume one packed batch
         it = iter(chat_ds)
-        next(it)
         next(it)
 
         state = chat_ds.state_dict()
@@ -371,49 +301,6 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
         self.assertIn("pack_buffer_input", state)
         self.assertIn("pack_buffer_label", state)
         self.assertIn("pack_buffer_positions", state)
-        self.assertEqual(state["sample_idx"], 2)
-        self.assertEqual(state["epoch"], 0)
-
-        # Create a new dataset and load the state
-        chat_ds2 = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=2048,
-            pack_sequences=False,
-            infinite=False,
-        )
-        chat_ds2.load_state_dict(state)
-
-        # Collect remaining from the same iterator and from the restored dataset
-        remaining_original = list(it)
-        remaining_restored = list(chat_ds2)
-
-        self.assertEqual(len(remaining_original), len(remaining_restored))
-        for (b1, l1), (b2, l2) in zip(remaining_original, remaining_restored):
-            self.assertTrue(torch.equal(b1["input"], b2["input"]))
-            self.assertTrue(torch.equal(l1, l2))
-
-    def test_packed_state_dict_round_trip(self):
-        tokenizer = _load_tokenizer()
-        ds = _load_dataset()
-        seq_len = 512
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=seq_len,
-            pack_sequences=True,
-            infinite=False,
-        )
-
-        # Consume one packed batch
-        it = iter(chat_ds)
-        next(it)
-
-        state = chat_ds.state_dict()
-
-        # Verify state has expected fields
         self.assertGreater(state["sample_idx"], 0)
         self.assertEqual(state["epoch"], 0)
 
@@ -423,7 +310,6 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=seq_len,
-            pack_sequences=True,
             infinite=False,
         )
         chat_ds2.load_state_dict(state)
@@ -450,7 +336,6 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=2048,
-            pack_sequences=False,
             infinite=True,
         )
 
@@ -471,7 +356,6 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=seq_len,
-            pack_sequences=True,
             infinite=True,
         )
 

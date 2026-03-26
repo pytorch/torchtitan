@@ -228,9 +228,15 @@ def sft_debugmodel() -> Trainer.Config:
             {"role": "assistant", "content": sample["answer"]},
         ]
 
+    model_spec = model_registry("debugmodel")
+    # pyrefly: ignore [missing-attribute]
+    model_spec.model.layer.attention.attn_backend = "varlen"
+    # pyrefly: ignore [missing-attribute]
+    model_spec.model.layer.attention.attn_mask_type = "block_causal"
+
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -250,7 +256,6 @@ def sft_debugmodel() -> Trainer.Config:
                 "split": "train",
             },
             sample_processor=process_sample,
-            pack_sequences=False,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

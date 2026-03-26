@@ -267,7 +267,6 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             dataset_path="openai/gsm8k",
             load_dataset_kwargs={"name": "main", "split": "train"},
             sample_processor=process_sample,
-            pack_sequences=True,
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,
