@@ -4,6 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# TODO: Re-enable once we have closed
+# https://github.com/pytorch/torchtitan/issues/2722
+os.environ.setdefault("DISABLE_LLVM_OPT", "1")
+
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
