@@ -133,6 +133,18 @@ class TestApplyCompileValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "precompile_artifact_dir"):
             apply_compile(**args)
 
+    def test_precompile_missing_artifact_raises(self):
+        from torchtitan.experiments.graph_trainer.compile import apply_compile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = self._make_args(
+                precompile=True,
+                precompile_artifact_dir=tmpdir,
+                passes=["full_inductor_compilation"],
+            )
+            with self.assertRaisesRegex(ValueError, "not found"):
+                apply_compile(**args)
+
     def test_precompile_without_serializable_pass_raises(self):
         from torchtitan.experiments.graph_trainer.compile import apply_compile
 

@@ -18,7 +18,6 @@ Additionally supports pre-compile via --compile.precompile:
 
 import dataclasses
 import functools
-import pickle
 
 import torch
 import torch.nn as nn
@@ -144,32 +143,16 @@ def _apply_aot_compile(
             model, compile_config, parallel_dims
         )
 
-        if storage.exists(artifact_key):
-            try:
-                return _apply_aot_compile_load(
-                    model, parallel_dims, storage, artifact_key, config_fingerprint
-                )
-            except (
-                ValueError,
-                pickle.UnpicklingError,
-                RuntimeError,
-                FileNotFoundError,
-            ) as e:
-                # ValueError: fingerprint/param/buffer mismatches from our
-                # validation. pickle.UnpicklingError: corrupted or
-                # incompatible serialized data. RuntimeError: intentionally
-                # broad to catch remaining deserialization failures (e.g.
-                # shape mismatches in torch.load) that surface as
-                # RuntimeError. FileNotFoundError: network-mounted storage
-                # may report exists() = True but fail on read due to stale
-                # metadata cache. We log the exception
-                # type so unrelated errors (CUDA OOM, NCCL) are
-                # distinguishable in logs.
-                logger.warning(
-                    f"Stale precompile artifact detected ({type(e).__name__}), "
-                    f"recompiling: {e}"
-                )
-                storage.delete(artifact_key)
+        if not storage.exists(artifact_key):
+            raise ValueError(
+                f"Precompiled artifact not found at "
+                f"'{compile_config.precompile_artifact_dir}/{artifact_key}'. "
+                f"Run precompile_main first to generate the artifact."
+            )
+
+        return _apply_aot_compile_load(
+            model, parallel_dims, storage, artifact_key, config_fingerprint
+        )
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(
@@ -188,20 +171,6 @@ def _apply_aot_compile(
         compiler_passes, dump_folder=dump_folder
     )
 
-    serializable = compile_config.precompile
-    on_compile = (
-        _make_precompile_callback(
-            model,
-            compile_config,
-            parallel_dims,
-            storage=storage,
-            artifact_key=artifact_key,
-            config_fingerprint=config_fingerprint,
-        )
-        if serializable
-        else None
-    )
-
     # Create custom joint_graph_builder with compilers
     model_joint_graph_builder = functools.partial(
         joint_graph_builder,
@@ -210,17 +179,12 @@ def _apply_aot_compile(
         joint_custom_passes=joint_custom_passes,
         dump_folder=dump_folder,
         compile_config=compile_config,
-        serializable=serializable,
-        on_compile=on_compile,
     )
 
     model = CompiledModule(
         model, parallel_dims, model_joint_graph_builder, parallelize_inputs
     )
-    msg = "Applied AOT compilation (joint graph export) to the model"
-    if serializable:
-        msg += " with serializable=True (precompile save)"
-    logger.info(msg)
+    logger.info("Applied AOT compilation (joint graph export) to the model")
     return model
 
 
