@@ -288,12 +288,6 @@ class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
-    selective_ac_option: str = "2"
-    """
-    Selective activation checkpointing options ['int', 'op'].
-    'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
-    """
-
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]
     )
@@ -384,7 +378,7 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    mode: Literal["default", "fake_backend", "local_tensor", "torchcomms"] = "default"
     """
     Communication mode for distributed training.
 
@@ -396,6 +390,7 @@ class CommConfig:
       rank after another. While the performance will be slow, the numerics should be the same.
       This enables us to verify numerics with fewer GPUs. For example, we can directly run 5D
       parallelisms within a single node to reduce the combinations we need to use in integration tests.
+    - "torchcomms": Use torchcomms-based communicators. Requires the torchcomms package to be installed.
 
     NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
     """
@@ -414,6 +409,10 @@ class DebugConfig:
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
+    detect_anomaly: bool = False
+    """Enable torch.autograd anomaly detection to help track down NaN/Inf gradients.
+    Note: incurs significant overhead; for debugging only."""
 
     print_config: bool = False
     """Print the job configs to terminal"""

@@ -32,32 +32,13 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_dense
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
-
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn.default,
-    torch._higher_order_ops.inductor_compiled_code,
-}
 
 
 def parallelize_llama(
@@ -129,14 +110,12 @@ def parallelize_llama(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
             base_folder=dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile_dense(model, compile_config)
 
     if parallel_dims.fsdp_enabled:
         # dp_mesh is the mesh for FSDP/HSDP
@@ -268,22 +247,6 @@ def apply_tp(
     )
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(
-            transformer_block, backend=compile_config.backend, fullgraph=True
-        )
-        # pyrefly: ignore [missing-attribute]
-        model.layers.register_module(layer_id, transformer_block)
-
-    logger.info("Compiling each TransformerBlock with torch.compile")
-
-
 def disable_fsdp_gradient_division(model: nn.Module) -> None:
     """
     Disable FSDP's automatic gradient division for all FSDP modules.
@@ -337,28 +300,41 @@ def apply_fsdp(
         reshard_after_forward_policy, pp_enabled
     )
 
-    if model.tok_embeddings is not None:
+    if getattr(model, "enable_weight_tying", False):
+        # When weights are tied, tok_embeddings and output share the same parameter.
+        # Group them together in one FSDP unit to avoid duplicate all-gathers.
+        modules = [
+            m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
+        ]
         # pyrefly: ignore [no-matching-overload]
         fully_shard(
-            model.tok_embeddings,
+            modules,
             **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
+            reshard_after_forward=reshard_after_forward_policy == "always",
         )
+    else:
+        if model.tok_embeddings is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                model.tok_embeddings,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+        # As an optimization, do not reshard_after_forward the last layers by default
+        # since FSDP would prefetch them immediately after the forward pass
+        if model.norm is not None and model.output is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                [model.norm, model.output],
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
-        )
-    # As an optimization, do not reshard_after_forward the last layers by default
-    # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
-        # pyrefly: ignore [no-matching-overload]
-        fully_shard(
-            [model.norm, model.output],
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
         )
 
     fully_shard(model, **fsdp_config)

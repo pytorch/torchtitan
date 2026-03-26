@@ -78,6 +78,7 @@ class Llama3Model(Decoder):
         dim: int = 4096
         n_layers: int = 32
         vocab_size: int = 128256
+        enable_weight_tying: bool = False
         layer: TransformerBlock.Config
 
         def update_from_config(
@@ -108,6 +109,25 @@ class Llama3Model(Decoder):
                     f"Varlen attention is not supported with CP."
                 )
 
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layer.attention.n_heads
+                # pyrefly: ignore [missing-attribute]
+                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
+
+            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
+                raise NotImplementedError(
+                    "Weight tying is not supported with Pipeline Parallel."
+                )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -118,3 +138,25 @@ class Llama3Model(Decoder):
                 2 * (self.dim // self.layer.attention.n_heads),
                 seq_len,
             )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.enable_weight_tying = config.enable_weight_tying
+
+        if self.enable_weight_tying:
+            self.tok_embeddings.weight = self.output.weight
+
+    def init_weights(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+        **kwargs,
+    ):
+        if self.enable_weight_tying:
+            # since when the model is initialized on meta device,
+            # the tying in the __init__ may not have worked correctly
+            # we ensure the weights are tied here
+            assert self.tok_embeddings is not None and self.output is not None
+            self.tok_embeddings.weight = self.output.weight
+
+        super().init_weights(buffer_device=buffer_device, **kwargs)

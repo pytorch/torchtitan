@@ -12,8 +12,15 @@ import torch.nn as nn
 from torchtitan.components.quantization import QuantizationConverter
 
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
+from .module_utils import (
+    capture_module_attrs,
+    inject_module_protocol,
+    verify_module_protocol,
+)
 
 
 class MXFP8Converter(QuantizationConverter):
@@ -102,6 +109,13 @@ class MXFP8Converter(QuantizationConverter):
                     return True
             return False
 
+        # Capture Module attrs before conversion (MX may swap classes, losing them).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
+        saved_attrs = capture_module_attrs(
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+        )
+
         recipe = MXFP8TrainingRecipe(self.config.recipe_name)
         mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
         mxfp8_op_config.pad_token_groups_for_grouped_mm = (
@@ -109,6 +123,10 @@ class MXFP8Converter(QuantizationConverter):
         )
 
         quantize_(model, config=mxfp8_op_config, filter_fn=module_filter_fn)
+
+        # Re-inject Linear protocol and re-attach attrs
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
 
         logger.info(
             f"Converted layers matching FQNS {self.config.fqns} "

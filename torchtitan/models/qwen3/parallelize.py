@@ -30,37 +30,15 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.parallelize import apply_replicate
-from torchtitan.models.llama4.parallelize import (
-    apply_compile,
-    apply_fsdp,
-    apply_moe_ep_tp,
-)
+from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
-
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn.default,
-    torch._higher_order_ops.inductor_compiled_code,
-}
 
 
 def parallelize_qwen3(
@@ -125,11 +103,6 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
-        if parallel_dims.tp_enabled:
-            raise NotImplementedError(
-                "Context Parallel with Tensor Parallel is not yet supported for Qwen3. "
-                "See https://github.com/pytorch/torchtitan/issues/2446"
-            )
         attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
@@ -143,14 +116,12 @@ def parallelize_qwen3(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
             base_folder=dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel

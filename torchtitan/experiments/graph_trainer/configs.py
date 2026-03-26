@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from typing import Literal
 
+from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
@@ -15,11 +16,12 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot"] | None = "aot"
+    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot"
     """
     Compilation mode. Options:
         jit: standard torch.compile() with custom backend
         aot: explicit joint graph export + custom graph passes
+        aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
     """
 
     backend: str = "aot_eager"
@@ -34,6 +36,21 @@ class GraphTrainerCompileConfig(CompileConfig):
     joint_passes: list[str] = field(default_factory=list)
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
+
+    precompile: bool = False
+    """
+    Enable serializable compilation. On first run, compiles with
+    serializable=True and saves the artifact. On subsequent runs, detects
+    the existing artifact and loads it, skipping compilation entirely.
+    """
+
+    precompile_artifact_dir: str = "/tmp/precompile_artifacts"
+    """
+    Directory where precompile artifacts are stored. The default /tmp
+    is ephemeral on most cluster environments. For multi-node setups
+    or persistence across job restarts, set this to a shared filesystem
+    path (e.g. under the job output directory).
+    """
 
 
 @dataclass(kw_only=True, slots=True)
@@ -58,5 +75,11 @@ def to_graph_trainer_config(
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
     d["model_spec"] = model_registry(base_config.model_spec.flavor)
     d.pop("compile")
+
+    # graph_trainer uses graph-based SAC instead of eager AC. Override any
+    # non-"none" AC mode to "selective" so callers don't need per-config fixups.
+    ac = d.get("activation_checkpoint")
+    if ac is not None and ac.mode != "none":
+        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
 
     return GraphTrainer.Config(**d)

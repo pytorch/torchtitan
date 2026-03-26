@@ -5,8 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import logging
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -54,8 +57,46 @@ class Configurable:
 
         _owner: ClassVar[type | None] = None
 
+        def __repr__(self) -> str:
+            """Safe repr that handles unset ``field(init=False)`` slots.
+
+            The default dataclass ``__repr__`` raises ``AttributeError`` when
+            ``field(init=False)`` slots have not been set yet.  This override
+            shows ``<UNSET>`` for those fields instead of crashing, which lets
+            external libraries (e.g. tyro) safely print configs.
+            """
+            cls_name = type(self).__name__
+            parts: list[str] = []
+            for f in fields(self):
+                try:
+                    val = getattr(self, f.name)
+                except AttributeError:
+                    parts.append(f"{f.name}=<UNSET>")
+                    continue
+                parts.append(f"{f.name}={val!r}")
+            return f"{cls_name}({', '.join(parts)})"
+
         def to_dict(self) -> dict:
             """Serialize to a dict, safely handling unset ``field(init=False)`` slots."""
+
+            def _convert(val):
+                if hasattr(val, "to_dict"):
+                    return val.to_dict()
+                elif dataclasses.is_dataclass(val):
+                    return dataclasses.asdict(val)
+                elif isinstance(val, (list, tuple)):
+                    return type(val)(_convert(v) for v in val)
+                elif isinstance(val, dict):
+                    return {k: _convert(v) for k, v in val.items()}
+                elif isinstance(val, (str, int, float, bool, type(None))):
+                    return val
+                else:
+                    logger.warning(
+                        f"Config field value of type {type(val).__name__} "
+                        f"may not be JSON serializable"
+                    )
+                    return val
+
             result = {}
             for f in fields(self):
                 try:
@@ -63,12 +104,7 @@ class Configurable:
                 except AttributeError:
                     # field(init=False) not yet set, ignore this field.
                     continue
-                if hasattr(val, "to_dict"):
-                    result[f.name] = val.to_dict()
-                elif dataclasses.is_dataclass(val):
-                    result[f.name] = dataclasses.asdict(val)
-                else:
-                    result[f.name] = val
+                result[f.name] = _convert(val)
             return result
 
         def _replace(self, **overrides):
@@ -154,5 +190,8 @@ class Configurable:
                             f"{cls.__name__}.Config field '{f.name}' "
                             "must be keyword-only"
                         )
+                # Override @dataclass-generated __repr__ with our safe
+                # version that handles unset field(init=False) slots.
+                config_cls.__repr__ = Configurable.Config.__repr__
                 # Auto-wire build() to construct this class
                 config_cls._owner = cls

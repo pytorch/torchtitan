@@ -7,7 +7,6 @@
 import operator
 
 import torch
-import torch.nn as nn
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
@@ -18,22 +17,31 @@ from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
     reassign_to_pg_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module, ModuleList
 
 
-class ToyModel(nn.Module):
+class ToyModel(Module):
     """A small toy model with multiple linear layers and activation
     checkpointing so that the backward graph recomputes the forward
     all-gathers."""
 
     def __init__(self, dim=16, n_layers=3):
         super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(dim, dim) for _ in range(n_layers)])
+        linear_config = Linear.Config(bias=True)
+        self.layers = ModuleList(
+            [
+                linear_config.build(in_features=dim, out_features=dim)
+                for _ in range(n_layers)
+            ]
+        )
 
     def forward(self, x):
         for layer in self.layers:
@@ -215,11 +223,16 @@ class TestApplySACPass(TestCase):
         x = graph.placeholder("x")
         y = graph.placeholder("y")
         last = x
-        for target in op_targets:
+        for i, target in enumerate(op_targets):
             if target is operator.getitem:
                 last = graph.call_function(target, args=(last, 0))
             else:
                 last = graph.call_function(target, args=(last, y))
+                # If the next op is getitem, wrap in a tuple so getitem has
+                # a proper tuple/list input.
+                if i + 1 < len(op_targets) and op_targets[i + 1] is operator.getitem:
+                    _make_tuple = lambda x: (x, x)
+                    last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
 
@@ -248,8 +261,8 @@ class TestApplySACPass(TestCase):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
-    def test_getitem_nodes_skipped(self):
-        """operator.getitem nodes should not receive any annotation."""
+    def test_getitem_propagates_parent_tags(self):
+        """operator.getitem nodes should inherit the parent's recompute tag and ac_graph_id."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -257,14 +270,46 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        apply_sac_pass(gm)
-        for node in self._get_call_function_nodes(gm):
-            if node.target is operator.getitem:
-                self.assertNotIn("recompute", node.meta)
-                self.assertNotIn("ac_graph_id", node.meta)
+        nodes = self._get_call_function_nodes(gm)
+        # nodes: [add, make_tuple, getitem, relu]
+        # make_tuple is the tuple-returning parent of getitem
+        self.assertEqual(nodes[0].target, torch.ops.aten.add.Tensor)
+        self.assertEqual(nodes[2].target, operator.getitem)
 
-    def test_ac_graph_id_set(self):
-        """All annotated nodes should have ac_graph_id = 0."""
+        # Set ac_region_id on the tuple-returning parent (the direct parent of getitem)
+        nodes[1].meta["custom"] = {_AC_REGION_ID: 3}
+
+        apply_sac_pass(gm)
+
+        tuple_node = nodes[1]
+        getitem_node = nodes[2]
+        self.assertEqual(getitem_node.meta["recompute"], tuple_node.meta["recompute"])
+        self.assertEqual(tuple_node.meta["ac_graph_id"], 3)
+        self.assertEqual(getitem_node.meta["ac_graph_id"], 3)
+
+    def test_wait_tensor_propagates_parent_tags(self):
+        """wait_tensor nodes should inherit the parent's recompute tag and ac_graph_id."""
+        custom_save = {torch.ops._c10d_functional.reduce_scatter_tensor.default}
+        gm = self._build_gm(
+            [
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+            ]
+        )
+        nodes = self._get_call_function_nodes(gm)
+        nodes[0].meta["custom"] = {_AC_REGION_ID: 3}
+
+        apply_sac_pass(gm, op_list_to_save=custom_save)
+
+        rs_node = nodes[0]
+        wait_node = nodes[1]
+        self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(rs_node.meta["ac_graph_id"], 3)
+        self.assertEqual(wait_node.meta["ac_graph_id"], 3)
+
+    def test_ac_graph_id_defaults_to_zero(self):
+        """Nodes without ac_region_id annotation should have ac_graph_id = 0."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -276,6 +321,24 @@ class TestApplySACPass(TestCase):
         for node in self._get_call_function_nodes(gm):
             if node.target is not operator.getitem:
                 self.assertEqual(node.meta["ac_graph_id"], 0)
+
+    def test_ac_graph_id_from_annotation(self):
+        """Nodes with _AC_REGION_ID_KEY in custom metadata should use that as ac_graph_id."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        nodes = self._get_call_function_nodes(gm)
+        # Simulate annotate_fn setting custom metadata on different nodes
+        nodes[0].meta["custom"] = {_AC_REGION_ID: 1}
+        nodes[1].meta["custom"] = {_AC_REGION_ID: 2}
+
+        apply_sac_pass(gm)
+
+        self.assertEqual(nodes[0].meta["ac_graph_id"], 1)
+        self.assertEqual(nodes[1].meta["ac_graph_id"], 2)
 
     def test_custom_op_list_to_save(self):
         """A custom op_list_to_save should override the defaults."""

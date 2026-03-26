@@ -28,6 +28,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     end_with_pass,
     get_extra_fsdp_pg_name,
 )
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
 
@@ -66,12 +67,6 @@ def export_joint(
         torch.fx.traceback.preserve_node_meta(),
     ):
         gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
-        logger.debug("Dynamo gm:")
-        logger.debug(
-            gm.print_readable(
-                print_output=False, include_stride=True, include_device=True
-            )
-        )
         _dump_gm(dump_folder, gm, "dynamo_gm")
 
         tracing_context = gm.meta["tracing_context"]
@@ -116,6 +111,8 @@ def joint_graph_builder(
     joint_custom_passes: list[Callable] | None = None,
     dump_folder: str | None = None,
     compile_config: CompileConfig | None = None,
+    serializable: bool = False,
+    on_compile: Callable | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -128,7 +125,10 @@ def joint_graph_builder(
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
-        job_config: Job configuration
+        compile_config: Compile configuration
+        serializable: If True, compile with serialization support
+        on_compile: Optional callback invoked after compilation with
+            (compiled_fn, out_spec)
     """
     assert isinstance(model_args, tuple)
 
@@ -151,9 +151,7 @@ def joint_graph_builder(
             # Create the decomposition pass with context
             decomp_pass = functools.partial(
                 inductor_decomposition_pass,
-                model=model,
                 joint_with_descriptors=joint_with_descriptors,
-                forward_inputs=model_args,
             )
 
             # Prepend to joint_custom_passes
@@ -170,8 +168,14 @@ def joint_graph_builder(
 
     with tracing(tracing_context):
         fn = aot_compile_joint_with_descriptors(
-            joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
+            joint_with_descriptors,
+            fw_compiler=fw_compiler,
+            bw_compiler=bw_compiler,
+            serializable=serializable,
         )
+
+    if on_compile is not None:
+        on_compile(fn, joint_with_descriptors.out_spec)
 
     def wrapper_fn(args, kwargs):
         inputs = [
@@ -184,13 +188,14 @@ def joint_graph_builder(
     return wrapper_fn
 
 
-class CompiledModule(torch.nn.Module):
+class CompiledModule(Module):
     def __init__(
         self,
         inner: torch.nn.Module,
         parallel_dims: ParallelDims,
         joint_graph_builder: Callable,
         parallelize_inputs: Callable,
+        precompiled_fn: Callable | None = None,
         **overrides,
     ) -> None:
         super().__init__()
@@ -199,6 +204,7 @@ class CompiledModule(torch.nn.Module):
 
         self.joint_graph_builder = joint_graph_builder
         self.joint_graph_module = None
+        self.precompiled_fn = precompiled_fn
 
         self.parallelize_inputs = parallelize_inputs
 
@@ -227,6 +233,14 @@ class CompiledModule(torch.nn.Module):
         else:
             super().__delattr__(name)
 
+    def init_weights(self, **kwargs) -> None:
+        # Explicitly delegate to inner model. Without this override,
+        # Module.init_weights (a no-op) would be found via MRO before
+        # the overwritten __getattr__ is triggered, silently skipping
+        # weight initialization.
+        # This is similar to state_dict, load_state_dict, ...
+        self.inner.init_weights(**kwargs)
+
     def state_dict(self, *args, **kwargs) -> Any:
         return self.inner.state_dict(*args, **kwargs)
 
@@ -245,9 +259,12 @@ class CompiledModule(torch.nn.Module):
         dt_args, dt_kwargs = self.parallelize_inputs(self.parallel_dims, args, kwargs)
 
         if self.joint_graph_module is None:
-            self.joint_graph_module = self.joint_graph_builder(
-                self.inner, dt_args, dt_kwargs
-            )
+            if self.precompiled_fn is not None:
+                self.joint_graph_module = self.precompiled_fn
+            else:
+                self.joint_graph_module = self.joint_graph_builder(
+                    self.inner, dt_args, dt_kwargs
+                )
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
@@ -281,10 +298,6 @@ def compiler(
     if passes is None:
         passes = DEFAULT_COMPILER_PASSES
 
-    logger.debug(f"{name} before compiler:")
-    logger.debug(
-        gm.print_readable(print_output=False, include_stride=True, include_device=True)
-    )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
     if end_with_pass(passes, ["cudagraph_pass"]):
@@ -310,13 +323,17 @@ def compiler(
     # Only try to print/dump if gm is still a GraphModule
     # (compile_fx_inner returns a CompiledFxGraph which doesn't have print_readable)
     if hasattr(gm, "print_readable"):
-        logger.debug(f"{name} after compiler:")
-        logger.debug(
-            gm.print_readable(
-                print_output=False, include_stride=True, include_device=True
-            )
-        )
         _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+
+        # Log the final transformed graph to tlparse.
+        from torchtitan.experiments.graph_trainer.passes import tlparse_log_graph_pass
+
+        graph_name = (
+            "aot_forward_graph_transformed"
+            if is_forward
+            else "aot_backward_graph_transformed"
+        )
+        tlparse_log_graph_pass(gm, example_inputs, graph_name=graph_name)
 
     return gm
 
@@ -370,22 +387,33 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
     Raises:
         ValueError: If pass configuration is invalid
     """
-    if "cudagraph" in pass_names:
-        assert (
-            pass_names[-1] == "cudagraph"
-        ), "cudagraph has to be the last pass to apply"
+    if "cudagraph" in pass_names and pass_names[-1] != "cudagraph":
+        raise ValueError("cudagraph has to be the last pass to apply")
 
     if "auto_bucketing" in pass_names and "transformer_block_bucketing" in pass_names:
         raise ValueError(
             "Cannot apply auto_bucketing and transformer_block_bucketing at the same time!"
         )
 
-    # Validate that full_inductor_compilation requires inductor_decomposition
+    # full_inductor_compilation returns a CompiledFxGraph (not a GraphModule),
+    # so no subsequent pass can inspect/modify the FX graph. It must be the
+    # last pass, or second-to-last if cudagraph is last.
     if "full_inductor_compilation" in pass_names:
         if "inductor_decomposition" not in joint_pass_names:
             raise ValueError(
                 "full_inductor_compilation pass requires inductor_decomposition to be "
                 "specified in joint_passes. Please add --compile.joint_passes inductor_decomposition"
+            )
+        full_inductor_idx = pass_names.index("full_inductor_compilation")
+        expected_idx = (
+            len(pass_names) - 2
+            if pass_names[-1] == "cudagraph"
+            else len(pass_names) - 1
+        )
+        if full_inductor_idx != expected_idx:
+            raise ValueError(
+                "full_inductor_compilation must be the last pass "
+                "(or second-to-last if cudagraph is last)."
             )
 
 
@@ -450,6 +478,23 @@ def get_compiler_passes_from_config(
                     fsdp_manual_buckets=get_transformer_block_buckets(model),
                 )
             )
+        elif pass_name == "regional_inductor" and getattr(
+            compile_config, "precompile", False
+        ):
+            # regional_inductor needs an explicit serializable=True at
+            # the pass level so it produces serializable RegionalOutputCode.
+            # full_inductor_compilation does NOT need a pass-level flag:
+            # compile_fx_inner already returns a CompiledFxGraph that is
+            # natively serializable, so aot_compile_joint_with_descriptors
+            # (called with serializable=True in joint_graph_builder) can
+            # bundle it into a BundledAOTAutogradSerializableCallable
+            # without any pass-level cooperation.
+            compiler_passes.append(
+                functools.partial(
+                    AVAILABLE_COMPILER_PASSES[pass_name],
+                    serializable=True,
+                )
+            )
         else:
             compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
 
@@ -486,7 +531,13 @@ def get_joint_custom_passes_from_config(
     )
 
     joint_custom_passes = []
-    joint_custom_passes.append(validate_flex_attn_annotation_pass)
+
+    # Skip flex_attention annotation validation when full_inductor_compilation
+    # is used, since it compiles everything through Inductor regardless of
+    # annotations. The validation is only relevant for regional_inductor.
+    pass_names = getattr(compile_config, "passes", [])
+    if "full_inductor_compilation" not in pass_names:
+        joint_custom_passes.append(validate_flex_attn_annotation_pass)
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])

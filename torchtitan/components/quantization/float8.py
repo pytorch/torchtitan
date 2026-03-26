@@ -15,9 +15,17 @@ from torchtitan.components.quantization import (
     QuantizationConverter,
 )
 from torchtitan.distributed import ParallelDims
+
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
+from .module_utils import (
+    capture_module_attrs,
+    inject_module_protocol,
+    verify_module_protocol,
+)
 
 from .utils import module_filter_fn
 
@@ -178,12 +186,24 @@ class Float8LinearConverter(QuantizationConverter):
 
         from torchao.float8 import convert_to_float8_training
 
+        # Capture Module attrs before conversion (Float8 creates new instances).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
+        saved_attrs = capture_module_attrs(
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+        )
+
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
         convert_to_float8_training(
             model,
             config=self.torchao_config,
             module_filter_fn=self.filter_fn,
         )
+
+        # Re-inject Linear protocol and re-attach attrs lost during conversion
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
+
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.torchao_config.enable_fsdp_float8_all_gather}"
@@ -254,7 +274,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
         from torchao.quantization.quant_api import quantize_
 
         try:
-            from torchao.prototype.moe_training.config import FP8GroupedMMConfig
+            from torchao.prototype.moe_training.config import Float8TrainingOpConfig
         except ImportError as e:
             raise ImportError(
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
@@ -266,8 +286,20 @@ class Float8GroupedMMConverter(QuantizationConverter):
                     return True
             return False
 
-        config = FP8GroupedMMConfig()
+        # Capture Module attrs before conversion (Float8 creates new instances).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
+        saved_attrs = capture_module_attrs(
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+        )
+
+        config = Float8TrainingOpConfig()
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+
+        # Re-inject Linear protocol and re-attach attrs
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
+
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
             "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
