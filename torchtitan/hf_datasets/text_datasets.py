@@ -157,12 +157,12 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 self._sample_idx = 0
                 self._epoch += 1
                 logger.warning(f"Dataset {self.dataset_name} is being re-looped")
-                if isinstance(self._data, Dataset):
-                    self._data = cast(
-                        Dataset, self._data.shuffle(seed=42 + self._epoch)
-                    )
-                elif hasattr(self._data, "set_epoch"):
-                    self._data.set_epoch(self._epoch)
+                # Ensures re-looping a dataset loaded from a checkpoint works correctly
+                if not isinstance(self._data, Dataset):
+                    if hasattr(self._data, "set_epoch") and hasattr(
+                        self._data, "epoch"
+                    ):
+                        self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
         self._inputs_buffer = state_dict["inputs_buffer"]
@@ -175,10 +175,6 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
-            self._epoch = state_dict.get("epoch", 0)
-            # Replay shuffles so _data matches the order at checkpoint time
-            if self._epoch > 0:
-                self._data = cast(Dataset, self._data.shuffle(seed=42 + self._epoch))
         else:
             assert "data" in state_dict
             self._data.load_state_dict(state_dict["data"])
