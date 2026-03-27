@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import sys
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -127,9 +126,6 @@ def _distribute_dtensor(
     )
 
 
-_wrap_class_counter = 0  # Not thread-safe; assumes single-threaded model init
-
-
 def _register_parametrization(
     module: nn.Module, param_names: list[str], parametrization: nn.Module
 ) -> None:
@@ -140,8 +136,6 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan's torchtitan/components/checkpoint.py.
     """
-    global _wrap_class_counter
-    _wrap_class_counter += 1
     param_name_to_property = {
         param_name: property(
             lambda self, pn=param_name: parametrization(self._parameters[pn])
@@ -149,14 +143,11 @@ def _register_parametrization(
         for param_name in param_names
     }
     module_cls = type(
-        f"SimpleFSDP{module.__class__.__name__}_{_wrap_class_counter}",
+        f"SimpleFSDP{module.__class__.__name__}",
         (module.__class__,),
         param_name_to_property,
     )
     module.__class__ = module_cls
-    # Expose the dynamically created class as a real, importable symbol
-    # so that pickle/GraphPickler can resolve it during serialization.
-    sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
 
 
 class ReplicateComputation(Module):
