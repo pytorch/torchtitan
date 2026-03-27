@@ -314,7 +314,7 @@ class DoubleStreamBlock(Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v)
+        attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B H L D -> B L (H D)")
 
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
@@ -398,7 +398,7 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v)
+        attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B H L D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer
