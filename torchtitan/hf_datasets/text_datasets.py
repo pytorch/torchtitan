@@ -202,6 +202,9 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         dataset: str = "c4_test"
         """Dataset to use"""
 
+        pack_samples: bool = True
+        """Packs multiple documents per sequence (default for text training)."""
+
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 

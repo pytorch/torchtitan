@@ -116,6 +116,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
 
+            if self.dataloader.pack_samples and self.model_spec is not None:
+                # pyrefly: ignore [missing-attribute]
+                attn = self.model_spec.model.layer.attention
+                if attn.attn_backend not in ("flex", "varlen"):
+                    raise ValueError(
+                        f"pack_samples=True requires 'flex' or 'varlen' "
+                        f"attention to prevent cross-document attention "
+                        f"in packed sequences, but got "
+                        f"attn_backend='{attn.attn_backend}'. Either set "
+                        f"pack_samples=False or switch to flex/varlen "
+                        f"attention."
+                    )
+                if attn.attn_mask_type != "block_causal":
+                    raise ValueError(
+                        f"pack_samples=True requires "
+                        f"attn_mask_type='block_causal' to prevent "
+                        f"cross-document attention in packed sequences, "
+                        f"but got attn_mask_type='{attn.attn_mask_type}'. "
+                        f"Set model_spec.model.layer.attention."
+                        f"attn_mask_type='block_causal'."
+                    )
+
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):

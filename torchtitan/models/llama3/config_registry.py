@@ -62,9 +62,10 @@ def llama3_debugmodel() -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_flex_attn() -> Trainer.Config:
+def llama3_debugmodel_sdpa_attn() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel_flex_attn")
+    config.model_spec = model_registry("debugmodel_sdpa_attn")
+    config.dataloader.pack_samples = False
     return config
 
 

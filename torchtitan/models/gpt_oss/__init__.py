@@ -47,6 +47,7 @@ gptoss_configs = {
             ),
             attention=Attention.Config(
                 linear_bias=True,
+                attn_mask_type="block_causal",
             ),
         ),
         rope=RoPE.Config(
@@ -84,6 +85,7 @@ gptoss_configs = {
             ),
             attention=Attention.Config(
                 linear_bias=True,
+                attn_mask_type="block_causal",
             ),
         ),
         rope=RoPE.Config(
@@ -121,6 +123,7 @@ gptoss_configs = {
             ),
             attention=Attention.Config(
                 linear_bias=True,
+                attn_mask_type="block_causal",
             ),
         ),
         rope=RoPE.Config(

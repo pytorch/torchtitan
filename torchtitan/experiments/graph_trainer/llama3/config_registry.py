@@ -14,7 +14,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_70b,
     llama3_8b,
     llama3_debugmodel,
-    llama3_debugmodel_flex_attn,
+    llama3_debugmodel_sdpa_attn,
 )
 
 from . import model_registry
@@ -26,8 +26,8 @@ def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_llama3_debugmodel_flex_attn() -> (GraphTrainer.Config):
-    config = to_graph_trainer_config(llama3_debugmodel_flex_attn(), model_registry)
+def graph_trainer_llama3_debugmodel_sdpa_attn() -> (GraphTrainer.Config):
+    config = to_graph_trainer_config(llama3_debugmodel_sdpa_attn(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 

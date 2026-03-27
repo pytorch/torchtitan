@@ -31,7 +31,7 @@ def _get_dict(obj) -> dict[str, Any]:
 
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2Transformer.Config(
-        **_get_dict(llama3_configs["debugmodel_flex_attn"]),
+        **_get_dict(llama3_configs["debugmodel"]),
         encoder=Siglip2Config(
             dim=128,
             ffn_dim=256,
