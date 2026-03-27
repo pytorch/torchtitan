@@ -79,6 +79,7 @@ jobs:
 
         start=$(date +%s)
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        python -m pip install --pre torchdata --index-url ${{ matrix.index-url }}
         end=$(date +%s)
         echo "pip install torchao took $((end - start)) seconds"
 
