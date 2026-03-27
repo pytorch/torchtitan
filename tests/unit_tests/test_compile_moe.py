@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -47,12 +47,13 @@ class TestApplyCompile(unittest.TestCase):
         Calls apply_compile multiple times, as in the case with PP.
         But patches should only happen once
         """
-        unused_model1 = TinyModel(num_layers=2, dim=128)
-        unused_model2 = TinyModel(num_layers=2, dim=128)
         compile_config = CompileConfig(backend="eager")
 
-        apply_compile_sparse(unused_model1, compile_config, ep_enabled=True)
-        apply_compile_sparse(unused_model2, compile_config, ep_enabled=True)
+        model1 = TinyModel(num_layers=2, dim=128)
+        model2 = TinyModel(num_layers=2, dim=128)
+
+        apply_compile(model1, compile_config)
+        apply_compile(model2, compile_config)
 
         from torchtitan.models.common import moe as moe_module
 
@@ -74,9 +75,7 @@ class TestApplyCompile(unittest.TestCase):
             w1, w2, w3, x, num_tokens_per_expert
         )
 
-        print(f"Input shape: {x.shape}")
-        print(f"Output shape: {output.shape}")
-        print(f"Num tokens per expert: {num_tokens_per_expert}")
+        self.assertEqual(output.shape, x.shape)
 
 
 if __name__ == "__main__":

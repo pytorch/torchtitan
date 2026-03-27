@@ -29,10 +29,17 @@ def _run_experts_for_loop(
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
+    total_tokens = sum(num_tokens_per_expert_list)
+    # Use two inequality checks to assert total_tokens == x.shape[0].
+    # torch._check(==) produces a sympy.Equality which inductor can't handle,
+    # but <= and >= together imply equality via sympy.Expr inequalities.
+    torch._check(x.shape[0] >= total_tokens)
+    torch._check(x.shape[0] <= total_tokens)
+
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
+        x,
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
