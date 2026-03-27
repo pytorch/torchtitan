@@ -57,7 +57,7 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
         model_spec=model_registry("debugmodel_flex"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(
-            default = AdamW.Config(lr=3e-4)
+            default = AdamW.Config(lr=8e-4)
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
