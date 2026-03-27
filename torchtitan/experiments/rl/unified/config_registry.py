@@ -12,7 +12,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 """
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, AdamW
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.unified.actors.generator import (
     GeneratorCompileConfig,
@@ -32,7 +32,9 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_steps=10,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
+            optimizer=OptimizersContainer.Config(
+                default=AdamW.Config(lr=2e-6),
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -71,7 +73,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_steps=10,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
+            optimizer=OptimizersContainer.Config(
+                default=AdamW.Config(lr=2e-6),
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -109,7 +113,9 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
         num_steps=5,
         batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                default=AdamW.Config(lr=8e-4),
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",

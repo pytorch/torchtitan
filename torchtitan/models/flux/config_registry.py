@@ -7,7 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, AdamW
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -33,7 +33,11 @@ def flux_debugmodel() -> FluxTrainer.Config:
         hf_assets_path=hf_assets_path,
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("flux-debug"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=1,
             decay_ratio=0.0,
@@ -92,7 +96,11 @@ def flux_dev() -> FluxTrainer.Config:
     return FluxTrainer.Config(
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-dev"),
-        optimizer=OptimizersContainer.Config(lr=1e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=1e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=3000,
             decay_ratio=0.0,
@@ -141,7 +149,11 @@ def flux_schnell() -> FluxTrainer.Config:
     return FluxTrainer.Config(
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-schnell"),
-        optimizer=OptimizersContainer.Config(lr=1e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=1e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=3000,
             decay_ratio=0.0,

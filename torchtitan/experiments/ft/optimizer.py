@@ -41,8 +41,8 @@ class FTOptimizersContainer(OptimizersContainer):
         # won't be called by state_dict() and load_state_dict().
         _ = {
             k: v
-            for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
-            for k, v in sd.items()
+            for model_part, optim_part in zip(model_parts, self.optimizers)
+            for k, v in get_optimizer_state_dict(optim_part, model_part).items()
         }
         self.cache_state_dict: dict[str, Any] = {}
         self._ft_optimizer = ft.Optimizer(ft_manager.manager, self)

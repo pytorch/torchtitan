@@ -8,6 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
+    AdamW,
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
@@ -31,7 +32,11 @@ def llama3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -77,7 +82,11 @@ def llama3_debugmodel_varlen_attn() -> Trainer.Config:
 
 def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.optimizer = OptimizersInBackwardContainer.Config(lr=8e-4)
+    config.optimizer = OptimizersInBackwardContainer.Config(
+        default = AdamW.Config(
+            lr=8e-4,
+        ),
+    )
     return config
 
 
@@ -119,7 +128,11 @@ def llama3_8b() -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_registry("8B"),
-        optimizer=OptimizersContainer.Config(lr=3e-4),
+        optimizer=OptimizersContainer.Config(
+            default = AdamW.Config(
+                lr=3e-4,
+            ),
+        ),
         training=TrainingConfig(
             local_batch_size=1,
             seq_len=8192,
@@ -151,7 +164,11 @@ def llama3_70b() -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_registry("70B"),
-        optimizer=OptimizersContainer.Config(lr=1.5e-4),
+        optimizer=OptimizersContainer.Config(
+            default = AdamW.Config(
+                lr=1.5e-4,
+            ),
+        ),
         training=TrainingConfig(
             local_batch_size=8,
             seq_len=8192,
@@ -192,7 +209,11 @@ def llama3_405b() -> Trainer.Config:
                 ),
             ],
         ),
-        optimizer=OptimizersContainer.Config(lr=8e-5),
+        optimizer=OptimizersContainer.Config(
+            default = AdamW.Config(
+                lr=8e-5,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=2,

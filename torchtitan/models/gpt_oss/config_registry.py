@@ -7,7 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, AdamW
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -28,7 +28,11 @@ def gpt_oss_debugmodel() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -64,7 +68,11 @@ def gpt_oss_20b() -> Trainer.Config:
         hf_assets_path="./assets/hf/gpt-oss-20b",
         model_spec=model_registry("20b"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default = AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -90,7 +98,11 @@ def gpt_oss_120b() -> Trainer.Config:
         hf_assets_path="./assets/hf/gpt-oss-120b",
         model_spec=model_registry("120b"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default = AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,

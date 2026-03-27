@@ -7,7 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, AdamW
 from torchtitan.config import (
     ActivationCheckpointConfig,
     DebugConfig,
@@ -30,7 +30,11 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("debugmodel"),
         profiling=ProfilingConfig(profile_freq=5),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -62,7 +66,11 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("full"),
         profiling=ProfilingConfig(profile_freq=5),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,

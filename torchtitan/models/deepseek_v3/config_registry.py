@@ -7,7 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, AdamW
 from torchtitan.components.quantization.float8 import (
     Float8GroupedMMConverter,
     Float8LinearConverter,
@@ -31,7 +31,11 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=8e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -71,7 +75,11 @@ def deepseek_v3_16b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=2.2e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=2.2e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             decay_ratio=0.8,
             decay_type="cosine",
@@ -103,7 +111,11 @@ def deepseek_v3_671b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=2.2e-4),
+        optimizer=OptimizersContainer.Config(
+            default=AdamW.Config(
+                lr=2.2e-4,
+            ),
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,

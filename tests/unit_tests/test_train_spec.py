@@ -10,7 +10,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, Adam
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import model_registry, parallelize_llama
 from torchtitan.protocols import BaseModel
@@ -108,16 +108,17 @@ class TestModelSpec:
 
         # Build optimizers directly and apply post-build hook
         optimizers = OptimizersContainer.Config(
-            name="Adam",
-            lr=0.1,
-            beta1=0.9,
-            beta2=0.95,
-            weight_decay=0.1,
-            implementation="fused",
+            default=Adam.Config(
+                lr=0.1,
+                beta1=0.9,
+                beta2=0.95,
+                weight_decay=0.1,
+                fused=True,
+            )
         ).build(model_parts=model_parts)
         spec.post_optimizer_build_fn(optimizers, model_parts, None, my_hook)
 
-        assert optimizers.optimizers[0].__class__.__name__ == "Adam"
+        assert optimizers.optimizers[0][0].__class__.__name__ == "Adam"
         batch = torch.randn(8, 8)
         model(batch).sum().backward()
         assert not hook_called
