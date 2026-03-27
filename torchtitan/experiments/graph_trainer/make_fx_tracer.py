@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -183,24 +183,24 @@ def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
 
 
 def _trace_bw_graph_for_make_fx(
-    subgraph: torch.fx.GraphModule,
+    subgraph_fn: Callable,
     num_primals: int,
     num_tangents: int,
     primals_and_tangents: tuple,
 ) -> torch.fx.GraphModule:
     """Trace the backward graph for an invoke_subgraph subgraph inside make_fx.
 
-    Replaces trace_joint_graph_as_bwd when we are already inside a make_fx
-    trace. trace_joint_graph_as_bwd uses create_joint (AOTAutograd machinery)
-    which is designed for the full AOTAutograd compilation pipeline. We want a
-    simpler path that traces the backward directly via torch.autograd.grad
-    without pulling in AOTAutograd.
+    Differentiates through the original Python callable (subgraph_fn) rather
+    than a pre-traced GraphModule. This ensures torch.autograd.grad sees the
+    source function with correct autograd semantics. The backward re-runs the
+    forward from scratch (full recomputation / activation-checkpointing style)
+    so no partitioner is needed.
 
-    We also defensively set requires_grad_(True) on all float primals because
+    We defensively set requires_grad_(True) on all float primals because
     meta["val"] on subgraph output nodes is always snapshot_fake'd
     (requires_grad=False), causing get_output_metadata to mark all outputs as
-    not needing gradients. Setting requires_grad_(True) ensures the subgraph
-    forward sees differentiable inputs and autograd.grad can compute gradients.
+    not needing gradients. Setting requires_grad_(True) ensures autograd.grad
+    can compute gradients.
 
     TODO(upstream): Fix get_output_metadata in invoke_subgraph.py to not trust
     meta["val"].requires_grad for float tensors (snapshot_fake always strips it).
@@ -227,7 +227,10 @@ def _trace_bw_graph_for_make_fx(
         ]
 
         with torch.enable_grad():
-            fw_outs = subgraph(*primals_with_grad)
+            # Differentiate through the original Python callable, not the
+            # pre-traced gm. This ensures correct autograd semantics; the
+            # forward is recomputed here (activation-checkpointing style).
+            fw_outs = subgraph_fn(*primals_with_grad)
 
         if isinstance(fw_outs, torch.Tensor):
             fw_outs = (fw_outs,)
@@ -316,8 +319,14 @@ def _patch_invoke_subgraph_backward() -> Generator[None, None, None]:
         tangents = tuple(o for o in grad_outs if o is not None)
         primals_and_tangents = primals + tangents
 
+        # Use the original Python callable stored on the gm so we differentiate
+        # through the source function rather than the pre-traced graph.
+        # Falls back to the gm itself for subgraphs not created by aot_nested_region
+        # (e.g. mark_compile_region), preserving the old behavior.
+        subgraph_fn = getattr(subgraph, "_orig_subgraph_fn", subgraph)
+
         bw_graph = _trace_bw_graph_for_make_fx(
-            subgraph, len(primals), len(tangents), primals_and_tangents
+            subgraph_fn, len(primals), len(tangents), primals_and_tangents
         )
 
         invoke_subgraph_cache = get_invoke_subgraph_cache()
