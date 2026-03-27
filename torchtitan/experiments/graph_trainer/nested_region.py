@@ -51,6 +51,11 @@ def _ensure_subgraph_cached(
 
     gm = reenter_make_fx(subgraph_fn)(*all_operands)
 
+    # Store the original callable on the gm so _trace_bw_graph_for_make_fx
+    # can differentiate through the Python function rather than the traced gm,
+    # ensuring correct autograd semantics in the backward.
+    gm._orig_subgraph_fn = subgraph_fn
+
     if cache is not None:
         cache.add_proxy_dispatch_entry(cache_key, gm)
 
