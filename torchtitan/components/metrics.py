@@ -258,6 +258,24 @@ def _get_metrics_rank(
     return (world_size // pp_size) * (pp_size - 1)
 
 
+@dataclass
+class PendingMetrics:
+    """Bundles all metric tensors from a single logging step with one CUDA event.
+
+    A single event guards all non-blocking D2H copies so we pay for one
+    synchronization point rather than one per metric. Used by
+    ``MetricsProcessor.log_async`` / ``flush`` to defer the GPU-CPU sync
+    until the next train step, where the event has already completed.
+    """
+
+    step: int
+    global_avg_loss: torch.Tensor
+    global_max_loss: torch.Tensor
+    grad_norm: torch.Tensor
+    extra_metrics: dict[str, Any]
+    event: torch.cuda.Event
+
+
 class MetricsProcessor(Configurable):
     """Metrics processor to processes the metrics and log metrics.
 
@@ -361,6 +379,7 @@ class MetricsProcessor(Configurable):
         self.optimizers = None
         self.lr_schedulers = None
         self.model_parts = None
+        self._pending: PendingMetrics | None = None
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.config.log_freq == 0
@@ -492,7 +511,11 @@ class MetricsProcessor(Configurable):
             mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
-        time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
+        time_data_loading = (
+            sum(self.data_loading_times) / len(self.data_loading_times)
+            if self.data_loading_times
+            else 0.0
+        )
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
@@ -578,5 +601,44 @@ class MetricsProcessor(Configurable):
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
+    def log_async(
+        self,
+        step: int,
+        global_avg_loss: torch.Tensor,
+        global_max_loss: torch.Tensor,
+        grad_norm: torch.Tensor,
+        extra_metrics: dict[str, Any] | None = None,
+    ) -> None:
+        """Initiate non-blocking D2H copies and stash for later flush.
+
+        Accepts GPU tensors instead of floats. A CUDA event is recorded so
+        ``flush`` can synchronize before reading the values.
+        """
+        self._pending = PendingMetrics(
+            step=step,
+            global_avg_loss=global_avg_loss.to("cpu", non_blocking=True),
+            global_max_loss=global_max_loss.to("cpu", non_blocking=True),
+            grad_norm=grad_norm.to("cpu", non_blocking=True),
+            extra_metrics=extra_metrics or {},
+            event=torch.cuda.Event(),
+        )
+        self._pending.event.record()
+
+    def flush(self) -> None:
+        """Flush any pending async metrics. No-op if nothing is pending."""
+        if self._pending is None:
+            return
+        pm = self._pending
+        self._pending = None
+        pm.event.synchronize()
+        self.log(
+            pm.step,
+            float(pm.global_avg_loss.item()),
+            float(pm.global_max_loss.item()),
+            float(pm.grad_norm.item()),
+            extra_metrics=pm.extra_metrics,
+        )
+
     def close(self):
+        self.flush()
         self.logger.close()

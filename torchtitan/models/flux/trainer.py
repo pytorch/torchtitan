@@ -250,7 +250,8 @@ class FluxTrainer(Trainer):
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        # log metrics
+        self.metrics_processor.flush()
+
         if not self.metrics_processor.should_log(self.step):
             return
 
@@ -258,29 +259,21 @@ class FluxTrainer(Trainer):
             loss = loss.detach()
             loss_mesh = parallel_dims.get_optional_mesh("loss")
 
-            # NOTE: the loss returned by train
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh),
-                dist_utils.dist_max(loss, loss_mesh),
-                dist_utils.dist_sum(
-                    torch.tensor(
-                        self.ntokens_seen, dtype=torch.int64, device=self.device
-                    ),
-                    loss_mesh,
-                ),
+            global_avg_loss = dist_utils.dist_sum_tensor(loss, loss_mesh)
+            global_max_loss = dist_utils.dist_max_tensor(loss, loss_mesh)
+            global_ntokens_seen = dist_utils.dist_sum(
+                torch.tensor(self.ntokens_seen, dtype=torch.int64, device=self.device),
+                loss_mesh,
             )
         else:
-            global_avg_loss = global_max_loss = float(loss.detach().item())
+            global_avg_loss = loss.detach()
+            global_max_loss = global_avg_loss
             global_ntokens_seen = self.ntokens_seen
 
-        extra_metrics = {
-            "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
-        }
-        self.metrics_processor.log(
+        self.metrics_processor.log_async(
             self.step,
             global_avg_loss,
             global_max_loss,
-            float(grad_norm.item()),
-            extra_metrics=extra_metrics,
+            grad_norm,
+            extra_metrics={"n_tokens_seen": global_ntokens_seen, "lr": lr},
         )
