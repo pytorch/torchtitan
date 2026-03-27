@@ -22,7 +22,7 @@ def vlm_debugmodel() -> MultiModalTrainerConfig:
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(
             default=AdamW.Config(
-                lr=8e-3,
+                lr=8e-4,
                 eps=1e-15,
             ),
         ),
