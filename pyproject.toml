@@ -11,7 +11,7 @@ authors = [
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
     # Stateful Dataloader
-    "torchdata==0.12.0.dev20260327",
+    "torchdata",
 
     # Hugging Face integrations
     "datasets>=3.6.0",
