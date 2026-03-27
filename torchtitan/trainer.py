@@ -756,7 +756,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
-        # log metrics
+        # flush metrics from the previous logging step; metrics are always
+        # delayed by one step so that we can do async D2H
+        self.metrics_processor.flush()
+
         if not self.metrics_processor.should_log(self.step):
             return
 
@@ -774,30 +777,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             #                = (loss * global_valid_tokens) / local_valid_tokens
             # global_max_loss = max(local_avg_loss)
             local_avg_loss = loss * global_valid_tokens / local_valid_tokens
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh),
-                dist_utils.dist_max(local_avg_loss, loss_mesh),
-                dist_utils.dist_sum(
-                    torch.tensor(
-                        self.ntokens_seen, dtype=torch.int64, device=self.device
-                    ),
-                    loss_mesh,
-                ),
+            global_avg_loss = dist_utils.dist_sum_tensor(loss, loss_mesh)
+            global_max_loss = dist_utils.dist_max_tensor(local_avg_loss, loss_mesh)
+            global_ntokens_seen = dist_utils.dist_sum(
+                torch.tensor(self.ntokens_seen, dtype=torch.int64, device=self.device),
+                loss_mesh,
             )
         else:
-            global_avg_loss = global_max_loss = float(loss.detach().item())
+            global_avg_loss = loss.detach()
+            global_max_loss = global_avg_loss
             global_ntokens_seen = self.ntokens_seen
 
-        extra_metrics = {
-            "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
-        }
-        self.metrics_processor.log(
+        self.metrics_processor.log_async(
             self.step,
             global_avg_loss,
             global_max_loss,
-            float(grad_norm.item()),
-            extra_metrics=extra_metrics,
+            grad_norm,
+            extra_metrics={"n_tokens_seen": global_ntokens_seen, "lr": lr},
         )
 
     @record
@@ -852,6 +848,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         timeout=timedelta(seconds=config.comm.train_timeout_seconds),
                         parallel_dims=self.parallel_dims,
                     )
+
+        # flush any pending async metrics from the last logging step
+        self.metrics_processor.flush()
 
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
