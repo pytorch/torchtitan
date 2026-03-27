@@ -44,7 +44,9 @@ def parallelize_flux(
         apply_ac(model, ac_config)
 
     if parallel_dims.cp_enabled:
-        apply_cp(model, parallel_dims.get_mesh("cp"))
+        # pyrefly: ignore [missing-attribute]
+        attn_backend = model.config.attn_backend
+        apply_cp(model, parallel_dims.get_mesh("cp"), attn_backend)
 
     if parallel_dims.fsdp_enabled:
         names = (
@@ -145,7 +147,7 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+def apply_cp(model: nn.Module, cp_mesh: DeviceMesh, attn_backend: str) -> None:
     """
     Apply context parallelism to the Flux model.
 
@@ -153,10 +155,7 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         model: The Flux model with double_blocks and single_blocks containing
             inner attention modules.
         cp_mesh: Device mesh for context parallel dimension
-
-    Note:
-        - Uses SDPA attention type
-        - Applies to all inner_attention modules in double_blocks and single_blocks
+        attn_backend: Attention backend type ("sdpa" or "flex")
     """
     # Collect all inner_attention modules from the Flux model
     attention_modules = []
@@ -175,8 +174,7 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         # pyrefly: ignore [missing-attribute]
         attention_modules.append(single_block.inner_attention)
 
-    # Apply CP using the shared implementation (always uses SDPA for Flux)
-    apply_cp_to_attention_module(attention_modules, cp_mesh, "sdpa")
+    apply_cp_to_attention_module(attention_modules, cp_mesh, attn_backend)
 
     logger.info("Applied Context Parallel to the Flux model")
 

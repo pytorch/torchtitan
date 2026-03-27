@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import torch
@@ -44,6 +45,7 @@ class FluxModel(BaseModel):
         axes_dim: tuple = (16, 56, 56)
         theta: int = 10_000
         qkv_bias: bool = True
+        attn_backend: str = "sdpa"
         autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
         # Sub-component configs
@@ -100,6 +102,17 @@ class FluxModel(BaseModel):
                 out_channels=64,
             )
         )
+
+        def __post_init__(self):
+            # Propagate attn_backend to sub-block configs
+            if self.double_block_config.attn_backend != self.attn_backend:
+                self.double_block_config = dataclasses.replace(
+                    self.double_block_config, attn_backend=self.attn_backend
+                )
+            if self.single_block_config.attn_backend != self.attn_backend:
+                self.single_block_config = dataclasses.replace(
+                    self.single_block_config, attn_backend=self.attn_backend
+                )
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass

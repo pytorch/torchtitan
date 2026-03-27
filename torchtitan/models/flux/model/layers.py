@@ -11,10 +11,14 @@ from dataclasses import dataclass
 import torch
 from einops import rearrange
 from torch import nn, Tensor
-from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
+from torchtitan.models.common.attention import (
+    FlexAttentionWrapper,
+    ScaledDotProductAttentionWrapper,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.module import Module, Sequential
+
 
 LayerNorm = Module.from_nn_module(nn.LayerNorm)
 GELU = Module.from_nn_module(nn.GELU)
@@ -141,9 +145,17 @@ class QKNorm(Module):
 
 
 class SelfAttention(Module):
-    def __init__(self, *, dim: int, num_heads: int = 8, qkv_bias: bool = False):
+    def __init__(
+        self,
+        *,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        attn_backend: str = "sdpa",
+    ):
         super().__init__()
         self.num_heads = num_heads
+        self.attn_backend = attn_backend
         head_dim = dim // num_heads
 
         self.qkv = Linear.Config(bias=qkv_bias).build(
@@ -151,7 +163,13 @@ class SelfAttention(Module):
         )
         self.norm = QKNorm(dim=head_dim)
         self.proj = Linear.Config(bias=True).build(in_features=dim, out_features=dim)
-        self.inner_attention = ScaledDotProductAttentionWrapper()
+        match attn_backend:
+            case "sdpa":
+                self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attn_backend: {attn_backend}")
 
     def init_weights(self, **kwargs) -> None:
         for layer in (self.qkv, self.proj):
@@ -164,7 +182,11 @@ class SelfAttention(Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = self.inner_attention(q, k, v, is_causal=False)
+        match self.attn_backend:
+            case "flex":
+                x = self.inner_attention(q, k, v)
+            case _:
+                x = self.inner_attention(q, k, v, is_causal=False)
         x = rearrange(x, "B H L D -> B L (H D)")
         x = self.proj(x)
         return x
@@ -212,6 +234,7 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
+        attn_backend: str = "sdpa"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -224,7 +247,10 @@ class DoubleStreamBlock(Module):
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.img_attn = SelfAttention(
-            dim=config.hidden_size, num_heads=config.num_heads, qkv_bias=config.qkv_bias
+            dim=config.hidden_size,
+            num_heads=config.num_heads,
+            qkv_bias=config.qkv_bias,
+            attn_backend=config.attn_backend,
         )
 
         self.img_norm2 = LayerNorm(
@@ -245,7 +271,10 @@ class DoubleStreamBlock(Module):
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.txt_attn = SelfAttention(
-            dim=config.hidden_size, num_heads=config.num_heads, qkv_bias=config.qkv_bias
+            dim=config.hidden_size,
+            num_heads=config.num_heads,
+            qkv_bias=config.qkv_bias,
+            attn_backend=config.attn_backend,
         )
 
         self.txt_norm2 = LayerNorm(
@@ -261,7 +290,14 @@ class DoubleStreamBlock(Module):
             ),
         )
 
-        self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.attn_backend = config.attn_backend
+        match config.attn_backend:
+            case "sdpa":
+                self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attn_backend: {config.attn_backend}")
 
     def init_weights(self, **kwargs) -> None:
         # initialize all the nn.Linear submodules
@@ -314,7 +350,11 @@ class DoubleStreamBlock(Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
+        match self.attn_backend:
+            case "flex":
+                attn = self.inner_attention(q, k, v)
+            case _:
+                attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B H L D -> B L (H D)")
 
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
@@ -347,6 +387,7 @@ class SingleStreamBlock(Module):
         linear2: Linear.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
+        attn_backend: str = "sdpa"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -376,7 +417,14 @@ class SingleStreamBlock(Module):
 
         self.mlp_act = GELU(approximate="tanh")
         self.modulation = Modulation(dim=config.hidden_size, double=False)
-        self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.attn_backend = config.attn_backend
+        match config.attn_backend:
+            case "sdpa":
+                self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attn_backend: {config.attn_backend}")
 
     def init_weights(self, **kwargs) -> None:
         for layer in (self.linear1, self.linear2):
@@ -398,7 +446,11 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
+        match self.attn_backend:
+            case "flex":
+                attn = self.inner_attention(q, k, v)
+            case _:
+                attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B H L D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer
