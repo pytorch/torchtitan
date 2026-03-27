@@ -19,7 +19,9 @@ For nn.Module instances, parameters and buffers are automatically flattened as
 explicit positional operands so invoke_subgraph can deduplicate across calls with
 identical structure (e.g. repeated transformer blocks sharing one traced subgraph).
 
-For free functions, all inputs must already be positional tensor arguments.
+Tensor arguments (positional and keyword) become invoke_subgraph operands.
+Non-tensor arguments (None, int, etc.) are specialized as constants inside the
+subgraph, mirroring Dynamo's "automatic" input mode for invoke_subgraph.
 """
 
 from typing import Any, Callable
@@ -55,6 +57,42 @@ def _ensure_subgraph_cached(
     return gm
 
 
+def _extract_tensor_operands(
+    args: tuple, kwargs: dict
+) -> tuple[list[int], list[str], tuple, tuple]:
+    """Split args/kwargs into tensor operands and non-tensor constants.
+
+    Returns:
+        tensor_arg_indices: positions in args that are tensors
+        tensor_kwarg_keys: keys in kwargs whose values are tensors
+        tensor_args: tensor values from args (in index order)
+        tensor_kwargs: tensor values from kwargs (in key order)
+    """
+    tensor_arg_indices = [i for i, a in enumerate(args) if isinstance(a, torch.Tensor)]
+    tensor_kwarg_keys = [k for k, v in kwargs.items() if isinstance(v, torch.Tensor)]
+    tensor_args = tuple(args[i] for i in tensor_arg_indices)
+    tensor_kwargs = tuple(kwargs[k] for k in tensor_kwarg_keys)
+    return tensor_arg_indices, tensor_kwarg_keys, tensor_args, tensor_kwargs
+
+
+def _reconstruct_args_kwargs(
+    args: tuple,
+    kwargs: dict,
+    tensor_arg_indices: list[int],
+    tensor_kwarg_keys: list[str],
+    tensor_fwd_args: tuple,
+    tensor_fwd_kwargs: tuple,
+) -> tuple[list, dict]:
+    """Reconstruct full args/kwargs by slotting traced tensor operands back in."""
+    full_args = list(args)
+    for idx, val in zip(tensor_arg_indices, tensor_fwd_args):
+        full_args[idx] = val
+    full_kwargs = dict(kwargs)
+    for k, val in zip(tensor_kwarg_keys, tensor_fwd_kwargs):
+        full_kwargs[k] = val
+    return full_args, full_kwargs
+
+
 def _make_module_wrapper(
     module: nn.Module,
     orig_forward: Callable,
@@ -67,16 +105,10 @@ def _make_module_wrapper(
     n_buffers = len(buffer_names)
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if kwargs:
-            raise ValueError(
-                "aot_nested_region does not support keyword arguments. "
-                f"Got kwargs: {set(kwargs.keys())}."
-            )
-
         if get_proxy_mode() is None:
-            return orig_forward(*args)
+            return orig_forward(*args, **kwargs)
 
-        cache_key = hash_fn(*args)
+        cache_key = hash_fn(*args, **kwargs)
         if not isinstance(cache_key, str):
             raise ValueError(
                 f"hash_fn must return a str, got {type(cache_key).__name__}"
@@ -87,25 +119,29 @@ def _make_module_wrapper(
         param_vals = [p for _, p in module.named_parameters()]
         buffer_vals = [b for _, b in module.named_buffers()]
 
-        # Only tensor forward args become invoke_subgraph operands — non-tensors
+        # Only tensor args/kwargs become invoke_subgraph operands — non-tensors
         # (None, int, etc.) are specialized as constants inside the subgraph, same
         # as Dynamo's "automatic" input mode for invoke_subgraph.
-        tensor_arg_indices = [i for i, a in enumerate(args) if isinstance(a, torch.Tensor)]
-        tensor_args = tuple(args[i] for i in tensor_arg_indices)
-        all_operands = (*param_vals, *buffer_vals, *tensor_args)
+        tensor_arg_indices, tensor_kwarg_keys, tensor_args, tensor_kwargs = (
+            _extract_tensor_operands(args, kwargs)
+        )
+        all_operands = (*param_vals, *buffer_vals, *tensor_args, *tensor_kwargs)
 
         def subgraph_fn(*operands: Any) -> tuple:
             params = dict(zip(param_names, operands[:n_params]))
             buffers = dict(zip(buffer_names, operands[n_params : n_params + n_buffers]))
-            tensor_fwd_args = operands[n_params + n_buffers :]
-            # Reconstruct the full forward args: start from the original call args
-            # (non-tensors stay as-is from the outer closure), then slot the traced
-            # tensor operands back into their original positions.
-            full_args = list(args)
-            for idx, val in zip(tensor_arg_indices, tensor_fwd_args):
-                full_args[idx] = val
+            n_tensor_args = len(tensor_arg_indices)
+            tensor_fwd_args = operands[n_params + n_buffers : n_params + n_buffers + n_tensor_args]
+            tensor_fwd_kwargs = operands[n_params + n_buffers + n_tensor_args :]
+            # Reconstruct full args/kwargs: non-tensors stay from the outer closure,
+            # tensor positions are filled from the traced operands.
+            full_args, full_kwargs = _reconstruct_args_kwargs(
+                args, kwargs,
+                tensor_arg_indices, tensor_kwarg_keys,
+                tensor_fwd_args, tensor_fwd_kwargs,
+            )
             with stateless._reparametrize_module(module, {**params, **buffers}):
-                out = orig_forward(*full_args)
+                out = orig_forward(*full_args, **full_kwargs)
             if isinstance(out, torch.Tensor):
                 return (out,)
             return tuple(out) if isinstance(out, (list, tuple)) else (out,)
@@ -130,15 +166,17 @@ def aot_nested_region(
     as the leading positional operands, enabling deduplication across layers that
     share the same architecture (e.g. all transformer blocks map to one subgraph).
 
-    For free functions, all inputs must already be positional tensor arguments.
+    Tensor arguments (positional and keyword) become invoke_subgraph operands.
+    Non-tensor arguments (None, int, etc.) are specialized as constants inside the
+    subgraph, mirroring Dynamo's "automatic" input mode for invoke_subgraph.
 
     Usage on an nn.Module instance::
 
-        aot_nested_region(layer, hash_fn=lambda *args: "block")
+        aot_nested_region(layer, hash_fn=lambda *args, **kwargs: "block")
 
     Usage as a decorator on a free function::
 
-        @aot_nested_region(hash_fn=lambda *args: "block")
+        @aot_nested_region(hash_fn=lambda *args, **kwargs: "block")
         def block_fwd(x, w1, b1, w2, b2):
             ...
 
@@ -168,30 +206,36 @@ def aot_nested_region(
         orig_fn = target
 
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if kwargs:
-                raise ValueError(
-                    "aot_nested_region does not support keyword arguments. "
-                    f"Got kwargs: {set(kwargs.keys())}. invoke_subgraph requires "
-                    "all inputs to be positional tensor operands."
-                )
-
             if get_proxy_mode() is None:
-                return orig_fn(*args)
+                return orig_fn(*args, **kwargs)
 
-            cache_key = hash_fn(*args)
+            cache_key = hash_fn(*args, **kwargs)
             if not isinstance(cache_key, str):
                 raise ValueError(
                     f"hash_fn must return a str, got {type(cache_key).__name__}"
                 )
 
-            def subgraph_fn(*a):
-                out = orig_fn(*a)
+            tensor_arg_indices, tensor_kwarg_keys, tensor_args, tensor_kwargs = (
+                _extract_tensor_operands(args, kwargs)
+            )
+            all_operands = (*tensor_args, *tensor_kwargs)
+
+            def subgraph_fn(*operands: Any) -> tuple:
+                n_tensor_args = len(tensor_arg_indices)
+                tensor_fwd_args = operands[:n_tensor_args]
+                tensor_fwd_kwargs = operands[n_tensor_args:]
+                full_args, full_kwargs = _reconstruct_args_kwargs(
+                    args, kwargs,
+                    tensor_arg_indices, tensor_kwarg_keys,
+                    tensor_fwd_args, tensor_fwd_kwargs,
+                )
+                out = orig_fn(*full_args, **full_kwargs)
                 if isinstance(out, torch.Tensor):
                     return (out,)
                 return tuple(out) if isinstance(out, (list, tuple)) else (out,)
 
-            gm = _ensure_subgraph_cached(cache_key, subgraph_fn, args)
-            result = invoke_subgraph(gm, cache_key, *args)
+            gm = _ensure_subgraph_cached(cache_key, subgraph_fn, all_operands)
+            result = invoke_subgraph(gm, cache_key, *all_operands)
             if isinstance(result, (tuple, list)) and len(result) == 1:
                 return result[0]
             return result
