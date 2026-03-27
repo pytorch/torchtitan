@@ -37,10 +37,10 @@ def _generate_permute_indices(
     Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
     """
     device = tokens_per_expert_group.device
-    total = tokens_per_expert_group.sum()
 
     # [R, E] matrix of token counts per (rank, expert)
     t_mat = tokens_per_expert_group.view(num_ranks, experts_per_rank)
+    num_tokens_per_expert = t_mat.sum(0)
 
     # Where each (r, e) segment starts in the input (rank-major order)
     input_starts = (tokens_per_expert_group.cumsum(0) - tokens_per_expert_group).view(
@@ -57,13 +57,16 @@ def _generate_permute_indices(
         segment_lens
     )
     output_starts = segment_lens.cumsum(0) - segment_lens
+    # seg_ids.shape[0] == segment_lens.sum(), but reuses the unbacked symint
+    # already created by repeat_interleave. Computing the sum separately would
+    # introduce a second symint for the same value, producing an Eq(u1, u2)
+    # constraint that inductor cannot lower.
     permuted_indices = (
         input_starts[seg_ids]
-        + torch.arange(total, device=device)  # pyrefly: ignore [no-matching-overload]
+        + torch.arange(seg_ids.shape[0], device=device)
         - output_starts[seg_ids]
     )
 
-    num_tokens_per_expert = t_mat.sum(0)
     return permuted_indices, num_tokens_per_expert
 
 
