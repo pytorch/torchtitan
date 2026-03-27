@@ -79,8 +79,8 @@ This uses compile-on-one-rank (CooR) to produce a rank-agnostic artifact.
 version, CUDA version, model architecture, and parallelism configuration used
 to create them. Changing any of these requires regenerating the artifacts.
 Stale artifacts are detected automatically via config fingerprinting and
-trigger a recompilation with a warning, but it is good practice to delete
-old artifacts when upgrading PyTorch or changing the model/parallelism setup.
+will raise an error at load time. Delete old artifacts and re-run
+precompile when upgrading PyTorch or changing the model/parallelism setup.
 
 ```bash
 # Step 1: precompile on a single process (needs only 1 GPU)

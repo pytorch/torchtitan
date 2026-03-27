@@ -284,6 +284,9 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === Precompile tests ===
+        # Each precompile test runs precompile_main.py as a pre_command
+        # (single process, 1 GPU) to generate the artifact, then the
+        # main training command loads it via --compile.precompile.
         OverrideDefinitions(
             [
                 [
@@ -301,12 +304,24 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 precompile full_inductor_compilation",
             "aot_llama3_precompile_full_inductor",
             ngpu=8,
+            pre_commands=[
+                "python -m torchtitan.experiments.graph_trainer.precompile_main"
+                " --module graph_trainer.llama3"
+                " --config graph_trainer_llama3_debugmodel"
+                " --compile.mode aot"
+                " --compile.passes full_inductor_compilation"
+                " --compile.joint_passes inductor_decomposition"
+                " --compile.precompile"
+                " --compile.precompile_artifact_dir /tmp/precompile_test_full_inductor"
+                " --parallelism.data_parallel_shard_degree 4"
+                " --parallelism.tensor_parallel_degree 2",
+            ],
         ),
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
+                    "--config graph_trainer_llama3_debugmodel_flex_attn",
                     "--compile.mode aot",
                     "--compile.passes regional_inductor",
                     "--compile.precompile",
@@ -318,6 +333,17 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 precompile regional_inductor",
             "aot_llama3_precompile_regional_inductor",
             ngpu=8,
+            pre_commands=[
+                "python -m torchtitan.experiments.graph_trainer.precompile_main"
+                " --module graph_trainer.llama3"
+                " --config graph_trainer_llama3_debugmodel_flex_attn"
+                " --compile.mode aot"
+                " --compile.passes regional_inductor"
+                " --compile.precompile"
+                " --compile.precompile_artifact_dir /tmp/precompile_test_regional_inductor"
+                " --parallelism.data_parallel_shard_degree 4"
+                " --parallelism.tensor_parallel_degree 2",
+            ],
         ),
     ]
 

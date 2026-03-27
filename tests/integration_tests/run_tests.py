@@ -40,6 +40,17 @@ def run_single_test(
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
+    for pre_cmd in test_flavor.pre_commands:
+        logger.info(
+            f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} Integration test pre-command for {test_flavor.test_descr}: {pre_cmd} ====="
+        )
+        result = _run_cmd(pre_cmd)
+        logger.info(result.stdout)
+        if result.returncode != 0:
+            raise Exception(
+                f"Integration test pre-command failed, flavor: {test_flavor.test_descr}, command: {pre_cmd}"
+            )
+
     for idx, override_arg in enumerate(test_flavor.override_args):
         cmd = ""
         if module is not None:
@@ -171,9 +182,9 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
 
-    assert (
-        args.test_suite in _TEST_SUITES_FUNCTION
-    ), f"Unknown test suite {args.test_suite}"
+    assert args.test_suite in _TEST_SUITES_FUNCTION, (
+        f"Unknown test suite {args.test_suite}"
+    )
 
     test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
     run_tests(args, test_list)

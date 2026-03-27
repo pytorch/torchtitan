@@ -61,7 +61,7 @@ def main():
         raise ValueError("precompile_main requires --compile.precompile true")
     if not compile_config.precompile_artifact_dir:
         raise ValueError(
-            "precompile_main requires --compile.precompile_artifact_dir " "to be set."
+            "precompile_main requires --compile.precompile_artifact_dir to be set."
         )
     if not (_SERIALIZABLE_PASSES & set(compile_config.passes)):
         raise ValueError(
@@ -76,10 +76,9 @@ def main():
     tp = parallelism.tensor_parallel_degree
     pp = parallelism.pipeline_parallel_degree
 
-    # dp_shard=-1 means "use remaining ranks" — but in single-process
-    # precompile there's no real world to infer from. The compiled graph
-    # bakes in tensor shapes that depend on dp_shard, so the user must
-    # specify the exact value matching their training setup.
+    # dp_shard=-1 means "use remaining ranks" which can't be inferred
+    # in single-process mode. The compiled graph bakes in tensor shapes
+    # that depend on dp_shard, so the exact value must match training.
     if dp_shard < 0:
         raise ValueError(
             "precompile_main requires an explicit "
@@ -88,20 +87,15 @@ def main():
         )
     world_size = dp_replicate * dp_shard * cp * tp * pp
 
-    logger.info(
-        f"Initializing single-process precompile with " f"world_size={world_size}"
-    )
+    logger.info(f"Initializing single-process precompile with world_size={world_size}")
 
-    # Initialize fake distributed backend for single-process compilation.
-    # The fake backend hallucinates collective output shapes without
-    # performing actual communication, allowing us to trace through
-    # distributed ops on a single process.
+    # Fake backend produces correct collective output shapes without real
+    # communication, letting us trace distributed ops on a single process.
     dist.init_process_group("fake", rank=0, world_size=world_size)
 
-    # Enable CooR globally so that parallelization (TP, FSDP mesh setup)
-    # also uses symbolic coordinates. export_joint() will additionally set
-    # compile_on_one_rank=True during tracing when serializable=True, but
-    # the global enable here is needed for the parallelization phase.
+    # CooR must be enabled globally (not just during tracing) so that the
+    # parallelization phase (TP, FSDP mesh setup) also uses symbolic
+    # coordinates rather than hardcoding rank-specific values.
     import torch.distributed.config as dist_config
 
     dist_config.compile_on_one_rank = True
@@ -140,9 +134,6 @@ def main():
 
     model.verify_module_protocol()
 
-    # Apply parallelization (TP, FSDP, etc.) — same as the trainer,
-    # but using the fake-backend mesh so no real communication occurs.
-    # Disable compilation here; we handle AOT compilation separately below.
     no_compile_config = dataclasses.replace(compile_config, enable=False)
     model = model_spec.parallelize_fn(
         model,
@@ -155,23 +146,21 @@ def main():
         dump_folder=config.dump_folder,
     )
 
-    # Materialize weights on the real CUDA device. Inductor/Triton
-    # codegen requires a real GPU for kernel compilation.
-    # Temporarily disable CooR during init_weights because DTensor RNG
-    # ops (used for weight initialization seeding) raise
-    # NotImplementedError with compile_on_one_rank=True.  CooR mode is
-    # only needed during the compilation/tracing phase that follows.
+    # CooR must be disabled during init_weights because DTensor RNG ops
+    # (weight initialization seeding) raise NotImplementedError under
+    # compile_on_one_rank=True. Re-enable for the tracing phase after.
     device_type = utils.device_type
     model.to_empty(device=device_type)
     dist_config.compile_on_one_rank = False
-    with torch.no_grad():
-        model.init_weights(buffer_device=None)
-    dist_config.compile_on_one_rank = True
+    try:
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
+    finally:
+        dist_config.compile_on_one_rank = True
     model.train()
 
     logger.info("Model parallelized and materialized, starting AOT compile")
 
-    # Run AOT compilation with the precompile save callback.
     register_blockmask_pytree_node()
 
     from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -221,11 +210,9 @@ def main():
         model, parallel_dims, model_joint_graph_builder, parallelize_inputs
     )
 
-    # Run one forward pass with dummy inputs to trigger compilation.
-    # The on_compile callback will save the artifact. The backward graph
-    # is compiled eagerly (not lazily) because serializable=True in
-    # joint_graph_builder sets force_non_lazy_backward_lowering=True
-    # inside aot_compile_joint_with_descriptors.
+    # Forward pass triggers AOT compilation; the backward graph is compiled
+    # eagerly (not lazily) because serializable=True sets
+    # force_non_lazy_backward_lowering=True in aot_compile_joint.
     seq_len = config.training.seq_len
     local_batch_size = config.training.local_batch_size
     vocab_size = model_config.vocab_size
