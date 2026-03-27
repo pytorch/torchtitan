@@ -23,7 +23,6 @@ def vlm_debugmodel() -> MultiModalTrainerConfig:
         optimizer=OptimizersContainer.Config(
             default=AdamW.Config(
                 lr=8e-4,
-                eps=1e-15,
             ),
         ),
         lr_scheduler=LRSchedulersContainer.Config(
