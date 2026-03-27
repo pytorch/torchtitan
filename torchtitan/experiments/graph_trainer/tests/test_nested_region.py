@@ -34,7 +34,7 @@ def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     return model
 
 
-CONST_HASH = lambda *args: "block"
+CONST_HASH = lambda *args, **kwargs: "block"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -353,13 +353,83 @@ class TestNestedRegion(unittest.TestCase):
             class Block(nn.Module):
                 pass
 
-    def test_error_on_kwargs(self):
-        @aot_nested_region(hash_fn=CONST_HASH)
-        def fn(x):
-            return x
+    def test_module_kwargs(self):
+        """Tensor kwargs become operands; non-tensor kwargs are constants."""
 
-        with self.assertRaisesRegex(ValueError, "keyword arguments"):
-            fn(x=torch.randn(4))
+        class Block(nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.fc = nn.Linear(dim, dim)
+
+            def forward(self, x, *, mask=None, scale: int = 1):
+                out = self.fc(x)
+                if mask is not None:
+                    out = out * mask
+                return out * scale
+
+        class Model(nn.Module):
+            def __init__(self, dim, n_layers):
+                super().__init__()
+                self.layers = nn.ModuleDict(
+                    {str(i): Block(dim) for i in range(n_layers)}
+                )
+
+            def forward(self, x, mask):
+                for layer in self.layers.values():
+                    x = layer(x, mask=mask, scale=2)
+                return x
+
+        dim, n_layers = 16, 3
+        model = Model(dim, n_layers).to(device=self.DEVICE)
+        for layer in model.layers.values():
+            aot_nested_region(layer, hash_fn=CONST_HASH)
+
+        x = torch.randn(2, 4, dim, device=self.DEVICE)
+        mask = torch.ones(2, 4, dim, device=self.DEVICE)
+        out_eager = model(x, mask)
+        traced_result = trace_module(model, (x, mask))
+
+        self._assert_invoke_subgraph_count(traced_result, n_layers)
+
+        params_and_buffers = _get_params_and_buffers(model)
+        out_traced = run_traced_module(traced_result, params_and_buffers, (x, mask))
+        self.assertTrue(torch.equal(out_eager, out_traced[0]))
+
+    def test_free_function_kwargs(self):
+        """@aot_nested_region on a free function with tensor and non-tensor kwargs."""
+        import torch.nn.functional as F
+
+        @aot_nested_region(hash_fn=CONST_HASH)
+        def block_fwd(w1, b1, w2, b2, *, x, scale: int = 1):
+            h = F.relu(F.linear(x, w1, b1))
+            return F.linear(h, w2, b2) * scale
+
+        class Model(nn.Module):
+            def __init__(self, dim, n_layers):
+                super().__init__()
+                self.layers = nn.ModuleList(
+                    [nn.Sequential(nn.Linear(dim, dim * 2), nn.Linear(dim * 2, dim))
+                     for _ in range(n_layers)]
+                )
+
+            def forward(self, x):
+                for blk in self.layers:
+                    fc1, fc2 = blk[0], blk[1]
+                    x = block_fwd(fc1.weight, fc1.bias, fc2.weight, fc2.bias, x=x, scale=2)
+                return x
+
+        dim, n_layers = 16, 3
+        model = Model(dim, n_layers).to(device=self.DEVICE)
+        x = torch.randn(2, 4, dim, device=self.DEVICE)
+
+        out_eager = model(x)
+        traced_result = trace_module(model, (x,))
+
+        self._assert_invoke_subgraph_count(traced_result, n_layers)
+
+        params_and_buffers = _get_params_and_buffers(model)
+        out_traced = run_traced_module(traced_result, params_and_buffers, (x,))
+        self.assertTrue(torch.equal(out_eager, out_traced[0]))
 
     def test_unique_hash_no_dedup(self):
         """Each unique hash key traces a separate subgraph — no deduplication.
