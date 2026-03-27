@@ -5,10 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-import dataclasses
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, TypeVar
 
 import torch
 import torch.distributed.tensor
@@ -35,10 +34,11 @@ __all__ = [
 
 T = TypeVar("T", bound=Optimizer)
 
-class BaseOptimizer(Configurable):
 
+class BaseOptimizer(Configurable):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config): pass
+    class Config(Configurable.Config):
+        pass
 
     optimizer_cls: type[Optimizer]
     config: Config
@@ -61,9 +61,13 @@ class BaseOptimizer(Configurable):
         return {k: v for k, v in self.config.to_dict().items() if v is not None}
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, BaseOptimizer): return False
+        if not isinstance(other, BaseOptimizer):
+            return False
         # Must also check optimizer_cls, not just hyperparams
-        return self.optimizer_cls == other.optimizer_cls and self.config.to_dict() == other.config.to_dict()
+        return (
+            self.optimizer_cls == other.optimizer_cls
+            and self.config.to_dict() == other.config.to_dict()
+        )
 
     def __hash__(self) -> int:
         return hash(tuple(sorted(self.config.to_dict().items())))
@@ -75,8 +79,8 @@ class BaseOptimizer(Configurable):
     def __repr__(self) -> str:
         return self.__str__()
 
-class AdamW(BaseOptimizer):
 
+class AdamW(BaseOptimizer):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseOptimizer.Config):
         lr: float = 8e-4
@@ -88,25 +92,29 @@ class AdamW(BaseOptimizer):
         foreach: bool = False
 
     optimizer_cls: type[Optimizer] = torch.optim.AdamW
+    # pyrefly: ignore [bad-override]
     config: Config
 
     def get_optimizer_kwargs(self) -> dict[str, Any]:
         return {
             "lr": self.config.lr,
             "eps": self.config.eps,
-            "betas": (self.config.beta1, self.config.beta2) if self.config.beta1 is not None and self.config.beta2 is not None else None,
+            "betas": (self.config.beta1, self.config.beta2)
+            if self.config.beta1 is not None and self.config.beta2 is not None
+            else None,
             "fused": self.config.fused,
             "foreach": self.config.foreach,
             "weight_decay": self.config.weight_decay,
         }
 
-class Adam(BaseOptimizer):
 
+class Adam(BaseOptimizer):
     @dataclass(kw_only=True, slots=True)
     class Config(AdamW.Config):
         weight_decay: float = 0.0
 
     optimizer_cls: type[Optimizer] = torch.optim.Adam
+    # pyrefly: ignore [bad-override]
     config: Config
 
     def get_optimizer_kwargs(self) -> dict[str, Any]:
@@ -119,6 +127,7 @@ class Adam(BaseOptimizer):
             "weight_decay": self.config.weight_decay,
         }
 
+
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     """A container for multiple optimizers."""
 
@@ -129,9 +138,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         overrides: dict[str, BaseOptimizer.Config] = field(default_factory=dict)
         """
-        Parameter group overrides to use. For example 
-        {'model.tok_embeddings.weight' : AdamWConfig(lr=1e-4, weight_decay=0.0)}
-        will override the weight decay and learning rate for the parameter group containing "model.tok_embeddings.weight" in its name.
+        Parameter group overrides to use. For example
+        {'model.tok_embeddings.weight' : AdamW.Config(lr=1e-4, weight_decay=0.0)}
+        will override the weight decay and learning rate for the parameter group
+        containing "model.tok_embeddings.weight" in its name.
         """
 
     optimizers: list[list[Optimizer]]
@@ -147,18 +157,25 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         # all empty parameter groups
         parts_group_params = [
             {
-                default_optimizer | override_params : [] 
-                for override_params in set(overrid_optimizers.values()) | {default_optimizer}
+                default_optimizer | override_params: []
+                for override_params in set(overrid_optimizers.values())
+                | {default_optimizer}
             }
-        for _ in range(len(model_parts))]
+            for _ in range(len(model_parts))
+        ]
 
-        # populate parameter groups based on overrides, if a parameter name matches multiple override keys, the first match will be used
+        # populate parameter groups based on overrides,
+        # if a parameter name matches multiple override keys, the first match will be used
         for model, group_params in zip(self.model_parts, parts_group_params):
-            for name, param in [(n, p) for n, p in model.named_parameters() if p.requires_grad]:
+            for name, param in [
+                (n, p) for n, p in model.named_parameters() if p.requires_grad
+            ]:
                 all_params.append(param)
                 if name in config.overrides:
                     override_params = overrid_optimizers[name]
-                    group_params[default_optimizer | override_params].append((param, name))
+                    group_params[default_optimizer | override_params].append(
+                        (param, name)
+                    )
                 else:
                     group_params[default_optimizer].append((param, name))
 
@@ -166,10 +183,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         for group_params in parts_group_params:
             for config_params, params in group_params.items():
                 if not params:
-                    logger.warning(f"Optimizer group {config_params} has no parameters assigned to it.")
+                    logger.warning(
+                        f"Optimizer group {config_params} has no parameters assigned to it."
+                    )
 
         # create optimizers for each group of parameters with the same optimizer class
-        for i,group_params in enumerate(parts_group_params):
+        for i, group_params in enumerate(parts_group_params):
             for optimizer_cls in set(params.optimizer_cls for params in group_params):
                 optimizer_groups = [
                     {
@@ -180,23 +199,38 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     for optim_config, named_params in group_params.items()
                     if optim_config.optimizer_cls == optimizer_cls
                 ]
-                self.optimizers[i].append(optimizer_cls(optimizer_groups, **default_optimizer.get_optimizer_kwargs()))
+                self.optimizers[i].append(
+                    optimizer_cls(
+                        optimizer_groups, **default_optimizer.get_optimizer_kwargs()
+                    )
+                )
 
         # log optimizer conguration
         for part in range(len(self.model_parts)):
             logger.info(f"Model part {part} optimizers:")
             for optimizer in self.optimizers[part]:
-                logger.info(f"Optimizer {optimizer.__class__.__name__} with param groups:")
+                logger.info(
+                    f"Optimizer {optimizer.__class__.__name__} with param groups:"
+                )
                 for i, param_group in enumerate(optimizer.param_groups):
-                    logger.info(f"\tGroup { {k: v for k, v in param_group.items() if k not in {'params', 'param_names'}} } parameters")
+                    log_group = {
+                        k: v
+                        for k, v in param_group.items()
+                        if k not in {"params", "param_names"}
+                    }
+                    logger.info(f"\tGroup {log_group} parameters")
                     for name in param_group.get("param_names", []):
                         logger.info(f"\t\t{name}")
 
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, default_optimizer.get_optimizer_kwargs())
 
-    def __iter__(self) -> Iterator[T]:
-        return iter(optimizer for part_optimizers in self.optimizers for optimizer in part_optimizers)
+    def __iter__(self) -> Iterator[Optimizer]:
+        return iter(
+            optimizer
+            for part_optimizers in self.optimizers
+            for optimizer in part_optimizers
+        )
 
     def __len__(self) -> int:
         return sum(len(part_optimizers) for part_optimizers in self.optimizers)
@@ -220,7 +254,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         return {
             k: v
             for model_part, optimizers in zip(self.model_parts, self.optimizers)
-            for k,v in func(model_part, optimizers).items()
+            for k, v in func(model_part, optimizers).items()
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -295,9 +329,9 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     def _validate_length(self, expected_length: int) -> None:
         total = sum(len(part) for part in self.optimizers)
-        assert expected_length == total, (
-            "Must pass one optimizer per param when using OptimizersInBackwardContainer."
-        )
+        assert (
+            expected_length == total
+        ), "Must pass one optimizer per param when using OptimizersInBackwardContainer."
 
     # pyrefly: ignore [bad-override]
     def step(self) -> None:

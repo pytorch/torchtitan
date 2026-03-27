@@ -12,7 +12,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 """
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer, AdamW
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.unified.actors.generator import (
     GeneratorCompileConfig,

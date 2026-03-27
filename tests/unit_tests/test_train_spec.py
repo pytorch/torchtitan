@@ -10,7 +10,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.optimizer import OptimizersContainer, Adam
+from torchtitan.components.optimizer import Adam, OptimizersContainer
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import model_registry, parallelize_llama
 from torchtitan.protocols import BaseModel

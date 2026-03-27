@@ -83,7 +83,7 @@ def llama3_debugmodel_varlen_attn() -> Trainer.Config:
 def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
     config = llama3_debugmodel()
     config.optimizer = OptimizersInBackwardContainer.Config(
-        default = AdamW.Config(
+        default=AdamW.Config(
             lr=8e-4,
         ),
     )
@@ -129,7 +129,7 @@ def llama3_8b() -> Trainer.Config:
         ),
         model_spec=model_registry("8B"),
         optimizer=OptimizersContainer.Config(
-            default = AdamW.Config(
+            default=AdamW.Config(
                 lr=3e-4,
             ),
         ),
@@ -165,7 +165,7 @@ def llama3_70b() -> Trainer.Config:
         ),
         model_spec=model_registry("70B"),
         optimizer=OptimizersContainer.Config(
-            default = AdamW.Config(
+            default=AdamW.Config(
                 lr=1.5e-4,
             ),
         ),
@@ -210,7 +210,7 @@ def llama3_405b() -> Trainer.Config:
             ],
         ),
         optimizer=OptimizersContainer.Config(
-            default = AdamW.Config(
+            default=AdamW.Config(
                 lr=8e-5,
             ),
         ),
