@@ -51,7 +51,9 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
@@ -84,7 +86,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _test_config(tp: int = 1) -> RLTrainer.Config:
+def _test_config(
+    tp: int = 1,
+    generator_compile_backend: str = "none",
+    generator_cudagraph_mode: str = "none",
+) -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry(
             "0.6B", attn_backend_override="varlen", batch_invariant=True
@@ -102,10 +108,12 @@ def _test_config(tp: int = 1) -> RLTrainer.Config:
             model_dtype="bfloat16",
             gpu_memory_limit=0.5,
             parallelism=ParallelismConfig(tensor_parallel_degree=tp),
-            compile=GeneratorCompileConfig(backend="none", cudagraph_mode="none"),
+            compile=GeneratorCompileConfig(
+                backend=generator_compile_backend,
+                cudagraph_mode=generator_cudagraph_mode,
+            ),
             num_samples_per_prompt=1,
             sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=50),
-            attention_backend="CUSTOM",
         ),
     )
 
@@ -135,7 +143,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=gen_config.compile.is_eager,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
-        attention_backend=gen_config.attention_backend,
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum.CUSTOM,
+        ),
     )
     vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
     if vllm_compilation_config is not None:
@@ -486,9 +496,27 @@ def main():
     )
     parser.add_argument("--gen-tokens", type=int, default=50)
     parser.add_argument("--tp", type=int, default=1)
+    parser.add_argument(
+        "--gen-compile-backend",
+        type=str,
+        default="none",
+        choices=["none", "eager", "inductor"],
+        help="torch.compile backend for the vLLM generator",
+    )
+    parser.add_argument(
+        "--generator-cudagraph-mode",
+        type=str,
+        default="none",
+        choices=["none", "piecewise", "full", "full_and_piecewise"],
+        help="CUDA graph capture mode for the vLLM generator",
+    )
     args, _ = parser.parse_known_args()
 
-    config = _test_config(tp=args.tp)
+    config = _test_config(
+        tp=args.tp,
+        generator_compile_backend=args.generator_compile_backend,
+        generator_cudagraph_mode=args.generator_cudagraph_mode,
+    )
     config.model_spec.parallelize_fn = parallelize_qwen3
 
     from torch.nn.attention import (

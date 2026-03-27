@@ -1,4 +1,4 @@
-name: RL Numerics 2 GPU Integration Tests
+name: RL H100 2 GPU Integration Tests
 
 on:
   push:
