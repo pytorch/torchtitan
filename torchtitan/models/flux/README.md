@@ -31,7 +31,7 @@ MODULE=flux CONFIG=flux_schnell ./run_train.sh
 ## Supported Features
 - Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
-- `torch.compile`: Per-block compilation for the Flux transformer (DoubleStreamBlock, SingleStreamBlock) and the T5/CLIP text encoders. See [torch.compile](#torchcompile) below.
+- `torch.compile`: Per-block compilation for the Flux transformer (DoubleStreamBlock, SingleStreamBlock). See [torch.compile](#torchcompile) below.
 - MXFP8 quantization: Dynamic MXFP8 quantization for linear layers on SM100+ (Blackwell) hardware. See [MXFP8 Quantization](#mxfp8-quantization) below.
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
@@ -39,7 +39,7 @@ MODULE=flux CONFIG=flux_schnell ./run_train.sh
 
 ## torch.compile
 
-The Flux model supports `torch.compile` for accelerating training. Compilation is applied per-block to the repeated DoubleStreamBlock and SingleStreamBlock layers in the main transformer, as well as per-block to the T5 encoder blocks and CLIP encoder layers.
+The Flux model supports `torch.compile` for accelerating training. Compilation is applied per-block to the repeated DoubleStreamBlock and SingleStreamBlock layers in the main transformer.
 
 To enable compilation, add the following flags:
 ```bash
@@ -56,8 +56,7 @@ MODULE=flux CONFIG=flux_debugmodel ./run_train.sh --compile.enable --compile.com
 ```
 
 **Notes:**
-- The main Flux model blocks are compiled with `fullgraph=True` for maximum optimization.
-- The T5 and CLIP encoders are compiled without `fullgraph=True` to accommodate potential graph-breaking patterns in HuggingFace model internals. Since the encoders are frozen (inference-only), this has minimal performance impact.
+- The Flux model blocks are compiled with `fullgraph=True` for maximum optimization.
 - The default backend is `inductor`. You can change it with `--compile.backend <backend>`.
 
 
