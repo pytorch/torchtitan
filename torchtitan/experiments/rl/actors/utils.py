@@ -8,6 +8,73 @@ import torch
 import torch.nn.functional as F
 
 
+def compute_batch_token_log_probs(
+    model: torch.nn.Module,
+    prompt_token_ids: list[list[int]],
+    gen_token_ids: list[list[int]],
+    device: torch.device,
+    pad_token_id: int = 0,
+) -> list[torch.Tensor]:
+    """
+    Compute per-token log probabilities for multiple episodes in a single
+    batched forward pass. Variable-length sequences are right-padded to the
+    longest sequence in the batch.
+
+    Args:
+        model: The model to use for computing logits
+        prompt_token_ids: List of prompt token ID sequences
+        gen_token_ids: List of generated completion token ID sequences
+        device: Device to run computation on
+        pad_token_id: Token ID used for right-padding
+
+    Returns:
+        List of per-token log probability tensors, one per episode
+    """
+    # Build full sequences and record lengths
+    full_sequences: list[list[int]] = []
+    prompt_lens: list[int] = []
+    gen_lens: list[int] = []
+    for prompt_toks, gen_toks in zip(prompt_token_ids, gen_token_ids):
+        full_sequences.append(prompt_toks + gen_toks)
+        prompt_lens.append(len(prompt_toks))
+        gen_lens.append(len(gen_toks))
+
+    max_seq_len = max(len(seq) for seq in full_sequences)
+
+    # Right-pad and stack into (batch_size, max_seq_len)
+    padded = [seq + [pad_token_id] * (max_seq_len - len(seq)) for seq in full_sequences]
+    batch_tensor = torch.tensor(padded, dtype=torch.long, device=device)
+
+    # Explicit positions for each sequence (needed for torch.compile + RoPE)
+    positions = (
+        torch.arange(max_seq_len, device=device)
+        .unsqueeze(0)
+        .expand(len(full_sequences), -1)
+    )
+
+    # Single batched forward pass
+    logits = model(batch_tensor, attention_masks=None, positions=positions)
+
+    # Convert to float32 for numerical stability
+    logits_f32 = logits[:, :-1, :].to(torch.float32)
+    log_probs = F.log_softmax(logits_f32, dim=-1)
+    target_tokens = batch_tensor[:, 1:]
+
+    # Extract per-episode gen-token log probs
+    results: list[torch.Tensor] = []
+    for i in range(len(full_sequences)):
+        gen_start_idx = prompt_lens[i] - 1
+        gen_end_idx = gen_start_idx + gen_lens[i]
+        gen_token_logprobs = log_probs[i, gen_start_idx:gen_end_idx, :]
+        gen_token_ids_tensor = target_tokens[i, gen_start_idx:gen_end_idx]
+        token_lps = gen_token_logprobs.gather(
+            1, gen_token_ids_tensor.unsqueeze(-1)
+        ).squeeze(-1)
+        results.append(token_lps)
+
+    return results
+
+
 def compute_token_log_probs(
     model: torch.nn.Module,
     prompt_token_ids: list[int],
@@ -94,11 +161,9 @@ def compute_policy_gradient_loss(
     advantages = advantages.to(device)
 
     # Compute per-token log probs under current policy (WITH GRADIENTS)
-    batch_token_log_probs = []
-
-    for prompt_toks, gen_toks in zip(prompt_token_ids, vllm_token_ids):
-        token_lps = compute_token_log_probs(model, prompt_toks, gen_toks, device)
-        batch_token_log_probs.append(token_lps)
+    batch_token_log_probs = compute_batch_token_log_probs(
+        model, prompt_token_ids, vllm_token_ids, device
+    )
 
     # Per-token log ratios and KL, averaged across tokens per sample
     per_sample_mean_log_ratio = []

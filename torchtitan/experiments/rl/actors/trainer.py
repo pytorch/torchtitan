@@ -24,8 +24,8 @@ from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.utils import (
+    compute_batch_token_log_probs,
     compute_policy_gradient_loss,
-    compute_token_log_probs,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.types import Episode
@@ -280,14 +280,11 @@ class PolicyTrainer(Actor, Configurable):
         my_advantages = advantages[my_indices]
 
         # Compute reference log probs using frozen ref_model (local shard only)
-        ref_token_log_probs = []
         device = next(self.model.parameters()).device
         with torch.no_grad():
-            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
-                token_lps = compute_token_log_probs(
-                    self.ref_model, prompt_toks, gen_toks, device
-                )
-                ref_token_log_probs.append(token_lps)
+            ref_token_log_probs = compute_batch_token_log_probs(
+                self.ref_model, my_prompt_token_ids, my_token_ids, device
+            )
 
         # Compute loss on this rank's shard
         loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
