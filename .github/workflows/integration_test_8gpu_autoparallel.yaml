@@ -78,8 +78,6 @@ jobs:
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
         fi
 
-        python -m pip install --pre torchdata --index-url ${{ matrix.index-url }}
-
         # Install autoparallel - required dependency for autoparallel experiment
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
