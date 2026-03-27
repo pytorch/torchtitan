@@ -313,6 +313,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--optimizer.name AdamW --optimizer.implementation fused_opt_states_bf16",
+                ]
+            ],
+            "BF16 Optimizer States Test",
+            "optimizer_bf16_states",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.data_parallel_shard_degree=1",
                     "--parallelism.data_parallel_replicate_degree=4",
                 ]
