@@ -153,7 +153,10 @@ def joint_graph_builder(
     assert isinstance(model_args, tuple)
 
     # get joint graph
-    (joint_with_descriptors, tracing_context,) = export_joint(
+    (
+        joint_with_descriptors,
+        tracing_context,
+    ) = export_joint(
         model,
         model_args,
         model_kwargs,

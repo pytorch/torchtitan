@@ -377,7 +377,10 @@ class TestPrecompileSaveValidation(unittest.TestCase):
         model = torch.nn.Linear(4, 4)
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            not_serializable = lambda *args: None
+
+            def not_serializable(*args):
+                return None
+
             with self.assertRaisesRegex(
                 TypeError, "BundledAOTAutogradSerializableCallable"
             ):

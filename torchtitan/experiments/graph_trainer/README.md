@@ -87,28 +87,24 @@ precompile when upgrading PyTorch or changing the model/parallelism setup.
 python -m torchtitan.experiments.graph_trainer.precompile_main \
     --module graph_trainer.llama3 \
     --config graph_trainer_llama3_debugmodel \
-    --compile.mode aot \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
     --compile.precompile \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2 \
-    --training.seq_len 2048
+    --parallelism.tensor_parallel_degree 2
 
 # Step 2: load and train with torchrun (uses all GPUs)
 torchrun --nproc_per_node=8 --virtual-local-rank \
     -m torchtitan.train \
     --module graph_trainer.llama3 \
     --config graph_trainer_llama3_debugmodel \
-    --compile.mode aot \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
     --compile.precompile \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2 \
-    --training.seq_len 2048
+    --parallelism.tensor_parallel_degree 2
 ```
 
 Pre-compile works with any compiler pass that produces serializable output,

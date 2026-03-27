@@ -38,9 +38,9 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     precompile: bool = False
     """
-    Enable serializable compilation. On first run, compiles with
-    serializable=True and saves the artifact. On subsequent runs, detects
-    the existing artifact and loads it, skipping compilation entirely.
+    Enable precompiled artifact loading. Requires running precompile_main.py
+    first to generate the artifact. At training time, loads the artifact
+    and skips compilation entirely.
     """
 
     precompile_artifact_dir: str = ""

@@ -14,6 +14,7 @@ Pass Types:
 - Joint custom passes: Applied to the joint forward-backward graph before partitioning
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
+
 import operator
 from collections import defaultdict
 from collections.abc import Sequence
