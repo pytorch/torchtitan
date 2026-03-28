@@ -31,6 +31,7 @@ import torch.distributed as dist
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
+    apply_graph_ac,
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
@@ -99,6 +100,14 @@ def main():
 
     dist_config.compile_on_one_rank = True
 
+    # Match the deterministic mode that the training loop will use.
+    # The backward graph captures use_deterministic_algorithms() at
+    # compile time and asserts it matches at runtime.
+    if config.debug.deterministic:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
@@ -159,6 +168,13 @@ def main():
     model.train()
 
     logger.info("Model parallelized and materialized, starting AOT compile")
+
+    # parallelize_fn called apply_graph_ac on no_compile_config (the copy
+    # with enable=False).  We need the same joint_passes augmentation on
+    # the real compile_config so that (a) the apply_sac pass runs during
+    # compilation and (b) the config fingerprint matches the train path.
+    if config.activation_checkpoint.mode != "none":
+        apply_graph_ac(compile_config, config.activation_checkpoint)
 
     register_blockmask_pytree_node()
 
