@@ -122,23 +122,11 @@ class TestApplyCompileValidation(unittest.TestCase):
             dump_folder="/tmp/test_dump",
         )
 
-    def test_precompile_without_artifact_dir_raises(self):
-        from torchtitan.experiments.graph_trainer.compile import apply_compile
-
-        args = self._make_args(
-            precompile=True,
-            precompile_artifact_dir="",
-            passes=["full_inductor_compilation"],
-        )
-        with self.assertRaisesRegex(ValueError, "precompile_artifact_dir"):
-            apply_compile(**args)
-
     def test_precompile_missing_artifact_raises(self):
         from torchtitan.experiments.graph_trainer.compile import apply_compile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             args = self._make_args(
-                precompile=True,
                 precompile_artifact_dir=tmpdir,
                 passes=["full_inductor_compilation"],
             )
@@ -149,11 +137,10 @@ class TestApplyCompileValidation(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.compile import apply_compile
 
         args = self._make_args(
-            precompile=True,
             precompile_artifact_dir="/tmp/test",
             passes=["auto_bucketing"],
         )
-        with self.assertRaisesRegex(ValueError, "serializable pass"):
+        with self.assertRaisesRegex(ValueError, "serializable output"):
             apply_compile(**args)
 
 

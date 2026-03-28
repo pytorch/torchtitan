@@ -74,6 +74,7 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 Pre-compile lets you compile AOT graphs on a single GPU and save them to disk,
 then load them on all ranks during training — skipping compilation entirely.
 This uses compile-on-one-rank (CooR) to produce a rank-agnostic artifact.
+Setting `--compile.precompile_artifact_dir` enables precompile in both steps.
 
 **Artifact ephemerality:** Precompiled artifacts are tied to the exact PyTorch
 version, CUDA version, model architecture, and parallelism configuration used
@@ -89,7 +90,6 @@ python -m torchtitan.experiments.graph_trainer.precompile_main \
     --config graph_trainer_llama3_debugmodel \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
-    --compile.precompile \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2
@@ -101,7 +101,6 @@ torchrun --nproc_per_node=8 --virtual-local-rank \
     --config graph_trainer_llama3_debugmodel \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
-    --compile.precompile \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2

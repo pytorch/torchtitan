@@ -6,6 +6,7 @@
 
 import argparse
 import os
+import tempfile
 
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
@@ -13,6 +14,8 @@ from tests.integration_tests.run_tests import run_tests
 
 def _build_llama3_tests() -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
+    full_inductor_precompile_dir = tempfile.mkdtemp(prefix="precompile_")
+    regional_inductor_precompile_dir = tempfile.mkdtemp(prefix="precompile_")
     return [
         # === JIT mode tests ===
         OverrideDefinitions(
@@ -286,7 +289,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
         # === Precompile tests ===
         # Each precompile test runs precompile_main.py as a pre_command
         # (single process, 1 GPU) to generate the artifact, then the
-        # main training command loads it via --compile.precompile.
+        # main training command loads it from --compile.precompile_artifact_dir.
         OverrideDefinitions(
             [
                 [
@@ -295,8 +298,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--compile.mode aot",
                     "--compile.passes full_inductor_compilation",
                     "--compile.joint_passes inductor_decomposition",
-                    "--compile.precompile",
-                    "--compile.precompile_artifact_dir /tmp/precompile_test_full_inductor",
+                    f"--compile.precompile_artifact_dir {full_inductor_precompile_dir}",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -311,8 +313,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                 " --compile.mode aot"
                 " --compile.passes full_inductor_compilation"
                 " --compile.joint_passes inductor_decomposition"
-                " --compile.precompile"
-                " --compile.precompile_artifact_dir /tmp/precompile_test_full_inductor"
+                f" --compile.precompile_artifact_dir {full_inductor_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2",
             ],
@@ -324,8 +325,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--config graph_trainer_llama3_debugmodel_flex_attn",
                     "--compile.mode aot",
                     "--compile.passes regional_inductor",
-                    "--compile.precompile",
-                    "--compile.precompile_artifact_dir /tmp/precompile_test_regional_inductor",
+                    f"--compile.precompile_artifact_dir {regional_inductor_precompile_dir}",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -339,8 +339,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                 " --config graph_trainer_llama3_debugmodel_flex_attn"
                 " --compile.mode aot"
                 " --compile.passes regional_inductor"
-                " --compile.precompile"
-                " --compile.precompile_artifact_dir /tmp/precompile_test_regional_inductor"
+                f" --compile.precompile_artifact_dir {regional_inductor_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2",
             ],

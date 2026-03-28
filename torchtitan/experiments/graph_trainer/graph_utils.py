@@ -73,11 +73,12 @@ def export_joint(
 
     import torch.distributed.config as dist_config
 
-    old_coor = dist_config.compile_on_one_rank
-    if precompile:
-        dist_config.compile_on_one_rank = True
-
-    try:
+    coor_ctx = (
+        dist_config.patch("compile_on_one_rank", True)
+        if precompile
+        else contextlib.nullcontext()
+    )
+    with coor_ctx:
         with (
             # TODO Investigate error on MOE model with use_grouped_mm=False.
             # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
@@ -94,8 +95,6 @@ def export_joint(
                 aot_export_joint_with_descriptors_alone(gm, args, kwargs),
                 tracing_context,
             )
-    finally:
-        dist_config.compile_on_one_rank = old_coor
 
 
 def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
@@ -500,7 +499,7 @@ def get_compiler_passes_from_config(
                 )
             )
         elif pass_name == "regional_inductor" and getattr(
-            compile_config, "precompile", False
+            compile_config, "precompile_artifact_dir", ""
         ):
             # regional_inductor needs an explicit serializable=True at
             # the pass level so it produces serializable RegionalOutputCode.

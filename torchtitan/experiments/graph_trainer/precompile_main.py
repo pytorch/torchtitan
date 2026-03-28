@@ -18,7 +18,6 @@ Usage:
         --config graph_trainer_llama3_debugmodel \
         --compile.passes full_inductor_compilation \
         --compile.joint_passes inductor_decomposition \
-        --compile.precompile \
         --compile.precompile_artifact_dir /tmp/precompile_artifacts
 """
 
@@ -57,15 +56,17 @@ def main():
 
     compile_config = config.compile
 
-    if not compile_config.precompile:
-        raise ValueError("precompile_main requires --compile.precompile true")
     if not compile_config.precompile_artifact_dir:
         raise ValueError(
             "precompile_main requires --compile.precompile_artifact_dir to be set."
         )
+    # Only one pass in the pipeline needs to produce serializable OutputCode.
+    # Earlier graph passes like bucketing can still run as long as the final
+    # lowering pass is one of the serializable passes below.
     if not (_SERIALIZABLE_PASSES & set(compile_config.passes)):
         raise ValueError(
-            "precompile_main requires at least one serializable pass "
+            "precompile_main requires at least one pass that produces "
+            "serializable output "
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
 
@@ -89,6 +90,8 @@ def main():
 
     logger.info(f"Initializing single-process precompile with world_size={world_size}")
 
+    # rank must be 0 because --virtual-local-rank maps every torchrun rank
+    # to local rank 0, so the precompiled artifact needs to match that setup.
     # Fake backend produces correct collective output shapes without real
     # communication, letting us trace distributed ops on a single process.
     dist.init_process_group("fake", rank=0, world_size=world_size)
@@ -130,6 +133,8 @@ def main():
             "(e.g. --module graph_trainer.llama3)."
         )
 
+    # TODO: Factor the model setup below with the training path so precompile
+    # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
     model_config.update_from_config(trainer_config=config)
 

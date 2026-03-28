@@ -36,18 +36,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
 
-    precompile: bool = False
-    """
-    Enable precompiled artifact loading. Requires running precompile_main.py
-    first to generate the artifact. At training time, loads the artifact
-    and skips compilation entirely.
-    """
-
     precompile_artifact_dir: str = ""
     """
-    Directory where precompile artifacts are stored. Must be explicitly
-    set when precompile is enabled. For multi-node setups or persistence
-    across job restarts, use a shared filesystem path.
+    Directory for precompiled artifacts. Setting this enables precompile:
+    precompile_main.py saves the artifact here, and training loads it from
+    here to skip compilation. For multi-node setups use a shared filesystem
+    path.
     """
 
 
