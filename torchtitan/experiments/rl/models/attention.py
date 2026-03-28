@@ -247,6 +247,7 @@ class VLLMAttention(LocalMapAttention):
         *,
         scale: float | None = None,
         enable_gqa: bool = False,
+        attention_masks: None = None,  # Unused but needed for GQA varlen inference.
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
@@ -284,9 +285,9 @@ class VLLMAttention(LocalMapAttention):
         # which happens with cudagraph capture for dummy input
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
-        output = output_flat.view(batch_size, seq_len, -1, head_dim)
-        output = output.transpose(1, 2)
+        # Reshape back to the format expected by GQAttention.forward()
+        # varlen path expects (bs*seqlen, n_heads, head_dim)
+        output = output_flat.view(batch_size * seq_len, -1, head_dim)
 
         return output
 
@@ -329,6 +330,11 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
         # GQA
         head_dim = model_args.layer.attention.head_dim
+
+        # TODO Support flex attention backend later as well.
+        assert (
+            layer.attention.attn_backend == "varlen"
+        ), "Only varlen attention backend is allowed."
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
             num_heads=model_args.layer.attention.n_heads // tp_degree,

@@ -164,6 +164,9 @@ class VarlenAttentionWrapper(LocalMapAttention):
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            attention_masks, VarlenMetadata
+        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -249,6 +252,10 @@ class FlexAttentionWrapper(LocalMapAttention):
         return_lse: bool = False,
         enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            block_mask, (BlockMask, type(None))
+        ), f"block_mask must instance of BlockMask or None, got {type(block_mask)}"
+
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
@@ -643,7 +650,6 @@ class GQAttention(BaseAttention):
                     mask_key = "rope" if self.use_rope else "nope"
                     block_mask = attention_masks[mask_key]
                 else:
-                    assert isinstance(attention_masks, BlockMask), attention_masks
                     block_mask = attention_masks
                 output = (
                     self.inner_attention(
@@ -658,7 +664,6 @@ class GQAttention(BaseAttention):
                     .contiguous()
                 )
             case "varlen":
-                assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
                     xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
                 )
