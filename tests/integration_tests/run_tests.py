@@ -182,9 +182,9 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
 
-    assert args.test_suite in _TEST_SUITES_FUNCTION, (
-        f"Unknown test suite {args.test_suite}"
-    )
+    assert (
+        args.test_suite in _TEST_SUITES_FUNCTION
+    ), f"Unknown test suite {args.test_suite}"
 
     test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
     run_tests(args, test_list)
