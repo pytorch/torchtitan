@@ -144,11 +144,15 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     torch._inductor.config.triton.mix_order_reduction = False
     # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
-        block.compile(backend=compile_config.backend, fullgraph=True)
+        block.compile(
+            backend=compile_config.backend, fullgraph=True
+        )  # pyrefly: ignore [missing-attribute]
 
     # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
-        block.compile(backend=compile_config.backend, fullgraph=True)
+        block.compile(
+            backend=compile_config.backend, fullgraph=True
+        )  # pyrefly: ignore [missing-attribute]
 
     logger.info(
         "Compiling each DoubleStreamBlock and SingleStreamBlock with torch.compile"
