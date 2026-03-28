@@ -169,10 +169,9 @@ def main():
 
     logger.info("Model parallelized and materialized, starting AOT compile")
 
-    # parallelize_fn called apply_graph_ac on no_compile_config (the copy
-    # with enable=False).  We need the same joint_passes augmentation on
-    # the real compile_config so that (a) the apply_sac pass runs during
-    # compilation and (b) the config fingerprint matches the train path.
+    # Augment compile_config with AC joint passes to match the training
+    # path, which calls apply_graph_ac during parallelization. Without
+    # this the SAC pass won't run and the config fingerprint will differ.
     if config.activation_checkpoint.mode != "none":
         apply_graph_ac(compile_config, config.activation_checkpoint)
 
