@@ -11,14 +11,14 @@ Supports two compilation modes via --compile.mode:
 - JIT: standard torch.compile() with custom backend
 - AOT: explicit joint graph export + custom graph passes
 
-Additionally supports pre-compile via --compile.precompile:
-- On first run: compiles with serializable=True, saves the artifact, continues training
-- On subsequent runs: detects existing artifact, loads it, skips compilation
+Additionally supports pre-compile via --compile.precompile_artifact_dir:
+- When set during training, loads a precompiled artifact and skips compilation
+  entirely
+- Generate artifacts with precompile_main.py
 """
 
 import dataclasses
 import functools
-import pickle
 
 import torch
 import torch.nn as nn
@@ -42,6 +42,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
 from torchtitan.experiments.graph_trainer.jit_backend import (
     get_compile_backend_with_passes,
 )
+from torchtitan.experiments.graph_trainer.precompile import ConfigFingerprint
 from torchtitan.experiments.graph_trainer.storage import (
     DiskStorageAdapter,
     StorageAdapter,
@@ -60,11 +61,7 @@ def _get_precompile_storage_and_key(
     compile_config: GraphTrainerCompileConfig,
 ) -> tuple[StorageAdapter, str]:
     storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-    rank = torch.distributed.get_rank()
-    # Per-rank artifact keys will go away once the Compile on one Rank
-    # (CooR) project lands — at that point we will precompile once and
-    # reuse that artifact across all ranks.
-    artifact_key = f"default_rank{rank}"
+    artifact_key = "default"
     return storage, artifact_key
 
 
@@ -95,18 +92,17 @@ def _make_precompile_callback(
     parallel_dims: ParallelDims,
     storage: StorageAdapter | None = None,
     artifact_key: str | None = None,
+    config_fingerprint: ConfigFingerprint | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
-    from .precompile import (
-        compute_config_fingerprint,
-        precompile_save,
-    )
+    from .precompile import compute_config_fingerprint, precompile_save
 
     if storage is None or artifact_key is None:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallel_dims
-    )
+    if config_fingerprint is None:
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, parallel_dims
+        )
 
     def on_compile(compiled_fn, out_spec):
         precompile_save(
@@ -117,7 +113,6 @@ def _make_precompile_callback(
             out_spec=out_spec,
             metadata={
                 "world_size": torch.distributed.get_world_size(),
-                "rank": torch.distributed.get_rank(),
             },
             config_fingerprint=config_fingerprint,
         )
@@ -136,39 +131,29 @@ def _apply_aot_compile(
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
 
-    # When precompile is enabled, compute storage/key once and reuse them
-    # for both the load attempt and the save callback to avoid duplicate
-    # DiskStorageAdapter construction and fingerprint computation.
+    # When loading a precompiled artifact, compute storage/key/fingerprint
+    # once before checking for existence and deserializing the artifact.
     storage: StorageAdapter | None = None
     artifact_key: str | None = None
-    if compile_config.precompile:
+    config_fingerprint: ConfigFingerprint | None = None
+    if compile_config.precompile_artifact_dir:
+        from .precompile import compute_config_fingerprint
+
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, parallel_dims
+        )
 
-        if storage.exists(artifact_key):
-            from .precompile import (
-                compute_config_fingerprint,
+        if not storage.exists(artifact_key):
+            raise ValueError(
+                f"Precompiled artifact not found at "
+                f"'{compile_config.precompile_artifact_dir}/{artifact_key}'. "
+                f"Run precompile_main first to generate the artifact."
             )
 
-            config_fingerprint = compute_config_fingerprint(
-                model, compile_config, parallel_dims
-            )
-            try:
-                return _apply_aot_compile_load(
-                    model, parallel_dims, storage, artifact_key, config_fingerprint
-                )
-            except (ValueError, pickle.UnpicklingError, RuntimeError) as e:
-                # ValueError: fingerprint/param/buffer mismatches from our
-                # validation. pickle.UnpicklingError: corrupted or
-                # incompatible serialized data. RuntimeError: intentionally
-                # broad to catch remaining deserialization failures (e.g.
-                # shape mismatches in torch.load) that surface as
-                # RuntimeError. We log the exception type so unrelated
-                # errors (CUDA OOM, NCCL) are distinguishable in logs.
-                logger.warning(
-                    f"Stale precompile artifact detected ({type(e).__name__}), "
-                    f"recompiling: {e}"
-                )
-                storage.delete(artifact_key)
+        return _apply_aot_compile_load(
+            model, parallel_dims, storage, artifact_key, config_fingerprint
+        )
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(
@@ -187,19 +172,6 @@ def _apply_aot_compile(
         compiler_passes, dump_folder=dump_folder
     )
 
-    serializable = compile_config.precompile
-    on_compile = (
-        _make_precompile_callback(
-            model,
-            compile_config,
-            parallel_dims,
-            storage=storage,
-            artifact_key=artifact_key,
-        )
-        if serializable
-        else None
-    )
-
     # Create custom joint_graph_builder with compilers
     model_joint_graph_builder = functools.partial(
         joint_graph_builder,
@@ -208,17 +180,12 @@ def _apply_aot_compile(
         joint_custom_passes=joint_custom_passes,
         dump_folder=dump_folder,
         compile_config=compile_config,
-        serializable=serializable,
-        on_compile=on_compile,
     )
 
     model = CompiledModule(
         model, parallel_dims, model_joint_graph_builder, parallelize_inputs
     )
-    msg = "Applied AOT compilation (joint graph export) to the model"
-    if serializable:
-        msg += " with serializable=True (precompile save)"
-    logger.info(msg)
+    logger.info("Applied AOT compilation (joint graph export) to the model")
     return model
 
 
@@ -227,7 +194,7 @@ def _apply_aot_compile_load(
     parallel_dims: ParallelDims,
     storage: StorageAdapter,
     artifact_key: str,
-    config_fingerprint: str,
+    config_fingerprint: ConfigFingerprint,
 ) -> CompiledModule:
     """Load a precompiled artifact and wrap the model with it."""
     from .precompile import precompile_load
@@ -237,13 +204,15 @@ def _apply_aot_compile_load(
     register_blockmask_pytree_node()
 
     precompiled_fn = precompile_load(
-        model, storage, artifact_key, expected_fingerprint=config_fingerprint
+        model,
+        storage,
+        artifact_key,
+        expected_fingerprint=config_fingerprint,
     )
 
     def _unused_graph_builder(*args, **kwargs):
         raise RuntimeError(
-            "joint_graph_builder should not be called when "
-            "using a precompiled artifact"
+            "joint_graph_builder should not be called when using a precompiled artifact"
         )
 
     compiled_model = CompiledModule(
@@ -290,18 +259,19 @@ def apply_compile(
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
     )
 
-    if compile_config.precompile and mode != "aot":
+    if compile_config.precompile_artifact_dir and mode != "aot":
         logger.warning(
-            "--compile.precompile is only supported with --compile.mode=aot, "
-            f"but mode is '{mode}'. Ignoring precompile."
+            "--compile.precompile_artifact_dir is only supported with "
+            f"--compile.mode=aot, but mode is '{mode}'. Ignoring precompile."
         )
-        compile_config = dataclasses.replace(compile_config, precompile=False)
+        compile_config = dataclasses.replace(compile_config, precompile_artifact_dir="")
 
-    if compile_config.precompile and not (
+    if compile_config.precompile_artifact_dir and not (
         _SERIALIZABLE_PASSES & set(compile_config.passes)
     ):
         raise ValueError(
-            "--compile.precompile requires at least one serializable pass "
+            "--compile.precompile_artifact_dir requires at least one pass that "
+            "produces serializable output "
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
 

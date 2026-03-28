@@ -69,6 +69,47 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode jit --compile.backend inductor
 ```
 
+### Pre-compile (Compile-on-One-Rank)
+
+Pre-compile lets you compile AOT graphs on a single GPU and save them to disk,
+then load them on all ranks during training — skipping compilation entirely.
+This uses compile-on-one-rank (CooR) to produce a rank-agnostic artifact.
+Setting `--compile.precompile_artifact_dir` enables precompile in both steps.
+
+**Artifact ephemerality:** Precompiled artifacts are tied to the exact PyTorch
+version, CUDA version, model architecture, and parallelism configuration used
+to create them. Changing any of these requires regenerating the artifacts.
+Stale artifacts are detected automatically via config fingerprinting and
+will raise an error at load time. Delete old artifacts and re-run
+precompile when upgrading PyTorch or changing the model/parallelism setup.
+
+```bash
+# Step 1: precompile on a single process (needs only 1 GPU)
+python -m torchtitan.experiments.graph_trainer.precompile_main \
+    --module graph_trainer.llama3 \
+    --config graph_trainer_llama3_debugmodel \
+    --compile.passes full_inductor_compilation \
+    --compile.joint_passes inductor_decomposition \
+    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2
+
+# Step 2: load and train with torchrun (uses all GPUs)
+torchrun --nproc_per_node=8 --virtual-local-rank \
+    -m torchtitan.train \
+    --module graph_trainer.llama3 \
+    --config graph_trainer_llama3_debugmodel \
+    --compile.passes full_inductor_compilation \
+    --compile.joint_passes inductor_decomposition \
+    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2
+```
+
+Pre-compile works with any compiler pass that produces serializable output,
+including `full_inductor_compilation` and `regional_inductor`. Use a shared
+filesystem path for the artifact directory in multi-node setups.
+
 ### Composability Support
 
 Some of the features require the updates from PyTorch, with which we are working on providing composability support for the following features:
