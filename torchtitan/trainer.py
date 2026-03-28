@@ -30,7 +30,7 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import Configurable
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     CommConfig,
@@ -41,6 +41,12 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.model_setup import (
+    build_model_on_meta,
+    materialize_model,
+    parallelize_model,
+    prepare_model_config,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -243,9 +249,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build model (using meta init)
-        model_config = model_spec.model
-        # set the model args from training job configs
-        model_config.update_from_config(
+        model_config = prepare_model_config(
+            model_spec=model_spec,
             trainer_config=config,
         )
         self.model_config = model_config
@@ -254,11 +259,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
-        with (
-            torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
-        ):
-            model = model_config.build()
+        model = build_model_on_meta(
+            model_config=model_config,
+            training_dtype=config.training.dtype,
+        )
 
         # Build the collection of model converters. No-op if converters empty
         model_compile_enabled = (
@@ -375,10 +379,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             del model
 
             for m in self.model_parts:
-                m.to_empty(device=init_device)
-                with torch.no_grad():
-                    cast(Decoder, m).init_weights(buffer_device=buffer_device)
-                m.train()
+                materialize_model(
+                    cast(Decoder, m),
+                    init_device=init_device,
+                    buffer_device=buffer_device,
+                )
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(
@@ -388,8 +393,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
         else:
             # apply Tensor/Context/Expert Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = model_spec.parallelize_fn(
+            model = parallelize_model(
                 model,
+                model_spec=model_spec,
                 parallel_dims=parallel_dims,
                 training=config.training,
                 model_converters=config.model_converters,
@@ -399,10 +405,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 dump_folder=config.dump_folder,
             )
 
-            model.to_empty(device=init_device)
-            with torch.no_grad():
-                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-            model.train()
+            model = materialize_model(
+                model,
+                init_device=init_device,
+                buffer_device=buffer_device,
+            )
 
             self.model_parts = [model]
 

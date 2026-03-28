@@ -27,7 +27,7 @@ import functools
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     apply_graph_ac,
@@ -45,6 +45,12 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
     get_joint_custom_passes_from_config,
     joint_graph_builder,
     make_compiler_with_passes,
+)
+from torchtitan.model_setup import (
+    build_model_on_meta,
+    materialize_model,
+    parallelize_model,
+    prepare_model_config,
 )
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -133,23 +139,23 @@ def main():
             "(e.g. --module graph_trainer.llama3)."
         )
 
-    # TODO: Factor the model setup below with the training path so precompile
-    # and training share a single implementation of build/parallelize/init.
-    model_config = model_spec.model
-    model_config.update_from_config(trainer_config=config)
+    model_config = prepare_model_config(
+        model_spec=model_spec,
+        trainer_config=config,
+    )
 
     logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")
-    with (
-        torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
-    ):
-        model = model_config.build()
+    model = build_model_on_meta(
+        model_config=model_config,
+        training_dtype=config.training.dtype,
+    )
 
     model.verify_module_protocol()
 
     no_compile_config = dataclasses.replace(compile_config, enable=False)
-    model = model_spec.parallelize_fn(
+    model = parallelize_model(
         model,
+        model_spec=model_spec,
         parallel_dims=parallel_dims,
         training=config.training,
         model_converters=config.model_converters,
@@ -162,15 +168,12 @@ def main():
     # CooR must be disabled during init_weights because DTensor RNG ops
     # (weight initialization seeding) raise NotImplementedError under
     # compile_on_one_rank=True. Re-enable for the tracing phase after.
-    device_type = utils.device_type
-    model.to_empty(device=device_type)
-    dist_config.compile_on_one_rank = False
-    try:
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-    finally:
-        dist_config.compile_on_one_rank = True
-    model.train()
+    model = materialize_model(
+        model,
+        init_device=utils.device_type,
+        buffer_device=None,
+        init_weights_context=dist_config.patch("compile_on_one_rank", False),
+    )
 
     logger.info("Model parallelized and materialized, starting AOT compile")
 
