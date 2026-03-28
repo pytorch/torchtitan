@@ -54,7 +54,6 @@ def llama3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
         validator=Validator.Config(
             freq=5,
@@ -131,7 +130,6 @@ def llama3_8b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
         validator=Validator.Config(
             freq=500,

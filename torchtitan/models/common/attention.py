@@ -4,6 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# TODO: Re-enable once we have closed
+# https://github.com/pytorch/torchtitan/issues/2722
+os.environ.setdefault("DISABLE_LLVM_OPT", "1")
+
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,10 +17,13 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     _score_mod_signature,
+    AuxRequest,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -34,6 +43,7 @@ from torchtitan.protocols.module import Module
 __all__ = [
     "FlexAttentionWrapper",
     "GQAttention",
+    "LocalMapAttention",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
     "VarlenMetadata",
@@ -61,19 +71,102 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class VarlenAttentionWrapper(Module):
+class LocalMapAttention(Module):
+    """Base class for inner attention wrappers with DTensor support.
+
+    When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
+    overrides ``__call__`` to wrap ``nn.Module.__call__`` with ``local_map``.
+    This converts TP DTensors to local **before** any ``forward_pre_hook``
+    (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
+    DTensors **after** all ``forward_hook``s complete.
+
+    Placements and device mesh are inferred from the input DTensors.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._local_map_fn: Callable | None = None
+
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        if isinstance(q, DTensor):
+            assert isinstance(k, DTensor) and isinstance(
+                v, DTensor
+            ), "q, k, v should all be DTensors"
+            # All placements must be Shard. We set
+            # out_placements and in_grad_placements equal to
+            # in_placements below. This is only valid for attention
+            # as qkv are sharded on the n_heads dim. CP is handled
+            # independently by _ContextParallel hooks inside
+            # nn.Module.__call__.
+            assert q.placements == k.placements == v.placements, (
+                f"q, k, v must have the same placements, "
+                f"but got q={q.placements}, k={k.placements}, v={v.placements}"
+            )
+            # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
+            # on the n_heads dim (dim 1)
+            # TODO: after full DTensor rewrite, the DP mesh will also be
+            # present, update this check to allow Shard(0) for DP and Shard(1) for TP.
+            for i, p in enumerate(q.placements):
+                assert p == Shard(1), (
+                    f"LocalMapAttention requires Shard(1) placements "
+                    f"(n_heads dim), but got {p} at position {i}"
+                )
+            # return_lse=True (e.g. gpt_oss attention sinks) produces
+            # 2 outputs instead of 1, requiring different out_placements.
+            return_lse = kwargs.get("return_lse", False)
+            out_placements = (
+                (q.placements, q.placements) if return_lse else (q.placements,)
+            )
+            if self._local_map_fn is None:
+                self._local_map_fn = local_map(
+                    super().__call__,
+                    in_placements=(q.placements, k.placements, v.placements),
+                    out_placements=out_placements,
+                    in_grad_placements=(q.placements, k.placements, v.placements),
+                    device_mesh=q.device_mesh,
+                )
+            # pyrefly: ignore [bad-argument-count]
+            return self._local_map_fn(q, k, v, **kwargs)
+        return super().__call__(q, k, v, **kwargs)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class VarlenAttentionWrapper(LocalMapAttention):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
     )
 
+    # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
         xq: torch.Tensor,
         xk: torch.Tensor,
         xv: torch.Tensor,
+        *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            attention_masks, VarlenMetadata
+        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -118,7 +211,7 @@ class VarlenAttentionWrapper(Module):
         ).to(xq.dtype)
 
 
-class FlexAttentionWrapper(Module):
+class FlexAttentionWrapper(LocalMapAttention):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
@@ -146,6 +239,7 @@ class FlexAttentionWrapper(Module):
         options=inductor_configs,
     )
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -158,22 +252,29 @@ class FlexAttentionWrapper(Module):
         return_lse: bool = False,
         enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            block_mask, (BlockMask, type(None))
+        ), f"block_mask must instance of BlockMask or None, got {type(block_mask)}"
+
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
-        #    to convert `lse` to be DTensor.
-        return FlexAttentionWrapper._compiled_flex_attn(
+        out, aux = FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
             block_mask=block_mask,
             scale=scale,
             enable_gqa=enable_gqa,
-            return_lse=return_lse,
+            return_aux=AuxRequest(lse=return_lse),
         )
+        # Note: return a tuple of Tensor to make converting `lse`
+        # to DTensor easier with TP module notation.
+        if return_lse:
+            return out, aux.lse
+        return out
 
 
 @contextmanager
@@ -199,7 +300,7 @@ def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, Non
         FlexAttentionWrapper.forward = orig
 
 
-class ScaledDotProductAttentionWrapper(Module):
+class ScaledDotProductAttentionWrapper(LocalMapAttention):
     """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
     This wrapper is needed because `F.scaled_dot_product_attention` is not
@@ -222,6 +323,7 @@ class ScaledDotProductAttentionWrapper(Module):
                 SDPBackend.MATH,
             ]
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -548,7 +650,6 @@ class GQAttention(BaseAttention):
                     mask_key = "rope" if self.use_rope else "nope"
                     block_mask = attention_masks[mask_key]
                 else:
-                    assert isinstance(attention_masks, BlockMask), attention_masks
                     block_mask = attention_masks
                 output = (
                     self.inner_attention(
@@ -563,9 +664,8 @@ class GQAttention(BaseAttention):
                     .contiguous()
                 )
             case "varlen":
-                assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq, xk, xv, attention_masks, **scale_kwargs
+                    xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
                 )
             case "sdpa":
                 assert attention_masks is None
@@ -582,7 +682,6 @@ class GQAttention(BaseAttention):
                 )
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_backend}")
-
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 

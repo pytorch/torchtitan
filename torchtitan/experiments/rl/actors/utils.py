@@ -7,32 +7,64 @@
 import torch
 import torch.nn.functional as F
 
+from torchtitan.models.common.attention import VarlenMetadata
+
+
+# TODO We should either unify all the mask creation for RL, or move them to a
+#      single file.
+def build_varlen_metadata(
+    input_sequences: list[tuple[torch.Tensor, int, int]], device: torch.device
+) -> VarlenMetadata:
+    """Build VarlenMetadata for all sequences in a batch."""
+    cu_seqs = torch.cumsum(
+        torch.tensor(
+            [0] + [token_ids.shape[0] for token_ids, _, _ in input_sequences],
+            dtype=torch.int32,
+            device=device,
+        ),
+        0,
+        dtype=torch.int32,
+    )
+    max_len = max(token_ids.shape[0] for token_ids, _, _ in input_sequences)
+    return VarlenMetadata(
+        cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
+    )
+
 
 def compute_token_log_probs(
     model: torch.nn.Module,
-    prompt_token_ids: list[int],
-    gen_token_ids: list[int],
+    prompt_ids: list[int],
+    gen_ids: list[int],
     device: torch.device,
 ) -> torch.Tensor:
     """
     Compute per-token log probabilities for generated tokens.
+    TODO Only batch size 1 is supported for now.
 
     Args:
         model: The model to use for computing logits
-        prompt_token_ids: Token IDs for the prompt
-        gen_token_ids: Token IDs for the generated completion
+        prompt_ids: Prompt token IDs
+        gen_ids: Generated token IDs
         device: Device to run computation on
 
     Returns:
         Per-token log probabilities for the generated tokens
     """
-    full_sequence = prompt_token_ids + gen_token_ids
-    full_tensor = torch.tensor(
-        full_sequence, dtype=torch.long, device=device
-    ).unsqueeze(0)
+    token_ids = torch.tensor(prompt_ids + gen_ids, dtype=torch.long, device=device)
+    prompt_len = len(prompt_ids)
+    gen_len = len(gen_ids)
+    attention_masks = build_varlen_metadata([(token_ids, prompt_len, gen_len)], device)
 
-    # Forward pass — trainer uses is_position_id=False so positions=None is fine
-    logits = model(full_tensor, attention_masks=None)
+    full_tensor = token_ids.unsqueeze(0)
+
+    # NOTE: We should move towards batching to improve efficiency here
+    # See https://github.com/pytorch/torchtitan/issues/2674
+    # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
+    # which breaks torch.compile with symbolic shapes.
+    seq_len = full_tensor.shape[1]
+    positions = torch.arange(seq_len, device=device).unsqueeze(0)
+
+    logits = model(full_tensor, attention_masks=attention_masks, positions=positions)
 
     # Convert to float32 for numerical stability
     logits_f32 = logits[:, :-1, :].to(torch.float32)
@@ -40,9 +72,8 @@ def compute_token_log_probs(
     target_tokens = full_tensor[:, 1:]
 
     # Extract log probs for generated tokens only
-    prompt_len = len(prompt_token_ids)
     gen_start_idx = prompt_len - 1
-    gen_end_idx = gen_start_idx + len(gen_token_ids)
+    gen_end_idx = gen_start_idx + gen_len
 
     gen_token_logprobs = log_probs[0, gen_start_idx:gen_end_idx, :]
     gen_token_ids_tensor = target_tokens[0, gen_start_idx:gen_end_idx]
@@ -91,7 +122,12 @@ def compute_policy_gradient_loss(
     batch_token_log_probs = []
 
     for prompt_toks, gen_toks in zip(prompt_token_ids, vllm_token_ids):
-        token_lps = compute_token_log_probs(model, prompt_toks, gen_toks, device)
+        token_lps = compute_token_log_probs(
+            model,
+            prompt_toks,
+            gen_toks,
+            device,
+        )
         batch_token_log_probs.append(token_lps)
 
     # Per-token log ratios and KL, averaged across tokens per sample
