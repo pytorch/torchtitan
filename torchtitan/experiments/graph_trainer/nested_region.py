@@ -21,7 +21,9 @@ automatically flattened as explicit positional operands so invoke_subgraph can
 deduplicate across calls with identical structure (e.g. repeated transformer
 blocks sharing one traced subgraph).
 
-For free functions, all inputs must already be positional tensor arguments.
+Tensor arguments (positional and keyword) become invoke_subgraph operands.
+Non-tensor arguments (None, int, etc.) are specialized as constants inside the
+subgraph, mirroring Dynamo's "automatic" input mode for invoke_subgraph.
 """
 
 from typing import Any, Callable
@@ -186,7 +188,9 @@ def aot_nested_region(
     For nn.Module instances and method decorators, parameters and buffers are
     automatically flattened as leading operands for deduplication across layers.
 
-    For free functions, all inputs must already be positional tensor arguments.
+    Tensor arguments (positional and keyword) become invoke_subgraph operands.
+    Non-tensor arguments (None, int, etc.) are specialized as constants inside the
+    subgraph, mirroring Dynamo's "automatic" input mode for invoke_subgraph.
 
     Usage on an nn.Module instance::
 
@@ -201,7 +205,7 @@ def aot_nested_region(
 
     Usage as a decorator on a free function::
 
-        @aot_nested_region(hash_fn=lambda *args: "block")
+        @aot_nested_region(hash_fn=lambda *args, **kwargs: "block")
         def block_fwd(x, w1, b1, w2, b2):
             ...
 
@@ -231,15 +235,6 @@ def aot_nested_region(
         orig_fn = target
 
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # For free functions (not method decorators), reject kwargs eagerly.
-            # Method decorator calls have args[0] as the nn.Module instance.
-            is_method_call = args and isinstance(args[0], nn.Module)
-            if kwargs and not is_method_call:
-                raise ValueError(
-                    "aot_nested_region does not support keyword arguments for free "
-                    f"functions. Got kwargs: {set(kwargs.keys())}."
-                )
-
             if get_proxy_mode() is None:
                 return orig_fn(*args, **kwargs)
 
@@ -257,16 +252,22 @@ def aot_nested_region(
                 bound_method = orig_fn.__get__(module, type(module))
                 return _invoke_as_module(module, bound_method, cache_key, args[1:], kwargs)
 
-            # Free function path: only positional tensor args become operands.
-            tensor_arg_indices = [i for i, a in enumerate(args) if isinstance(a, torch.Tensor)]
-            tensor_args = tuple(args[i] for i in tensor_arg_indices)
-            all_operands = tensor_args
+            # Free function path: only tensor args/kwargs become operands.
+            tensor_arg_indices, tensor_kwarg_keys, tensor_args, tensor_kwargs = (
+                _extract_tensor_operands(args, kwargs)
+            )
+            all_operands = (*tensor_args, *tensor_kwargs)
 
             def subgraph_fn(*operands: Any) -> tuple:
-                full_args = list(args)
-                for idx, val in zip(tensor_arg_indices, operands):
-                    full_args[idx] = val
-                out = orig_fn(*full_args)
+                n_tensor_args = len(tensor_arg_indices)
+                tensor_fwd_args = operands[:n_tensor_args]
+                tensor_fwd_kwargs = operands[n_tensor_args:]
+                full_args, full_kwargs = _reconstruct_args_kwargs(
+                    args, kwargs,
+                    tensor_arg_indices, tensor_kwarg_keys,
+                    tensor_fwd_args, tensor_fwd_kwargs,
+                )
+                out = orig_fn(*full_args, **full_kwargs)
                 if isinstance(out, torch.Tensor):
                     return (out,)
                 return tuple(out) if isinstance(out, (list, tuple)) else (out,)
