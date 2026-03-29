@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -16,8 +16,11 @@ import torch.utils._pytree as pytree
 from torch._functorch._aot_autograd.logging_utils import (
     setup_stacktrace_preservation_hooks,
 )
+from torch._guards import TracingContext, tracing
+from torch._higher_order_ops.invoke_subgraph import InvokeSubgraphAutogradOp
+from torch._higher_order_ops.utils import reenter_make_fx
 from torch._subclasses import FakeTensorMode
-from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.experimental.proxy_tensor import get_proxy_mode, make_fx
 from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
@@ -177,6 +180,178 @@ def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
 
     gm.graph.lint()
     gm.recompile()
+
+
+def _trace_bw_graph_for_make_fx(
+    subgraph_fn: Callable,
+    num_primals: int,
+    num_tangents: int,
+    primals_and_tangents: tuple,
+) -> torch.fx.GraphModule:
+    """Trace the backward graph for an invoke_subgraph subgraph inside make_fx.
+
+    Differentiates through the original Python callable (subgraph_fn) rather
+    than a pre-traced GraphModule. The backward re-runs the forward from
+    scratch (activation-checkpointing style) so no partitioner is needed.
+
+    reenter_make_fx converts primals_and_tangents into fresh leaf fake tensors,
+    preserving requires_grad=True for params and activations alike (requires_grad
+    is True for both leaf params and non-leaf activation tensors output by prior
+    invoke_subgraph calls). No .detach() or .requires_grad_() is needed: we never
+    touch requires_grad on the original primals, and the fresh leaf fake tensors
+    inside bwd_fn have the correct requires_grad for torch.autograd.grad.
+
+    Output signature: (*primals, *tangents) → (*grads_for_all_primals, *fw_outs)
+    so InvokeSubgraphAutogradOp.backward can extract grads via [:num_primals].
+    """
+
+    def bwd_fn(*args: torch.Tensor) -> tuple:
+        primals = list(args[:num_primals])
+        tangents = list(args[num_primals : num_primals + num_tangents])
+
+        with torch.enable_grad():
+            # Differentiate through the original Python callable, not the
+            # pre-traced gm. This ensures correct autograd semantics; the
+            # forward is recomputed here (activation-checkpointing style).
+            fw_outs = subgraph_fn(*primals)
+
+        if isinstance(fw_outs, torch.Tensor):
+            fw_outs = (fw_outs,)
+        fw_outs = tuple(fw_outs)
+
+        differentiable_outs = [
+            o for o in fw_outs if isinstance(o, torch.Tensor) and o.requires_grad
+        ]
+        differentiable_ins = [
+            p for p in primals if isinstance(p, torch.Tensor) and p.requires_grad
+        ]
+
+        raw_grads = torch.autograd.grad(
+            differentiable_outs, differentiable_ins, tangents, allow_unused=True
+        )
+
+        # Map back to all primals, zeros for non-differentiable.
+        grad_iter = iter(raw_grads)
+        all_grads: list[torch.Tensor] = []
+        for p in primals:
+            if isinstance(p, torch.Tensor) and p.requires_grad:
+                g = next(grad_iter)
+                all_grads.append(g if g is not None else torch.zeros_like(p))
+            else:
+                all_grads.append(torch.zeros_like(p) if isinstance(p, torch.Tensor) else p)
+
+        # Signature: (*grads_for_all_primals, *fw_outs)
+        return tuple(all_grads) + fw_outs
+
+    return reenter_make_fx(bwd_fn)(*primals_and_tangents)
+
+
+@contextmanager
+def _patch_invoke_subgraph_backward() -> Generator[None, None, None]:
+    """Patch InvokeSubgraphAutogradOp.backward to handle make_fx tracing context.
+
+    In the normal torch.compile path, InvokeSubgraphAutogradOp.backward is
+    called by AOTAutograd's joint tracer with fake tensors. It lazily traces a
+    bw_graph via trace_joint_graph_as_bwd (which uses create_joint, an
+    AOTAutograd utility) and emits an invoke_subgraph(bw_graph, ...) HOP node.
+
+    When loss.backward() is called inside make_fx instead, two things break:
+
+    1. trace_joint_graph_as_bwd / create_joint is AOTAutograd machinery that is
+       not appropriate for the make_fx tracing path. A concrete symptom: it reads
+       output_node.meta["val"].requires_grad to filter tangents, but snapshot_fake
+       always strips requires_grad → all outputs appear non-differentiable →
+       filtered_grad_outs=[] → AssertionError inside create_joint.
+
+    2. The C++ autograd engine runs InvokeSubgraphAutogradOp.backward on a worker
+       thread. threading.local() does not propagate across threads, so
+       get_invoke_subgraph_cache() returns None on the worker thread even though
+       a TracingContext is active on the main thread.
+
+    This patch fixes both: it captures the TracingContext on the main thread and
+    re-establishes it on the worker thread, and replaces trace_joint_graph_as_bwd
+    with _trace_bw_graph_for_make_fx, which runs subgraph_fn (the original Python
+    callable) directly to build a real autograd graph and uses torch.autograd.grad
+    — no AOTAutograd machinery needed.
+
+    TODO(upstream): This patch should be contributed upstream to PyTorch once the
+    make_fx-based tracer moves out of torchtitan/experiments. At that point,
+    InvokeSubgraphAutogradOp.backward should natively handle the make_fx tracing
+    context instead of requiring this monkey-patch.
+    """
+    from torch._guards import TracingContext, tracing
+    from torch._higher_order_ops.invoke_subgraph import (
+        get_invoke_subgraph_cache,
+        invoke_subgraph,
+        saved_values,
+    )
+
+    # Capture the TracingContext from the main thread now. The autograd engine
+    # runs InvokeSubgraphAutogradOp.backward on a worker thread, where
+    # threading.local() does not propagate — so get_invoke_subgraph_cache()
+    # would return None if we didn't re-establish the context inside the patch.
+    captured_tracing_ctx = TracingContext.try_get()
+
+    _orig_backward = InvokeSubgraphAutogradOp.backward
+
+    @staticmethod  # type: ignore[misc]
+    def _patched_backward(ctx, *grad_outs):  # type: ignore[no-untyped-def]
+        if get_proxy_mode() is None:
+            # Not in make_fx — use the original path unchanged.
+            return _orig_backward(ctx, *grad_outs)
+
+        # Re-establish the TracingContext for this worker thread so that
+        # get_invoke_subgraph_cache() can find the cache.
+        with tracing(captured_tracing_ctx):
+            return _patched_backward_impl(ctx, *grad_outs)
+
+    @staticmethod  # type: ignore[misc]
+    def _patched_backward_impl(ctx, *grad_outs):  # type: ignore[no-untyped-def]
+        # ── make_fx path ──────────────────────────────────────────────────────
+        subgraph = ctx._subgraph
+        identifier = ctx._identifier
+        primals = saved_values(ctx)
+
+        # We do not use output_metadata.indexes_with_no_grad here.
+        # _trace_bw_graph_for_make_fx runs subgraph_fn directly and inspects
+        # o.requires_grad on the real (fake) tensors to determine differentiability,
+        # so static graph metadata is not needed. The C++ autograd engine already
+        # passes None for outputs that don't require grad, so filtering by
+        # o is not None is sufficient.
+        tangents = tuple(o for o in grad_outs if o is not None)
+        primals_and_tangents = primals + tangents
+
+        # Use the original Python callable stored on the gm so we differentiate
+        # through the source function rather than the pre-traced graph.
+        # Falls back to the gm itself for subgraphs not created by aot_nested_region
+        # (e.g. mark_compile_region), preserving the old behavior.
+        subgraph_fn = getattr(subgraph, "_orig_subgraph_fn", subgraph)
+
+        bw_graph = _trace_bw_graph_for_make_fx(
+            subgraph_fn, len(primals), len(tangents), primals_and_tangents
+        )
+
+        invoke_subgraph_cache = get_invoke_subgraph_cache()
+        assert invoke_subgraph_cache is not None, (
+            "_patched_backward: expected TracingContext to be active on this thread "
+            "(captured_tracing_ctx should have been re-established via tracing())"
+        )
+        existing, suffix = invoke_subgraph_cache.get_lazy_bwd_entry(identifier, ())
+        if existing is None:
+            suffix = invoke_subgraph_cache.add_lazy_bwd_entry(identifier, (), bw_graph)
+
+        # bw_graph output: (*grads_for_all_primals, *fw_outs)
+        # We want only the gradient tensors (first len(primals) outputs).
+        grads = invoke_subgraph(
+            bw_graph, f"bw_{identifier}_{suffix}", *primals_and_tangents
+        )[: len(primals)]
+        return None, None, None, *grads
+
+    InvokeSubgraphAutogradOp.backward = _patched_backward
+    try:
+        yield
+    finally:
+        InvokeSubgraphAutogradOp.backward = _orig_backward
 
 
 @contextmanager
@@ -339,7 +514,11 @@ def trace_module(
         return unwrapped_outputs
 
     # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with fake_mode, preserve_node_meta(), _skip_nested_compile():
+    # Install TracingContext so that invoke_subgraph's ProxyTorchDispatchMode impl
+    # can cache traced subgraphs (its cache lives in TracingContext.hop_dispatch_set_cache).
+    # Without this, invoke_subgraph re-traces the subgraph on every call.
+    tracing_ctx = TracingContext(fake_mode=fake_mode)
+    with fake_mode, preserve_node_meta(), _skip_nested_compile(), tracing(tracing_ctx), _patch_invoke_subgraph_backward():
         traced = make_fx(
             fn_with_subclass_handling,
             record_stack_traces=True,
