@@ -195,9 +195,9 @@ def qwen3_14b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=1,
+            tensor_parallel_degree=2,
             context_parallel_degree=1,
-            pipeline_parallel_degree=1,
+            pipeline_parallel_degree=2,
         ),
         checkpoint=CheckpointManager.Config(
             interval=500,
