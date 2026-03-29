@@ -199,7 +199,7 @@ def apply_non_moe_tp(
     embed_plan = RowwiseParallel(
         input_layouts=Replicate(),
         output_layouts=sp_layout,
-        use_local_output=enable_sp,
+        use_local_output=False,
     )
 
     parallelize_module(
@@ -207,7 +207,7 @@ def apply_non_moe_tp(
         tp_mesh,
         {
             "tok_embeddings": embed_plan,
-            "norm": SequenceParallel() if enable_sp else NoParallel(),
+            "norm": SequenceParallel(use_local_output=False) if enable_sp else NoParallel(),
             "output": ColwiseParallel(
                 input_layouts=sp_layout,
                 output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
@@ -217,9 +217,9 @@ def apply_non_moe_tp(
     )
 
     # Apply tensor + sequence parallelism to every transformer block
-    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
     rowwise_output_plan = RowwiseParallel(
-        output_layouts=sp_layout, use_local_output=enable_sp
+        output_layouts=sp_layout, use_local_output=False
     )
 
     # pyrefly: ignore [not-callable]
@@ -297,6 +297,7 @@ def apply_moe_ep_tp(
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(Shard(1),),
+                    use_local_output=False,
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(
