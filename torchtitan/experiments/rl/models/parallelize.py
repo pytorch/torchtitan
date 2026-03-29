@@ -26,8 +26,8 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.distributed.compile import apply_compile_dense_rl
+from torchtitan.distributed.tensor_parallel import NoParallel
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def apply_non_moe_tp(
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
-        qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=enable_sp)
+        qk_norm_plan = SequenceParallel(sequence_dim=2)
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": PrepareModuleInput(
