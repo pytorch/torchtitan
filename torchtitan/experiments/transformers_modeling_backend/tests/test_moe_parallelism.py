@@ -18,8 +18,7 @@ import unittest
 import torch
 
 from torchtitan.experiments.transformers_modeling_backend.parallelize import (
-    apply_moe_ep,
-    apply_moe_tp,
+    apply_moe_ep_tp,
 )
 
 try:
@@ -177,7 +176,7 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         ep_mesh = self.build_device_mesh()
 
         # Apply EP
-        apply_moe_ep(model.model, ep_mesh=ep_mesh)
+        apply_moe_ep_tp(model.model, ep_mesh=ep_mesh)
 
         # Forward
         torch.manual_seed(42)
@@ -226,25 +225,8 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         ep_mesh = mesh_2d["ep"]
         tp_mesh = mesh_2d["tp"]
 
-        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
-            _gate_restore_post_hook,
-            _gate_to_local_pre_hook,
-            _make_moe_to_local_pre_hook,
-            _replicate_gate_params,
-        )
-
-        # Apply EP (shards params on dim 0, adds all-to-all dispatch/combine)
-        apply_moe_ep(model.model, ep_mesh=ep_mesh)
-
-        # Apply TP gate handling (replicate gate params, shadow with to_local)
-        for layer in model.model.layers.values():
-            if layer.moe_enabled:
-                _replicate_gate_params(layer.mlp, tp_mesh)
-                layer.mlp.gate.register_forward_pre_hook(_gate_to_local_pre_hook)
-                layer.mlp.gate.register_forward_hook(_gate_restore_post_hook)
-                layer.mlp.register_forward_pre_hook(
-                    _make_moe_to_local_pre_hook((Shard(1),))
-                )
+        # Apply EP+TP (shards params, registers all hooks)
+        apply_moe_ep_tp(model.model, tp_mesh=tp_mesh, ep_mesh=ep_mesh)
 
         # Create Shard(1) DTensor input (simulating SP output)
         torch.manual_seed(42)
@@ -264,7 +246,7 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         # Backward
         output.sum().backward()
         experts = layer.mlp.experts
-        # Expert params are TP-sharded DTensors (via distribute_tensor in apply_moe_tp)
+        # Expert params are TP-sharded DTensors (via distribute_tensor in apply_moe_ep_tp)
         # but with hook-based EP, they may be plain tensors after manual slicing
         self.assertIsNotNone(experts.gate_up_proj.grad)
         self.assertIsNotNone(experts.down_proj.grad)
@@ -308,7 +290,7 @@ class TestTPOnlyMoeForwardBackward(DTensorTestBase):
         tp_mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("tp",))
 
         # Apply TP-only MoE (shards expert weights, patches forwards)
-        apply_moe_tp(model.model, tp_mesh=tp_mesh)
+        apply_moe_ep_tp(model.model, tp_mesh=tp_mesh)
 
         # Forward with Replicate DTensor input (simulating PrepareModuleInputOutput)
         torch.manual_seed(42)
@@ -372,7 +354,7 @@ class TestMixedMoeDenseLayers(DTensorTestBase):
 
         # Apply EP (only affects MoE layers)
         ep_mesh = self.build_device_mesh()
-        apply_moe_ep(model.model, ep_mesh=ep_mesh)
+        apply_moe_ep_tp(model.model, ep_mesh=ep_mesh)
 
         # Forward through all layers sequentially
         torch.manual_seed(42)

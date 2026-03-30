@@ -342,12 +342,12 @@ def parallelize_hf_transformers(
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    # TP-only MoE (when TP is on but EP is off): shard expert weights via TP
-    if parallel_dims.tp_enabled and not parallel_dims.ep_enabled:
-        apply_moe_tp(model, tp_mesh=parallel_dims.get_mesh("tp"))
-
-    if parallel_dims.ep_enabled:
-        apply_moe_ep(model, ep_mesh=parallel_dims.get_mesh("ep"))
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+        )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -569,22 +569,12 @@ def apply_non_moe_tp(
             )
             layer_plan.update(mlp_plan)
         elif ep_enabled:
-            # MoE with EP: replicate gate params on TP mesh (FSDP mesh
-            # alignment), shadow with to_local so F.linear produces plain
-            # output and topk never sees DTensors.
-            _replicate_gate_params(transformer_block.mlp, tp_mesh)
-            transformer_block.mlp.gate.register_forward_pre_hook(
-                _gate_to_local_pre_hook
-            )
-            transformer_block.mlp.gate.register_forward_hook(_gate_restore_post_hook)
-            # Convert Shard(1) DTensor input to local for MoE computation
-            transformer_block.mlp.register_forward_pre_hook(
-                _make_moe_to_local_pre_hook((Shard(1),))
-            )
+            # MoE with EP+TP: gate and expert handling done in
+            # apply_moe_ep_tp. No mlp plan needed.
+            pass
         else:
-            # MoE with TP only (no EP): shard expert weights via TP.
-            # All-gather input, run experts with TP-sharded weights
-            # (Partial output), reduce-scatter output back to Shard(1).
+            # MoE with TP only (no EP): all-gather input, reduce-scatter
+            # output. Expert weights and gate handled in apply_moe_ep_tp.
             mlp_plan = {
                 "mlp": PrepareModuleInputOutput(
                     input_layouts=(Shard(1),),
@@ -595,11 +585,6 @@ def apply_non_moe_tp(
                 ),
             }
             layer_plan.update(mlp_plan)
-            _replicate_gate_params(transformer_block.mlp, tp_mesh)
-            transformer_block.mlp.gate.register_forward_pre_hook(
-                _gate_to_local_pre_hook
-            )
-            transformer_block.mlp.gate.register_forward_hook(_gate_restore_post_hook)
 
         # Some models like Phi-2 don't have post_attention_layernorm
         if not hasattr(transformer_block, "post_attention_layernorm"):
@@ -622,42 +607,25 @@ def apply_non_moe_tp(
 # ---------------------------------------------------------------------------
 
 
-def apply_moe_ep(model: nn.Module, ep_mesh: DeviceMesh):
-    """Apply Expert Parallelism via HFExpertParallel ParallelStyle.
+def apply_moe_ep_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh | None = None,
+    ep_mesh: DeviceMesh | None = None,
+):
+    """Apply Expert Parallelism and/or Tensor Parallelism to MoE layers.
 
-    Shards expert params on dim 0, registers all-to-all dispatch/combine
-    hooks via distribute_module. The original HF forward runs unchanged.
+    Mirrors native torchtitan's apply_moe_ep_tp pattern. Handles all
+    combinations: EP-only, TP-only, EP+TP.
+
+    Args:
+        model: The model with MoE layers.
+        tp_mesh: TP device mesh. If provided, expert weights are TP-sharded
+            and gate params are replicated on this mesh.
+        ep_mesh: EP device mesh. If provided, expert params are sharded on
+            dim 0 and dispatch/combine hooks are registered.
     """
-    for transformer_block in model.layers:
-        if not getattr(transformer_block, "moe_enabled", False):
-            continue
+    assert tp_mesh is not None or ep_mesh is not None
 
-        experts = transformer_block.mlp.experts
-
-        # Apply HFExpertParallel: shards params on dim 0, registers
-        # dispatch/combine hooks via distribute_module
-        parallelize_module(experts, ep_mesh, HFExpertParallel())
-
-        # Convert DTensor params to local for the HF forward.
-        # Store hook handles so apply_fsdp can re-register them after
-        # fully_shard (ensuring they fire after FSDP unshard).
-        experts._local_pre_hook = experts.register_forward_pre_hook(
-            _experts_to_local_pre_hook
-        )
-        experts._local_post_hook = experts.register_forward_hook(
-            _experts_restore_post_hook, prepend=True
-        )
-
-    logger.info("Applied Expert Parallelism to MoE layers")
-
-
-def apply_moe_tp(model: nn.Module, tp_mesh: DeviceMesh):
-    """Apply Tensor Parallelism to MoE expert weights (no EP).
-
-    Shards expert weights column-wise (gate_up_proj) and row-wise (down_proj)
-    across TP ranks. Uses hooks (not forward replacement) so the original
-    HF for-loop runs unchanged on local weight shards.
-    """
     for transformer_block in model.layers:
         if not getattr(transformer_block, "moe_enabled", False):
             continue
@@ -665,27 +633,52 @@ def apply_moe_tp(model: nn.Module, tp_mesh: DeviceMesh):
         moe_block = transformer_block.mlp
         experts = moe_block.experts
 
-        # Shard expert weights via TP
-        # gate_up_proj: (num_experts, 2*intermediate, hidden) -> Shard(1) column-wise
-        # down_proj: (num_experts, hidden, intermediate) -> Shard(2) row-wise
-        experts.gate_up_proj = nn.Parameter(
-            distribute_tensor(experts.gate_up_proj, tp_mesh, [Shard(1)])
-        )
-        experts.down_proj = nn.Parameter(
-            distribute_tensor(experts.down_proj, tp_mesh, [Shard(2)])
-        )
+        # --- EP: shard experts on dim 0, register dispatch/combine ---
+        if ep_mesh is not None:
+            parallelize_module(experts, ep_mesh, HFExpertParallel())
 
-        # Pre-hook on MoE block: convert Replicate DTensor to local.
-        # Runs AFTER PrepareModuleInputOutput's pre-hook (registered by
-        # parallelize_module in apply_non_moe_tp).
-        moe_block.register_forward_pre_hook(_make_moe_to_local_pre_hook((Partial(),)))
+        # --- TP: shard expert weights (TP-only), replicate gate, hooks ---
+        if tp_mesh is not None:
+            if ep_mesh is None:
+                # TP-only: shard expert weights (column-wise gate_up,
+                # row-wise down). Not done for EP+TP — experts are
+                # EP-sharded and each TP rank processes independently.
+                experts.gate_up_proj = nn.Parameter(
+                    distribute_tensor(experts.gate_up_proj, tp_mesh, [Shard(1)])
+                )
+                experts.down_proj = nn.Parameter(
+                    distribute_tensor(experts.down_proj, tp_mesh, [Shard(2)])
+                )
 
-        # Pre/post hooks on experts: convert DTensor params to local
-        # for the HF for-loop, restore after.
-        experts.register_forward_pre_hook(_experts_to_local_pre_hook)
-        experts.register_forward_hook(_experts_restore_post_hook, prepend=True)
+            # Replicate gate params on TP mesh (FSDP mesh alignment)
+            _replicate_gate_params(moe_block, tp_mesh)
 
-    logger.info("Applied Tensor Parallelism to MoE expert weights")
+            # Shadow gate weight with to_local so F.linear produces plain
+            # output and topk never sees DTensors
+            moe_block.gate.register_forward_pre_hook(_gate_to_local_pre_hook)
+            moe_block.gate.register_forward_hook(_gate_restore_post_hook)
+
+            # Convert MoE block DTensor input to local
+            if ep_mesh is not None:
+                # EP+TP: input is Shard(1) from SP, each TP rank processes
+                # its shard independently through EP
+                moe_block.register_forward_pre_hook(
+                    _make_moe_to_local_pre_hook((Shard(1),))
+                )
+            else:
+                # TP-only: input is Replicate from PrepareModuleInputOutput,
+                # output is Partial (row-parallel)
+                moe_block.register_forward_pre_hook(
+                    _make_moe_to_local_pre_hook((Partial(),))
+                )
+
+        # Pre/post hooks on experts: convert DTensor params to local.
+        # Store handles so apply_fsdp can re-register after fully_shard.
+        h1 = experts.register_forward_pre_hook(_experts_to_local_pre_hook)
+        h2 = experts.register_forward_hook(_experts_restore_post_hook, prepend=True)
+        experts._to_local_hook_handles = (h1, h2)
+
+    logger.info("Applied MoE parallelism to the model")
 
 
 # ---------------------------------------------------------------------------
@@ -830,14 +823,12 @@ def apply_fsdp(
             if dp_mod_ep_mesh.size() > num_local_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
-            # Remove to_local hooks registered in apply_moe_ep (they'd
+            # Remove to_local hooks registered in apply_moe_ep_tp (they'd
             # fire before FSDP unshard, getting sharded params).
-            if hasattr(experts, "_local_pre_hook"):
-                experts._local_pre_hook.remove()
-                del experts._local_pre_hook
-            if hasattr(experts, "_local_post_hook"):
-                experts._local_post_hook.remove()
-                del experts._local_post_hook
+            if hasattr(experts, "_to_local_hook_handles"):
+                for h in experts._to_local_hook_handles:
+                    h.remove()
+                del experts._to_local_hook_handles
 
             fully_shard(
                 experts,
