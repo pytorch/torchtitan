@@ -316,10 +316,17 @@ def inductor_decomposition_pass(
 
         fake_mode = detect_fake_mode(all_inputs)
 
-    # Use make_fx with the original fake mode to retrace with decompositions
-    with fake_mode:
+    # Use make_fx with the original fake mode to retrace with decompositions.
+    # We route through torch.fx.Interpreter rather than calling gm() directly
+    # so that Interpreter.run_node() calls set_current_meta(node) before each
+    # op dispatch. This ensures decomposed nodes inherit the original node's
+    # custom annotations (comm_region, ac_region_id, compile_with_inductor)
+    # via the _COPY_META_FIELDS mechanism in TracerBase.create_node().
+    with fake_mode, torch.fx.traceback.preserve_node_meta():
         decomposed_gm = make_fx(
-            gm,
+            lambda primals, tangents: torch.fx.Interpreter(gm).run(
+                primals, tangents
+            ),
             decomposition_table=decomp_table,
             _allow_non_fake_inputs=False,
         )(primals_fake, tangents_fake)
