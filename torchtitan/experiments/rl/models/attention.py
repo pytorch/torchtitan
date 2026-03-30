@@ -301,8 +301,8 @@ class VLLMGQAttention(GQAttention):
 
     Standard GQAttention + VLLMInnerAttention flow:
       (bs,seq,heads,dim) -> transpose -> (bs,heads,seq,dim)
-      -> VLLMInnerAttention transpose back -> clone -> (bs*seq,heads,dim)
-      -> vllm_attn -> reshape -> transpose -> contiguous  (4 layout ops)
+      -> VLLMInnerAttention transpose back -> (bs*seq,heads,dim)
+      -> vllm_attn -> reshape -> transpose  (4 layout ops)
 
     This subclass:
       (bs,seq,heads,dim) -> reshape -> (bs*seq,heads,dim)  (1 zero-copy op)
