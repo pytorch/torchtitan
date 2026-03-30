@@ -18,7 +18,6 @@ The kernels are registered via ``torch.library.Library("aten", "IMPL")``
 so they are transparent to the model code — no changes needed in the model
 definition.
 
-Depends on https://github.com/thinking-machines-lab/batch_invariant_ops.
 
 Usage:
     from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
@@ -31,10 +30,10 @@ from typing import Any
 
 import torch
 
+# https://github.com/thinking-machines-lab/batch_invariant_ops.
 from batch_invariant_ops import (
     disable_batch_invariant_mode as _upstream_disable,
     enable_batch_invariant_mode as _upstream_enable,
-    is_batch_invariant_mode_enabled as _upstream_is_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,10 +43,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SAVED_STATE: dict[str, Any] | None = None
+_enabled: bool = False
 
 
 def is_batch_invariant_mode_enabled() -> bool:
-    return _upstream_is_enabled()
+    """Return whether batch-invariant mode is active."""
+    return _enabled
 
 
 def enable_batch_invariant_mode() -> None:
@@ -65,8 +66,8 @@ def enable_batch_invariant_mode() -> None:
 
     Safe to call multiple times (idempotent).
     """
-    global _SAVED_STATE
-    if _upstream_is_enabled():
+    global _SAVED_STATE, _enabled
+    if _enabled:
         return
 
     # Register batch-invariant ATen overrides via upstream package
@@ -81,16 +82,18 @@ def enable_batch_invariant_mode() -> None:
         "deterministic": torch.are_deterministic_algorithms_enabled(),
     }
 
-    # Set NCCL env vars for deterministic inter-GPU collectives (all-reduce
-    # in TP/DP). Must be set BEFORE dist.init_process_group so NCCL picks
-    # them up. Without these, NCCL may use Tree/CollNet algorithms or
-    # multiple channels, changing the floating-point summation order.
-    os.environ["NCCL_ALGO"] = "Ring"
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"
+    # Set NCCL env vars for deterministic inter-GPU collectives.
+    # Must be set BEFORE dist.init_process_group.
+    os.environ["NCCL_ALGO"] = "Ring"  # Fixed summation order (Tree may vary)
+    os.environ["NCCL_MIN_NCHANNELS"] = "1"  # Single channel to avoid split interleaving
     os.environ["NCCL_MAX_NCHANNELS"] = "1"
-    os.environ["NCCL_PROTO"] = "Simple"
-    os.environ["NCCL_COLLNET_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
+    os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 may reorder reductions
+    os.environ[
+        "NCCL_COLLNET_ENABLE"
+    ] = "0"  # Disable SHARP (non-deterministic HW reduce)
+    os.environ[
+        "NCCL_NVLS_ENABLE"
+    ] = "0"  # Disable NVLink SHARP (non-deterministic HW reduce)
 
     # Disable reduced-precision reductions: these allow cuBLAS to use
     # lower-precision accumulation that can round differently depending
@@ -105,6 +108,8 @@ def enable_batch_invariant_mode() -> None:
     # Enable deterministic algorithms for run-to-run reproducibility.
     torch.use_deterministic_algorithms(True)
 
+    _enabled = True
+
     logger.info(
         "Batch-invariant mode enabled: mm, addmm, _log_softmax, mean.dim "
         "overridden with Triton kernels (via batch_invariant_ops); "
@@ -114,7 +119,7 @@ def enable_batch_invariant_mode() -> None:
 
 def disable_batch_invariant_mode() -> None:
     """Unregister batch-invariant ATen overrides and restore settings."""
-    global _SAVED_STATE
+    global _SAVED_STATE, _enabled
 
     # Unregister upstream ATen overrides
     _upstream_disable()
@@ -131,3 +136,4 @@ def disable_batch_invariant_mode() -> None:
         torch.backends.cudnn.allow_tf32 = _SAVED_STATE["tf32_cudnn"]
         torch.use_deterministic_algorithms(_SAVED_STATE["deterministic"])
     _SAVED_STATE = None
+    _enabled = False

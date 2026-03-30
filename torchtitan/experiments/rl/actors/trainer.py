@@ -106,11 +106,6 @@ class PolicyTrainer(Actor, Configurable):
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
-        # Seed RNG for reproducibility. Deterministic algorithms are already
-        # enabled by enable_batch_invariant_mode() above.
-        if batch_invariant_mode and seed is not None:
-            torch.manual_seed(seed)
-
         # Activate FA3 so that varlen attention on the trainer uses the same
         # FlashAttention 3 kernel as the generator's CUSTOM backend.  This is
         # required for bitwise-identical logprobs between the two sides.
