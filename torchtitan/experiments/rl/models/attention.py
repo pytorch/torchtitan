@@ -12,6 +12,7 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torchtitan.models.common.attention import LocalMapAttention
+from torchtitan.tools.utils import has_cuda_capability
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
@@ -57,12 +58,19 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Activate PyTorch's FA3 flash attention implementation. This is required for
-        # the varlen attention API to work with paged attention (KV cache in block
-        # layout) because vLLM uses default page size 16 but FA2 only supports
-        # page_size=256. Error out if FA3 is not available in the current environment.
-        if current_flash_attention_impl() != "FA3":
-            activate_flash_attention_impl("FA3")
+        # FA3 requires SM 9.0+ (e.g. H100); check capability explicitly because
+        # activate_flash_attention_impl("FA3") succeeds even on SM80.
+        # Fall back to FA2 which requires page_size to be a multiple of 256.
+        if has_cuda_capability(9, 0):
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+            self._use_fa3 = True
+        else:
+            logger.warning(
+                "FA3 not available (requires SM 9.0+), falling back to FA2. "
+                "vLLM block_size must be set to 256 for FA2 paged attention."
+            )
+            self._use_fa3 = False
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
@@ -146,13 +154,24 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
+        # FA3 can infer cu_seqlens_k from block_table + seqused_k.
+        # FA2 requires cu_seqlens_k to be explicitly set.
+        if self._use_fa3:
+            cu_seqlens_k = None
+        else:
+            num_seqs = seqused_k.shape[0]
+            cu_seqlens_k = torch.zeros(
+                num_seqs + 1, dtype=torch.int32, device=query.device
+            )
+            cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
+
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
             value_cache,
             cu_seqlens_q,
-            None,
+            cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             scale=self.scale,
@@ -228,6 +247,7 @@ class VLLMAttention(LocalMapAttention):
         *,
         scale: float | None = None,
         enable_gqa: bool = False,
+        attention_masks: None = None,  # Unused but needed for GQA varlen inference.
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
@@ -265,9 +285,9 @@ class VLLMAttention(LocalMapAttention):
         # which happens with cudagraph capture for dummy input
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
-        output = output_flat.view(batch_size, seq_len, -1, head_dim)
-        output = output.transpose(1, 2)
+        # Reshape back to the format expected by GQAttention.forward()
+        # varlen path expects (bs*seqlen, n_heads, head_dim)
+        output = output_flat.view(batch_size * seq_len, -1, head_dim)
 
         return output
 
@@ -310,6 +330,11 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
         # GQA
         head_dim = model_args.layer.attention.head_dim
+
+        # TODO Support flex attention backend later as well.
+        assert (
+            layer.attention.attn_backend == "varlen"
+        ), "Only varlen attention backend is allowed."
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
             num_heads=model_args.layer.attention.n_heads // tp_degree,

@@ -262,6 +262,10 @@ def trace_module(
     graph is a pure function.  Tensor subclasses (e.g. DTensor) are recursively
     unwrapped into plain tensors for tracing, and the layouts needed to rewrap
     them are recorded in the returned :class:`TracedResult`.
+
+    Args:
+        mod: The module to trace.
+        args: The user arguments to trace with.
     """
     named_parameters = dict(mod.named_parameters(remove_duplicate=False))
     named_buffers = dict(mod.named_buffers(remove_duplicate=False))

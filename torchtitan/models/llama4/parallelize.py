@@ -10,6 +10,10 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp._fully_shard._fsdp_common import (
+    FSDPMeshInfo,
+    ShardPlacementResult,
+)
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -374,40 +378,85 @@ def apply_fsdp(
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
-        # NOTE: In an MoE layer, we separately wrap the routed experts with FSDP:
-        # - The router and shared experts are sharded with the TransformerBlock.
-        # - The routed experts are sharded separately, using the EP mesh (if EP > 1)
-        #   or the default FSDP mesh (if EP = 1).
-        # - EP already shards the routed experts on dim 0 (num_experts).
-        #   When FSDP degree > num_experts, default dim-0 sharding causes
-        #   inefficiency due to padding, so we shard on dim-1 (hidden_dim) instead.
+        # NOTE: In an MoE layer, we use shard_placement_fn to apply different
+        # FSDP mesh and shard placement to different parameters:
+        # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
+        # - When EP = 1: all params use the same FSDP mesh, but experts may
+        #   use Shard(1) when FSDP degree > num_experts to avoid padding
         if transformer_block.moe_enabled:
+            assert hasattr(transformer_block, "moe")
+            expert_params = set(transformer_block.moe.experts.parameters())
+            num_experts = transformer_block.moe.experts.num_experts
+
             if ep_degree > 1:
-                efsdp_config = fsdp_config.copy()
-                efsdp_config["mesh"] = edp_mesh
                 assert edp_mesh is not None
                 efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
             else:
-                efsdp_config = fsdp_config
                 efsdp_ep_size = fsdp_config["mesh"].size()
 
-            _experts_shard_placement_fn = None
-            assert hasattr(transformer_block, "moe")
-            if efsdp_ep_size > transformer_block.moe.experts.num_experts:
-                _experts_shard_placement_fn = lambda param: Shard(1)
+            if efsdp_ep_size > num_experts:
+                expert_shard_placement = Shard(1)
+            else:
+                expert_shard_placement = Shard(0)
 
+            # When ep_degree == 1 and no Shard(1) override needed, skip
+            # shard_placement_fn entirely for simplicity
+            if ep_degree == 1 and expert_shard_placement == Shard(0):
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                )
+            elif ep_degree == 1:
+                # ep_degree == 1 but need Shard(1) for experts to avoid padding
+                def _experts_shard_placement_fn(
+                    param: nn.Parameter,
+                    _expert_params: set = expert_params,
+                ) -> Shard | None:
+                    if param in _expert_params:
+                        return Shard(1)
+                    return None
+
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                    shard_placement_fn=_experts_shard_placement_fn,
+                )
+            else:
+                # ep_degree > 1: per-param mesh
+                assert edp_mesh is not None
+                edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
+                dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
+
+                def _shard_placement_fn(
+                    param: nn.Parameter,
+                    _expert_params: set = expert_params,
+                    _expert_placement: Shard = expert_shard_placement,
+                    _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+                    _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+                ) -> ShardPlacementResult:
+                    if param in _expert_params:
+                        return ShardPlacementResult(
+                            placement=_expert_placement, mesh_info=_edp_mesh_info
+                        )
+                    else:
+                        return ShardPlacementResult(
+                            placement=Shard(0), mesh_info=_dp_mesh_info
+                        )
+
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                    shard_placement_fn=_shard_placement_fn,
+                )
+        else:
             fully_shard(
-                transformer_block.moe.experts,
-                **efsdp_config,
+                transformer_block,
+                **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
-                shard_placement_fn=_experts_shard_placement_fn,
             )
-
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
 
     fully_shard(model, **fsdp_config)
 
@@ -434,17 +483,7 @@ def apply_fsdp(
     ):
         if next_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
-            if next_transformer_block.moe_enabled:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_forward_prefetch(
-                    # pyrefly: ignore [missing-attribute]
-                    [next_transformer_block, next_transformer_block.moe.experts]
-                )
-            else:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block]
-                )
+            transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
         elif model.norm is not None and model.output is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_forward_prefetch(
@@ -466,17 +505,7 @@ def apply_fsdp(
     ):
         if prev_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
-            if prev_transformer_block.moe_enabled:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_backward_prefetch(
-                    # pyrefly: ignore [missing-attribute]
-                    [prev_transformer_block, prev_transformer_block.moe.experts]
-                )
-            else:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block]
-                )
+            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
