@@ -236,11 +236,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             },
         ]
 
-    model_spec = model_registry("8B")
-    # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.attn_backend = "varlen"
-    # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.attn_mask_type = "block_causal"
+    model_spec = model_registry("8B", attn_backend_override="varlen")
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,
