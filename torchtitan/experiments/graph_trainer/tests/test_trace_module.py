@@ -37,7 +37,7 @@ def get_loss(logits, labels):
     )
 
 
-def _make_train_step(loss_fn):
+def make_train_step(loss_fn):
     """Return a plain function for aot_function tracing.  loss_fn is captured in closure."""
 
     def train_step(model, *args):
@@ -129,7 +129,7 @@ class TestTraceModule(unittest.TestCase):
         model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
 
-        train_step = _make_train_step(loss_fn)
+        train_step = make_train_step(loss_fn)
         traced = aot_function(train_step, (model_ref, tokens, labels))
 
         logits_ref = model_ref(tokens)
@@ -150,7 +150,7 @@ class TestTraceModule(unittest.TestCase):
         model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
 
-        train_step = _make_train_step(loss_fn)
+        train_step = make_train_step(loss_fn)
         traced = aot_function(train_step, (model_ref, tokens, labels))
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
@@ -351,7 +351,7 @@ class TestTraceDTensor(unittest.TestCase):
         tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
         labels_dt = DTensor.from_local(labels, mesh, [Replicate()])
 
-        train_step = _make_train_step(get_loss)
+        train_step = make_train_step(get_loss)
         traced = aot_function(train_step, (model_ref, tokens_dt, labels_dt))
 
         logits_ref = model_ref(tokens_dt)
@@ -381,7 +381,7 @@ class TestMetadataPropagation(unittest.TestCase):
     def test_backward_nodes_have_seq_nr(self):
         """Verify that backward FX nodes get seq_nr metadata via the patched engine."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        train_step = _make_train_step(get_loss)
+        train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
@@ -409,7 +409,7 @@ class TestMetadataPropagation(unittest.TestCase):
         """Verify _copy_fwd_metadata_to_bw_nodes copies custom metadata to bwd nodes."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
 
-        train_step = _make_train_step(get_loss)
+        train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
@@ -480,7 +480,7 @@ class TestTraceModels(unittest.TestCase):
         num_steps=5,
         lr=1e-3,
     ):
-        train_step = _make_train_step(get_loss)
+        train_step = make_train_step(get_loss)
 
         with (
             annotate_flex_attention_for_regional_inductor()
@@ -775,7 +775,7 @@ class TestTraceFSDP(FSDPTest):
         else:
             fwd_args = (tokens,)
 
-        train_step = _make_train_step(get_loss)
+        train_step = make_train_step(get_loss)
 
         with (
             annotate_flex_attention_for_regional_inductor()

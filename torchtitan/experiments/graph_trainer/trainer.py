@@ -19,7 +19,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.trainer import Trainer
 
 
-def _make_fwd_bwd_step(loss_fn):
+def make_fwd_bwd_step(loss_fn):
     """Return a plain function that traces the entire fwd+loss+bwd step.
 
     ``loss_fn`` is captured in the closure so it is not a graph input.
@@ -102,7 +102,7 @@ class GraphTrainer(Trainer):
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         if self._traced_step is None:
-            fwd_bwd_fn = _make_fwd_bwd_step(self.loss_fn)
+            fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
             with self.train_context(), self.maybe_enable_amp:
                 self._traced_step = aot_function(
                     fwd_bwd_fn,
