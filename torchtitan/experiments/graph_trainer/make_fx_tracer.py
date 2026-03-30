@@ -466,13 +466,16 @@ def aot_function(
         return unwrapped_outs
 
     ctx = TracingContext(fake_mode)
+    # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
     with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
         traced = make_fx(
             fn_with_subclass_handling,
             record_stack_traces=True,
-            record_module_stack=False,
+            record_module_stack=False,  # don't need nn_module_stack for now
         )(*fake_args)
 
+    # Copy forward annotations to backward nodes.
+    # Must run before DCE so that forward nodes used for matching aren't removed.
     _copy_fwd_metadata_to_bw_nodes(traced)
     _remove_cpu_shadow_chains(traced)
 
