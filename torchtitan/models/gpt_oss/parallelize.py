@@ -28,6 +28,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -132,6 +133,10 @@ def parallelize_gptoss(
             ac_config,
             model_compile_enabled=model_compile_enabled,
         )
+
+    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    if model_compile_enabled:
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
