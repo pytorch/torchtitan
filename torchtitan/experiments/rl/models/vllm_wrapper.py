@@ -150,7 +150,8 @@ class TorchTitanVLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Swap GQAttention -> VLLMGQAttention at config time
+        # Swap GQAttention -> VLLMGQAttention in config
+        # NOTE: VLLMGQAttention is only needed in generator model.
         model_config = model_spec.model
         attn_config = model_config.layer.attention
         vllm_attn_fields = {
@@ -158,12 +159,6 @@ class TorchTitanVLLMModelWrapper(Module):
             for f in dataclasses.fields(attn_config)
             if f.init
         }
-        attn_backend = vllm_attn_fields.get("attn_backend")
-        if attn_backend != "varlen":
-            raise ValueError(
-                f"VLLMGQAttention requires attn_backend='varlen', "
-                f"but model config has '{attn_backend}'."
-            )
         new_layer = dataclasses.replace(
             model_config.layer, attention=VLLMGQAttention.Config(**vllm_attn_fields)
         )
