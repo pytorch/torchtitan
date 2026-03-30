@@ -62,8 +62,7 @@ class _ModuleParamsMeta:
     """Per-module parameter metadata captured during tracing."""
 
     fqns: list[str]
-    spec: pytree.TreeSpec
-    length: int
+    num_params: int
 
 
 def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta | None]:
@@ -264,8 +263,8 @@ def _collect_module_params(
             **dict(mod.named_buffers(remove_duplicate=False)),
         }
         fqns = list(params_dict.keys())
-        flat, spec = pytree.tree_flatten(params_dict)
-        per_module.append(_ModuleParamsMeta(fqns=fqns, spec=spec, length=len(flat)))
+        flat = list(params_dict.values())
+        per_module.append(_ModuleParamsMeta(fqns=fqns, num_params=len(flat)))
         all_flat.extend(flat)
     return per_module, all_flat
 
@@ -430,9 +429,9 @@ def aot_function(
         offset = 0
         module_param_dicts = []
         for pmp in per_module_params:
-            flat = all_params[offset : offset + pmp.length]
-            module_param_dicts.append(pytree.tree_unflatten(list(flat), pmp.spec))
-            offset += pmp.length
+            flat = all_params[offset : offset + pmp.num_params]
+            module_param_dicts.append(dict(zip(pmp.fqns, flat, strict=True)))
+            offset += pmp.num_params
 
         user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
 
