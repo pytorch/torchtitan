@@ -28,6 +28,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -133,6 +134,10 @@ def parallelize_gptoss(
             model_compile_enabled=model_compile_enabled,
         )
 
+    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    if model_compile_enabled:
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -233,14 +238,6 @@ def apply_non_moe_tp(
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
-            "attention.inner_attention": PrepareModuleInputOutput(
-                input_layouts=(Shard(1), Shard(1), Shard(1)),
-                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
-                use_local_input=True,
-                output_layouts=(Shard(1), Shard(1)),
-                desired_output_layouts=(Shard(1), Shard(1)),
-                use_local_output=False,
-            ),
             "attention.wo": rowwise_output_plan,
             "ffn_norm": norm_plan,
         }
