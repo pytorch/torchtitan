@@ -40,7 +40,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.configs import ParallelismConfig
+from torchtitan.config.configs import CompileConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
@@ -79,7 +79,7 @@ def _log_attention_module(model, label):
 # ---------------------------------------------------------------------------
 
 
-def create_vllm_engine(config):
+def create_vllm_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine from the RL config."""
     gen_config = config.generator
     model_path = config.hf_assets_path
@@ -113,7 +113,9 @@ def create_vllm_engine(config):
     return engine
 
 
-def generate_with_vllm(engine, prompt, gen_config):
+def generate_with_vllm(
+    engine: LLMEngine, prompt: str, gen_config: VLLMGenerator.Config
+) -> tuple[list[int], list[int], list[float]]:
     """Generate tokens from *prompt*, return IDs + log-probs."""
     sampling = gen_config.sampling
     sampling_params = SamplingParams(
@@ -135,6 +137,7 @@ def generate_with_vllm(engine, prompt, gen_config):
     assert len(outputs) == 1, f"Expected 1 output, got {len(outputs)}"
     output = outputs[0]
 
+    logger.info('vLLM text output: "%s"', output.outputs[0].text)
     prompt_token_ids = list(output.prompt_token_ids)
     sample = output.outputs[0]
     generated_token_ids = list(sample.token_ids)
@@ -158,8 +161,6 @@ def build_trainer_model(config):
 
     Mirrors PolicyTrainer._build_model() but without the Monarch actor
     framework.
-
-    TODO(zhxchen17) Switch trainer model to use varlen backend with batch-invariant mode.
     """
     model_spec = config.model_spec
     model_config = model_spec.model
@@ -230,8 +231,9 @@ def build_trainer_model(config):
 
 def _test_config() -> RLTrainer.Config:
     """Test-specific config: greedy sampling, fewer tokens, single sample."""
+    model_spec = model_registry("0.6B", attn_backend_override="varlen")
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B"),
+        model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
@@ -239,6 +241,7 @@ def _test_config() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -246,10 +249,7 @@ def _test_config() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
-            # compile=GeneratorCompileConfig(
-            #     backend="eager", cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
-            # ),
-            compile=GeneratorCompileConfig(backend="none", cudagraph_mode="none"),
+            compile=GeneratorCompileConfig(backend="eager", cudagraph_mode="piecewise"),
             num_samples_per_prompt=1,
             sampling=SamplingConfig(
                 temperature=0.0,
@@ -297,7 +297,10 @@ def main():
 
     with torch.no_grad():
         trainer_token_log_probs = compute_token_log_probs(
-            trainer_model, prompt_token_ids, generated_token_ids, device
+            trainer_model,
+            prompt_token_ids,
+            generated_token_ids,
+            device,
         )
 
     if dist.get_rank() == 0:
