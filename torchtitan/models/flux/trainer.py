@@ -80,8 +80,6 @@ class FluxTrainer(Trainer):
             random_init=config.encoder.random_init,
         ).to(device=self.device, dtype=self._dtype)
 
-        # Apply FSDP
-
         # Apply FSDP to the T5 model / CLIP model
         # pyrefly: ignore [bad-assignment]
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
