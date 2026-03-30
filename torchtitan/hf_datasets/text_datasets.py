@@ -361,8 +361,9 @@ class ChatDataset(IterableDataset, Stateful):
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         prompt_len = len(prompt_tokens)
 
-        # Mask prompt tokens in labels [0, prompt_len).
-        mask_end = min(prompt_len, len(label_ids))
+        # Labels are shifted by one token, so the first assistant token is
+        # predicted at index prompt_len - 1 and must remain unmasked.
+        mask_end = min(max(prompt_len - 1, 0), len(label_ids))
         label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
 
         return input_ids, label_ids

@@ -110,7 +110,13 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             messages[:1], add_generation_prompt=True
         )
         prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        response_start = len(prompt_tokens)  # labels [0, prompt_len) are masked
+        response_start = len(prompt_tokens) - 1
+        self.assertGreaterEqual(response_start, 0)
+        self.assertNotEqual(
+            label_ids[response_start].item(),
+            IGNORE_INDEX,
+            "First assistant token should not be masked",
+        )
         self.assertEqual(
             label_ids[response_start:seq_len_actual].tolist(),
             expected_label[response_start:],
