@@ -4,9 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
-from unittest.mock import patch as _mock_patch
-
 import torch
 import torch.nn as nn
 
@@ -17,6 +14,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import (
+    distribute_module,
     distribute_tensor,
     DTensor,
     Partial,
@@ -44,6 +42,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_dense
+from torchtitan.distributed.expert_parallel import BaseExpertParallel
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.parallelize import (
@@ -54,52 +53,243 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
-_orig_topk = torch.topk
+# ---------------------------------------------------------------------------
+# HFExpertParallel: ParallelStyle for HF MoE experts
+# ---------------------------------------------------------------------------
 
 
-def _dtensor_safe_topk(input, *args, **kwargs):
-    """topk that converts DTensor to local first (workaround for PyTorch bug).
+class HFExpertParallel(BaseExpertParallel):
+    """Expert Parallelism for HF Transformers MoE models.
 
-    torch.topk backward uses aten.scatter.src which doesn't support
-    mixed tensor/DTensor types. This converts DTensor inputs to local
-    tensors before calling the real topk.
+    Adapts torchtitan's BaseExpertParallel for the HF experts interface
+    (hidden_states, top_k_index, top_k_weights). Shards expert params
+    on dim 0, dispatches tokens via all-to-all based on routing decisions,
+    and combines results after expert computation.
+
+    Applied to the experts module via parallelize_module. The MoE block
+    forward and experts forward run unchanged — dispatch/combine happen
+    in input/output hooks registered by distribute_module.
     """
-    if isinstance(input, DTensor):
-        input = input.to_local()
-    return _orig_topk(input, *args, **kwargs)
+
+    def __init__(self):
+        super().__init__()
+        self._ep_group = None
+        self._ep_size = None
+        self._num_local_experts = None
+        self._global_num_experts = None
+
+    def _partition_fn(self, name, mod, device_mesh):
+        """Shard expert params on dim 0 across EP ranks."""
+        for param_name, param in list(mod.named_parameters(recurse=False)):
+            mod.register_parameter(
+                param_name,
+                nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])),
+            )
+        # Only set EP metadata on the top-level experts module
+        # (distribute_module calls _partition_fn on children too)
+        if hasattr(mod, "num_experts"):
+            ep_size = device_mesh.size()
+            self._ep_group = device_mesh.get_group()
+            self._ep_size = ep_size
+            self._global_num_experts = mod.num_experts
+            self._num_local_experts = mod.num_experts // ep_size
+
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        """Sort tokens by expert, all-to-all dispatch, build local routing."""
+        hidden_states, top_k_index, top_k_weights = inputs
+        ep_size = self._ep_size
+        num_local = self._num_local_experts
+        global_num_experts = self._global_num_experts
+        ep_group = self._ep_group
+
+        num_tokens = hidden_states.size(0)
+        top_k = top_k_index.size(-1)
+
+        # Flatten token-expert pairs
+        token_idx = (
+            torch.arange(num_tokens, device=hidden_states.device)
+            .unsqueeze(1)
+            .expand(-1, top_k)
+            .reshape(-1)
+        )
+        expert_ids = top_k_index.reshape(-1)
+        sample_weights = top_k_weights.reshape(-1)
+
+        # Sort by expert
+        perm = torch.argsort(expert_ids, stable=True)
+        inv_perm = torch.empty_like(perm)
+        inv_perm[perm] = torch.arange(perm.size(0), device=hidden_states.device)
+
+        routed_input = hidden_states[token_idx[perm]]
+        sorted_weights = sample_weights[perm]
+
+        # Compute num_tokens_per_expert
+        num_tokens_per_expert = torch.histc(
+            expert_ids[perm].int(),
+            bins=global_num_experts,
+            min=0,
+            max=global_num_experts - 1,
+        )
+
+        # Exchange per-expert token counts
+        with torch.no_grad():
+            input_splits_t = num_tokens_per_expert.view(ep_size, num_local).sum(dim=1)
+            output_splits_t = torch.empty_like(input_splits_t)
+            torch.distributed.all_to_all_single(
+                output_splits_t, input_splits_t, group=ep_group
+            )
+            self._input_splits = input_splits_t.int().tolist()
+            self._output_splits = output_splits_t.int().tolist()
+
+        # Dispatch tokens
+        dispatched = all_to_all_single_autograd(
+            routed_input, self._output_splits, self._input_splits, ep_group
+        )
+
+        # Dispatch routing weights alongside tokens
+        dispatched_weights = all_to_all_single_autograd(
+            sorted_weights.unsqueeze(-1),
+            self._output_splits,
+            self._input_splits,
+            ep_group,
+        ).squeeze(-1)
+
+        # Exchange per-expert counts for local routing
+        with torch.no_grad():
+            local_ntpe_tensor = torch.empty_like(num_tokens_per_expert)
+            torch.distributed.all_to_all_single(
+                local_ntpe_tensor, num_tokens_per_expert, group=ep_group
+            )
+
+        # Build local mock routing (matches by-source-rank token ordering)
+        local_ntpe_per_source = local_ntpe_tensor.view(ep_size, num_local)
+        local_expert_indices = torch.repeat_interleave(
+            torch.arange(num_local, device=hidden_states.device).repeat(ep_size),
+            local_ntpe_per_source.reshape(-1).long(),
+        )
+        mock_top_k_index = local_expert_indices.unsqueeze(1)
+        mock_top_k_weights = dispatched_weights.unsqueeze(1)
+
+        # Save state for combine
+        self._inv_perm = inv_perm
+        self._num_tokens = num_tokens
+        self._top_k = top_k
+
+        return dispatched, mock_top_k_index, mock_top_k_weights
+
+    def _token_combine(self, mod, output, device_mesh):
+        """All-to-all combine, unsort, sum across top_k."""
+        combined = all_to_all_single_autograd(
+            output,
+            self._input_splits,  # reversed
+            self._output_splits,  # reversed
+            self._ep_group,
+        )
+        combined = combined[self._inv_perm]
+        return combined.view(self._num_tokens, self._top_k, -1).sum(dim=1)
+
+    def _apply(self, module, device_mesh):
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            input_fn=self._token_dispatch,
+            output_fn=self._token_combine,
+        )
 
 
-def _wrap_forward_with_safe_topk(module: nn.Module):
-    """Wrap a module's forward to scope a DTensor-safe topk mock.
+# ---------------------------------------------------------------------------
+# Gate and expert hooks for DTensor → local conversion
+# ---------------------------------------------------------------------------
 
-    Uses unittest.mock.patch to temporarily replace torch.topk with a
-    version that converts DTensor inputs to local before calling the
-    real topk. Also wraps plain tensor inputs as Replicate DTensors
-    when the module has DTensor params (from _replicate_gate_params),
-    since F.linear requires both operands to be DTensors.
 
-    The original forward runs unchanged — no HF code is copied.
-    Works for any HF MoE router regardless of model variant.
+def _replicate_gate_params(moe_block: nn.Module, tp_mesh: DeviceMesh):
+    """Replicate MoE router gate parameters on the TP mesh.
+
+    Ensures gate params become DTensors with Replicate placement on the
+    TP mesh, so that after FSDP wrapping they end up on the same
+    (fsdp, tp) mesh as other non-EP params.
     """
-    original_forward = module.forward
+    if not hasattr(moe_block, "gate"):
+        return
+    for submod in moe_block.gate.modules():
+        for param_name, param in list(submod.named_parameters(recurse=False)):
+            submod.register_parameter(
+                param_name,
+                nn.Parameter(distribute_tensor(param, tp_mesh, [Replicate()])),
+            )
 
-    @functools.wraps(original_forward)
-    def _wrapped_forward(hidden_states, *args, **kwargs):
-        # Wrap plain tensor as Replicate DTensor for F.linear compatibility
-        # when gate params are DTensors (from _replicate_gate_params)
-        if not isinstance(hidden_states, DTensor):
-            for p in module.parameters():
-                if isinstance(p, DTensor):
-                    hidden_states = DTensor.from_local(
-                        hidden_states, p.device_mesh, (Replicate(),), run_check=False
-                    )
-                    break
 
-        with _mock_patch.object(torch, "topk", _dtensor_safe_topk):
-            return original_forward(hidden_states, *args, **kwargs)
+def _gate_to_local_pre_hook(module, args):
+    """Shadow gate weight with local tensor for the HF router forward.
 
-    module.forward = _wrapped_forward
-    module._has_topk_wrapper = True
+    The gate weight is a Replicate DTensor on the TP mesh (for FSDP mesh
+    alignment). Shadowing with to_local() ensures F.linear produces a
+    plain tensor output, so topk never sees DTensors (avoiding the
+    aten.scatter.src backward crash).
+    """
+    weight = module.weight
+    if isinstance(weight, DTensor):
+        module.__dict__["weight"] = weight.to_local()
+    return None
+
+
+def _gate_restore_post_hook(module, args, output):
+    """Restore gate DTensor weight after the forward."""
+    module.__dict__.pop("weight", None)
+    return output
+
+
+def _make_moe_to_local_pre_hook(grad_placements):
+    """Create a pre-hook that converts DTensor input to local.
+
+    Args:
+        grad_placements: Gradient placements for to_local(). Use
+            (Partial(),) for TP-only (output is partial sum from
+            TP-sharded experts), (Shard(1),) for EP+TP (each TP rank
+            processes its local shard independently through EP).
+    """
+
+    def hook(module, args):
+        hidden_states = args[0]
+        if isinstance(hidden_states, DTensor):
+            return (hidden_states.to_local(grad_placements=grad_placements),)
+        return None
+
+    return hook
+
+
+def _experts_to_local_pre_hook(module, args):
+    """Convert DTensor expert params to local for the HF forward.
+
+    Uses __dict__ shadowing for params and saves/restores num_experts
+    to match the local expert count. Python checks instance __dict__
+    before nn.Module's __getattr__ (which accesses _parameters), so
+    self.gate_up_proj in the forward finds the local tensor.
+    """
+    gate_up = module.gate_up_proj
+    down = module.down_proj
+    if isinstance(gate_up, DTensor):
+        module.__dict__["gate_up_proj"] = gate_up.to_local()
+        module.__dict__["down_proj"] = down.to_local()
+        module._saved_num_experts = module.num_experts
+        module.num_experts = module.__dict__["gate_up_proj"].shape[0]
+    return None
+
+
+def _experts_restore_post_hook(module, args, output):
+    """Restore DTensor expert params and num_experts after the HF forward."""
+    for key in ("gate_up_proj", "down_proj"):
+        module.__dict__.pop(key, None)
+    if hasattr(module, "_saved_num_experts"):
+        module.num_experts = module._saved_num_experts
+        del module._saved_num_experts
+    return output
+
+
+# ---------------------------------------------------------------------------
+# Main parallelization entry point
+# ---------------------------------------------------------------------------
 
 
 def parallelize_hf_transformers(
@@ -222,229 +412,9 @@ def parallelize_hf_transformers(
     return model
 
 
-def _replicate_gate_params(moe_block: nn.Module, tp_mesh: DeviceMesh):
-    """Replicate MoE router gate parameters on the TP mesh.
-
-    Ensures gate params become DTensors with Replicate placement on the
-    TP mesh, so that after FSDP wrapping they end up on the same
-    (fsdp, tp) mesh as other non-EP params.
-    """
-    if not hasattr(moe_block, "gate"):
-        return
-    for submod in moe_block.gate.modules():
-        for param_name, param in list(submod.named_parameters(recurse=False)):
-            submod.register_parameter(
-                param_name,
-                nn.Parameter(distribute_tensor(param, tp_mesh, [Replicate()])),
-            )
-
-
-def _ep_dispatch_pre_hook(module, args):
-    """Pre-hook on MoE block: route tokens, dispatch via all-to-all, mock gate.
-
-    Runs the real gate to get global routing decisions, sorts tokens by
-    expert, applies routing weights, dispatches tokens to the EP rank
-    owning each target expert via all-to-all, then mocks the gate with
-    pre-computed local routing so the original HF forward runs unchanged.
-    """
-    hidden_states = args[0]
-    ep = module._ep_info
-
-    # Handle DTensor from TP/SP
-    if isinstance(hidden_states, DTensor):
-        hidden_states = hidden_states.to_local(grad_placements=(Shard(1),))
-
-    batch_size, seq_len, hidden_dim = hidden_states.shape
-    x = hidden_states.view(-1, hidden_dim)
-    num_tokens = x.size(0)
-
-    # Run the REAL gate to get global routing decisions
-    _, routing_weights, top_k_indices = module.gate(x)
-    top_k = top_k_indices.size(-1)
-
-    # Flatten token-expert pairs
-    token_idx = (
-        torch.arange(num_tokens, device=x.device)
-        .unsqueeze(1)
-        .expand(-1, top_k)
-        .reshape(-1)
-    )
-    expert_ids = top_k_indices.reshape(-1)
-    sample_weights = routing_weights.reshape(-1)
-
-    # Sort by expert
-    perm = torch.argsort(expert_ids, stable=True)
-    inv_perm = torch.empty_like(perm)
-    inv_perm[perm] = torch.arange(perm.size(0), device=x.device)
-
-    routed_input = x[token_idx[perm]]
-    sorted_weights = sample_weights[perm]
-
-    # NOTE: Do NOT apply routing weights here. They are transported
-    # through the all-to-all and applied AFTER expert computation
-    # by the HF forward, matching both HF and native torchtitan
-    # behavior (expert(x) * w, not expert(x * w)).
-
-    # Compute num_tokens_per_expert
-    global_num_experts = ep["global_num_experts"]
-    num_tokens_per_expert = torch.histc(
-        expert_ids[perm].int(),
-        bins=global_num_experts,
-        min=0,
-        max=global_num_experts - 1,
-    )
-
-    # --- All-to-all dispatch ---
-    ep_size = ep["ep_size"]
-    num_local = ep["num_local_experts"]
-    ep_group = ep["ep_group"]
-
-    # Exchange per-expert token counts
-    with torch.no_grad():
-        input_splits_t = num_tokens_per_expert.view(ep_size, num_local).sum(dim=1)
-        output_splits_t = torch.empty_like(input_splits_t)
-        torch.distributed.all_to_all_single(
-            output_splits_t, input_splits_t, group=ep_group
-        )
-        input_splits = input_splits_t.int().tolist()
-        output_splits = output_splits_t.int().tolist()
-
-    # Dispatch tokens
-    dispatched = all_to_all_single_autograd(
-        routed_input, output_splits, input_splits, ep_group
-    )
-    total_received = sum(output_splits)
-
-    # Dispatch routing weights alongside tokens (scalar per token)
-    dispatched_weights = all_to_all_single_autograd(
-        sorted_weights.unsqueeze(-1), output_splits, input_splits, ep_group
-    ).squeeze(-1)
-
-    # Exchange per-expert counts to build local routing
-    with torch.no_grad():
-        local_ntpe_tensor = torch.empty_like(num_tokens_per_expert)
-        torch.distributed.all_to_all_single(
-            local_ntpe_tensor, num_tokens_per_expert, group=ep_group
-        )
-        # local_ntpe_tensor has shape (global_num_experts,).
-        # Viewed as (ep_size, num_local): element [s, e] is how many tokens
-        # source rank s sends for local expert e on this rank.
-
-    # Build local mock routing matching the by-source-rank token ordering.
-    # Dispatched tokens arrive as [rank0_chunk, rank1_chunk, ...].
-    # Within each source rank's chunk, tokens are sorted by local expert.
-    # So the expert index pattern is: [r0_e0, r0_e1, ..., r1_e0, r1_e1, ...]
-    local_ntpe_per_source = local_ntpe_tensor.view(ep_size, num_local)
-    local_expert_indices = torch.repeat_interleave(
-        torch.arange(num_local, device=x.device).repeat(ep_size),
-        local_ntpe_per_source.reshape(-1).long(),
-    )
-    mock_top_k_index = local_expert_indices.unsqueeze(1)  # (total_received, 1)
-    # Use real dispatched weights so HF forward applies them after experts
-    mock_top_k_weights = dispatched_weights.unsqueeze(1)  # (total_received, 1)
-
-    # Save state for post-hook
-    module._ep_dispatch_state = {
-        "inv_perm": inv_perm,
-        "num_tokens": num_tokens,
-        "top_k": top_k,
-        "batch_size": batch_size,
-        "seq_len": seq_len,
-        "input_splits": input_splits,
-        "output_splits": output_splits,
-        "original_gate": module.gate,
-    }
-
-    # Mock the gate to return pre-computed local routing
-    class _MockGate(nn.Module):
-        def __init__(self, weights, indices):
-            super().__init__()
-            self._weights = weights
-            self._indices = indices
-
-        def forward(self, hidden_states):
-            return None, self._weights, self._indices
-
-    module.gate = _MockGate(mock_top_k_weights, mock_top_k_index)
-
-    # Return dispatched tokens shaped as (1, total_received, hidden_dim)
-    # so the original forward's batch_size/seq_len extraction works
-    return (dispatched.unsqueeze(0),)
-
-
-def _ep_combine_post_hook(module, args, output):
-    """Post-hook on MoE block: restore gate, combine via all-to-all, unsort + sum."""
-    state = module._ep_dispatch_state
-    del module._ep_dispatch_state
-
-    # Restore the real gate
-    module.gate = state["original_gate"]
-
-    # output is (1, num_received, hidden_dim) from original forward
-    expert_output = output.squeeze(0)
-
-    # All-to-all combine: send results back to originating ranks
-    combined = all_to_all_single_autograd(
-        expert_output,
-        state["input_splits"],  # reversed direction
-        state["output_splits"],  # reversed direction
-        module._ep_info["ep_group"],
-    )
-
-    # Unsort (combined is in sorted-by-expert order)
-    combined = combined[state["inv_perm"]]
-
-    # Sum across top_k contributions
-    output = combined.view(state["num_tokens"], state["top_k"], -1).sum(dim=1)
-
-    # Reshape to original (batch_size, seq_len, hidden_dim)
-    return output.view(state["batch_size"], state["seq_len"], -1)
-
-
-def _moe_to_local_pre_hook(module, args):
-    """Convert Replicate DTensor input to local for MoE computation.
-
-    Runs AFTER PrepareModuleInputOutput's pre-hook (which all-gathers
-    Shard(1) to Replicate). Converts the Replicate DTensor to a plain
-    tensor so the original HF MoE forward operates on plain tensors.
-
-    grad_placements=(Partial(),) because the MoE output is a partial sum
-    from TP-sharded expert weights (row-parallel down_proj). The reduce
-    happens at the MoE boundary via PrepareModuleInputOutput.
-    """
-    hidden_states = args[0]
-    if isinstance(hidden_states, DTensor):
-        hidden_states = hidden_states.to_local(grad_placements=(Partial(),))
-        return (hidden_states,)
-    return None
-
-
-def _experts_to_local_pre_hook(module, args):
-    """Convert DTensor expert params to local for the HF forward.
-
-    Uses __dict__ shadowing for params and saves/restores num_experts
-    to match the local expert count. Python checks instance __dict__
-    before nn.Module's __getattr__ (which accesses _parameters), so
-    self.gate_up_proj in the forward finds the local tensor.
-    """
-    gate_up = module.gate_up_proj
-    down = module.down_proj
-    if isinstance(gate_up, DTensor):
-        module.__dict__["gate_up_proj"] = gate_up.to_local()
-        module.__dict__["down_proj"] = down.to_local()
-        module._saved_num_experts = module.num_experts
-        module.num_experts = module.__dict__["gate_up_proj"].shape[0]
-    return None
-
-
-def _experts_restore_post_hook(module, args, output):
-    """Restore DTensor expert params and num_experts after the HF forward."""
-    for key in ("gate_up_proj", "down_proj"):
-        module.__dict__.pop(key, None)
-    if hasattr(module, "_saved_num_experts"):
-        module.num_experts = module._saved_num_experts
-        del module._saved_num_experts
-    return output
+# ---------------------------------------------------------------------------
+# TP for non-MoE layers + gate handling for MoE layers
+# ---------------------------------------------------------------------------
 
 
 def apply_non_moe_tp(
@@ -599,12 +569,18 @@ def apply_non_moe_tp(
             )
             layer_plan.update(mlp_plan)
         elif ep_enabled:
-            # MoE with EP: replicate router gate params on TP mesh so
-            # they end up on the same (fsdp, tp) mesh as other non-EP
-            # params after FSDP. Wrap forward with DTensor-safe topk
-            # (topk backward doesn't support DTensor).
+            # MoE with EP: replicate gate params on TP mesh (FSDP mesh
+            # alignment), shadow with to_local so F.linear produces plain
+            # output and topk never sees DTensors.
             _replicate_gate_params(transformer_block.mlp, tp_mesh)
-            _wrap_forward_with_safe_topk(transformer_block.mlp.gate)
+            transformer_block.mlp.gate.register_forward_pre_hook(
+                _gate_to_local_pre_hook
+            )
+            transformer_block.mlp.gate.register_forward_hook(_gate_restore_post_hook)
+            # Convert Shard(1) DTensor input to local for MoE computation
+            transformer_block.mlp.register_forward_pre_hook(
+                _make_moe_to_local_pre_hook((Shard(1),))
+            )
         else:
             # MoE with TP only (no EP): shard expert weights via TP.
             # All-gather input, run experts with TP-sharded weights
@@ -620,7 +596,10 @@ def apply_non_moe_tp(
             }
             layer_plan.update(mlp_plan)
             _replicate_gate_params(transformer_block.mlp, tp_mesh)
-            _wrap_forward_with_safe_topk(transformer_block.mlp.gate)
+            transformer_block.mlp.gate.register_forward_pre_hook(
+                _gate_to_local_pre_hook
+            )
+            transformer_block.mlp.gate.register_forward_hook(_gate_restore_post_hook)
 
         # Some models like Phi-2 don't have post_attention_layernorm
         if not hasattr(transformer_block, "post_attention_layernorm"):
@@ -638,45 +617,26 @@ def apply_non_moe_tp(
     )
 
 
+# ---------------------------------------------------------------------------
+# MoE parallelism: EP and TP-only
+# ---------------------------------------------------------------------------
+
+
 def apply_moe_ep(model: nn.Module, ep_mesh: DeviceMesh):
-    """Apply Expert Parallelism via DTensor Shard(0) + hooks.
+    """Apply Expert Parallelism via HFExpertParallel ParallelStyle.
 
-    Shards expert params on dim 0 (the expert dimension) across EP ranks
-    using DTensor. All-to-all dispatch and combine are handled by pre/post
-    hooks on the MoE block. The original HF forward runs unchanged on
-    local expert params (converted to local via hooks before the forward).
+    Shards expert params on dim 0, registers all-to-all dispatch/combine
+    hooks via distribute_module. The original HF forward runs unchanged.
     """
-    ep_size = ep_mesh.size()
-
     for transformer_block in model.layers:
         if not getattr(transformer_block, "moe_enabled", False):
             continue
 
-        moe_block = transformer_block.mlp
-        experts = moe_block.experts
-        num_experts = experts.num_experts
-        num_local = num_experts // ep_size
+        experts = transformer_block.mlp.experts
 
-        # Shard expert params on dim 0 across EP ranks
-        experts.gate_up_proj = nn.Parameter(
-            distribute_tensor(experts.gate_up_proj, ep_mesh, [Shard(0)])
-        )
-        experts.down_proj = nn.Parameter(
-            distribute_tensor(experts.down_proj, ep_mesh, [Shard(0)])
-        )
-
-        # Store EP metadata for hooks
-        moe_block._ep_info = {
-            "ep_mesh": ep_mesh,
-            "ep_group": ep_mesh.get_group(),
-            "ep_size": ep_size,
-            "num_local_experts": num_local,
-            "global_num_experts": num_experts,
-        }
-
-        # Register dispatch/combine hooks on MoE block
-        moe_block.register_forward_pre_hook(_ep_dispatch_pre_hook)
-        moe_block.register_forward_hook(_ep_combine_post_hook)
+        # Apply HFExpertParallel: shards params on dim 0, registers
+        # dispatch/combine hooks via distribute_module
+        parallelize_module(experts, ep_mesh, HFExpertParallel())
 
         # Convert DTensor params to local for the HF forward.
         # Store hook handles so apply_fsdp can re-register them after
@@ -718,7 +678,7 @@ def apply_moe_tp(model: nn.Module, tp_mesh: DeviceMesh):
         # Pre-hook on MoE block: convert Replicate DTensor to local.
         # Runs AFTER PrepareModuleInputOutput's pre-hook (registered by
         # parallelize_module in apply_non_moe_tp).
-        moe_block.register_forward_pre_hook(_moe_to_local_pre_hook)
+        moe_block.register_forward_pre_hook(_make_moe_to_local_pre_hook((Partial(),)))
 
         # Pre/post hooks on experts: convert DTensor params to local
         # for the HF for-loop, restore after.
@@ -728,12 +688,17 @@ def apply_moe_tp(model: nn.Module, tp_mesh: DeviceMesh):
     logger.info("Applied Tensor Parallelism to MoE expert weights")
 
 
+# ---------------------------------------------------------------------------
+# Compile
+# ---------------------------------------------------------------------------
+
+
 def _apply_compile_moe(model: nn.Module, compile_config: CompileConfig):
     """Apply torch.compile to each TransformerBlock in a MoE-aware manner.
 
     For non-MoE layers, compiles the whole block. For MoE layers, only
-    compiles the gate (when not TP-patched). The experts module is skipped
-    (FSDP hooks cause graph breaks) and runs the original HF for-loop eagerly.
+    compiles the gate (when it has no TP hooks). The experts module is
+    skipped (FSDP hooks cause graph breaks) and runs eagerly.
     """
     torch._dynamo.config.capture_scalar_outputs = True
     torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
@@ -756,13 +721,10 @@ def _apply_compile_moe(model: nn.Module, compile_config: CompileConfig):
                             # Skip experts — FSDP hooks cause graph breaks,
                             # and the HF for-loop runs eagerly.
                             continue
-                        if mlp_attr == "gate" and getattr(
-                            mlp_submod, "_has_topk_wrapper", False
-                        ):
-                            # Skip compiling the gate when it has the
-                            # DTensor-safe topk wrapper — the mock.patch
-                            # context manager is incompatible with
-                            # fullgraph=True.
+                        if mlp_attr == "gate" and mlp_submod._forward_hooks:
+                            # Skip compiling the gate when it has TP hooks
+                            # (gate to_local). The __dict__ shadowing in
+                            # hooks is incompatible with fullgraph=True.
                             continue
                         setattr(
                             submod,
@@ -794,6 +756,11 @@ def _apply_compile_moe(model: nn.Module, compile_config: CompileConfig):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
+
+# ---------------------------------------------------------------------------
+# FSDP
+# ---------------------------------------------------------------------------
 
 
 def apply_fsdp(
@@ -853,19 +820,18 @@ def apply_fsdp(
             fsdp_mod_ep_config = fsdp_config.copy()
             fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
             moe_block = transformer_block.mlp
+            experts = moe_block.experts
             # Expert params are DTensor Shard(0) on EP mesh. After FSDP,
             # local dim-0 has num_experts/ep_degree experts. When
             # efsdp_size > num_local, dim-0 can't be sharded further.
             _experts_shard_placement_fn = None
             assert dp_mod_ep_mesh is not None
-            num_local_experts = moe_block.experts.num_experts // ep_degree
+            num_local_experts = experts.num_experts // ep_degree
             if dp_mod_ep_mesh.size() > num_local_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             # Remove to_local hooks registered in apply_moe_ep (they'd
-            # fire before FSDP unshard, getting sharded params). Re-register
-            # after fully_shard so they fire after FSDP unshard.
-            experts = moe_block.experts
+            # fire before FSDP unshard, getting sharded params).
             if hasattr(experts, "_local_pre_hook"):
                 experts._local_pre_hook.remove()
                 del experts._local_pre_hook
@@ -880,7 +846,7 @@ def apply_fsdp(
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
-            # Re-register after fully_shard: pre-hook fires AFTER FSDP
+            # Re-register AFTER fully_shard: pre-hook fires AFTER FSDP
             # unshard, post-hook (prepend) fires BEFORE FSDP reshard.
             experts.register_forward_pre_hook(_experts_to_local_pre_hook)
             experts.register_forward_hook(_experts_restore_post_hook, prepend=True)

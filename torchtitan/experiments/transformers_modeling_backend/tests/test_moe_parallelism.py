@@ -226,8 +226,25 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         ep_mesh = mesh_2d["ep"]
         tp_mesh = mesh_2d["tp"]
 
-        # Apply EP (patches forwards, shards params on dim 0, adds all-to-all)
+        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
+            _gate_restore_post_hook,
+            _gate_to_local_pre_hook,
+            _make_moe_to_local_pre_hook,
+            _replicate_gate_params,
+        )
+
+        # Apply EP (shards params on dim 0, adds all-to-all dispatch/combine)
         apply_moe_ep(model.model, ep_mesh=ep_mesh)
+
+        # Apply TP gate handling (replicate gate params, shadow with to_local)
+        for layer in model.model.layers.values():
+            if layer.moe_enabled:
+                _replicate_gate_params(layer.mlp, tp_mesh)
+                layer.mlp.gate.register_forward_pre_hook(_gate_to_local_pre_hook)
+                layer.mlp.gate.register_forward_hook(_gate_restore_post_hook)
+                layer.mlp.register_forward_pre_hook(
+                    _make_moe_to_local_pre_hook((Shard(1),))
+                )
 
         # Create Shard(1) DTensor input (simulating SP output)
         torch.manual_seed(42)
