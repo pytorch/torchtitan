@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
@@ -235,7 +234,7 @@ class PolicyTrainer(Actor, Configurable):
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
-                model = config.build()
+                model = model_spec.model.build()
 
         # Disable torch.compile on VarlenAttentionWrapper so the trainer calls
         # varlen_attn directly (uncompiled), matching the generator's uncompiled
