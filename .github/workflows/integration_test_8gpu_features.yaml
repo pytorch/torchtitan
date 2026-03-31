@@ -92,8 +92,8 @@ jobs:
 
         # Verify the accuracy first.
         echo "Checking FSDP8 v.s. HSDP (4, 2) accuracy parity"
-        export baseline_options="--parallelism.data_parallel_replicate_degree=1 --parallelism.data_parallel_shard_degree=8"
-        export test_options="--parallelism.data_parallel_replicate_degree=4 --parallelism.data_parallel_shard_degree=2"
+        export baseline_options="--parallelism.data_parallel_replicate_degree=1"
+        export test_options="--parallelism.data_parallel_replicate_degree=4"
 
         # Set architecture-specific parameters
         if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
