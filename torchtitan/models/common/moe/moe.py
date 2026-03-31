@@ -11,12 +11,58 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 from .utils import indices_padding_wrapper
+
+
+def _gather_topk_scores(
+    scores: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Gather top-k scores from the full score tensor using expert indices.
+
+    Args:
+        scores: Full routing scores, shape (num_tokens, num_experts).
+        selected_experts_indices: Expert indices, shape (num_tokens, top_k).
+
+    Returns:
+        Top-k scores, shape (num_tokens, top_k).
+    """
+    return torch.gather(scores, -1, selected_experts_indices)
+
+
+def _generate_routing_map(
+    selected_experts_indices: torch.Tensor,
+    num_experts: int,
+) -> torch.Tensor:
+    """Build a boolean routing map from expert indices.
+
+    Args:
+        selected_experts_indices: Expert indices for each token,
+            shape (num_tokens, top_k).
+        num_experts: Total number of experts.
+
+    Returns:
+        routing_map: Boolean tensor of shape (num_tokens, num_experts),
+            where routing_map[i, j] is True if token i is routed to expert j.
+    """
+    num_tokens = selected_experts_indices.shape[0]
+    routing_map = torch.scatter(
+        torch.zeros(
+            (num_tokens, num_experts),
+            dtype=torch.bool,
+            device=selected_experts_indices.device,
+        ),
+        -1,
+        selected_experts_indices,
+        True,
+    )
+    return routing_map
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -278,7 +324,24 @@ class TokenChoiceTopKRouter(Module):
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
+        # gather is wrapped with local_map for DTensor support.
+        if isinstance(selected_experts_indices, DTensor):
+            assert isinstance(
+                scores, DTensor
+            ), "scores and selected_experts_indices should both be DTensors"
+            _local_gather_topk_scores = local_map(
+                _gather_topk_scores,
+                out_placements=(list(scores.placements),),
+                in_placements=(
+                    list(scores.placements),
+                    list(selected_experts_indices.placements),
+                ),
+                device_mesh=scores.device_mesh,
+            )
+        else:
+            _local_gather_topk_scores = _gather_topk_scores
+
+        top_scores = _local_gather_topk_scores(scores, selected_experts_indices)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
@@ -292,13 +355,23 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+        # Build a boolean routing map via scatter, then sum to count tokens
+        # per expert. scatter is wrapped with local_map for DTensor support,
+        # while sum has native DTensor support.
+        if isinstance(selected_experts_indices, DTensor):
+            _local_generate_routing_map = local_map(
+                _generate_routing_map,
+                out_placements=(list(selected_experts_indices.placements),),
+                in_placements=(list(selected_experts_indices.placements),),
+                device_mesh=selected_experts_indices.device_mesh,
+            )
+        else:
+            _local_generate_routing_map = _generate_routing_map
+
+        routing_map = _local_generate_routing_map(
+            selected_experts_indices, self.num_experts
         )
+        num_tokens_per_expert = routing_map.sum(dim=0)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -340,13 +413,8 @@ class TokenReorderer(Module):
                 - token_indices_experts_sorted: Token indices reordered to match expert ordering
                 - num_tokens_per_expert: Number of tokens assigned to each expert
         """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        routing_map = _generate_routing_map(selected_experts_indices, self.num_experts)
+        num_tokens_per_expert = routing_map.sum(dim=0)
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
@@ -427,7 +495,21 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
+        bs, slen, dim = x.shape
+        x = x.view(-1, dim)
+
+        # Router runs in full DTensor (Replicate on TP mesh).
+        # top_scores and selected_experts_indices shape (bs*slen, top_k)
+        # num_tokens_per_expert shape (num_experts,)
+        (
+            top_scores,
+            selected_experts_indices,
+            num_tokens_per_expert,
+        ) = self.router(x, self.expert_bias)
+
+        # Convert DTensor to local tensor after the router for the
+        # reorderer, experts, and combine steps which use ops without
+        # DTensor support (argsort, index assignment, etc.).
         # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
         # in backward, so gradient reduction (reduce-scatter from Partial to
         # Shard(1)) happens once at the MoE boundary rather than being
@@ -440,7 +522,7 @@ class MoE(Module):
         #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
         #   each rank's token positions(Partial).
         #
-        # This holds for all MoE components (router.gate, routed experts, shared
+        # This holds for all MoE components (routed experts, shared
         # experts) and regardless of score_before_experts.
         if isinstance(x, DTensor):
             assert (
@@ -450,16 +532,9 @@ class MoE(Module):
                 "tp",
             ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
             x = x.to_local(grad_placements=(Partial(),))
-        bs, slen, dim = x.shape
-        x = x.view(-1, dim)
-
-        # top_scores and selected_experts_indices shape (bs*slen, top_k)
-        # num_tokens_per_expert shape (num_experts,)
-        (
-            top_scores,
-            selected_experts_indices,
-            num_tokens_per_expert,
-        ) = self.router(x, self.expert_bias)
+            top_scores = top_scores.to_local()
+            selected_experts_indices = selected_experts_indices.to_local()
+            num_tokens_per_expert = num_tokens_per_expert.to_local()
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
         # and also to count the expert usage
