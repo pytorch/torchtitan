@@ -90,12 +90,13 @@ def _test_config(
     tp: int = 1,
     generator_compile_backend: str = "none",
     generator_cudagraph_mode: str = "none",
+    hf_assets_path: str = "torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
 ) -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry(
             "0.6B", attn_backend_override="varlen", batch_invariant=True
         ),
-        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        hf_assets_path=hf_assets_path,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
             training=TrainingConfig(dtype="bfloat16"),
@@ -510,22 +511,32 @@ def main():
         choices=["none", "piecewise", "full", "full_and_piecewise"],
         help="CUDA graph capture mode for the vLLM generator",
     )
+    parser.add_argument(
+        "--hf-assets-path",
+        type=str,
+        default="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        help="Path to HF model checkpoint directory",
+    )
     args, _ = parser.parse_known_args()
 
     config = _test_config(
         tp=args.tp,
         generator_compile_backend=args.generator_compile_backend,
         generator_cudagraph_mode=args.generator_cudagraph_mode,
+        hf_assets_path=args.hf_assets_path,
     )
     config.model_spec.parallelize_fn = parallelize_qwen3
 
-    from torch.nn.attention import (
-        activate_flash_attention_impl,
-        current_flash_attention_impl,
-    )
+    from torchtitan.tools.utils import has_cuda_capability
 
-    if current_flash_attention_impl() != "FA3":
-        activate_flash_attention_impl("FA3")
+    if has_cuda_capability(9, 0):
+        from torch.nn.attention import (
+            activate_flash_attention_impl,
+            current_flash_attention_impl,
+        )
+
+        if current_flash_attention_impl() != "FA3":
+            activate_flash_attention_impl("FA3")
 
     # Register torchtitan model to vllm Engine
     register_model_to_vllm_model_registry(config.model_spec)

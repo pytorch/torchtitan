@@ -147,6 +147,10 @@ class RLTrainer(Configurable):
         # Propagate seed to generator for deterministic sampling
         config.generator.seed = config.seed
 
+        # Propagate batch_invariant_mode to sub-configs
+        config.trainer.batch_invariant_mode = config.batch_invariant_mode
+        config.generator.batch_invariant_mode = config.batch_invariant_mode
+
         # Batch-invariant mode requires bf16 on both trainer and generator
         # so that attention kernels (FA3) run identically on both sides
         # without any dtype casting that could break bitwise identity.
@@ -328,10 +332,8 @@ class RLTrainer(Configurable):
             PolicyTrainer,
             config.trainer,
             model_spec=config.model_spec,
-            batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
             transfer_dtype=config.generator.model_dtype,
-            seed=config.seed,
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -339,7 +341,6 @@ class RLTrainer(Configurable):
             config.generator,
             model_spec=config.model_spec,
             model_path=config.hf_assets_path,
-            batch_invariant_mode=config.batch_invariant_mode,
         )
         self.grader = grader_mesh.spawn(
             "grader",

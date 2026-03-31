@@ -45,7 +45,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 45
+      timeout: 90
       script: |
         set -eux
 
@@ -67,8 +67,9 @@ jobs:
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
 
-        # 2. Install Flash Attention 3 kernels
+        # 2. Install Flash Attention 3 kernels and batch-invariant ops
         uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
+        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
         # 3. Install PyTorch nightly, vllm, and xformers
         uv pip install torch vllm xformers --pre \
@@ -90,3 +91,8 @@ jobs:
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
           --hf_assets_path "$MODEL_PATH"
+
+        # Run bitwise parity test (TP=2, batch-invariant mode)
+        torchrun --nproc-per-node=2 \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py --tp 2 \
+          --hf-assets-path "$MODEL_PATH"

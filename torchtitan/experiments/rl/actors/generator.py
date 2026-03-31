@@ -113,7 +113,6 @@ class VLLMGenerator(Actor, Configurable):
     Args:
         config: Generator-specific configuration.
         model_path: Path to the HF model checkpoint.
-        batch_invariant_mode: Enable batch-invariant mode for deterministic ops.
         prompt_texts: List of prompt strings.
         TODO: refine `prompt_texts` according to input type (eg, a list of token sequences, or conversion)
     """
@@ -144,6 +143,9 @@ class VLLMGenerator(Actor, Configurable):
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
+        batch_invariant_mode: bool = False
+        """Enable batch-invariant mode for deterministic ops."""
+
         def __post_init__(self):
             assert self.parallelism.data_parallel_shard_degree in (1, -1), (
                 f"Generator does not support data parallel sharding, "
@@ -160,7 +162,6 @@ class VLLMGenerator(Actor, Configurable):
         *,
         model_spec: ModelSpec,
         model_path: str,
-        batch_invariant_mode: bool,
     ):
         self.config = config
         self.model_spec = model_spec
@@ -171,7 +172,7 @@ class VLLMGenerator(Actor, Configurable):
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
-        if batch_invariant_mode:
+        if config.batch_invariant_mode:
             from torchtitan.experiments.rl.batch_invariant import (
                 enable_batch_invariant_mode,
             )

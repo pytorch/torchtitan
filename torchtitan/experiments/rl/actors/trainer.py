@@ -21,7 +21,12 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import (
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
@@ -31,6 +36,7 @@ from torchtitan.experiments.rl.actors.utils import (
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
+from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +68,17 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
         compile: CompileConfig = field(default_factory=CompileConfig)
+        debug: DebugConfig = field(default_factory=DebugConfig)
+        batch_invariant_mode: bool = False
+        """Enable batch-invariant mode for deterministic training."""
 
     def __init__(
         self,
         config: Config,
         *,
         model_spec: ModelSpec,
-        batch_invariant_mode: bool,
         hf_assets_path: str = "",
         transfer_dtype: str = "",
-        seed: int = 42,
     ):
         self.config = config
         self.model_spec = model_spec
@@ -95,7 +102,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Enable batch-invariant mode BEFORE init_distributed so NCCL env
         # vars are set before the first communicator is created.
-        if batch_invariant_mode:
+        if config.batch_invariant_mode:
             from torchtitan.experiments.rl.batch_invariant import (
                 enable_batch_invariant_mode,
             )
@@ -106,10 +113,17 @@ class PolicyTrainer(Actor, Configurable):
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
-        # Activate FA3 so that varlen attention on the trainer uses the same
-        # FlashAttention 3 kernel as the generator's CUSTOM backend.  This is
-        # required for bitwise-identical logprobs between the two sides.
-        if batch_invariant_mode:
+        # Set determinism flags and seed via core torchtitan utility
+        dist_utils.set_determinism(
+            self.parallel_dims,
+            self.device,
+            config.debug,
+            distinct_seed_mesh_dims=["pp"],
+        )
+
+        # Activate FA3 when using Hopper machine so that varlen attention
+        # on the trainer uses the same FAv3 kernel as the generator's CUSTOM backend.
+        if config.batch_invariant_mode and has_cuda_capability(9, 0):
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,
@@ -127,18 +141,14 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(
-            model_spec, config, device_type, batch_invariant_mode, hf_assets_path
-        )
+        model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
         self.model = model
         self.model_parts = [model]
 
         # Create reference model for KL divergence (frozen copy of initial policy)
         # TODO: Move ref_model to a separate actor so it can live on different GPUs
-        ref_model = self._build_model(
-            model_spec, config, device_type, batch_invariant_mode, hf_assets_path
-        )
+        ref_model = self._build_model(model_spec, config, device_type, hf_assets_path)
         for p in ref_model.parameters():
             p.requires_grad = False
         ref_model.eval()
@@ -202,7 +212,6 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         config: Config,
         device_type: str,
-        batch_invariant_mode: bool,
         hf_assets_path: str,
     ):
         """Build, parallelize, and initialize a model from checkpoint.
@@ -212,8 +221,6 @@ class PolicyTrainer(Actor, Configurable):
             model_spec: Model specification for building and parallelizing.
             config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
             device_type: Device type string (e.g. "cuda").
-            batch_invariant_mode: Whether to override attention to varlen for
-                batch-invariant training.
             hf_assets_path: Path to HF assets folder for checkpoint loading.
 
         Returns:
@@ -235,7 +242,7 @@ class PolicyTrainer(Actor, Configurable):
         # varlen_attn directly (uncompiled), matching the generator's uncompiled
         # varlen_attn_out path.  torch.compile can change floating-point
         # accumulation order, breaking bitwise identity.
-        if batch_invariant_mode:
+        if config.batch_invariant_mode:
             from torch.nn.attention.varlen import varlen_attn
             from torchtitan.models.common.attention import VarlenAttentionWrapper
 

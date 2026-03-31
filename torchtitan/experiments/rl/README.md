@@ -110,21 +110,7 @@ When enabled, this:
 - Forces `num_splits=1` in flash attention to prevent non-deterministic split-k reductions
 - Enables `torch.use_deterministic_algorithms(True)` to ensure all PyTorch operations use deterministic implementations
 
-### Seed
 
-Setting a seed controls **randomness across runs** (e.g. dropout masks, random initialization). We provide seed as an optional tool — we do not set a seed by default.
 
-For standard transformer LLMs, the forward pass is deterministic (no dropout at inference, weights loaded from checkpoint), so **seed is not required for logprob parity** between the generator and trainer. However, models with randomness in the forward pass (e.g. FLUX) or training with dropout enabled may require a fixed seed for reproducibility.
-
-```python
-PolicyTrainer.__init__(..., seed=42)
-```
-
-### Which tool do I need?
-
-The right choice depends on what you are debugging:
-
-- **Verifying generator/trainer logprob parity:** Use `batch_invariant_mode=True`. Seed is not needed for deterministic models (e.g. transformer LLMs without dropout).
-- **Reproducing the same training trajectory across runs:** Use `seed` and `batch_invariant_mode=True`. Seed fixes RNG, and batch-invariant mode enables `torch.use_deterministic_algorithms(True)` which ensures non-deterministic PyTorch ops (e.g. atomics in backward passes) produce consistent results.
-- **Fully deterministic end-to-end RL loop:** Use both. Batch-invariant mode ensures logprob parity across different batch compositions, and seed ensures the same random choices (sampling, dropout) across runs.
-- **Models with randomness in the forward pass:** Use `seed` in addition to `batch_invariant_mode` to ensure bitwise parity.
+### Verifying generator/trainer logprob parity
+When a user wants to run true on-policy mode in TorchTitan RL and debug generator/trainer log-prob parity, they should enable `batch-invariant-mode` to eliminate potential numerical differences caused by batch-size discrepancies between the generator and trainer. The `batch-invariant-mode` provides run-to-run determinism for both the trainer and generator. If the model has randomness (e.g., dropout), you should also ensure consistent behavior between the trainer and generator by specifying a `seed`.
