@@ -63,7 +63,7 @@ class Module(nn.Module, Configurable):
 
         queue = list(self.children())
         while queue:
-            child = queue.pop()
+            child = queue.pop(0)
             if isinstance(child, Module):
                 child.init_states(buffer_device=buffer_device)
             else:
