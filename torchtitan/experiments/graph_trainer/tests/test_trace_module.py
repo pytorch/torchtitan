@@ -664,6 +664,101 @@ class TestTraceModels(unittest.TestCase):
                 f"{node.name} missing ac_region_id annotation",
             )
 
+    def test_llama_1b_peak_memory(self):
+        """Traced+AC peak memory within 10% of eager+AC, with bitwise-identical numerics."""
+        from torchtitan.config import ActivationCheckpointConfig
+        from torchtitan.distributed.activation_checkpoint import apply_ac
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        config = llama3_configs["1B"]
+        batch_size, seq_len = 2, 2048
+        dtype = torch.bfloat16
+        num_steps = 3
+        tokens = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE)
+        labels = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE)
+
+        # Create reference weights on CPU.
+        ref_model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
+        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
+        del ref_model
+        torch.cuda.empty_cache()
+
+        def make_model():
+            model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
+            with torch.no_grad():
+                model.init_weights(buffer_device=torch.device(self.DEVICE))
+            model.load_state_dict(state)
+            apply_ac(model, ActivationCheckpointConfig(mode="selective"))
+            return model
+
+        def run_steps(step_fn, model):
+            """Run num_steps training steps, return losses and peak memory."""
+            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+            losses = []
+            torch.cuda.reset_peak_memory_stats()
+            for _ in range(num_steps):
+                loss, grads = step_fn(model)
+                losses.append(loss.detach().cpu())
+                for p, g in zip(model.parameters(), grads, strict=True):
+                    p.grad = g
+                opt.step()
+                opt.zero_grad()
+            peak = torch.cuda.max_memory_allocated() / 1e9
+            del opt
+            return losses, peak
+
+        def eager_step(model):
+            logits = model(tokens)
+            loss = get_loss(logits, labels)
+            loss.backward()
+            grads = [p.grad.clone() for p in model.parameters()]
+            return loss, grads
+
+        def traced_step_factory(model):
+            train_step = make_train_step(get_loss)
+            traced = minimal_fx_tracer(train_step, (model, tokens, labels))
+
+            def step(model):
+                result = traced(model, tokens, labels)
+                return result[0], result[1:]
+
+            return step
+
+        # Eager + AC
+        model_eager = make_model()
+        eager_losses, peak_eager = run_steps(eager_step, model_eager)
+        del model_eager
+        torch.cuda.empty_cache()
+
+        # Traced + AC
+        model_traced = make_model()
+        traced_step = traced_step_factory(model_traced)
+        traced_losses, peak_traced = run_steps(traced_step, model_traced)
+        del model_traced
+        torch.cuda.empty_cache()
+
+        torch.use_deterministic_algorithms(False)
+
+        # Verify bitwise-identical loss across all steps.
+        for step, (el, tl) in enumerate(
+            zip(eager_losses, traced_losses, strict=True)
+        ):
+            self.assertTrue(
+                torch.equal(el, tl),
+                f"Step {step}: eager loss={el.item():.6f} vs traced loss={tl.item():.6f}",
+            )
+
+        # Verify peak memory within 10%.
+        ratio = peak_traced / peak_eager
+        self.assertLess(
+            ratio,
+            1.1,
+            f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
+            f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
+        )
+
 
 class TestTraceFSDP(FSDPTest):
     @property
