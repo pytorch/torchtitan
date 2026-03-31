@@ -12,9 +12,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.utils._pytree as pytree
-from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
-    remat_using_tags_for_fwd_loss_bwd_graph,
-)
 from torch._functorch._aot_autograd.logging_utils import (
     setup_stacktrace_preservation_hooks,
 )
@@ -29,46 +26,6 @@ from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 # Everything else (callables, custom objects) should be registered as pytree
 # nodes/constants or captured in fn's closure.
 _ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
-
-# Counter for assigning unique ac_graph_id to each CheckpointWrapper region.
-_ac_graph_id_counter = 0
-
-
-@contextmanager
-def _patch_checkpoint_wrapper_ac_graph_id() -> Generator[None, None, None]:
-    """Monkey-patch CheckpointWrapper.forward to annotate nodes with ac_graph_id.
-
-    During make_fx tracing, each CheckpointWrapper call gets a unique
-    ``ac_graph_id`` via ``torch.fx.traceback.annotate``.  This lets
-    ``cleanup_recompute_tags`` (called by the remat pass) correctly mark
-    cross-region boundary nodes as MUST_SAVE instead of PREFER_RECOMPUTE,
-    preventing cascading recomputation across AC regions.
-
-    In AOTAutograd this is handled by ``TagActivationCheckpoint.tag_nodes``,
-    but make_fx doesn't go through that path.
-
-    FIXME: Remove once https://github.com/pytorch/pytorch/pull/175348 lands,
-    which revamps the AC implementation to handle this natively.
-    """
-    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-        CheckpointWrapper,
-    )
-
-    global _ac_graph_id_counter
-    _ac_graph_id_counter = 0
-    _orig_forward = CheckpointWrapper.forward
-
-    def _patched_forward(self, *args, **kwargs):
-        global _ac_graph_id_counter
-        _ac_graph_id_counter += 1
-        with torch.fx.traceback.annotate({"ac_graph_id": _ac_graph_id_counter}):
-            return _orig_forward(self, *args, **kwargs)
-
-    CheckpointWrapper.forward = _patched_forward  # type: ignore[assignment]
-    try:
-        yield
-    finally:
-        CheckpointWrapper.forward = _orig_forward  # type: ignore[assignment]
 
 
 @contextmanager
@@ -263,10 +220,10 @@ def _patch_engine_run_backward() -> Generator[None, None, None]:
     ``setup_stacktrace_preservation_hooks`` before the autograd engine runs,
     restoring ``seq_nr`` propagation during tracing.
 
-    Additionally, we annotate all backward nodes with
+    Additionally, all backward nodes are annotated with
     ``{"remat_pass_tag": "is_backward"}`` so that
     ``remat_using_tags_for_fwd_loss_bwd_graph`` can identify the backward
-    region boundary for activation checkpointing rematerialization.
+    region boundary.
 
     We must patch the name in both modules since ``torch.autograd.__init__``
     imports it via ``from .graph import``.
@@ -525,13 +482,7 @@ def minimal_fx_tracer(
 
     ctx = TracingContext(fake_mode)
     # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with (
-        fake_mode,
-        tracing(ctx),
-        preserve_node_meta(),
-        _skip_nested_compile(),
-        _patch_checkpoint_wrapper_ac_graph_id(),
-    ):
+    with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
         traced = make_fx(
             fn_with_subclass_handling,
             record_stack_traces=True,
@@ -542,22 +493,7 @@ def minimal_fx_tracer(
     # Must run before DCE so that forward nodes used for matching aren't removed.
     _copy_fwd_metadata_to_bw_nodes(traced)
 
-    # FIXME: Promote ac_graph_id from custom dict to top-level meta so that
-    # cleanup_recompute_tags (called by the remat pass) can find it.
-    # torch.fx.traceback.annotate puts values under meta["custom"], but
-    # cleanup_recompute_tags reads meta["ac_graph_id"] directly.
-    # Remove once https://github.com/pytorch/pytorch/pull/175348 lands.
-    for node in traced.graph.nodes:
-        ac_id = node.meta.get("custom", {}).get("ac_graph_id")
-        if ac_id is not None:
-            node.meta["ac_graph_id"] = ac_id
-
     _remove_cpu_shadow_chains(traced)
-
-    # Rematerialize activations tagged PREFER_RECOMPUTE by selective AC.
-    # Duplicates recomputable forward ops before the backward region and
-    # DCEs the original copies, reducing peak memory.
-    traced = remat_using_tags_for_fwd_loss_bwd_graph(traced)
 
     assert output_spec is not None
     return TracedResult(
