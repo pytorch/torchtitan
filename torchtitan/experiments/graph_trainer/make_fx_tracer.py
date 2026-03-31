@@ -215,6 +215,10 @@ def _patch_engine_run_backward() -> Generator[None, None, None]:
     nodes back to their forward counterparts (needed by
     ``_copy_fwd_metadata_to_bw_nodes``).
 
+    This context manager patches ``_engine_run_backward`` to call
+    ``setup_stacktrace_preservation_hooks`` before the autograd engine runs,
+    restoring ``seq_nr`` propagation during tracing.
+
     We must patch the name in both modules since ``torch.autograd.__init__``
     imports it via ``from .graph import``.
     """
