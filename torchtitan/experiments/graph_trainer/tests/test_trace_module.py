@@ -18,7 +18,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
-    aot_function,
+    minimal_fx_tracer,
 )
 from torchtitan.models.common.attention import (
     annotate_flex_attention_for_regional_inductor,
@@ -38,7 +38,7 @@ def get_loss(logits, labels):
 
 
 def make_train_step(loss_fn):
-    """Return a plain function for aot_function tracing.  loss_fn is captured in closure."""
+    """Return a plain function for minimal_fx_tracer tracing.  loss_fn is captured in closure."""
 
     def train_step(model, *args):
         *fwd_args, labels = args
@@ -123,7 +123,7 @@ class TestTraceModule(unittest.TestCase):
         def forward(model, tokens):
             return model(tokens)
 
-        traced = aot_function(forward, (model, tokens))
+        traced = minimal_fx_tracer(forward, (model, tokens))
         out_eager = model(tokens)
         wrapped = traced(model, tokens)
         self.assertTrue(torch.equal(out_eager, wrapped))
@@ -134,7 +134,7 @@ class TestTraceModule(unittest.TestCase):
         model_test.load_state_dict(model_ref.state_dict())
 
         train_step = make_train_step(loss_fn)
-        traced = aot_function(train_step, (model_ref, tokens, labels))
+        traced = minimal_fx_tracer(train_step, (model_ref, tokens, labels))
 
         logits_ref = model_ref(tokens)
         loss_ref = loss_fn(logits_ref, labels)
@@ -155,7 +155,7 @@ class TestTraceModule(unittest.TestCase):
         model_test.load_state_dict(model_ref.state_dict())
 
         train_step = make_train_step(loss_fn)
-        traced = aot_function(train_step, (model_ref, tokens, labels))
+        traced = minimal_fx_tracer(train_step, (model_ref, tokens, labels))
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR)
@@ -189,7 +189,7 @@ class TestTraceModule(unittest.TestCase):
         def forward(model, tokens):
             return model(tokens)
 
-        traced = aot_function(forward, (model, tokens))
+        traced = minimal_fx_tracer(forward, (model, tokens))
 
         # A model with a different architecture (extra layer → different FQNs).
         different_model = nn.Sequential(
@@ -210,7 +210,7 @@ class TestTraceModule(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
         with self.assertRaises(ValueError, msg="all pytree leaves"):
-            aot_function(fn, (model, tokens, lambda x: x.sum()))
+            minimal_fx_tracer(fn, (model, tokens, lambda x: x.sum()))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -264,7 +264,7 @@ class TestTraceDTensor(unittest.TestCase):
         def forward(model, tokens):
             return model(tokens)
 
-        traced = aot_function(forward, (model, tokens_dt))
+        traced = minimal_fx_tracer(forward, (model, tokens_dt))
         has_subclass = any(
             layout.meta is not None for layout in traced.input_subclass_layouts
         )
@@ -293,7 +293,7 @@ class TestTraceDTensor(unittest.TestCase):
         labels_dt = DTensor.from_local(labels, mesh, [Replicate()])
 
         train_step = make_train_step(get_loss)
-        traced = aot_function(train_step, (model_ref, tokens_dt, labels_dt))
+        traced = minimal_fx_tracer(train_step, (model_ref, tokens_dt, labels_dt))
 
         logits_ref = model_ref(tokens_dt)
         loss_ref = get_loss(logits_ref, labels_dt)
@@ -326,7 +326,7 @@ class TestMetadataPropagation(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = aot_function(train_step, (model, tokens, labels))
+        traced = minimal_fx_tracer(train_step, (model, tokens, labels))
 
         # Collect seq_nr values from all call_function nodes
         seq_nrs = []
@@ -354,9 +354,11 @@ class TestMetadataPropagation(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = aot_function(train_step, (model, tokens, labels))
+        traced = minimal_fx_tracer(train_step, (model, tokens, labels))
         gm = traced.gm
 
+        # Manually set custom metadata on the first fwd node for each seq_nr
+        # to test that _copy_fwd_metadata_to_bw_nodes works
         seq_nr_first: dict[int, torch.fx.Node] = {}
         for node in gm.graph.nodes:
             if node.op == "call_function" and "seq_nr" in node.meta:
@@ -365,13 +367,16 @@ class TestMetadataPropagation(unittest.TestCase):
                     seq_nr_first[seq_nr] = node
                     node.meta["custom"] = {"test_key": "test_value"}
 
+        # Run the copy pass again
         _copy_fwd_metadata_to_bw_nodes(gm)
 
+        # Check that bwd nodes with shared seq_nr got the custom metadata
         for node in gm.graph.nodes:
             if node.op != "call_function" or "seq_nr" not in node.meta:
                 continue
             seq_nr = node.meta["seq_nr"]
             if node is not seq_nr_first.get(seq_nr):
+                # This is a backward node
                 custom = node.meta.get("custom")
                 self.assertIsNotNone(
                     custom,
@@ -387,9 +392,11 @@ class TestMetadataPropagation(unittest.TestCase):
         orig_fn = torch.autograd.graph._engine_run_backward
 
         with _patch_engine_run_backward():
+            # Inside the context, it should be patched
             self.assertIsNot(torch.autograd.graph._engine_run_backward, orig_fn)
             self.assertIsNot(torch.autograd._engine_run_backward, orig_fn)
 
+        # After the context, it should be restored
         self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
         self.assertIs(torch.autograd._engine_run_backward, orig_fn)
 
@@ -429,7 +436,7 @@ class TestTraceModels(unittest.TestCase):
             else contextlib.nullcontext()
         )
         with maybe_regional_inductor:
-            traced = aot_function(train_step, (model_ref, *fwd_args, labels))
+            traced = minimal_fx_tracer(train_step, (model_ref, *fwd_args, labels))
 
         if check_collective_ops:
             ag = sum(
@@ -635,7 +642,7 @@ class TestTraceModels(unittest.TestCase):
             def forward(model, tokens, attn_masks):
                 return model(tokens, attn_masks)
 
-            traced = aot_function(forward, (model, tokens, attn_masks))
+            traced = minimal_fx_tracer(forward, (model, tokens, attn_masks))
 
         flex_nodes = [
             n
@@ -729,7 +736,7 @@ class TestTraceFSDP(FSDPTest):
             else contextlib.nullcontext()
         )
         with maybe_regional_inductor:
-            traced = aot_function(train_step, (model_ref, *fwd_args, labels))
+            traced = minimal_fx_tracer(train_step, (model_ref, *fwd_args, labels))
 
         ag = sum(
             1
