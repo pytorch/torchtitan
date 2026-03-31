@@ -29,20 +29,6 @@ class TestModuleInitStates(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.init_states()
 
-    def test_init_states_with_param_init(self):
-        """init_states uses param_init to initialize parameters."""
-
-        class TestModel(Module):
-            def __init__(self, param_init):
-                super().__init__()
-                self._param_init = param_init
-                self.weight = nn.Parameter(torch.empty(4))
-
-        param_init = {"weight": nn.init.zeros_}
-        m = TestModel(param_init)
-        m.init_states()
-        self.assertTrue(torch.all(m.weight == 0))
-
     def test_init_states_auto_recurses(self):
         """init_states automatically recurses into Module children."""
 
@@ -168,16 +154,8 @@ class TestFromNnModule(unittest.TestCase):
         self.assertIsInstance(m, nn.Conv2d)
         self.assertIsInstance(m, Module)
 
-    def test__init_self_parameters_calls_reset_parameters(self):
-        """For classes with reset_parameters, _init_self_parameters delegates to it."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        m = LayerNorm(32)
-        nn.init.zeros_(m.weight)
-        m._init_self_parameters()
-        self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
-
     def test_init_states_calls_reset_parameters(self):
-        """init_states triggers _init_self_parameters which calls reset_parameters."""
+        """For classes with reset_parameters, init_states delegates to it."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         m = LayerNorm(32)
         nn.init.zeros_(m.weight)

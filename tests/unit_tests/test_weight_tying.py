@@ -20,10 +20,10 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.models.llama3 import expand_layer_configs
 from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 
-_LINEAR_INIT = {
+_DUMMY_LINEAR_INIT = {
     "weight": nn.init.zeros_,
     "bias": nn.init.zeros_,
-}  # dummy; values don't matter for tying tests
+}
 _LINEAR_DEPTH_INIT = DeferredCallable.Config(
     fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
@@ -44,18 +44,18 @@ def _make_config(enable_weight_tying: bool = False):
         enable_weight_tying=enable_weight_tying,
         tok_embeddings=Embedding.Config(param_init=tok_init),
         norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_LINEAR_INIT),
+        output=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
             ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(64, multiple_of=64),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
+                w1=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
                 w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             attention=GQAttention.Config(
                 n_heads=4,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
+                wqkv=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 attn_backend="sdpa",
                 rope_backend="complex",

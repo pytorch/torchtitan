@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import copy
 from copy import deepcopy
 from dataclasses import replace
 from functools import partial

@@ -38,7 +38,7 @@ class FakeModel(BaseModel):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
 
-    def _init_self_parameters(self, **kwargs) -> None:
+    def _init_self_parameters(self) -> None:
         nn.init.trunc_normal_(self.linear.weight, std=0.02)
 
 

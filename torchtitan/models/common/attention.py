@@ -187,14 +187,14 @@ class VarlenAttentionWrapper(LocalMapAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        return varlen_attn(
+        return varlen_attn(  # pyrefly: ignore [missing-attribute]
             xq_packed,
             xk_packed,
             xv_packed,
             cu_seq_q,
             cu_seq_k,
-            max_q,
-            max_k,
+            max_q,  # pyrefly: ignore [bad-argument-type]
+            max_k,  # pyrefly: ignore [bad-argument-type]
             scale=scale,
             # window_size=(left, right) controls the attention window relative to each
             # query position. 'left' is how many tokens before the query to attend to,
