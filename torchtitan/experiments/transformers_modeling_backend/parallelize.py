@@ -338,7 +338,6 @@ def parallelize_hf_transformers(
             parallel_dims.get_mesh("tp"),
             loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            ep_enabled=parallel_dims.ep_enabled,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
@@ -422,7 +421,6 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    ep_enabled: bool = False,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -568,19 +566,8 @@ def apply_non_moe_tp(
                 output_layouts=Shard(1)
             )
             layer_plan.update(mlp_plan)
-        elif not ep_enabled:
-            # MoE with TP only (no EP): all-gather input, reduce-scatter
-            # output. Expert weights and gate handled in apply_moe_ep_tp.
-            mlp_plan = {
-                "mlp": PrepareModuleInputOutput(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(Replicate(),),
-                    use_local_input=False,
-                    output_layouts=(Partial(),),
-                    desired_output_layouts=(Shard(1),),
-                ),
-            }
-            layer_plan.update(mlp_plan)
+        # MoE layers: no mlp plan here. All MoE parallelism
+        # (EP, TP, boundary handling) is in apply_moe_ep_tp.
 
         # Some models like Phi-2 don't have post_attention_layernorm
         if not hasattr(transformer_block, "post_attention_layernorm"):
@@ -653,6 +640,22 @@ def apply_moe_ep_tp(
             # output and topk never sees DTensors
             moe_block.gate.register_forward_pre_hook(_gate_to_local_pre_hook)
             moe_block.gate.register_forward_hook(_gate_restore_post_hook)
+
+            # MoE block TP boundary (TP-only): all-gather input, reduce-
+            # scatter output. Must be registered BEFORE to_local hook so
+            # hook order is: PrepareModuleInputOutput → to_local.
+            if ep_mesh is None:
+                parallelize_module(
+                    moe_block,
+                    tp_mesh,
+                    PrepareModuleInputOutput(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                        use_local_input=False,
+                        output_layouts=(Partial(),),
+                        desired_output_layouts=(Shard(1),),
+                    ),
+                )
 
             # Convert MoE block DTensor input to local
             if ep_mesh is not None:

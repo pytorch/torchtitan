@@ -264,7 +264,7 @@ class TestTPOnlyMoeForwardBackward(DTensorTestBase):
     def test_tp_only_forward_backward(self):
         """Test TP-only MoE forward/backward."""
         from torch.distributed.device_mesh import init_device_mesh
-        from torch.distributed.tensor import DTensor, Replicate, Shard
+        from torch.distributed.tensor import DTensor, Shard
 
         model = _create_tiny_qwen3moe_model(
             num_experts=4,
@@ -292,18 +292,20 @@ class TestTPOnlyMoeForwardBackward(DTensorTestBase):
         # Apply TP-only MoE (shards expert weights, patches forwards)
         apply_moe_ep_tp(model.model, tp_mesh=tp_mesh)
 
-        # Forward with Replicate DTensor input (simulating PrepareModuleInputOutput)
+        # Forward with Shard(1) DTensor input (simulating SP output).
+        # PrepareModuleInputOutput all-gathers to Replicate, then
+        # _moe_to_local_pre_hook converts to local for the MoE forward.
+        # Output is reduce-scattered back to Shard(1) by PrepareModuleInputOutput.
         torch.manual_seed(42)
-        x = torch.randn(2, 16, 64, device="cuda")
-        x_dt = DTensor.from_local(x, tp_mesh, [Replicate()])
+        local_seq = 16 // self.world_size  # seq_len / tp
+        x_local = torch.randn(2, local_seq, 64, device="cuda")
+        x_dt = DTensor.from_local(x_local, tp_mesh, [Shard(1)])
 
         layer = list(model.model.layers.values())[0]
         output = layer.mlp(x_dt)
 
-        # Output should be a plain tensor (to_local inside forward)
-        self.assertIsInstance(output, torch.Tensor)
-        self.assertNotIsInstance(output, DTensor)
-        self.assertEqual(output.shape, (2, 16, 64))
+        # Output shape should match input local shape
+        self.assertEqual(output.shape, (2, local_seq, 64))
         self.assertFalse(torch.isnan(output).any())
 
         # Backward
