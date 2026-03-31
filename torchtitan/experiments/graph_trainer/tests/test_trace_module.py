@@ -12,15 +12,21 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    register_blockmask_pytree_node,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
-    run_traced_module,
-    trace_module,
+    aot_function,
 )
 from torchtitan.models.common.attention import (
     annotate_flex_attention_for_regional_inductor,
 )
+
+# BlockMask must be registered as a pytree node so its tensor children
+# are properly traced as graph inputs instead of opaque leaves.
+register_blockmask_pytree_node()
 
 
 def get_loss(logits, labels):
@@ -31,28 +37,18 @@ def get_loss(logits, labels):
     )
 
 
-class TrainStepModule(nn.Module):
-    def __init__(self, model, loss_fn):
-        super().__init__()
-        self.model = model
-        self.loss_fn = loss_fn
+def make_train_step(loss_fn):
+    """Return a plain function for aot_function tracing.  loss_fn is captured in closure."""
 
-    def forward(self, *args):
+    def train_step(model, *args):
         *fwd_args, labels = args
-        logits = self.model(*fwd_args)
-        loss = self.loss_fn(logits, labels)
-        # Must look up params in forward (not __init__) so that
-        # _reparametrize_module's swapped parameters are captured during tracing.
-        params = list(self.model.parameters())
+        logits = model(*fwd_args)
+        loss = loss_fn(logits, labels)
+        params = list(model.parameters())
         grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
 
-
-def _get_params_and_buffers(mod):
-    return {
-        **dict(mod.named_parameters(remove_duplicate=False)),
-        **dict(mod.named_buffers(remove_duplicate=False)),
-    }
+    return train_step
 
 
 def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
@@ -123,28 +119,25 @@ class TestTraceModule(unittest.TestCase):
 
     def test_mlp_forward(self):
         model, tokens, labels, loss_fn = self._make_mlp()
-        traced_result = trace_module(model, (tokens,))
+        traced = aot_function(model, (tokens,))
         out_eager = model(tokens)
-        params_and_buffers = _get_params_and_buffers(model)
-        wrapped = run_traced_module(traced_result, params_and_buffers, (tokens,))
-        self.assertTrue(torch.equal(out_eager, wrapped[0]))
+        wrapped = traced(model, tokens)
+        self.assertTrue(torch.equal(out_eager, wrapped))
 
     def test_mlp_train_step(self):
         model_ref, tokens, labels, loss_fn = self._make_mlp()
         model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
 
-        train_step = TrainStepModule(model_ref, loss_fn)
-        traced_result = trace_module(train_step, (tokens, labels))
+        train_step = make_train_step(loss_fn)
+        traced = aot_function(train_step, (model_ref, tokens, labels))
 
         logits_ref = model_ref(tokens)
         loss_ref = loss_fn(logits_ref, labels)
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        train_step_copy = TrainStepModule(model_test, loss_fn)
-        params_and_buffers = _get_params_and_buffers(train_step_copy)
-        wrapped = run_traced_module(traced_result, params_and_buffers, (tokens, labels))
+        wrapped = traced(model_test, tokens, labels)
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -157,9 +150,8 @@ class TestTraceModule(unittest.TestCase):
         model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
 
-        train_step_ref = TrainStepModule(model_ref, loss_fn)
-        train_step_copy = TrainStepModule(model_test, loss_fn)
-        traced_result = trace_module(train_step_ref, (tokens, labels))
+        train_step = make_train_step(loss_fn)
+        traced = aot_function(train_step, (model_ref, tokens, labels))
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR)
@@ -172,10 +164,7 @@ class TestTraceModule(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            params_and_buffers = _get_params_and_buffers(train_step_copy)
-            wrapped = run_traced_module(
-                traced_result, params_and_buffers, (tokens, labels)
-            )
+            wrapped = traced(model_test, tokens, labels)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -188,6 +177,36 @@ class TestTraceModule(unittest.TestCase):
             )
             for gr, gt in zip(grads_ref, grads_tr, strict=True):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
+
+    def test_mismatched_module_raises(self):
+        """Executing with a module that has different params than at trace time raises."""
+        model, tokens, labels, loss_fn = self._make_mlp()
+
+        def forward(model, tokens):
+            return model(tokens)
+
+        traced = aot_function(forward, (model, tokens))
+
+        # A model with a different architecture (extra layer → different FQNs).
+        different_model = nn.Sequential(
+            nn.Embedding(256, 64),
+            nn.Linear(64, 256),
+        ).to(device=self.DEVICE, dtype=self.DTYPE)
+
+        with self.assertRaises(ValueError, msg="different parameter/buffer names"):
+            traced(different_model, tokens)
+
+    def test_non_tensor_leaf_raises(self):
+        """Passing a callable leaf in args raises (should be in closure instead)."""
+
+        def fn(model, x, loss_fn):
+            return loss_fn(model(x))
+
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        with self.assertRaises(ValueError, msg="all pytree leaves"):
+            aot_function(fn, (model, tokens, lambda x: x.sum()))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -238,15 +257,14 @@ class TestTraceDTensor(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
 
-        traced_result = trace_module(model, (tokens_dt,))
+        traced = aot_function(model, (tokens_dt,))
         has_subclass = any(
-            layout.meta is not None for layout in traced_result.input_subclass_layouts
+            layout.meta is not None for layout in traced.input_subclass_layouts
         )
         self.assertTrue(has_subclass)
 
         out_eager = model(tokens_dt)
-        params_and_buffers = _get_params_and_buffers(model)
-        wrapped = run_traced_module(traced_result, params_and_buffers, (tokens_dt,))
+        wrapped = traced(model, tokens_dt)
         self.assertTrue(torch.equal(out_eager.full_tensor(), wrapped[0].full_tensor()))
 
     def test_dtensor_train_step(self):
@@ -267,19 +285,15 @@ class TestTraceDTensor(unittest.TestCase):
         tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
         labels_dt = DTensor.from_local(labels, mesh, [Replicate()])
 
-        train_step = TrainStepModule(model_ref, get_loss)
-        traced_result = trace_module(train_step, (tokens_dt, labels_dt))
+        train_step = make_train_step(get_loss)
+        traced = aot_function(train_step, (model_ref, tokens_dt, labels_dt))
 
         logits_ref = model_ref(tokens_dt)
         loss_ref = get_loss(logits_ref, labels_dt)
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        train_step_copy = TrainStepModule(model_test, get_loss)
-        params_and_buffers = _get_params_and_buffers(train_step_copy)
-        wrapped = run_traced_module(
-            traced_result, params_and_buffers, (tokens_dt, labels_dt)
-        )
+        wrapped = traced(model_test, tokens_dt, labels_dt)
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -301,15 +315,15 @@ class TestMetadataPropagation(unittest.TestCase):
     def test_backward_nodes_have_seq_nr(self):
         """Verify that backward FX nodes get seq_nr metadata via the patched engine."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        train_step = TrainStepModule(model, get_loss)
+        train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced_result = trace_module(train_step, (tokens, labels))
+        traced = aot_function(train_step, (model, tokens, labels))
 
         # Collect seq_nr values from all call_function nodes
         seq_nrs = []
-        for node in traced_result.gm.graph.nodes:
+        for node in traced.gm.graph.nodes:
             if node.op == "call_function" and "seq_nr" in node.meta:
                 seq_nrs.append(node.meta["seq_nr"])
 
@@ -329,17 +343,13 @@ class TestMetadataPropagation(unittest.TestCase):
         """Verify _copy_fwd_metadata_to_bw_nodes copies custom metadata to bwd nodes."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
 
-        # Use annotate to set custom metadata on forward nodes, then trace
-        # with backward to verify it propagates
-        train_step = TrainStepModule(model, get_loss)
+        train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced_result = trace_module(train_step, (tokens, labels))
-        gm = traced_result.gm
+        traced = aot_function(train_step, (model, tokens, labels))
+        gm = traced.gm
 
-        # Manually set custom metadata on the first fwd node for each seq_nr
-        # to test that _copy_fwd_metadata_to_bw_nodes works
         seq_nr_first: dict[int, torch.fx.Node] = {}
         for node in gm.graph.nodes:
             if node.op == "call_function" and "seq_nr" in node.meta:
@@ -348,16 +358,13 @@ class TestMetadataPropagation(unittest.TestCase):
                     seq_nr_first[seq_nr] = node
                     node.meta["custom"] = {"test_key": "test_value"}
 
-        # Run the copy pass again
         _copy_fwd_metadata_to_bw_nodes(gm)
 
-        # Check that bwd nodes with shared seq_nr got the custom metadata
         for node in gm.graph.nodes:
             if node.op != "call_function" or "seq_nr" not in node.meta:
                 continue
             seq_nr = node.meta["seq_nr"]
             if node is not seq_nr_first.get(seq_nr):
-                # This is a backward node
                 custom = node.meta.get("custom")
                 self.assertIsNotNone(
                     custom,
@@ -373,11 +380,9 @@ class TestMetadataPropagation(unittest.TestCase):
         orig_fn = torch.autograd.graph._engine_run_backward
 
         with _patch_engine_run_backward():
-            # Inside the context, it should be patched
             self.assertIsNot(torch.autograd.graph._engine_run_backward, orig_fn)
             self.assertIsNot(torch.autograd._engine_run_backward, orig_fn)
 
-        # After the context, it should be restored
         self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
         self.assertIs(torch.autograd._engine_run_backward, orig_fn)
 
@@ -409,20 +414,25 @@ class TestTraceModels(unittest.TestCase):
         num_steps=5,
         lr=1e-3,
     ):
-        train_step_ref = TrainStepModule(model_ref, get_loss)
+        train_step = make_train_step(get_loss)
 
-        with annotate_flex_attention_for_regional_inductor() if use_regional_inductor else contextlib.nullcontext():
-            traced_result = trace_module(train_step_ref, (*fwd_args, labels))
+        maybe_regional_inductor = (
+            annotate_flex_attention_for_regional_inductor()
+            if use_regional_inductor
+            else contextlib.nullcontext()
+        )
+        with maybe_regional_inductor:
+            traced = aot_function(train_step, (model_ref, *fwd_args, labels))
 
         if check_collective_ops:
             ag = sum(
                 1
-                for n in traced_result.gm.graph.nodes
+                for n in traced.gm.graph.nodes
                 if "all_gather_into_tensor" in str(n.target)
             )
             rs = sum(
                 1
-                for n in traced_result.gm.graph.nodes
+                for n in traced.gm.graph.nodes
                 if "reduce_scatter_tensor" in str(n.target)
             )
             self.assertTrue(
@@ -431,7 +441,7 @@ class TestTraceModels(unittest.TestCase):
             )
 
         if use_regional_inductor:
-            _apply_regional_inductor(traced_result)
+            _apply_regional_inductor(traced)
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=lr)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr)
@@ -444,11 +454,7 @@ class TestTraceModels(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            train_step_copy = TrainStepModule(model_test, get_loss)
-            params_and_buffers = _get_params_and_buffers(train_step_copy)
-            wrapped = run_traced_module(
-                traced_result, params_and_buffers, (*fwd_args, labels)
-            )
+            wrapped = traced(model_test, *fwd_args, labels)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -618,11 +624,11 @@ class TestTraceModels(unittest.TestCase):
             "sliding_window_mask": sliding_window_mask,
         }
         with annotate_flex_attention_for_regional_inductor():
-            traced_result = trace_module(model, (tokens, attn_masks))
+            traced = aot_function(model, (tokens, attn_masks))
 
         flex_nodes = [
             n
-            for n in traced_result.gm.graph.nodes
+            for n in traced.gm.graph.nodes
             if "flex_attention" in str(n.target) and "backward" not in str(n.target)
         ]
         self.assertGreater(len(flex_nodes), 0, "No FlexAttentionHOP nodes found")
@@ -704,20 +710,23 @@ class TestTraceFSDP(FSDPTest):
         else:
             fwd_args = (tokens,)
 
-        train_step_ref = TrainStepModule(model_ref, get_loss)
+        train_step = make_train_step(get_loss)
 
-        with annotate_flex_attention_for_regional_inductor() if use_regional_inductor else contextlib.nullcontext():
-            traced_result = trace_module(train_step_ref, (*fwd_args, labels))
+        maybe_regional_inductor = (
+            annotate_flex_attention_for_regional_inductor()
+            if use_regional_inductor
+            else contextlib.nullcontext()
+        )
+        with maybe_regional_inductor:
+            traced = aot_function(train_step, (model_ref, *fwd_args, labels))
 
         ag = sum(
             1
-            for n in traced_result.gm.graph.nodes
+            for n in traced.gm.graph.nodes
             if "all_gather_into_tensor" in str(n.target)
         )
         rs = sum(
-            1
-            for n in traced_result.gm.graph.nodes
-            if "reduce_scatter_tensor" in str(n.target)
+            1 for n in traced.gm.graph.nodes if "reduce_scatter_tensor" in str(n.target)
         )
         self.assertTrue(
             ag > 0 and rs > 0,
@@ -725,7 +734,7 @@ class TestTraceFSDP(FSDPTest):
         )
 
         if use_regional_inductor:
-            _apply_regional_inductor(traced_result)
+            _apply_regional_inductor(traced)
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=1e-3)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3)
@@ -738,11 +747,7 @@ class TestTraceFSDP(FSDPTest):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            train_step_copy = TrainStepModule(model_test, get_loss)
-            params_and_buffers = _get_params_and_buffers(train_step_copy)
-            wrapped = run_traced_module(
-                traced_result, params_and_buffers, (*fwd_args, labels)
-            )
+            wrapped = traced(model_test, *fwd_args, labels)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
