@@ -4,6 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# TODO: Re-enable once we have closed
+# https://github.com/pytorch/torchtitan/issues/2722
+os.environ.setdefault("DISABLE_LLVM_OPT", "1")
+
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +23,7 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     _score_mod_signature,
+    AuxRequest,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -157,6 +164,9 @@ class VarlenAttentionWrapper(LocalMapAttention):
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            attention_masks, VarlenMetadata
+        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -242,22 +252,29 @@ class FlexAttentionWrapper(LocalMapAttention):
         return_lse: bool = False,
         enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            block_mask, (BlockMask, type(None))
+        ), f"block_mask must instance of BlockMask or None, got {type(block_mask)}"
+
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
-        #    to convert `lse` to be DTensor.
-        return FlexAttentionWrapper._compiled_flex_attn(
+        out, aux = FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
             block_mask=block_mask,
             scale=scale,
             enable_gqa=enable_gqa,
-            return_lse=return_lse,
+            return_aux=AuxRequest(lse=return_lse),
         )
+        # Note: return a tuple of Tensor to make converting `lse`
+        # to DTensor easier with TP module notation.
+        if return_lse:
+            return out, aux.lse
+        return out
 
 
 @contextmanager
@@ -633,7 +650,6 @@ class GQAttention(BaseAttention):
                     mask_key = "rope" if self.use_rope else "nope"
                     block_mask = attention_masks[mask_key]
                 else:
-                    assert isinstance(attention_masks, BlockMask), attention_masks
                     block_mask = attention_masks
                 output = (
                     self.inner_attention(
@@ -648,7 +664,6 @@ class GQAttention(BaseAttention):
                     .contiguous()
                 )
             case "varlen":
-                assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
                     xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
                 )

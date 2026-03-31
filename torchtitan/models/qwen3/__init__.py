@@ -6,6 +6,8 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import copy
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
@@ -399,11 +401,21 @@ qwen3_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(flavor: str, attn_backend_override: str | None = None) -> ModelSpec:
+    model = copy.deepcopy(qwen3_configs[flavor])
+    if attn_backend_override is not None:
+        assert attn_backend_override in [
+            "sdpa",
+            "flex",
+            "varlen",
+        ], f"Invalid attn_backend_override: {attn_backend_override}"
+        model.layer.attention.attn_backend = attn_backend_override
+        if attn_backend_override == "varlen":
+            model.layer.attention.attn_mask_type = "block_causal"
     return ModelSpec(
         name="qwen3",
         flavor=flavor,
-        model=qwen3_configs[flavor],
+        model=model,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
