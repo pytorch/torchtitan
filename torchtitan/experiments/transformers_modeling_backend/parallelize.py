@@ -568,11 +568,7 @@ def apply_non_moe_tp(
                 output_layouts=Shard(1)
             )
             layer_plan.update(mlp_plan)
-        elif ep_enabled:
-            # MoE with EP+TP: gate and expert handling done in
-            # apply_moe_ep_tp. No mlp plan needed.
-            pass
-        else:
+        elif not ep_enabled:
             # MoE with TP only (no EP): all-gather input, reduce-scatter
             # output. Expert weights and gate handled in apply_moe_ep_tp.
             mlp_plan = {
