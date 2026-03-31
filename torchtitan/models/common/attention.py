@@ -112,15 +112,18 @@ class LocalMapAttention(Module):
                 f"q, k, v must have the same placements, "
                 f"but got q={q.placements}, k={k.placements}, v={v.placements}"
             )
-            # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
-            # on the n_heads dim (dim 1)
-            # TODO: after full DTensor rewrite, the DP mesh will also be
-            # present, update this check to allow Shard(0) for DP and Shard(1) for TP.
             for i, p in enumerate(q.placements):
-                assert p == Shard(1), (
-                    f"LocalMapAttention requires Shard(1) placements "
+                assert isinstance(p, Shard), (
+                    f"LocalMapAttention requires Shard placements "
                     f"(n_heads dim), but got {p} at position {i}"
                 )
+            # Ensure all Shard placements use the same tensor dim
+            # pyrefly: ignore [missing-attribute]
+            shard_dims = {p.dim for p in q.placements}
+            assert len(shard_dims) == 1, (
+                f"All Shard placements must shard on the same dim, "
+                f"but got dims {shard_dims}"
+            )
             # return_lse=True (e.g. gpt_oss attention sinks) produces
             # 2 outputs instead of 1, requiring different out_placements.
             return_lse = kwargs.get("return_lse", False)
@@ -150,10 +153,6 @@ class LocalMapAttention(Module):
 
 
 class VarlenAttentionWrapper(LocalMapAttention):
-    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
-        varlen_attn, mode="max-autotune-no-cudagraphs"
-    )
-
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -188,7 +187,7 @@ class VarlenAttentionWrapper(LocalMapAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        return VarlenAttentionWrapper._compiled_varlen_attn(
+        return varlen_attn(
             xq_packed,
             xk_packed,
             xv_packed,

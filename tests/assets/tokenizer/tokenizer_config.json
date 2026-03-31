@@ -60,7 +60,7 @@
     "input_ids",
     "attention_mask"
   ],
-  "chat_template": "{% for msg in messages %}<|im_start|>{{ msg.role }}\n{{ msg.content }}<|im_end|>\n{% endfor %}",
+  "chat_template": "{{ bos_token }}{% for msg in messages %}{{ msg.role }}\n{{ msg.content }}{{ eos_token }}{% endfor %}{% if add_generation_prompt %}assistant\n{% endif %}",
   "model_max_length": 131072,
   "tokenizer_class": "PreTrainedTokenizerFast"
 }
