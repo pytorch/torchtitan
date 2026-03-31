@@ -113,7 +113,10 @@ def regional_inductor_pass(
 
 
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: Sequence[Any],
+    is_forward: bool,
+    static_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -123,17 +126,33 @@ def cudagraph_pass(
     - For the first run, it will warm up operators such as nccl.
     - For the second run, it will record cudagraph and replay cudagraph.
     - For the following runs, it will replay cudagraph.
+
+    Args:
+        static_input_indices: Pre-computed static input indices. When
+            provided, skips computing them from gm (necessary when a
+            prior pass like full_inductor_compilation replaced the
+            GraphModule with a non-inspectable callable).
     """
-    # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
-    # which must happen after torch.cuda.set_device(local_rank).
+    from torch._functorch._aot_autograd.utils import make_boxed_func
+
     from torchtitan.experiments.graph_trainer.cudagraph import (
         CUDAGraphWrapper,
         get_static_input_indices,
     )
 
-    static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
-    return gm
+    if static_input_indices is None:
+        static_input_indices = get_static_input_indices(gm, is_forward)
+
+    if isinstance(gm, torch.fx.GraphModule):
+        gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+        return make_boxed_func(gm)
+    else:
+        wrapper = CUDAGraphWrapper(gm, example_inputs, static_input_indices)
+        # Propagate _boxed_call so the AOT runtime uses the same
+        # calling convention (single list arg vs individual *args).
+        if getattr(gm, "_boxed_call", False):
+            wrapper._boxed_call = True
+        return wrapper
 
 
 def validate_flex_attn_annotation_pass(
