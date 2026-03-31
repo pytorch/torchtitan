@@ -12,14 +12,15 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_flex_attention_for_regional_inductor,
+)
+
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
     run_traced_module,
     trace_module,
-)
-from torchtitan.models.common.attention import (
-    annotate_flex_attention_for_regional_inductor,
 )
 
 
