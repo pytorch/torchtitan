@@ -238,16 +238,6 @@ class PolicyTrainer(Actor, Configurable):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
 
-        # Disable torch.compile on VarlenAttentionWrapper so the trainer calls
-        # varlen_attn directly (uncompiled), matching the generator's uncompiled
-        # varlen_attn_out path.  torch.compile can change floating-point
-        # accumulation order, breaking bitwise identity.
-        if config.batch_invariant_mode:
-            from torch.nn.attention.varlen import varlen_attn
-            from torchtitan.models.common.attention import VarlenAttentionWrapper
-
-            VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn
-
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,

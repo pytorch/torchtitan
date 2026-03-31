@@ -154,15 +154,16 @@ class LocalMapInnerAttention(Module):
 class VarlenAttention(LocalMapInnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(LocalMapInnerAttention.Config):
-        pass
+        batch_invariant: bool = False
+        """Enable batch-invariant mode for deterministic attention."""
 
-    def __init__(self, *, batch_invariant: bool = False) -> None:
-        super().__init__()
-        self.batch_invariant = batch_invariant
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.batch_invariant = config.batch_invariant
 
         # num_splits requires FA3. Activate it once when batch-invariant mode
         # is requested so that varlen_attn can accept the num_splits kwarg.
-        if batch_invariant:
+        if config.batch_invariant:
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,

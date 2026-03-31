@@ -13,8 +13,8 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.models.common.attention import LocalMapInnerAttention
 from torchtitan.experiments.rl.batch_invariant import is_batch_invariant_mode_enabled
+from torchtitan.models.common.attention import LocalMapInnerAttention
 from torchtitan.tools.utils import has_cuda_capability
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType

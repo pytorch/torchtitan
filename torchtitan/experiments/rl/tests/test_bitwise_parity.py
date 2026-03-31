@@ -92,10 +92,10 @@ def _test_config(
     generator_cudagraph_mode: str = "none",
     hf_assets_path: str = "torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
 ) -> RLTrainer.Config:
+    model_spec = model_registry("0.6B", attn_backend_override="varlen")
+    model_spec.model.layer.attention.inner_attention.batch_invariant = True
     return RLTrainer.Config(
-        model_spec=model_registry(
-            "0.6B", attn_backend_override="varlen", batch_invariant=True
-        ),
+        model_spec=model_spec,
         hf_assets_path=hf_assets_path,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
@@ -206,14 +206,6 @@ def build_trainer_model(
     with torch.device("meta"):
         with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
             model = model_config.build()
-
-    # Disable compile on VarlenAttentionWrapper to match generator's path
-    if config.batch_invariant_mode:
-        from torch.nn.attention.varlen import varlen_attn
-
-        from torchtitan.models.common.attention import VarlenAttentionWrapper
-
-        VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn
 
     model = parallelize_qwen3(
         model, parallel_dims=parallel_dims, parallelism=parallelism
