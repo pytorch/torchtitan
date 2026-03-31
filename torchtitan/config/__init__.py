@@ -21,11 +21,13 @@ from .configs import (
     TrainingConfig,
 )
 from .configurable import Configurable
+from .deferred_callable import DeferredCallable
 from .manager import ConfigManager
 
 __all__ = [
     "ConfigManager",
     "Configurable",
+    "DeferredCallable",
     "TORCH_DTYPE_MAP",
     # Config dataclasses
     "ActivationCheckpointConfig",

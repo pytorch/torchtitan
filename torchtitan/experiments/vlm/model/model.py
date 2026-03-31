@@ -17,7 +17,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model as Llama3
 from torchtitan.protocols.module import Module
 
-from .args import Siglip2Config, SpecialTokens
+from .args import SpecialTokens
 from .siglip2 import VisionTransformer
 
 
@@ -39,11 +39,19 @@ def _scatter_img_tokens(h_BSD, tokens_BS, i_NLD, i_mask_NL, img_id):
 class Projector(Module):
     """Project the Encoder embedding to the LLM embedding."""
 
-    def __init__(self, in_dim: int, out_dim: int) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        w1: Linear.Config
+        w2: Linear.Config
+        in_dim: int = field(init=False)
+        out_dim: int = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        linear_config = Linear.Config(bias=True)
-        self.w1 = linear_config.build(in_features=in_dim, out_features=in_dim)
-        self.w2 = linear_config.build(in_features=in_dim, out_features=out_dim)
+        self.w1 = config.w1.build(in_features=config.in_dim, out_features=config.in_dim)
+        self.w2 = config.w2.build(
+            in_features=config.in_dim, out_features=config.out_dim
+        )
 
     def forward(self, x_NLD: torch.Tensor):
         x_NLD = self.w1(x_NLD)
@@ -52,43 +60,17 @@ class Projector(Module):
         return x_NLD
 
 
-def _set_param_init_recursive(module: nn.Module) -> None:
-    """Set param_init on all Module descendants that have Linear or norm children.
-
-    Walks the module tree and assigns xavier_uniform for weights, zeros for biases,
-    and ones for norm weights. This is used for experiment modules that don't use
-    the Config.expand() system.
-    """
-    for child in module.modules():
-        if isinstance(child, Module) and child._param_init is None:
-            has_params = any(True for _ in child.parameters(recurse=False))
-            if has_params:
-                # Check if this is a norm-like module
-                names = [n for n, _ in child.named_parameters(recurse=False)]
-                if names == ["weight"] and hasattr(child, "normalized_shape"):
-                    child._param_init = {"weight": nn.init.ones_}
-                else:
-                    child._param_init = {
-                        "weight": nn.init.xavier_uniform_,
-                        "bias": nn.init.zeros_,
-                    }
-
-
 class Llama3Siglip2Transformer(Llama3):
     @dataclass(kw_only=True, slots=True)
     class Config(Llama3.Config):
-        encoder: Siglip2Config = field(default_factory=Siglip2Config)
+        encoder: VisionTransformer.Config
+        projector: Projector.Config
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.config = config
         self.encoder = VisionTransformer(config.encoder)
-        self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
-
-        # Set param_init on encoder and projector sub-modules.
-        # These are experiment-level modules that don't use Config.expand().
-        _set_param_init_recursive(self.encoder)
-        _set_param_init_recursive(self.projector)
+        self.projector = Projector(config.projector)
 
     def get_attention_masks(
         self,

@@ -129,6 +129,9 @@ class ParallelismConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
+    enable_sequence_parallel: bool = True
+    """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.

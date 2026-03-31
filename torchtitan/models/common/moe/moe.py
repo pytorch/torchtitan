@@ -355,7 +355,6 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
-        num_shared_experts: int = 1
         score_before_experts: bool = True
         load_balance_coeff: float | None = 1e-3
         # Expert hidden dimension (replaces old moe_inter_dim)

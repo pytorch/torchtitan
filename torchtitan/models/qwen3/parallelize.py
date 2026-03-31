@@ -34,6 +34,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
+from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
@@ -78,14 +79,17 @@ def parallelize_qwen3(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        enable_sp = parallelism.enable_sequence_parallel
+
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
-            cp_enabled=parallel_dims.cp_enabled,
+            enable_cp=parallel_dims.cp_enabled,
+            enable_sp=enable_sp,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -172,29 +176,34 @@ def parallelize_qwen3(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
-    cp_enabled: bool,
+    enable_cp: bool,
+    enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    embed_plan = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=sp_layout,
+        use_local_output=enable_sp,
+    )
+
     parallelize_module(
         model,
         tp_mesh,
         {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel() if enable_sp else NoParallel(),
             "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
             ),
         },
     )
@@ -225,13 +234,20 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    positions_sharding = Replicate() if cp_enabled else None
+    positions_sharding = Replicate() if enable_cp else None
+    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    qk_norm_plan = SequenceParallel(sequence_dim=2)
+    rowwise_output_plan = rowwise_parallel(
+        output_layouts=sp_layout, use_local_output=enable_sp
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
-            "attention_norm": SequenceParallel(),
+            "attention_norm": norm_plan,
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None, positions_sharding),
+                input_layouts=(sp_layout, Replicate(), None, positions_sharding),
                 desired_input_layouts=(
                     Replicate(),
                     Replicate(),
@@ -242,10 +258,10 @@ def apply_non_moe_tp(
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),
             "attention.wv": colwise_parallel(use_local_output=False),
-            "attention.q_norm": SequenceParallel(sequence_dim=2),
-            "attention.k_norm": SequenceParallel(sequence_dim=2),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "attention.q_norm": qk_norm_plan,
+            "attention.k_norm": qk_norm_plan,
+            "attention.wo": rowwise_output_plan,
+            "ffn_norm": norm_plan,
         }
 
         # pyrefly: ignore [missing-attribute]
@@ -253,11 +269,11 @@ def apply_non_moe_tp(
             layer_plan.update(
                 {
                     "feed_forward": prepare_module_input(
-                        input_layouts=(Shard(1),),
+                        input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
                     "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w2": rowwise_output_plan,
                     "feed_forward.w3": colwise_parallel(),
                 }
             )

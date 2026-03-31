@@ -57,7 +57,7 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
     """Build a minimal Llama3Model.Config with the given head counts."""
-    from torchtitan.models.llama3 import _expand_layer_configs
+    from torchtitan.models.llama3 import expand_layer_configs
 
     rope_cfg = RoPE.Config(
         dim=_DIM // n_heads,
@@ -92,7 +92,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
             ),
         ),
     )
-    _expand_layer_configs({"_test": config})
+    expand_layer_configs(config)
     return config
 
 

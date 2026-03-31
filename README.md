@@ -85,9 +85,9 @@ We report [performance](benchmarks/llama3_h100_202412_torchtitan.md) on up to 51
 
 You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
 * [torchtitan/train.py](torchtitan/train.py) - the main training loop and high-level setup code
-* [torchtitan/models/llama3/model/model.py](torchtitan/models/llama3/model/model.py) - the Llama 3.1 model definition
-* [torchtitan/models/llama3/infra/parallelize.py](torchtitan/models/llama3/infra/parallelize.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
-* [torchtitan/models/llama3/infra/pipeline.py](torchtitan/models/llama3/infra/pipeline.py) - helpers for applying Pipeline Parallel to the model
+* [torchtitan/models/llama3/model.py](torchtitan/models/llama3/model.py) - the Llama 3.1 model definition
+* [torchtitan/models/llama3/parallelize.py](torchtitan/models/llama3/parallelize.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
+* [torchtitan/distributed/pipeline_parallel.py](torchtitan/distributed/pipeline_parallel.py) - helpers for applying Pipeline Parallel to the model
 * [torchtitan/components/checkpoint.py](torchtitan/components/checkpoint.py) - utils for saving/loading distributed checkpoints
 * [torchtitan/components/quantization/float8.py](torchtitan/components/quantization/float8.py) - utils for applying Float8 techniques
 
@@ -104,7 +104,10 @@ This method requires the nightly build of PyTorch, or the latest PyTorch built [
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
+pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/cpu
 ```
+
+> **Note:** The nightly build of `torchdata` is required when using a PyTorch nightly. Install it from the nightly index as shown above.
 
 ### Nightly builds
 

@@ -503,35 +503,52 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_llama3(self):
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import (
+            expand_layer_configs,
+            llama3_configs,
+            Llama3Model,
+        )
 
-        self._run_model_test(Llama3Model, llama3_configs["debugmodel"])
+        config = llama3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_model_test(Llama3Model, config)
 
     def test_qwen3(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        self._run_model_test(Qwen3Model, qwen3_configs["debugmodel"])
+        config = qwen3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_model_test(Qwen3Model, config)
 
     def test_qwen3_moe(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        self._run_model_test(Qwen3Model, qwen3_configs["debugmodel_moe"])
+        config = qwen3_configs["debugmodel_moe"]()
+        expand_layer_configs(config)
+        self._run_model_test(Qwen3Model, config)
 
     def test_deepseek_v3(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import (
+            deepseekv3_configs,
+            expand_layer_configs,
+        )
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        self._run_model_test(DeepSeekV3Model, deepseekv3_configs["debugmodel"])
+        config = deepseekv3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_model_test(DeepSeekV3Model, config)
 
     def test_llama4(self):
-        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4 import expand_layer_configs, llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
+        config = llama4_configs["debugmodel"]()
+        expand_layer_configs(config)
         self._run_model_test(
             Llama4Model,
-            llama4_configs["debugmodel"],
+            config,
             use_attn_masks=True,
             use_regional_inductor=True,
         )
@@ -544,10 +561,11 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
+        expand_layer_configs(config)
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -593,10 +611,11 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
+        expand_layer_configs(config)
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_ac_regions(model)
 
@@ -757,29 +776,44 @@ class TestTraceFSDP(FSDPTest):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
     def test_llama3_fsdp(self):
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import (
+            expand_layer_configs,
+            llama3_configs,
+            Llama3Model,
+        )
 
-        self._run_fsdp_model_test(Llama3Model, llama3_configs["debugmodel"])
+        config = llama3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_fsdp_model_test(Llama3Model, config)
 
     def test_qwen3_fsdp(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        self._run_fsdp_model_test(Qwen3Model, qwen3_configs["debugmodel"])
+        config = qwen3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_fsdp_model_test(Qwen3Model, config)
 
     def test_deepseek_v3_fsdp(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import (
+            deepseekv3_configs,
+            expand_layer_configs,
+        )
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        self._run_fsdp_model_test(DeepSeekV3Model, deepseekv3_configs["debugmodel"])
+        config = deepseekv3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_fsdp_model_test(DeepSeekV3Model, config)
 
     def test_llama4_fsdp(self):
-        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4 import expand_layer_configs, llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
+        config = llama4_configs["debugmodel"]()
+        expand_layer_configs(config)
         self._run_fsdp_model_test(
             Llama4Model,
-            llama4_configs["debugmodel"],
+            config,
             use_attn_masks=True,
             use_regional_inductor=True,
         )
@@ -792,10 +826,11 @@ class TestTraceFSDP(FSDPTest):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
+        expand_layer_configs(config)
         seq_len = 128
         causal = get_causal_mask_mod()
         sw_size = config.layer.attention.sliding_window_size

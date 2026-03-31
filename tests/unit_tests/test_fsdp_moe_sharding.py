@@ -81,9 +81,9 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
             high_freq_factor=1.0,
         ),
     )
-    from torchtitan.models.llama4 import _expand_layer_configs
+    from torchtitan.models.llama4 import expand_layer_configs
 
-    _expand_layer_configs({"_test": config})
+    expand_layer_configs(config)
     return Llama4Model(config)
 
 

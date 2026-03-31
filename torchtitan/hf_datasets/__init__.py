@@ -7,7 +7,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-
 __all__ = ["DatasetConfig"]
 
 

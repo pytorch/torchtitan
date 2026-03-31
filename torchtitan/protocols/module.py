@@ -11,24 +11,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from torchtitan.config import Configurable
-
-
-class PerLayer:
-    """Deferred ``param_init`` that varies per layer.
-
-    Wraps a factory ``(layer_id) -> dict[str, Callable]``.  Set on a
-    Config's ``param_init`` field in the registry.  During ``expand()``,
-    resolved into a concrete dict for each layer.
-    """
-
-    def __init__(
-        self, factory: Callable[[int], dict[str, Callable[[nn.Parameter], Any]]]
-    ) -> None:
-        self.factory = factory
-
-    def resolve(self, layer_id: int) -> dict[str, Callable[[nn.Parameter], Any]]:
-        return self.factory(layer_id)
+from torchtitan.config import Configurable, DeferredCallable
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -54,7 +37,8 @@ class Module(nn.Module, Configurable):
 
     ``param_init`` is a ``dict[str, Callable]`` mapping parameter names to
     init functions.  It is set on every sub-config in the model config
-    registry.  ``PerLayer`` markers are resolved during ``expand()``.
+    registry.  ``DeferredCallable.Config`` markers are resolved during
+    layer expansion.
 
     Subclasses should NOT override ``init_states`` unless they need custom
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
@@ -65,7 +49,7 @@ class Module(nn.Module, Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        param_init: dict | PerLayer | None = None
+        param_init: dict | DeferredCallable.Config | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -91,18 +75,15 @@ class Module(nn.Module, Configurable):
             buffer_device: Device for buffer initialization (e.g., RoPE, MoE).
         """
 
-        def prefixed_children(module, prefix):
-            return [(f"{prefix}{n}", child) for n, child in module.named_children()]
-
-        queue = prefixed_children(self, "")
+        queue = list(self.children())
         while queue:
-            child_name, child = queue.pop()
+            child = queue.pop()
             if isinstance(child, Module):
                 child.init_states(buffer_device=buffer_device)
             else:
                 # Plain nn.Module (e.g., CheckpointWrapper, torch.compile
                 # wrappers) — look inside for Module descendants.
-                queue.extend(prefixed_children(child, f"{child_name}."))
+                queue.extend(child.children())
 
         self._init_self_parameters()
         self._init_self_buffers(buffer_device=buffer_device)

@@ -8,27 +8,24 @@ import unittest
 from functools import partial
 
 import torch.nn as nn
+from torchtitan.config import DeferredCallable
 
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import compute_ffn_hidden_dim, FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.param_init import (
-    depth_scaled_std,
-    PerLayer,
-    skip_param_init,
-)
+from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.llama3 import _expand_layer_configs
+from torchtitan.models.llama3 import expand_layer_configs
 from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 
 _LINEAR_INIT = {
     "weight": nn.init.zeros_,
     "bias": nn.init.zeros_,
 }  # dummy; values don't matter for tying tests
-_LINEAR_DEPTH_INIT = PerLayer(
-    lambda layer_id: {
+_LINEAR_DEPTH_INIT = DeferredCallable.Config(
+    fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
         "bias": nn.init.zeros_,
     }
@@ -72,7 +69,7 @@ def _make_config(enable_weight_tying: bool = False):
             scaling="llama",
         ),
     )
-    _expand_layer_configs({"_test": config})
+    expand_layer_configs(config)
     return config
 
 

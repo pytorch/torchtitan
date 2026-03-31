@@ -200,6 +200,12 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Initialized model with weights loaded from checkpoint.
         """
+
+        # TODO Also support flex attention backend later.
+        assert (
+            model_spec.model.layer.attention.attn_backend == "varlen"
+        ), "Only varlen attention backend is allowed."
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
@@ -285,7 +291,10 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
                 token_lps = compute_token_log_probs(
-                    self.ref_model, prompt_toks, gen_toks, device
+                    self.ref_model,
+                    prompt_toks,
+                    gen_toks,
+                    device,
                 )
                 ref_token_log_probs.append(token_lps)
 

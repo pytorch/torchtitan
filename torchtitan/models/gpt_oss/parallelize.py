@@ -28,6 +28,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -87,12 +88,15 @@ def parallelize_gptoss(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        enable_sp = parallelism.enable_sequence_parallel
+
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=False,
+            enable_sp=enable_sp,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -129,6 +133,10 @@ def parallelize_gptoss(
             ac_config,
             model_compile_enabled=model_compile_enabled,
         )
+
+    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    if model_compile_enabled:
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -182,46 +190,56 @@ def parallelize_gptoss(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
+    enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    embed_plan = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=sp_layout,
+        use_local_output=enable_sp,
+    )
+
     parallelize_module(
         model,
         tp_mesh,
         {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel() if enable_sp else NoParallel(),
             "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
             ),
         },
     )
 
     # Apply tensor + sequence parallelism to every transformer block
+    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    rowwise_output_plan = RowwiseParallel(
+        output_layouts=sp_layout, use_local_output=enable_sp
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
-            "attention_norm": SequenceParallel(),
+            "attention_norm": norm_plan,
             "attention": PrepareModuleInput(
-                input_layouts=(Shard(1), Replicate(), None, None),
+                input_layouts=(sp_layout, Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
-            "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "attention.wo": rowwise_output_plan,
+            "ffn_norm": norm_plan,
         }
 
         # shard attention.sinks across heads
