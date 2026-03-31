@@ -57,7 +57,11 @@ def run_single_test(
             cmd += f"MODULE={module} "
         if config is not None:
             cmd += f"CONFIG={config} "
-        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
+        env_str = " ".join(f"{k}={v}" for k, v in test_flavor.env_vars.items())
+        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks}"
+        if env_str:
+            cmd += f" {env_str}"
+        cmd += " ./run_train.sh"
 
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
