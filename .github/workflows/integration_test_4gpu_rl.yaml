@@ -27,17 +27,24 @@ permissions:
       contents: read
 
 jobs:
-  # Step 1: Dynamically compute the matrix based on conditions
-  set-matrix:
-    uses: ./.github/workflows/set-matrix.yaml
-
-  # Step 2: Use the dynamic matrix in the build-test job
+  # TEMPORARY: Force both CUDA and ROCm to run on this PR for testing.
+  # Revert to set-matrix.yaml after verifying ROCm CI passes.
   build-test:
-    needs: set-matrix
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+      matrix:
+        include:
+          - name: cuda
+            runner: linux.g5.48xlarge.nvidia.gpu
+            gpu-arch-type: cuda
+            gpu-arch-version: "12.8"
+            docker-image: torchtitan-ubuntu-20.04-clang12
+          - name: rocm
+            runner: linux.rocm.gpu.gfx942.8
+            gpu-arch-type: rocm
+            gpu-arch-version: "7.1"
+            docker-image: torchtitan-rocm-ubuntu-22.04-clang12
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
