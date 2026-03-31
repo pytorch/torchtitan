@@ -21,6 +21,8 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 
+from torch.utils._pytree import TreeSpec
+
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -45,7 +47,11 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
 
 
 def export_joint(
-    model, args, kwargs=None, dump_folder: str | None = None
+    model,
+    args,
+    kwargs=None,
+    dump_folder: str | None = None,
+    precompile: bool = False,
 ) -> tuple[JointWithDescriptors, TracingContext]:
     """
     Export joint forward-backward graph with AOT Autograd.
@@ -55,27 +61,40 @@ def export_joint(
         args: Tuple of input arguments
         kwargs: Dict of keyword arguments for the model
         dump_folder: Optional folder to dump the graph to
+        precompile: If True, enable compile-on-one-rank (CooR) so that
+            ProcessGroups flow through the graph as opaque inputs instead
+            of being baked as string-literal PG names. This makes the
+            serialized artifact rank-agnostic.
     """
     if kwargs is None:
         kwargs = {}
     assert isinstance(args, tuple)
     assert isinstance(kwargs, dict)
-    with (
-        # TODO Investigate error on MOE model with use_grouped_mm=False.
-        # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
-        torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
-        torch.fx.traceback.preserve_node_meta(),
-    ):
-        gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
-        _dump_gm(dump_folder, gm, "dynamo_gm")
 
-        tracing_context = gm.meta["tracing_context"]
+    import torch.distributed.config as dist_config
 
-    with tracing(tracing_context):
-        return (
-            aot_export_joint_with_descriptors_alone(gm, args, kwargs),
-            tracing_context,
-        )
+    coor_ctx = (
+        dist_config.patch("compile_on_one_rank", True)
+        if precompile
+        else contextlib.nullcontext()
+    )
+    with coor_ctx:
+        with (
+            # TODO Investigate error on MOE model with use_grouped_mm=False.
+            # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
+            torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
+            torch.fx.traceback.preserve_node_meta(),
+        ):
+            gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
+            _dump_gm(dump_folder, gm, "dynamo_gm")
+
+            tracing_context = gm.meta["tracing_context"]
+
+        with tracing(tracing_context):
+            return (
+                aot_export_joint_with_descriptors_alone(gm, args, kwargs),
+                tracing_context,
+            )
 
 
 def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
@@ -112,7 +131,7 @@ def joint_graph_builder(
     dump_folder: str | None = None,
     compile_config: CompileConfig | None = None,
     serializable: bool = False,
-    on_compile: Callable | None = None,
+    on_compile: Callable[[Any, TreeSpec | None], None] | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -138,6 +157,7 @@ def joint_graph_builder(
         model_args,
         model_kwargs,
         dump_folder=dump_folder,
+        precompile=serializable,
     )
 
     # Check if inductor_decomposition is configured and create the pass with proper context
@@ -479,7 +499,7 @@ def get_compiler_passes_from_config(
                 )
             )
         elif pass_name == "regional_inductor" and getattr(
-            compile_config, "precompile", False
+            compile_config, "precompile_artifact_dir", ""
         ):
             # regional_inductor needs an explicit serializable=True at
             # the pass level so it produces serializable RegionalOutputCode.
