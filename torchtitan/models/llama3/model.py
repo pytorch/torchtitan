@@ -99,14 +99,14 @@ class Llama3Model(Decoder):
 
             self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
 
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend == "varlen"
+            from torchtitan.models.common.attention import VarlenAttention
+
+            if parallelism.context_parallel_degree > 1 and isinstance(
+                self.layer.attention.inner_attention, VarlenAttention.Config
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA and FlexAttention."
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
-                    f"Varlen attention is not supported with CP."
+                    "Context Parallel only supports SDPA and FlexAttention. "
+                    "Varlen attention is not supported with CP."
                 )
 
             tp = parallelism.tensor_parallel_degree

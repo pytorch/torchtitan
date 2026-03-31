@@ -40,7 +40,7 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes.
-    - Flex attention annotation: Tags FlexAttentionWrapper.forward with
+    - Flex attention annotation: Tags FlexAttention.forward with
       {"compile_with_inductor": "flex_attention"} so the compiler can apply
       regional inductor pass based on the annotation. Regional inductor is now only
       supported in AOT mode.
@@ -50,7 +50,7 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     """
     from torchtitan.distributed.expert_parallel import ExpertParallel
-    from torchtitan.models.common.attention import FlexAttentionWrapper
+    from torchtitan.models.common.attention import FlexAttention
     from torchtitan.models.common.moe.moe import MoE
 
     ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
@@ -61,9 +61,9 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
-    FlexAttentionWrapper.forward = annotate_fn(
-        {"compile_with_inductor": "flex_attention"}
-    )(FlexAttentionWrapper.forward)
+    FlexAttention.forward = annotate_fn({"compile_with_inductor": "flex_attention"})(
+        FlexAttention.forward
+    )
 
     annotate_ac_regions(model)
 
@@ -90,9 +90,10 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if (
-        parallelism.context_parallel_degree > 1
-        and model.config.layer.attention.attn_backend != "sdpa"
+    from torchtitan.models.common.attention import ScaledDotProductAttention
+
+    if parallelism.context_parallel_degree > 1 and not isinstance(
+        model.config.layer.attention.inner_attention, ScaledDotProductAttention.Config
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 

@@ -18,6 +18,7 @@ from torchtitan.models.common import (
     compute_ffn_hidden_dim,
     Embedding,
     FeedForward,
+    FlexAttention,
     GQAttention,
     Linear,
     RMSNorm,
@@ -54,8 +55,8 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
                 ),
                 attention=GQAttention.Config(
                     n_heads=n_heads,
-                    attn_backend="flex",
-                    attn_mask_type="block_causal",
+                    inner_attention=FlexAttention.Config(),
+                    mask_type="block_causal",
                     rope_backend="complex",
                 ),
                 moe=MoE.Config(
