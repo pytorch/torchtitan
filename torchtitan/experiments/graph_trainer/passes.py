@@ -32,6 +32,7 @@ from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
+from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
@@ -112,7 +113,10 @@ def regional_inductor_pass(
 
 
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: Sequence[Any],
+    is_forward: bool,
+    static_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -122,17 +126,33 @@ def cudagraph_pass(
     - For the first run, it will warm up operators such as nccl.
     - For the second run, it will record cudagraph and replay cudagraph.
     - For the following runs, it will replay cudagraph.
+
+    Args:
+        static_input_indices: Pre-computed static input indices. When
+            provided, skips computing them from gm (necessary when a
+            prior pass like full_inductor_compilation replaced the
+            GraphModule with a non-inspectable callable).
     """
-    # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
-    # which must happen after torch.cuda.set_device(local_rank).
+    from torch._functorch._aot_autograd.utils import make_boxed_func
+
     from torchtitan.experiments.graph_trainer.cudagraph import (
         CUDAGraphWrapper,
         get_static_input_indices,
     )
 
-    static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
-    return gm
+    if static_input_indices is None:
+        static_input_indices = get_static_input_indices(gm, is_forward)
+
+    if isinstance(gm, torch.fx.GraphModule):
+        gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+        return make_boxed_func(gm)
+    else:
+        wrapper = CUDAGraphWrapper(gm, example_inputs, static_input_indices)
+        # Propagate _boxed_call so the AOT runtime uses the same
+        # calling convention (single list arg vs individual *args).
+        if getattr(gm, "_boxed_call", False):
+            wrapper._boxed_call = True
+        return wrapper
 
 
 def validate_flex_attn_annotation_pass(
@@ -146,45 +166,6 @@ def validate_flex_attn_annotation_pass(
         }:
             assert "compile_with_inductor" in node.meta.get("custom", {})
     return gm
-
-
-def _get_default_sac_save_ops() -> set:
-    """Build the default set of ops whose outputs should be saved (not recomputed)
-    during activation checkpointing.
-
-    Compute-intensive ops are obtained dynamically from PyTorch's partitioner
-    (``get_default_op_list``) so the list stays in sync with upstream changes.
-    """
-    from torch._functorch.partitioners import get_default_op_list
-
-    # Compute-intensive ops from PyTorch's partitioner
-    compute_intensive_ops = {
-        op.default for op in get_default_op_list().compute_intensive_ops
-    }
-
-    # attention variants
-    scaled_dot_product_attention_ops = {
-        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-        torch.ops.aten._scaled_dot_product_attention_math.default,
-        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    }
-
-    higher_order_ops = {
-        torch._higher_order_ops.flex_attention,
-        torch._higher_order_ops.inductor_compiled_code,
-    }
-
-    communication_intensive_ops = {
-        torch.ops._c10d_functional.reduce_scatter_tensor.default,
-        torch.ops._c10d_functional.all_to_all_single.default,
-    }
-
-    return (
-        compute_intensive_ops
-        | scaled_dot_product_attention_ops
-        | higher_order_ops
-        | communication_intensive_ops
-    )
 
 
 def apply_sac_pass(
@@ -213,13 +194,14 @@ def apply_sac_pass(
     Args:
         gm: The joint forward-backward graph module
         op_list_to_save: Set of op targets whose outputs should be saved.
-            Defaults to ``_get_default_sac_save_ops()`` if None.
+            Defaults to ``torchtitan.distributed.activation_checkpoint._get_save_ops()``
+            if None.
 
     Returns:
         The annotated graph module
     """
     if op_list_to_save is None:
-        op_list_to_save = _get_default_sac_save_ops()
+        op_list_to_save = _get_save_ops()
 
     mm_count = 0
     ac_region_stats: dict[int, dict[str, int]] = defaultdict(

@@ -42,7 +42,10 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
 from torchtitan.experiments.graph_trainer.jit_backend import (
     get_compile_backend_with_passes,
 )
-from torchtitan.experiments.graph_trainer.precompile import ConfigFingerprint
+from torchtitan.experiments.graph_trainer.precompile import (
+    _ARTIFACT_KEY,
+    ConfigFingerprint,
+)
 from torchtitan.experiments.graph_trainer.storage import (
     DiskStorageAdapter,
     StorageAdapter,
@@ -55,14 +58,6 @@ from torchtitan.tools.logging import logger
 _SERIALIZABLE_PASSES: frozenset[str] = frozenset(
     ("full_inductor_compilation", "regional_inductor")
 )
-
-
-def _get_precompile_storage_and_key(
-    compile_config: GraphTrainerCompileConfig,
-) -> tuple[StorageAdapter, str]:
-    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-    artifact_key = "default"
-    return storage, artifact_key
 
 
 def _apply_jit_compile(
@@ -91,14 +86,13 @@ def _make_precompile_callback(
     compile_config: GraphTrainerCompileConfig,
     parallel_dims: ParallelDims,
     storage: StorageAdapter | None = None,
-    artifact_key: str | None = None,
     config_fingerprint: ConfigFingerprint | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
     from .precompile import compute_config_fingerprint, precompile_save
 
-    if storage is None or artifact_key is None:
-        storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+    if storage is None:
+        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
     if config_fingerprint is None:
         config_fingerprint = compute_config_fingerprint(
             model, compile_config, parallel_dims
@@ -109,7 +103,6 @@ def _make_precompile_callback(
             model,
             compiled_fn,
             storage,
-            artifact_key,
             out_spec=out_spec,
             metadata={
                 "world_size": torch.distributed.get_world_size(),
@@ -131,28 +124,25 @@ def _apply_aot_compile(
     """Apply AOT compilation (joint graph export + pass pipeline)."""
     register_blockmask_pytree_node()
 
-    # When loading a precompiled artifact, compute storage/key/fingerprint
+    # When loading a precompiled artifact, compute storage/fingerprint
     # once before checking for existence and deserializing the artifact.
-    storage: StorageAdapter | None = None
-    artifact_key: str | None = None
-    config_fingerprint: ConfigFingerprint | None = None
     if compile_config.precompile_artifact_dir:
         from .precompile import compute_config_fingerprint
 
-        storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
         config_fingerprint = compute_config_fingerprint(
             model, compile_config, parallel_dims
         )
 
-        if not storage.exists(artifact_key):
+        if not storage.exists(_ARTIFACT_KEY):
             raise ValueError(
                 f"Precompiled artifact not found at "
-                f"'{compile_config.precompile_artifact_dir}/{artifact_key}'. "
+                f"'{compile_config.precompile_artifact_dir}/{_ARTIFACT_KEY}'. "
                 f"Run precompile_main first to generate the artifact."
             )
 
         return _apply_aot_compile_load(
-            model, parallel_dims, storage, artifact_key, config_fingerprint
+            model, parallel_dims, storage, config_fingerprint
         )
 
     # Get joint custom passes from config
@@ -193,7 +183,6 @@ def _apply_aot_compile_load(
     model: nn.Module,
     parallel_dims: ParallelDims,
     storage: StorageAdapter,
-    artifact_key: str,
     config_fingerprint: ConfigFingerprint,
 ) -> CompiledModule:
     """Load a precompiled artifact and wrap the model with it."""
@@ -206,7 +195,6 @@ def _apply_aot_compile_load(
     precompiled_fn = precompile_load(
         model,
         storage,
-        artifact_key,
         expected_fingerprint=config_fingerprint,
     )
 
@@ -292,5 +280,14 @@ def apply_compile(
             fsdp_reshard_after_forward,
             joint_passes=[],
         )
+    elif mode == "aot_fx_trace":
+        # aot_fx_trace traces fwd+loss+bwd together inside forward_backward_step,
+        # so no model-level wrapping is needed here.
+        logger.info(
+            "aot_fx_trace compile mode: graph capture will happen at training time"
+        )
+        return model
     else:
-        raise ValueError(f"Unknown compile mode: {mode}. Must be 'jit' or 'aot'.")
+        raise ValueError(
+            f"Unknown compile mode: {mode}. Must be 'jit', 'aot', or 'aot_fx_trace'."
+        )

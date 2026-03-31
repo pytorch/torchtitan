@@ -35,7 +35,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.compile import (
-    _get_precompile_storage_and_key,
     _make_precompile_callback,
     _SERIALIZABLE_PASSES,
 )
@@ -46,6 +45,8 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
     joint_graph_builder,
     make_compiler_with_passes,
 )
+from torchtitan.experiments.graph_trainer.precompile import _ARTIFACT_KEY
+from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.model_setup import (
     build_model_on_meta,
     materialize_model,
@@ -203,7 +204,7 @@ def main():
 
     from .precompile import compute_config_fingerprint
 
-    storage, artifact_key = _get_precompile_storage_and_key(compile_config)
+    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
     config_fingerprint = compute_config_fingerprint(
         model, compile_config, parallel_dims
     )
@@ -213,7 +214,6 @@ def main():
         compile_config,
         parallel_dims,
         storage=storage,
-        artifact_key=artifact_key,
         config_fingerprint=config_fingerprint,
     )
 
@@ -247,7 +247,7 @@ def main():
 
     logger.info(
         f"Precompile complete. Artifact saved to "
-        f"{compile_config.precompile_artifact_dir}/{artifact_key}.bin"
+        f"{compile_config.precompile_artifact_dir}/{_ARTIFACT_KEY}.bin"
     )
 
     dist.destroy_process_group()
