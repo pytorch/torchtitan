@@ -150,8 +150,6 @@ class LocalMapAttention(Module):
 
 
 class VarlenAttentionWrapper(LocalMapAttention):
-    _varlen_attn: ClassVar[Callable] = varlen_attn
-
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -186,7 +184,7 @@ class VarlenAttentionWrapper(LocalMapAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        return VarlenAttentionWrapper._varlen_attn(
+        return varlen_attn(
             xq_packed,
             xk_packed,
             xv_packed,
