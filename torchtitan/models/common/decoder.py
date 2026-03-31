@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -157,7 +156,6 @@ class Decoder(BaseModel):
     def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer | None = None,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
@@ -185,14 +183,11 @@ class Decoder(BaseModel):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer | None = None,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         match self.attn_config.attn_backend:
             case "flex":
-                return self._get_flex_attention_masks(
-                    input_batch, tokenizer, extra_inputs
-                )
+                return self._get_flex_attention_masks(input_batch, extra_inputs)
             case "varlen":
                 if self.attn_config.attn_mask_type != "block_causal":
                     raise ValueError(

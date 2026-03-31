@@ -446,9 +446,9 @@ class ChatDataset(IterableDataset, Stateful):
 
     def _iter_greedy_packed(self):
         """Greedy packing: pack examples sequentially until seq_len is full.
-        Document boundaries are marked by EOS tokens between packed examples.
-        The model's flex/varlen attention mask uses these EOS positions to
-        prevent cross-document attention.
+        Packed examples reset positions to 0 at each conversation boundary.
+        The model's block-causal flex/varlen attention mask uses these
+        position resets to prevent cross-conversation attention.
         """
         while True:
             for sample in self._get_data_iter():

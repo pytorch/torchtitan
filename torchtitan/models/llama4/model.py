@@ -11,7 +11,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -230,7 +229,6 @@ class Llama4Model(Decoder):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer | None = None,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]

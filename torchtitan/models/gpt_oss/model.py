@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -280,7 +279,6 @@ class GptOssModel(Decoder):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer | None = None,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         basic_mask_mods = []

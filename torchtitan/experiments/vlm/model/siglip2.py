@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -219,7 +218,6 @@ class VisionTransformer(Module):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
 
@@ -236,7 +234,13 @@ class VisionTransformer(Module):
                 B = 1
             case "block_causal":
                 B = pixel_masks.shape[0]
-                mask_mods.append(get_document_mask_mod(pixel_masks, tokenizer.eos_id))
+                positions = torch.arange(
+                    pixel_masks.shape[1], device=pixel_masks.device
+                ).unsqueeze(0).expand(pixel_masks.shape[0], -1)
+                # Vision rows do not contain packed sub-sequences, so this
+                # yields one monotonically increasing position stream per row
+                # and therefore one document/chunk per image.
+                mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.args.attn_mask_type}"

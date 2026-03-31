@@ -11,7 +11,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model as Llama3
@@ -82,15 +81,12 @@ class Llama3Siglip2Transformer(Llama3):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        masks = super().get_attention_masks(input_batch, tokenizer, extra_inputs)
+        masks = super().get_attention_masks(input_batch, extra_inputs)
         assert isinstance(masks, BlockMask)
         if self.encoder is not None:
-            encoder_masks = self.encoder.get_attention_masks(
-                input_batch, tokenizer, extra_inputs
-            )
+            encoder_masks = self.encoder.get_attention_masks(input_batch, extra_inputs)
             assert isinstance(encoder_masks, BlockMask)
         return {"llama3_masks": masks, "encoder_masks": encoder_masks}
 

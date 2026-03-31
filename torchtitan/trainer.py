@@ -612,7 +612,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model = cast(Decoder, self.model_parts[0])
             extra_kwargs["attention_masks"] = model.get_attention_masks(
                 input_batch=inputs,
-                tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
 
