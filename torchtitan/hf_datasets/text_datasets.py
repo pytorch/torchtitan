@@ -249,11 +249,12 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 
 
 class ChatDataset(IterableDataset, Stateful):
-    """Dataset for single-turn chat/instruction-tuning.
+    """Dataset for single-turn and multi-turn chat/instruction-tuning.
 
-    Tokenizes [user, assistant] message pairs, masks prompt tokens with
-    IGNORE_INDEX in labels, and uses greedy sequence packing with
-    per-document positions. Implements Stateful for checkpointing.
+    Tokenizes conversations with alternating user/assistant turns, masks
+    all non-assistant tokens with IGNORE_INDEX in labels, and uses greedy
+    sequence packing with per-document positions. Implements Stateful for
+    checkpointing.
     """
 
     def __init__(
@@ -300,33 +301,93 @@ class ChatDataset(IterableDataset, Stateful):
 
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
-        """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO: expand this to multi-turn
-        if len(messages) != 2:
+        """Validate conversation structure.
+
+        Allows an optional leading 'system' message, then requires
+        alternating user/assistant turns ending with 'assistant'.
+        """
+        if len(messages) < 2:
             raise ValueError(
-                f"Expected single-turn [user, assistant], got {len(messages)} messages"
+                f"Expected at least 2 messages (user + assistant), "
+                f"got {len(messages)}"
             )
-        if messages[0]["role"] != "user":
+
+        # Determine where the user/assistant alternation starts
+        start = 0
+        if messages[0]["role"] == "system":
+            start = 1
+
+        turns = messages[start:]
+        if len(turns) < 2 or len(turns) % 2 != 0:
             raise ValueError(
-                f"First message must be 'user', got '{messages[0]['role']}'"
+                f"After optional system message, expected an even number of "
+                f"alternating user/assistant messages (>= 2), got {len(turns)}"
             )
-        if messages[1]["role"] != "assistant":
-            raise ValueError(
-                f"Second message must be 'assistant', got '{messages[1]['role']}'"
+
+        for i, msg in enumerate(turns):
+            expected = "user" if i % 2 == 0 else "assistant"
+            if msg["role"] != expected:
+                raise ValueError(
+                    f"Message {start + i} should be '{expected}', "
+                    f"got '{msg['role']}'"
+                )
+
+    def _get_assistant_spans(
+        self,
+        messages: list[dict[str, str]],
+        full_tokens: list[int],
+    ) -> list[tuple[int, int]]:
+        """Find token spans for each assistant turn via incremental tokenization.
+
+        Returns list of (start, end) indices into full_tokens for each
+        assistant turn. Uses prefix re-tokenization to avoid BPE merge errors.
+        """
+        spans = []
+        for i, msg in enumerate(messages):
+            if msg["role"] != "assistant":
+                continue
+
+            # Start: tokenize everything before this assistant turn with
+            # add_generation_prompt=True to include the assistant header.
+            prefix_text = self._tokenizer.apply_chat_template(
+                messages[:i], add_generation_prompt=True
             )
+            prefix_tokens = self._tokenizer.encode(
+                prefix_text, add_bos=True, add_eos=False
+            )
+            start = len(prefix_tokens)
+
+            # End: for non-final turns, tokenize through this turn.
+            # For the final turn, use len(full_tokens) to include the
+            # terminal EOS appended after rendering.
+            if i < len(messages) - 1:
+                through_text = self._tokenizer.apply_chat_template(
+                    messages[: i + 1]
+                )
+                through_tokens = self._tokenizer.encode(
+                    through_text, add_bos=True, add_eos=False
+                )
+                end = len(through_tokens)
+            else:
+                end = len(full_tokens)
+
+            spans.append((start, end))
+
+        return spans
 
     def _tokenize_sample(
         self, sample: dict[str, Any]
     ) -> tuple[list[int], list[int]] | None:
-        """Tokenize a single-turn sample and create input/label pairs.
+        """Tokenize a chat sample and create input/label pairs.
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:] with prompt tokens masked as IGNORE_INDEX.
+        label_ids = tokens[1:] with non-assistant tokens masked as
+        IGNORE_INDEX. Supports both single-turn and multi-turn conversations.
         Returns None if the sample exceeds seq_len (dropped to avoid
         training on truncated responses).
 
-        Uses incremental prefix re-tokenization to find the prompt/response
-        token boundary, avoiding BPE merge errors.
+        Uses incremental prefix re-tokenization to find assistant token
+        boundaries, avoiding BPE merge errors.
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
@@ -353,20 +414,32 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        # Find prompt/response boundary by tokenizing just the user message
-        # with add_generation_prompt=True.
-        prompt_text = self._tokenizer.apply_chat_template(
-            messages[:1], add_generation_prompt=True
-        )
-        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        prompt_len = len(prompt_tokens)
+        # Find assistant spans and unmask only those in labels.
+        # Labels are shifted by 1: label_ids[j] = full_tokens[j+1], so
+        # an assistant span (start, end) in full_tokens maps to
+        # label indices [start-1, end-1) (the model predicts each
+        # assistant token from the preceding position).
+        spans = self._get_assistant_spans(messages, full_tokens)
 
-        # Labels are shifted by one token, so the first assistant token is
-        # predicted at index prompt_len - 1 and must remain unmasked.
-        mask_end = min(max(prompt_len - 1, 0), len(label_ids))
-        label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
+        # Start with everything masked
+        masked_labels = [IGNORE_INDEX] * len(label_ids)
 
-        return input_ids, label_ids
+        for start, end in spans:
+            # In label space: first supervised position is start - 1
+            # (predicting full_tokens[start] from position start-1),
+            # last supervised position is end - 2
+            # (predicting full_tokens[end-1] from position end-2).
+            label_start = max(start - 1, 0)
+            label_end = min(end - 1, len(label_ids))
+            if label_start >= label_end:
+                logger.warning(
+                    f"Sample {self._sample_idx}: assistant span has zero "
+                    f"supervised tokens, skipping sample"
+                )
+                return None
+            masked_labels[label_start:label_end] = label_ids[label_start:label_end]
+
+        return input_ids, masked_labels
 
     def __iter__(self):
         yield from self._iter_greedy_packed()

@@ -7,11 +7,16 @@
 import os
 import unittest
 
+import torch
 from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatDataset
+from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
+    get_document_mask_mod,
+)
 
 # Path to the test tokenizer and fixture data
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -33,6 +38,7 @@ def _load_tokenizer():
 
 def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
+
 
 
 class TestChatDatasetLabelMasking(unittest.TestCase):
@@ -213,9 +219,10 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
 
 
 class TestChatDatasetMessageValidation(unittest.TestCase):
-    """Non-[user, assistant] messages raise ValueError."""
+    """Invalid conversation structures raise ValueError."""
 
-    def test_wrong_first_role(self):
+    def test_system_then_assistant_only(self):
+        """system + assistant without user should raise."""
         tokenizer = _load_tokenizer()
 
         def bad_processor(sample):
@@ -233,7 +240,7 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             infinite=False,
         )
 
-        with self.assertRaises(ValueError, msg="system role should raise"):
+        with self.assertRaises(ValueError):
             next(iter(chat_ds))
 
     def test_wrong_second_role(self):
@@ -257,7 +264,8 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
         with self.assertRaises(ValueError, msg="two user messages should raise"):
             next(iter(chat_ds))
 
-    def test_three_messages(self):
+    def test_ends_with_user(self):
+        """Conversation ending with user (odd turns) should raise."""
         tokenizer = _load_tokenizer()
 
         def bad_processor(sample):
@@ -276,8 +284,75 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             infinite=False,
         )
 
-        with self.assertRaises(ValueError, msg="3 messages should raise"):
+        with self.assertRaises(ValueError, msg="ending with user should raise"):
             next(iter(chat_ds))
+
+    def test_single_message(self):
+        tokenizer = _load_tokenizer()
+
+        def bad_processor(sample):
+            return [{"role": "user", "content": "hi"}]
+
+        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=bad_processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        with self.assertRaises(ValueError, msg="single message should raise"):
+            next(iter(chat_ds))
+
+    def test_valid_multiturn(self):
+        """Multi-turn [user, assistant, user, assistant] should NOT raise."""
+        tokenizer = _load_tokenizer()
+
+        def good_processor(sample):
+            return [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+                {"role": "assistant", "content": "goodbye"},
+            ]
+
+        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=good_processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        # Should not raise
+        batch, labels = next(iter(chat_ds))
+        self.assertEqual(batch["input"].shape[0], 2048)
+
+    def test_valid_system_prefix(self):
+        """[system, user, assistant] should NOT raise."""
+        tokenizer = _load_tokenizer()
+
+        def good_processor(sample):
+            return [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+
+        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=good_processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        # Should not raise
+        batch, labels = next(iter(chat_ds))
+        self.assertEqual(batch["input"].shape[0], 2048)
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):
@@ -370,6 +445,106 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
         batches = [next(it) for _ in range(20)]
         self.assertEqual(len(batches), 20)
         self.assertGreaterEqual(chat_ds._epoch, 1)
+
+
+class TestChatDatasetMultiTurnMasking(unittest.TestCase):
+    """Only assistant spans should be unmasked in multi-turn conversations."""
+
+    def test_multiturn_only_assistant_unmasked(self):
+        tokenizer = _load_tokenizer()
+
+        messages = [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "content": "6"},
+        ]
+
+        def processor(sample):
+            return messages
+
+        ds = Dataset.from_list([{"id": 1}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        batch, labels = next(iter(chat_ds))
+        label_ids = labels
+
+        # There should be unmasked regions (assistant tokens)
+        unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
+        self.assertGreater(len(unmasked), 0, "Expected unmasked assistant tokens")
+
+        # There should be masked regions between assistant spans (user/template tokens)
+        masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
+        self.assertGreater(len(masked), 0, "Expected masked non-assistant tokens")
+
+        # Verify there are at least 2 separate unmasked regions
+        # (one per assistant turn) by checking for gaps in unmasked indices
+        gaps = 0
+        for i in range(1, len(unmasked)):
+            if unmasked[i] - unmasked[i - 1] > 1:
+                gaps += 1
+        self.assertGreaterEqual(
+            gaps, 1, "Expected at least 2 separate unmasked regions for 2 turns"
+        )
+
+
+class TestChatDatasetPositionBoundaries(unittest.TestCase):
+    def test_positions_keep_turns_together_and_packed_conversations_apart(self):
+        tokenizer = _load_tokenizer()
+        messages = [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "content": "6"},
+        ]
+
+        full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != tokenizer.eos_id:
+            full_tokens.append(tokenizer.eos_id)
+        sample_len = len(full_tokens) - 1
+
+        ds = Dataset.from_list([{"id": 1}, {"id": 2}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=lambda sample: messages,
+            seq_len=sample_len * 2,
+            infinite=False,
+        )
+        spans = chat_ds._get_assistant_spans(messages, full_tokens)
+
+        batch, _ = next(iter(chat_ds))
+        positions = batch["positions"].unsqueeze(0)
+        doc_mask = get_document_mask_mod(positions=positions)
+
+        self.assertTrue(
+            doc_mask(
+                torch.tensor(0),
+                torch.tensor(0),
+                torch.tensor(spans[1][0]),
+                torch.tensor(spans[0][0]),
+            ).item(),
+            "Assistant turn 2 should attend to turn 1 within the same conversation",
+        )
+        self.assertFalse(
+            doc_mask(
+                torch.tensor(0),
+                torch.tensor(0),
+                torch.tensor(sample_len + spans[0][0]),
+                torch.tensor(spans[0][0]),
+            ).item(),
+            "Packed conversations should not attend across position resets",
+        )
+
+        metadata = create_varlen_metadata_for_document(positions=positions)
+        self.assertEqual(metadata.cu_seq_q.tolist(), [0, sample_len, sample_len * 2])
 
 
 if __name__ == "__main__":

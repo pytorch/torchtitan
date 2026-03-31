@@ -157,18 +157,22 @@ class Decoder(BaseModel):
     def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
+        tokenizer: BaseTokenizer | None = None,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
+        positions = extra_inputs.get("positions") if extra_inputs else None
 
         match self.attn_config.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                if positions is None:
+                    raise ValueError(
+                        "block_causal attention requires positions in extra_inputs"
+                    )
+                mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.attn_config.attn_mask_type}"
@@ -181,7 +185,7 @@ class Decoder(BaseModel):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
+        tokenizer: BaseTokenizer | None = None,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         match self.attn_config.attn_backend:
@@ -195,10 +199,14 @@ class Decoder(BaseModel):
                         f"varlen attention is only supported with block_causal "
                         f"attention mask type, got {self.attn_config.attn_mask_type}"
                     )
-                assert tokenizer.eos_id is not None
-                return create_varlen_metadata_for_document(
-                    input_batch, tokenizer.eos_id
+                positions = (
+                    extra_inputs.get("positions") if extra_inputs else None
                 )
+                if positions is None:
+                    raise ValueError(
+                        "block_causal varlen attention requires positions in extra_inputs"
+                    )
+                return create_varlen_metadata_for_document(positions=positions)
             case _:
                 raise TypeError("Only varlen and flex attn masks are supported")
 

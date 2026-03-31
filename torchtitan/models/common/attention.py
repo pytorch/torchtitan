@@ -356,27 +356,49 @@ def get_causal_mask_mod() -> _mask_mod_signature:
     return _causal_mask
 
 
-def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signature:
+def get_document_mask_mod(
+    batch: torch.Tensor | None = None,
+    eos_id: int | None = None,
+    *,
+    positions: torch.Tensor | None = None,
+) -> _mask_mod_signature:
     """Creates a document mask that prevents attention across document boundaries.
 
+    Boundaries can be supplied in one of two ways:
+    - `positions`: position resets (`positions[i] <= positions[i-1]`)
+    - `batch` + `eos_id`: EOS tokens that terminate packed documents
+
     Args:
-        batch: Input batch tensor with shape [b, s, h, d]
-        eos_id: End-of-sequence token ID that marks document boundaries
+        batch: Input batch tensor with shape [b, s]. Required when using
+            EOS-based boundary detection.
+        eos_id: End-of-sequence token ID that marks document boundaries.
+            Required when using EOS-based boundary detection.
+        positions: Position tensor with shape [b, s]. Positions reset to 0
+            at each packed document boundary. When provided, position-based
+            detection is used and `batch` / `eos_id` are ignored.
 
     Returns:
         A mask modifier function that implements document-level masking.
     """
-    # batch is [b, s, h, d] shape
-    eos_mask = batch == eos_id
-    eos_mask[:, -1] = True
-    cumulative_mask = torch.cumsum(torch.where(eos_mask, 1, 0), dim=1)
-    sequence_indices = torch.zeros_like(cumulative_mask, dtype=torch.int32)
-    sequence_indices[:, 1:] = cumulative_mask[:, :-1]
+    if positions is not None:
+        boundaries = torch.zeros_like(positions, dtype=torch.bool)
+        boundaries[:, 1:] = positions[:, 1:] <= positions[:, :-1]
+        document_ids = torch.cumsum(boundaries.int(), dim=1)
+    else:
+        if batch is None or eos_id is None:
+            raise ValueError(
+                "get_document_mask_mod requires either positions or batch + eos_id"
+            )
+        eos_mask = batch == eos_id
+        eos_mask[:, -1] = True
+        cumulative_mask = torch.cumsum(torch.where(eos_mask, 1, 0), dim=1)
+        document_ids = torch.zeros_like(cumulative_mask, dtype=torch.int32)
+        document_ids[:, 1:] = cumulative_mask[:, :-1]
 
     def document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
+        return document_ids[b, q_idx] == document_ids[b, kv_idx]
 
     return document_mask
 
@@ -447,31 +469,61 @@ def create_attention_mask(*args, **kwargs):
 
 
 def create_varlen_metadata_for_document(
-    input_batch: torch.Tensor, eos_id: int
+    input_batch: torch.Tensor | None = None,
+    eos_id: int | None = None,
+    *,
+    positions: torch.Tensor | None = None,
 ) -> VarlenMetadata:
     """
     Creates cumulative sequence length indices needed for variable length attention
 
     Args:
-        input_batch
-        eos_id: the EOS id marker
+        input_batch: Input batch tensor with shape [b, s]. Required when
+            using EOS-based boundary detection.
+        eos_id: The EOS id marker. Required when using EOS-based boundary
+            detection.
+        positions: Position tensor with shape [b, s]. When provided,
+            position resets define boundaries and `input_batch` / `eos_id`
+            are ignored.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
     """
-    batch_size, seq_len = input_batch.shape
-    device = input_batch.device
+    if positions is not None:
+        boundary_source = positions
+        eos_id_int: int | None = None
+    else:
+        if input_batch is None or eos_id is None:
+            raise ValueError(
+                "create_varlen_metadata_for_document requires either positions or input_batch + eos_id"
+            )
+        boundary_source = input_batch
+        eos_id_int = int(eos_id)
+
+    batch_size, seq_len = boundary_source.shape
+    device = boundary_source.device
     cu_seqlens_list, all_seq_lengths = [], []
     offset = 0
     max_seqlen = 0
 
     for b in range(batch_size):
-        tokens = input_batch[b]
-        eos_positions = (tokens == eos_id).nonzero(as_tuple=True)[0].to(torch.int32)
+        if positions is not None:
+            sample_positions = positions[b]
+            boundaries = (sample_positions[1:] <= sample_positions[:-1]).nonzero(
+                as_tuple=True
+            )[0].to(torch.int32) + 1
+        else:
+            assert eos_id_int is not None
+            tokens = boundary_source[b]
+            boundaries = (
+                torch.eq(tokens, eos_id_int).nonzero(as_tuple=True)[0].to(torch.int32)
+                + 1
+            )
+
         sample_cu_seqlens = torch.cat(
             [
                 torch.tensor([0], dtype=torch.int32, device=device),
-                eos_positions + 1,
+                boundaries,
                 torch.tensor([seq_len], dtype=torch.int32, device=device),
             ]
         )
