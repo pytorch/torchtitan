@@ -264,13 +264,15 @@ def graph_pp_pipeline_llm(
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
     from torch.distributed.pipelining.schedules import (
         get_schedule_class,
+        PipelineScheduleMulti,
         ScheduleDualPipeV,
         ScheduleZBVZeroBubble,
     )
 
     schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     is_v_schedule = schedule_class in (ScheduleDualPipeV, ScheduleZBVZeroBubble)
-    stages_per_rank = 2 if is_v_schedule else 1
+    is_multi_stage_schedule = issubclass(schedule_class, PipelineScheduleMulti)
+    stages_per_rank = 2 if is_multi_stage_schedule else 1
     num_virtual_stages = parallel_dims.pp * stages_per_rank
 
     # V-schedules (DualPipeV, ZBV) benefit from split_dI_dW to enable
