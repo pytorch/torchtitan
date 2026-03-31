@@ -22,6 +22,11 @@ from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
+# Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
+# Everything else (callables, custom objects) should be registered as pytree
+# nodes/constants or captured in fn's closure.
+_ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
+
 
 @contextmanager
 def _skip_nested_compile() -> Generator[None, None, None]:
@@ -267,11 +272,25 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
 class TracedResult:
     """Holds the traced graph and metadata needed to execute it.
 
-    Returned by :func:`aot_function`.  Call the instance directly to execute
+    Returned by :func:`minimal_fx_tracer`.  Call the instance directly to execute
     the traced graph with fresh parameters read from the live module::
 
-        traced = aot_function(train_step, (model, tokens, labels))
+        traced = minimal_fx_tracer(train_step, (model, tokens, labels))
         result = traced(model, tokens, labels)
+
+    Args:
+        gm: The traced FX graph (a pure function of flat tensors).
+        param_fqns: Fully qualified names of the module's parameters and
+            buffers, recorded at trace time for validation.
+        num_params: Number of parameters + buffers (flat count).
+        num_flat_inputs: Number of original args (before subclass unwrapping).
+        input_subclass_layouts: Maps arg positions that are tensor subclasses
+            to their unwrap/rewrap metadata.  Plain tensors have no entry.
+        num_flat_outputs: Number of original outputs (before subclass unwrapping).
+        output_subclass_layouts: Maps output positions that are tensor subclasses
+            to their rewrap metadata.  Plain tensors have no entry.
+        output_spec: Pytree spec of the original function's return value,
+            used to reconstruct the output structure.
     """
 
     def __init__(
@@ -285,21 +304,6 @@ class TracedResult:
         output_subclass_layouts: dict[int, SubclassLayout],
         output_spec: pytree.TreeSpec,
     ) -> None:
-        """
-        Args:
-            gm: The traced FX graph (a pure function of flat tensors).
-            param_fqns: Fully qualified names of the module's parameters and
-                buffers, recorded at trace time for validation.
-            num_params: Number of parameters + buffers (flat count).
-            num_flat_inputs: Number of original args (before subclass unwrapping).
-            input_subclass_layouts: Maps arg positions that are tensor subclasses
-                to their unwrap/rewrap metadata.  Plain tensors have no entry.
-            num_flat_outputs: Number of original outputs (before subclass unwrapping).
-            output_subclass_layouts: Maps output positions that are tensor subclasses
-                to their rewrap metadata.  Plain tensors have no entry.
-            output_spec: Pytree spec of the original function's return value,
-                used to reconstruct the output structure.
-        """
         self.gm = gm
         self.param_fqns = param_fqns
         self.num_params = num_params
@@ -314,12 +318,7 @@ class TracedResult:
         """Execute the traced graph, reading fresh params from the module in ``args``.
 
         The module must be the first argument (position 0), matching the
-        convention enforced by :func:`aot_function`.
-
-        Runs under ``torch.no_grad()`` because the graph already contains
-        explicit backward ops (from ``torch.autograd.grad`` traced by make_fx).
-        Without this, PyTorch would build a redundant autograd graph on top,
-        keeping all forward intermediates alive via ``grad_fn`` references.
+        convention enforced by :func:`minimal_fx_tracer`.
         """
         mod = args[0]
         params_dict = {
@@ -344,15 +343,14 @@ class TracedResult:
         all_args = params_flat + list(user_args_flat)
         flat_inputs, _ = _unwrap_subclasses(all_args)
 
-        with torch.no_grad():
-            flat_outputs = self.gm(*flat_inputs)
+        flat_outputs = self.gm(*flat_inputs)
         wrapped = _wrap_subclasses(
             flat_outputs, self.num_flat_outputs, self.output_subclass_layouts
         )
         return pytree.tree_unflatten(wrapped, self.output_spec)
 
 
-def aot_function(
+def minimal_fx_tracer(
     fn: Callable,
     args: tuple,
 ) -> TracedResult:
@@ -373,7 +371,7 @@ def aot_function(
     The returned :class:`TracedResult` is directly callable — pass the same
     positional arguments (with the live module first) to execute the graph::
 
-        traced = aot_function(train_step, (model, tokens, labels))
+        traced = minimal_fx_tracer(train_step, (model, tokens, labels))
         result = traced(model, tokens, labels)
 
     Args:
@@ -385,7 +383,7 @@ def aot_function(
     module_indices = [i for i, a in enumerate(args) if isinstance(a, nn.Module)]
     if len(module_indices) != 1:
         raise ValueError(
-            f"aot_function expects exactly one nn.Module in args, "
+            f"minimal_fx_tracer expects exactly one nn.Module in args, "
             f"got {len(module_indices)} at positions {module_indices}."
         )
     if module_indices[0] != 0:
@@ -408,12 +406,11 @@ def aot_function(
     user_args = list(args[1:])
     user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
 
-    # Validate leaves: tensors and make_fx-safe primitives are allowed.
-    _ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
+    # Validate leaves.
     for leaf in user_args_flat:
         if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
             raise ValueError(
-                f"aot_function requires all pytree leaves in args to be tensors "
+                f"minimal_fx_tracer requires all pytree leaves in args to be tensors "
                 f"or primitives (int/float/bool/str), got {type(leaf).__name__}. "
                 f"Non-primitive values should either be registered as pytree "
                 f"nodes (register_pytree_node) or constants "
@@ -478,6 +475,7 @@ def aot_function(
     # Copy forward annotations to backward nodes.
     # Must run before DCE so that forward nodes used for matching aren't removed.
     _copy_fwd_metadata_to_bw_nodes(traced)
+
     _remove_cpu_shadow_chains(traced)
 
     assert output_spec is not None

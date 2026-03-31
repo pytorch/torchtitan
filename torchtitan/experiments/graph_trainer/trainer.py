@@ -13,7 +13,7 @@ import torch.nn as nn
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    aot_function,
+    minimal_fx_tracer,
     TracedResult,
 )
 from torchtitan.trainer import Trainer
@@ -23,10 +23,6 @@ def make_fwd_bwd_step(loss_fn):
     """Return a plain function that traces the entire fwd+loss+bwd step.
 
     ``loss_fn`` is captured in the closure so it is not a graph input.
-
-    TODO: investigate how loss_fn interacts with non-strict trace. Currently
-    it is captured as a closure variable, but non-strict tracing may need it
-    registered via pytree.register_constant or passed differently.
     """
 
     def fwd_bwd_step(
@@ -104,7 +100,7 @@ class GraphTrainer(Trainer):
         if self._traced_step is None:
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
             with self.train_context(), self.maybe_enable_amp:
-                self._traced_step = aot_function(
+                self._traced_step = minimal_fx_tracer(
                     fwd_bwd_fn,
                     (
                         model,
