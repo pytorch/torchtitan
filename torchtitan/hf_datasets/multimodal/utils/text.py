@@ -83,7 +83,7 @@ def process_text_with_images(
     Returns:
         Processed text with image tokens inserted
     """
-    parts = []
+    parts: list[str] = []
     image_idx = 0
 
     for part in text:
@@ -101,6 +101,7 @@ def process_text_with_images(
             )
             image_idx += 1
         else:
+            # pyrefly: ignore [bad-assignment]
             parts.append(part)
 
     result = "".join(parts)
@@ -129,7 +130,7 @@ def process_text_with_videos(
     Returns:
         Processed text with video tokens inserted.
     """
-    parts = []
+    parts: list[str] = []
     video_idx = 0
 
     for part in text:
@@ -145,6 +146,7 @@ def process_text_with_videos(
             )
             video_idx += 1
         else:
+            # pyrefly: ignore [bad-assignment]
             parts.append(part)
 
     result = "".join(parts)

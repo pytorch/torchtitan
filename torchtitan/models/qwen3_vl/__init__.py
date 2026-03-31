@@ -31,12 +31,14 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3VLModel
 from .parallelize import parallelize_qwen3_vl
+from .special_tokens import Qwen3VLSpecialTokens
 from .state_dict_adapter import Qwen3VLStateDictAdapter
 from .vision_encoder import Qwen3VLVisionEncoder
 
 __all__ = [
     "parallelize_qwen3_vl",
     "Qwen3VLModel",
+    "Qwen3VLSpecialTokens",
     "qwen3_vl_configs",
 ]
 
@@ -61,7 +63,8 @@ qwen3_vl_configs = {
                 head_dim=64,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),
@@ -116,7 +119,8 @@ qwen3_vl_configs = {
                 head_dim=64,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),
@@ -159,7 +163,8 @@ qwen3_vl_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),
@@ -201,7 +206,8 @@ qwen3_vl_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),
@@ -256,7 +262,8 @@ qwen3_vl_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),
@@ -311,7 +318,8 @@ qwen3_vl_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
+                attn_backend="flex",
+                attn_mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),

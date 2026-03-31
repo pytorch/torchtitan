@@ -12,7 +12,7 @@ from typing import Any
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from torchtitan.hf_datasets import SpecialTokens
+from torchtitan.hf_datasets.multimodal import MMSpecialTokens
 
 from torchtitan.tools.logging import logger
 
@@ -39,7 +39,7 @@ class MultiModalCollatorNLD:
     spatial_merge_size: int
     max_images_per_batch: int
     max_patches_per_image: int  # This is merged patches count
-    special_tokens: SpecialTokens
+    special_tokens: MMSpecialTokens
 
     def __post_init__(self):
         # Calculate raw patches limit (before spatial merging)
@@ -94,8 +94,8 @@ class MultiModalCollatorNLD:
     def collate_text(
         self,
         batch: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process text inputs and labels from batch."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Process text inputs, labels, and positions from batch."""
         # Pad sequences to the longest in the batch
         input_ids = pad_sequence(
             [s["input_ids"] for s in batch],
@@ -107,6 +107,11 @@ class MultiModalCollatorNLD:
             batch_first=True,
             padding_value=self.special_tokens.ignore_id,
         )
+        positions = pad_sequence(
+            [s["positions"] for s in batch],
+            batch_first=True,
+            padding_value=0,
+        )
         # Pad or truncate to seq_len + 1
         input_ids, labels = pad_text_batch(
             input_ids,
@@ -115,6 +120,15 @@ class MultiModalCollatorNLD:
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
+        # Pad or truncate positions to seq_len + 1
+        if positions.shape[1] < self.seq_len + 1:
+            positions = torch.nn.functional.pad(
+                positions,
+                (0, self.seq_len + 1 - positions.shape[1]),
+                value=0,
+            )
+        else:
+            positions = positions[:, : self.seq_len + 1]
         # Pad dummy rows to reach target batch size
         input_ids, labels = pad_input_ids_and_labels_to_target_batch_size(
             input_ids,
@@ -123,15 +137,21 @@ class MultiModalCollatorNLD:
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
+        if positions.shape[0] < self.batch_size:
+            positions = torch.nn.functional.pad(
+                positions,
+                (0, 0, 0, self.batch_size - positions.shape[0]),
+                value=0,
+            )
 
         # pyrefly: ignore [bad-return]
-        return input_ids[:, :-1], labels[:, 1:]
+        return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]
 
     def __call__(
         self, batch: list[dict[str, Any]]
     ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
         """Collate batch with patch-based approach."""
-        images_per_sample = []
+        images_per_sample: list[int] = []
         for sample in batch:
             num_images = len(sample.get("pixel_values", []))
             images_per_sample.append(num_images)
@@ -162,9 +182,10 @@ class MultiModalCollatorNLD:
         ]
         video_patches, video_grids = self.collate_images(all_videos)
 
-        input_ids, labels = self.collate_text(batch)
+        input_ids, labels, positions = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
+            "positions": positions,
             "pixel_values": patches,
             "grid_thw": grids,
             "pixel_values_videos": video_patches,

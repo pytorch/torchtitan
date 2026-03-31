@@ -96,7 +96,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             "model.visual.deepstack_merger_list.{}.linear_fc2.bias": "vision_encoder.deepstack_merger_list.{}.linear_fc2.bias",
         }
 
-    def to_hf(self, tt_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3-VL format."""
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
@@ -105,7 +105,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
         moe_w1_by_layer: dict[str, Any] = {}
         moe_w3_by_layer: dict[str, Any] = {}
 
-        for tt_key, value in tt_state_dict.items():
+        for tt_key, value in state_dict.items():
             if "moe.experts" in tt_key:
                 tt_abstract_key = re.sub(r"(\d+)", "{}", tt_key, count=1)
                 # pyrefly: ignore [missing-attribute]
@@ -149,7 +149,8 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                     continue
                 hf_key = to_hf_map[tt_key]
                 hf_value = value
-                # Reshape Linear weight to Conv3d for patch embedding
+                # Linear weight (out, C*T*H*W) -> Conv3d weight (out, C, T, H, W)
+                # Plain reshape since both use channel-first (c pt ph pw) layout.
                 if tt_key == "vision_encoder.patch_embed.proj.weight":
                     encoder = self.model_config.vision_encoder
                     hf_value = value.reshape(
@@ -235,7 +236,8 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                 if tt_key is None:
                     continue
                 tt_value = value
-                # Reshape Conv3d weight to Linear for patch embedding
+                # Conv3d weight (out, C, T, H, W) -> Linear weight (out, C*T*H*W)
+                # Plain reshape since both use channel-first (c pt ph pw) layout.
                 if hf_key == "model.visual.patch_embed.proj.weight":
                     tt_value = value.reshape(value.shape[0], -1)
                 tt_state_dict[tt_key] = tt_value

@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.mm_datasets import MMDataLoader
+from torchtitan.models.qwen3_vl.special_tokens import Qwen3VLDataLoader
 
 
 class TestMMDatasetCheckpointing(unittest.TestCase):
@@ -19,7 +19,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         tokenizer = HuggingFaceTokenizer.Config().build(
             tokenizer_path="tests/assets/tokenizer"
         )
-        dl_config = MMDataLoader.Config(
+        dl_config = Qwen3VLDataLoader.Config(
             dataset="cc12m-test",
             patch_size=14,
             temporal_patch_size=2,
@@ -28,7 +28,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
             max_pixels=200000,
         )
 
-        return MMDataLoader(
+        return Qwen3VLDataLoader(
             dl_config,
             dp_world_size=world_size,
             dp_rank=rank,
@@ -68,6 +68,9 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                     assert torch.equal(
                         labels, expected_labels
                     ), f"labels mismatch (world_size={world_size}, rank={rank})"
+                    assert torch.equal(
+                        input_dict["positions"], expected_input["positions"]
+                    ), f"positions mismatch (world_size={world_size}, rank={rank})"
                     # Verify pixel_values shapes match (values not compared)
                     for key in ["pixel_values", "grid_thw"]:
                         exp_v = expected_input[key]

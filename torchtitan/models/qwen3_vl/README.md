@@ -6,10 +6,25 @@ This folder contains the implementation of Qwen3-VL, a multimodal vision-languag
 
 Qwen3-VL combines:
 - **Qwen3 LLM**: The base language model with QK-norm and RoPE
-- **Vision Encoder**: A Vision Transformer (ViT) with 2D RoPE and bilinear-interpolated position embeddings
+- **Vision Encoder**: A Vision Transformer (ViT) that supports native resolution images (no fixed square crops) with 2D RoPE and bilinear-interpolated position embeddings
 - **Patch Merger**: Reduces vision sequence length by merging spatial patches (e.g., 2×2 patches → 1 token)
 - **DeepStack**: Visual features from intermediate ViT layers are added to early LLM hidden states
 - **MRoPE**: Multi-dimensional Rotary Position Embedding with separate temporal, height, and width position IDs for vision-language alignment
+
+## Design
+
+Distributed training usually does not play nice with input of varying shapes. To handle a varying number of images and image sizes, we require two hyperparameters: image batch size `N` and image length `L` (in patches), and pad the actual image patches to this fixed size. Then we scatter the patch embeddings to their actual positions in the LLM input tokens.
+
+<img width="1398" height="840" alt="VLM Architecture" src="https://github.com/user-attachments/assets/63fcbbc1-c587-4a63-8246-411cb72f5789" />
+
+Note: the diagram shows the case where each patch maps to one vision token. In practice, Qwen3-VL uses a Patch Merger that groups `merge_size²` patches into one token (e.g., `merge_size=2` means 4 patches → 1 token), reducing the vision sequence length by `merge_size²`.
+
+- After `tok_embeddings`, we obtain text tokens of shape `B×S`.
+- After `vision_encoder`, we obtain visual tokens of shape `N×L`.
+- We extract the valid visual tokens only (remove padding).
+- Then scatter those tokens to their actual positions in the LLM input tokens.
+- DeepStack adds intermediate ViT features to early decoder layers.
+- MRoPE assigns separate (T, H, W) position IDs to vision tokens for spatial awareness.
 
 ## Prerequisites
 
@@ -63,7 +78,6 @@ Set `video_dir="./assets/videos"` in the dataloader config so paths resolve corr
 ## TODO
 
 - Add Pipeline Parallelism support
-- Add Context Parallelism support for long-sequence training
-- Add SequenceParallel to the decoder (requires DTensor-aware vision scatter and DeepStack)
+- Add default video dataset training configs
 - Multi-worker data loading for video
-- GPU-accelerated video decoding (nvdec)
+- GPU-accelerated video decoding

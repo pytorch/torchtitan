@@ -75,6 +75,7 @@ class MMSamplePacker:
         merged: dict[str, Any] = {
             "input_ids": torch.cat([s["input_ids"] for s in samples]),
             "labels": torch.cat([s["labels"] for s in samples]),
+            "positions": torch.cat([s["positions"] for s in samples]),
             "pixel_values": [img for s in samples for img in s.get("pixel_values", [])],
             "pixel_values_videos": [
                 vid for s in samples for vid in s.get("pixel_values_videos", [])

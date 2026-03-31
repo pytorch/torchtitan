@@ -77,7 +77,8 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 
-from torchtitan.hf_datasets import DatasetConfig, SpecialTokens
+from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.hf_datasets.multimodal import MMSpecialTokens
 from torchtitan.tools.logging import logger
 from .mm_collator_nld import MultiModalCollatorNLD
 from .utils.image import calculate_vision_tokens, process_image, smart_resize
@@ -97,7 +98,7 @@ def _process_mm_sample(
     max_pixels: int,
     image_mean: tuple[float, ...],
     image_std: tuple[float, ...],
-    special_tokens: SpecialTokens,
+    special_tokens: MMSpecialTokens,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
 
@@ -192,6 +193,7 @@ def _process_mm_sample(
         return {
             "input_ids": input_ids,
             "labels": labels,
+            "positions": torch.arange(len(input_ids)),
             "pixel_values": processed_images,
         }
 
@@ -210,7 +212,7 @@ def _process_obelics_sample(
     max_pixels: int,
     image_mean: tuple[float, ...],
     image_std: tuple[float, ...],
-    special_tokens: SpecialTokens,
+    special_tokens: MMSpecialTokens,
     **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the OBELICS dataset (interleaved text and images)."""
@@ -239,7 +241,7 @@ def _process_cc12_wd_sample(
     max_pixels: int,
     image_mean: tuple[float, ...],
     image_std: tuple[float, ...],
-    special_tokens: SpecialTokens,
+    special_tokens: MMSpecialTokens,
     **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the CC12-WD dataset (text-image pairs)."""
@@ -276,7 +278,7 @@ def _process_nemotron_video_sample(
     max_pixels: int,
     image_mean: tuple[float, ...],
     image_std: tuple[float, ...],
-    special_tokens: SpecialTokens,
+    special_tokens: MMSpecialTokens,
     video_dir: str = "",
     video_fps: float = 2.0,
     video_min_frames: int = 4,
@@ -434,6 +436,7 @@ def _process_nemotron_video_sample(
         return {
             "input_ids": input_ids,
             "labels": labels,
+            "positions": torch.arange(len(input_ids)),
             "pixel_values_videos": [processed_video],
         }
 
@@ -505,7 +508,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         image_mean: tuple[float, ...],
         image_std: tuple[float, ...],
         packing_buffer_size: int,
-        special_tokens: SpecialTokens,
+        special_tokens: MMSpecialTokens,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -739,6 +742,9 @@ class MMDataLoader(ParallelAwareDataloader):
         video_max_frames: int = 768
         """Maximum number of frames to sample from a video."""
 
+    # Subclasses must set this to their model's special tokens class.
+    special_tokens_cls: type[MMSpecialTokens]
+
     def __init__(
         self,
         config: Config,
@@ -750,7 +756,7 @@ class MMDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         **kwargs,
     ):
-        special_tokens = SpecialTokens.from_tokenizer(tokenizer)
+        special_tokens = self.special_tokens_cls.from_tokenizer(tokenizer)
 
         dataset = HuggingFaceMultiModalDataset(
             dataset_name=config.dataset,

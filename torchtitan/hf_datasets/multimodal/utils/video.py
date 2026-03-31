@@ -9,7 +9,7 @@
 import numpy as np
 import torch
 
-from torchtitan.hf_datasets.utils.image import smart_resize
+from .image import smart_resize
 from torchtitan.tools.logging import logger
 
 
@@ -35,7 +35,7 @@ def load_video(
         or None if loading fails.
     """
     try:
-        import av
+        import av  # pyrefly: ignore [missing-import]
 
         container = av.open(path)
         stream = container.streams.video[0]
@@ -122,7 +122,7 @@ def process_video(
         or None on failure.
     """
     try:
-        import torchvision.transforms.functional as F
+        import torchvision.transforms.functional as F  # pyrefly: ignore [missing-import]
 
         T, H, W, C = video.shape
         factor = patch_size * merge_size

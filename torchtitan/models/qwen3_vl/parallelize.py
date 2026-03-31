@@ -49,7 +49,8 @@ from torchtitan.distributed.tensor_parallel import (
     NoParallel,
 )
 from torchtitan.models.llama3.parallelize import apply_replicate
-from torchtitan.models.llama4.parallelize import apply_compile, apply_fsdp
+from torchtitan.distributed.compile import apply_compile_dense, apply_compile_sparse
+from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.models.qwen3.parallelize import _op_sac_save_list
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -62,11 +63,12 @@ def _apply_moe_ep_tp_to_decoder(
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None = None,
 ):
-    """Apply TP and EP to MoE layers for VLM (no SequenceParallel).
+    """Apply TP and EP to MoE layers for decoder (no SequenceParallel).
 
     Unlike llama4's apply_moe_ep_tp which assumes Shard(1) hidden states
     (from SequenceParallel), this uses Replicate input/output layouts because
-    Qwen3-VL keeps hidden states as Replicate for vision scatter and DeepStack.
+    Qwen3-VL keeps hidden states as replicated plain tensors on every rank (no
+    sequence sharding) for vision scatter and DeepStack.
 
     The key difference: MoE output uses Partial → Replicate (all-reduce)
     instead of Partial → Shard(1) (reduce-scatter).
@@ -154,9 +156,10 @@ def _apply_non_moe_tp_to_decoder(
     """Apply tensor parallelism to the decoder without SequenceParallel.
 
     Unlike Qwen3's apply_non_moe_tp which uses SequenceParallel (hidden states
-    are Shard(1) between blocks), this keeps hidden states as Replicate. This is
-    necessary for VLM because vision scatter and DeepStack operate on the full
-    sequence with boolean masks that aren't DTensor-aware.
+    are Shard(1) DTensors between blocks), this keeps hidden states as
+    replicated plain tensors on every rank (no sequence sharding). This is necessary for
+    VLM because vision scatter and DeepStack operate on the full sequence with
+    boolean masks that aren't DTensor-aware.
 
     The trade-off is slightly higher activation memory (full sequence on each
     rank instead of 1/TP), but it avoids costly all-gather/re-shard at every
@@ -199,6 +202,10 @@ def _apply_non_moe_tp_to_decoder(
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
+            # Not actual sequence parallelism — SequenceParallel(sequence_dim=2)
+            # tells DTensor that dim 2 (the head dimension) is the sharded dim,
+            # so the per-head RMSNorm operates on each rank's local heads without
+            # communication, and norm weights become DTensors on tp_mesh for FSDP.
             "attention.q_norm": SequenceParallel(sequence_dim=2),
             "attention.k_norm": SequenceParallel(sequence_dim=2),
             "attention.wo": RowwiseParallel(output_layouts=Replicate()),
@@ -237,23 +244,26 @@ def _apply_tp_to_vision_encoder(
 ):
     """Apply tensor parallelism to the vision encoder.
 
-    Uses TP without SequenceParallel: data between blocks stays Replicate
-    (all ranks hold full hidden_states). This is simpler because norms and
-    position embeddings don't need DTensor conversion, and vision encoder
-    sequence lengths are short enough that redundant norm computation is cheap.
-    Memory savings come from sharding the linear layer weights.
+    Hidden states flow as DTensor(Replicate) throughout — all ranks hold the
+    full hidden_states. Only the linear layers (qkv, proj, fc1, fc2) are
+    sharded via ColwiseParallel/RowwiseParallel to save memory. Norms operate
+    on Replicate DTensors directly. The learned position embedding parameter
+    is a Replicate DTensor; computing position embeddings for the current
+    input requires bilinear interpolation which doesn't support DTensors, so
+    local_map is used to unwrap the parameter, perform interpolation in plain
+    tensors, and re-wrap the result as a DTensor. Vision encoder sequence
+    lengths are short enough that redundant computation is cheap.
     """
-    # Use NoParallel on patch_embed so its params become Replicate DTensors
-    # on tp_mesh (ensuring a consistent (fsdp, tp) mesh after FSDP), while
-    # its I/O hooks convert plain pixel_values to DTensor on entry and back
-    # to local tensor on exit — avoiding mixed tensor/DTensor errors with
-    # pos_embeds (which are computed as plain tensors).
+    # NoParallel on patch_embed distributes its params as Replicate DTensors
+    # on tp_mesh for FSDP mesh consistency. Its input hook wraps plain
+    # pixel_values as DTensor(Replicate), and the output stays as DTensor
+    # (Replicate) to flow through the rest of the vision encoder.
     parallelize_module(vision_encoder, tp_mesh, {"patch_embed": NoParallel()})
 
-    # pos_embed is an nn.Parameter (not a submodule) used with direct indexing
-    # and bilinear interpolation. We convert it to a Replicate DTensor on
-    # tp_mesh for mesh consistency. compute_position_embeddings() calls
-    # .to_local() on it before indexing.
+    # pos_embed is an nn.Parameter (not a submodule), so it can't be targeted
+    # by parallelize_module's plan dict. We distribute it as Replicate DTensor
+    # on tp_mesh for FSDP mesh consistency. The vision encoder's
+    # compute_position_embeddings uses local_map to unwrap it for interpolation.
     vision_encoder.pos_embed = nn.Parameter(
         # pyrefly: ignore [bad-argument-type]
         distribute_tensor(vision_encoder.pos_embed.data, tp_mesh, [Replicate()]),
@@ -261,18 +271,20 @@ def _apply_tp_to_vision_encoder(
     )
 
     # TP plan for each vision transformer block.
+    # hidden_states flows through as DTensor (Replicate) so residual adds work.
     # NoParallel on norms sets their params as Replicate DTensors on tp_mesh
-    # (for consistent (fsdp, tp) mesh after FSDP) and inserts I/O hooks that
-    # convert local tensor → DTensor on entry and DTensor → local tensor on
-    # exit. This keeps the block's data path in local-tensor space (as
-    # ColwiseParallel/RowwiseParallel with use_local_output=True expect).
+    # (for consistent (fsdp, tp) mesh after FSDP).
+    # RowwiseParallel uses use_local_output=False to return DTensor (Replicate)
+    # so residual connections (hidden_states + attn/mlp output) stay in DTensor
+    # space. ColwiseParallel uses use_local_output=True (default) to return
+    # local shards for the internal attention/MLP computation.
     layer_plan = {
         "norm1": NoParallel(),
         "norm2": NoParallel(),
         "attn.qkv": ColwiseParallel(),
-        "attn.proj": RowwiseParallel(),
+        "attn.proj": RowwiseParallel(use_local_output=False),
         "mlp.linear_fc1": ColwiseParallel(),
-        "mlp.linear_fc2": RowwiseParallel(),
+        "mlp.linear_fc2": RowwiseParallel(use_local_output=False),
     }
 
     # pyrefly: ignore [not-callable]
@@ -281,6 +293,9 @@ def _apply_tp_to_vision_encoder(
         parallelize_module(transformer_block, tp_mesh, layer_plan)
 
     # TP plan for patch mergers (main + deepstack).
+    # RowwiseParallel uses default use_local_output=True so mergers return
+    # plain tensors — their outputs are used in vision scatter and DeepStack
+    # which operate on plain tensors with boolean masks.
     merger_plan = {
         "norm": NoParallel(),
         "linear_fc1": ColwiseParallel(),
@@ -308,13 +323,14 @@ def _apply_fsdp_to_vision_encoder(
     """
     Apply FSDP to the vision encoder as a single unit.
 
-    This wraps the entire vision encoder with one fully_shard call so that all
-    parameters are gathered in a single AllGather. Since FSDP2 lacks forward
-    prefetching, layer-wise sharding would serialize AllGather and compute
-    per layer. A single wrap avoids this overhead.
+    Wraps the entire vision encoder with one fully_shard call so all parameters
+    are gathered in a single AllGather. The vision encoder's compute is small
+    relative to the decoder, so per-layer sharding would launch many small
+    AllGather kernels whose total overhead exceeds a single AllGather followed
+    by computing all layers in one shot — even without overlap.
 
-    This must be called before the llama4 apply_fsdp so that the vision encoder
-    is sharded before the final fully_shard(model).
+    Must be called before apply_fsdp on the decoder so the vision encoder is
+    already sharded when the final fully_shard(model) is applied.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
@@ -327,20 +343,6 @@ def _apply_fsdp_to_vision_encoder(
         **fsdp_config,
         reshard_after_forward=reshard_after_forward,
     )
-
-
-def _apply_compile_to_vision_encoder(vision_encoder: nn.Module, compile_config):
-    """Apply torch.compile to vision encoder transformer blocks."""
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in vision_encoder.layers.named_children():
-        transformer_block = torch.compile(
-            transformer_block,
-            backend=compile_config.backend,
-            fullgraph=True,
-        )
-        # pyrefly: ignore [missing-attribute]
-        vision_encoder.layers.register_module(layer_id, transformer_block)
-    logger.info("Compiling each visual TransformerBlock with torch.compile")
 
 
 def parallelize_qwen3_vl(
@@ -361,15 +363,6 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # Validate sequence length divisibility
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
-    # Check attention type compatibility
     if parallel_dims.cp_enabled:
         raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
 
@@ -390,7 +383,7 @@ def parallelize_qwen3_vl(
 
         # Apply TP to decoder without SequenceParallel.
         # VLM needs full-sequence access between decoder blocks for vision
-        # scatter and DeepStack, so hidden states stay Replicate.
+        # scatter and DeepStack, so hidden states stay as replicated plain tensors.
         _apply_non_moe_tp_to_decoder(
             model,
             tp_mesh,
@@ -400,7 +393,7 @@ def parallelize_qwen3_vl(
 
     # Apply MoE parallelism to decoder layers.
     # Uses Replicate input/output instead of Shard(1) since Qwen3-VL keeps
-    # hidden states as Replicate for vision scatter and DeepStack.
+    # hidden states as replicated plain tensors for vision scatter and DeepStack.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         _apply_moe_ep_tp_to_decoder(
             model,
@@ -425,11 +418,11 @@ def parallelize_qwen3_vl(
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
     if compile_config.enable:
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
-            _apply_compile_to_vision_encoder(model.vision_encoder, compile_config)
+            apply_compile_dense(model.vision_encoder, compile_config)
 
     # Apply FSDP or HSDP
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
