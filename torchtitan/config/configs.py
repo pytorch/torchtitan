@@ -129,6 +129,9 @@ class ParallelismConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
+    enable_sequence_parallel: bool = True
+    """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -287,12 +290,6 @@ class ParallelismConfig:
 class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
-
-    selective_ac_option: str = "2"
-    """
-    Selective activation checkpointing options ['int', 'op'].
-    'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
-    """
 
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]

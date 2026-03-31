@@ -38,6 +38,17 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
             "hsdp+cp+validation+inference",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module flux",
+                    "--config flux_debugmodel",
+                    "--compile.enable",
+                ],
+            ],
+            "Flux FSDP+compile",
+            "flux_fsdp+compile",
+        ),
     ]
     return integration_tests_flavors
 

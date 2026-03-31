@@ -80,6 +80,13 @@ class PolicyTrainer(Actor, Configurable):
         requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
         self._transfer_dtype = requested if requested != training_dtype else None
 
+        # The policy and ref models share code objects, so dynamo's
+        # per-code-object cache must hold entries for both grad modes
+        # (grad for policy, no_grad for ref). The default limit of 8
+        # is not enough; 16 accommodates both without recompile storms.
+        # TODO: @Lucaskabela fix recompiles in general as these increase startup
+        torch._dynamo.config.cache_size_limit = 16
+
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -200,6 +207,12 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Initialized model with weights loaded from checkpoint.
         """
+
+        # TODO Also support flex attention backend later.
+        assert (
+            model_spec.model.layer.attention.attn_backend == "varlen"
+        ), "Only varlen attention backend is allowed."
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
@@ -285,7 +298,10 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
                 token_lps = compute_token_log_probs(
-                    self.ref_model, prompt_toks, gen_toks, device
+                    self.ref_model,
+                    prompt_toks,
+                    gen_toks,
+                    device,
                 )
                 ref_token_log_probs.append(token_lps)
 

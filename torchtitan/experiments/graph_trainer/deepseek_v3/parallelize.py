@@ -116,9 +116,10 @@ def parallelize_deepseekv3(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            cp_enabled=parallel_dims.cp_enabled,
+            enable_cp=parallel_dims.cp_enabled,
+            enable_sp=parallelism.enable_sequence_parallel,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 

@@ -4,6 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# TODO: Re-enable once we have closed
+# https://github.com/pytorch/torchtitan/issues/2722
+os.environ.setdefault("DISABLE_LLVM_OPT", "1")
+
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,12 +23,12 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     _score_mod_signature,
+    AuxRequest,
     BlockMask,
     create_block_mask,
     flex_attention,
 )
 from torch.nn.attention.varlen import varlen_attn
-from torch.types import Number
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -57,8 +63,8 @@ class VarlenMetadata(NamedTuple):
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
-    max_q: Number
-    max_k: Number
+    max_q: int
+    max_k: int
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -105,15 +111,18 @@ class LocalMapAttention(Module):
                 f"q, k, v must have the same placements, "
                 f"but got q={q.placements}, k={k.placements}, v={v.placements}"
             )
-            # qkv are (bs, n_heads, seqlen, head_dim) and must be sharded
-            # on the n_heads dim (dim 1)
-            # TODO: after full DTensor rewrite, the DP mesh will also be
-            # present, update this check to allow Shard(0) for DP and Shard(1) for TP.
             for i, p in enumerate(q.placements):
-                assert p == Shard(1), (
-                    f"LocalMapAttention requires Shard(1) placements "
+                assert isinstance(p, Shard), (
+                    f"LocalMapAttention requires Shard placements "
                     f"(n_heads dim), but got {p} at position {i}"
                 )
+            # Ensure all Shard placements use the same tensor dim
+            # pyrefly: ignore [missing-attribute]
+            shard_dims = {p.dim for p in q.placements}
+            assert len(shard_dims) == 1, (
+                f"All Shard placements must shard on the same dim, "
+                f"but got dims {shard_dims}"
+            )
             # return_lse=True (e.g. gpt_oss attention sinks) produces
             # 2 outputs instead of 1, requiring different out_placements.
             return_lse = kwargs.get("return_lse", False)
@@ -143,10 +152,6 @@ class LocalMapAttention(Module):
 
 
 class VarlenAttentionWrapper(LocalMapAttention):
-    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
-        varlen_attn, mode="max-autotune-no-cudagraphs"
-    )
-
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -157,6 +162,9 @@ class VarlenAttentionWrapper(LocalMapAttention):
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            attention_masks, VarlenMetadata
+        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -178,7 +186,8 @@ class VarlenAttentionWrapper(LocalMapAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        return VarlenAttentionWrapper._compiled_varlen_attn(
+        # pyrefly: ignore [bad-assignment]
+        res: torch.Tensor = varlen_attn(
             xq_packed,
             xk_packed,
             xv_packed,
@@ -198,7 +207,8 @@ class VarlenAttentionWrapper(LocalMapAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-        ).to(xq.dtype)
+        )
+        return res.to(xq.dtype)
 
 
 class FlexAttentionWrapper(LocalMapAttention):
@@ -242,22 +252,29 @@ class FlexAttentionWrapper(LocalMapAttention):
         return_lse: bool = False,
         enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            block_mask, (BlockMask, type(None))
+        ), f"block_mask must instance of BlockMask or None, got {type(block_mask)}"
+
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
-        #    to convert `lse` to be DTensor.
-        return FlexAttentionWrapper._compiled_flex_attn(
+        out, aux = FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
             block_mask=block_mask,
             scale=scale,
             enable_gqa=enable_gqa,
-            return_lse=return_lse,
+            return_aux=AuxRequest(lse=return_lse),
         )
+        # Note: return a tuple of Tensor to make converting `lse`
+        # to DTensor easier with TP module notation.
+        if return_lse:
+            return out, aux.lse
+        return out
 
 
 @contextmanager
@@ -472,10 +489,11 @@ def create_varlen_metadata_for_document(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
 
-    max_seqlen = 0
+    max_seqlen: int = 0
     if len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
+        # pyrefly: ignore[bad-assignment]
         max_seqlen = all_seq_lengths.max().item()
 
     return VarlenMetadata(
@@ -633,7 +651,6 @@ class GQAttention(BaseAttention):
                     mask_key = "rope" if self.use_rope else "nope"
                     block_mask = attention_masks[mask_key]
                 else:
-                    assert isinstance(attention_masks, BlockMask), attention_masks
                     block_mask = attention_masks
                 output = (
                     self.inner_attention(
@@ -648,7 +665,6 @@ class GQAttention(BaseAttention):
                     .contiguous()
                 )
             case "varlen":
-                assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
                     xq, xk, xv, attention_masks=attention_masks, **scale_kwargs
                 )

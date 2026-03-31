@@ -46,6 +46,9 @@ def parallelize_flux(
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
 
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(model, compile_config)
+
     if parallel_dims.fsdp_enabled:
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -125,6 +128,26 @@ def apply_fsdp(
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
+
+
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
+    """
+    Apply torch.compile to each DoubleStreamBlock and SingleStreamBlock, which
+    makes compilation efficient due to repeated structure.
+    """
+    # pyrefly: ignore [not-iterable]
+    for block in model.double_blocks:
+        # pyrefly: ignore [missing-attribute]
+        block.compile(backend=compile_config.backend, fullgraph=True)
+
+    # pyrefly: ignore [not-iterable]
+    for block in model.single_blocks:
+        # pyrefly: ignore [missing-attribute]
+        block.compile(backend=compile_config.backend, fullgraph=True)
+
+    logger.info(
+        "Compiling each DoubleStreamBlock and SingleStreamBlock with torch.compile"
+    )
 
 
 def apply_ac(model: nn.Module, ac_config):

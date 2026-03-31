@@ -80,8 +80,7 @@ def _apply_jit_compile(
         fsdp_reshard_after_forward,
         transformer_block_buckets,
     )
-    model = torch.compile(
-        model,
+    model.compile(
         backend=backend,
         fullgraph=True,
     )
@@ -97,10 +96,7 @@ def _make_precompile_callback(
     artifact_key: str | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
-    from .precompile import (
-        compute_config_fingerprint,
-        precompile_save,
-    )
+    from .precompile import compute_config_fingerprint, precompile_save
 
     if storage is None or artifact_key is None:
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
@@ -145,9 +141,7 @@ def _apply_aot_compile(
         storage, artifact_key = _get_precompile_storage_and_key(compile_config)
 
         if storage.exists(artifact_key):
-            from .precompile import (
-                compute_config_fingerprint,
-            )
+            from .precompile import compute_config_fingerprint
 
             config_fingerprint = compute_config_fingerprint(
                 model, compile_config, parallel_dims
@@ -322,5 +316,14 @@ def apply_compile(
             fsdp_reshard_after_forward,
             joint_passes=[],
         )
+    elif mode == "aot_fx_trace":
+        # aot_fx_trace traces fwd+loss+bwd together inside forward_backward_step,
+        # so no model-level wrapping is needed here.
+        logger.info(
+            "aot_fx_trace compile mode: graph capture will happen at training time"
+        )
+        return model
     else:
-        raise ValueError(f"Unknown compile mode: {mode}. Must be 'jit' or 'aot'.")
+        raise ValueError(
+            f"Unknown compile mode: {mode}. Must be 'jit', 'aot', or 'aot_fx_trace'."
+        )

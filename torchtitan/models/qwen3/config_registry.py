@@ -13,7 +13,10 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import (
+    ChatDataLoader,
+    HuggingFaceTextDataLoader,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -43,7 +46,6 @@ def qwen3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )
 
@@ -72,7 +74,6 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )
 
@@ -99,7 +100,6 @@ def qwen3_0_6b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )
 
@@ -125,7 +125,6 @@ def qwen3_1_7b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )
 
@@ -157,7 +156,6 @@ def qwen3_14b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
-            selective_ac_option="op",
         ),
     )
 
@@ -189,7 +187,6 @@ def qwen3_32b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
-            selective_ac_option="op",
         ),
     )
 
@@ -220,6 +217,54 @@ def qwen3_moe_debug() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
+        ),
+    )
+
+
+def sft_qwen3_8b_math() -> Trainer.Config:
+    """Qwen3-8B SFT on GSM8K math dataset."""
+
+    def process_sample(sample):
+        answer = sample["answer"]
+        reasoning, final_answer = answer.rsplit("####", 1)
+        return [
+            {"role": "user", "content": sample["question"]},
+            {
+                "role": "assistant",
+                "reasoning_content": reasoning.strip(),
+                "content": final_answer.strip(),
+            },
+        ]
+
+    model_spec = model_registry("8B", attn_backend_override="varlen")
+    return Trainer.Config(
+        hf_assets_path="./assets/hf/Qwen3-8B",
+        model_spec=model_spec,
+        optimizer=OptimizersContainer.Config(lr=2e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=15,
+            decay_ratio=0.9,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=2048,
+            steps=180,
+        ),
+        dataloader=ChatDataLoader.Config(
+            dataset_path="openai/gsm8k",
+            load_dataset_kwargs={"name": "main", "split": "train"},
+            sample_processor=process_sample,
+        ),
+        metrics=MetricsProcessor.Config(
+            enable_wandb=True,
+        ),
+        checkpoint=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )
