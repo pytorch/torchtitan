@@ -266,7 +266,8 @@ class TestTraceDTensor(unittest.TestCase):
 
         traced = minimal_fx_tracer(forward, (model, tokens_dt))
         has_subclass = any(
-            layout.meta is not None for layout in traced.input_subclass_layouts
+            layout.meta is not None
+            for layout in traced.input_subclass_layouts.values()
         )
         self.assertTrue(has_subclass)
 
