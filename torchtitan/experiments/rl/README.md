@@ -87,6 +87,44 @@ python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config 
 
 We use a unified model definition from torchtitan for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
+## Reproducibility
 
+We provide two independent tools for debugging and reproducibility. They address different sources of non-determinism and can be used separately or together.
 
-**Current status:** Batch invariance is only supported for single-GPU configurations (TP=1) for both the trainer and generator. When tensor parallelism is enabled (TP > 1), batch-invariant mode is not yet supported.
+### Batch-invariant mode
+
+Batch-invariant mode guarantees that a model's output for a given input is **identical regardless of what other inputs are in the batch**. This is critical for RL training because the generator computes log-probs in one batch composition (e.g. 8 completions), while the trainer recomputes them in a different batch composition (e.g. 2 completions after DP sharding). Without batch-invariant mode, the same input can produce different log-probs in different batch contexts due to floating-point accumulation order differences.
+
+Enable it in your config:
+```python
+RLTrainer.Config(
+    batch_invariant_mode=True,
+    ...
+)
+```
+
+When enabled, this:
+- Replaces `mm`, `addmm`, `log_softmax`, and `mean.dim` with Triton kernels that use a fixed tile iteration order (via [batch_invariant_ops](https://github.com/thinking-machines-lab/batch_invariant_ops))
+- Forces NCCL to use Ring all-reduce with a single channel for deterministic inter-GPU collectives
+- Disables reduced-precision reductions and TF32 to prevent batch-size-dependent rounding
+- Forces `num_splits=1` in flash attention to prevent non-deterministic split-k reductions
+- Enables `torch.use_deterministic_algorithms(True)` to ensure all PyTorch operations use deterministic implementations
+
+### Seed
+
+Setting a seed controls **randomness across runs** (e.g. dropout masks, random initialization). We provide seed as an optional tool — we do not set a seed by default.
+
+For standard transformer LLMs, the forward pass is deterministic (no dropout at inference, weights loaded from checkpoint), so **seed is not required for logprob parity** between the generator and trainer. However, models with randomness in the forward pass (e.g. FLUX) or training with dropout enabled may require a fixed seed for reproducibility.
+
+```python
+PolicyTrainer.__init__(..., seed=42)
+```
+
+### Which tool do I need?
+
+The right choice depends on what you are debugging:
+
+- **Verifying generator/trainer logprob parity:** Use `batch_invariant_mode=True`. Seed is not needed for deterministic models (e.g. transformer LLMs without dropout).
+- **Reproducing the same training trajectory across runs:** Use `seed` and `batch_invariant_mode=True`. Seed fixes RNG, and batch-invariant mode enables `torch.use_deterministic_algorithms(True)` which ensures non-deterministic PyTorch ops (e.g. atomics in backward passes) produce consistent results.
+- **Fully deterministic end-to-end RL loop:** Use both. Batch-invariant mode ensures logprob parity across different batch compositions, and seed ensures the same random choices (sampling, dropout) across runs.
+- **Models with randomness in the forward pass:** Use `seed` in addition to `batch_invariant_mode` to ensure bitwise parity.
