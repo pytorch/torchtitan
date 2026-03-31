@@ -5,18 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import torch
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    FlexAttentionWrapper,
-    ScaledDotProductAttentionWrapper,
+    LocalMapInnerAttention,
+    ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -49,8 +48,10 @@ class Attention(BaseAttention):
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        attn_backend: str = "sdpa"
-        attn_mask_type: str = "causal"
+        inner_attention: LocalMapInnerAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
+        mask_type: str = "causal"
         mscale: float = 1.0
         rope_factor: float = 1.0
         rope_max_seq_len: int = 4096
@@ -115,17 +116,7 @@ class Attention(BaseAttention):
             mscale = 0.1 * config.mscale * math.log(config.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.attn_backend = config.attn_backend
-        self.inner_attention: nn.Module
-        match self.attn_backend:
-            case "flex":
-                self.inner_attention = FlexAttentionWrapper()
-            case "sdpa":
-                self.inner_attention = ScaledDotProductAttentionWrapper()
-            case "varlen":
-                raise ValueError("Varlen attention is not supported with Deepseek V3.")
-            case _:
-                raise ValueError(f"Unknown attention backend: {self.attn_backend}")
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -160,21 +151,9 @@ class Attention(BaseAttention):
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        match self.attn_backend:
-            case "flex":
-                assert isinstance(attention_masks, BlockMask)
-                output = self.inner_attention(
-                    q, k, v, block_mask=attention_masks, scale=self.softmax_scale
-                )
-            case _:
-                assert attention_masks is None
-                output = self.inner_attention(q, k, v, scale=self.softmax_scale)
-
-        output = output.transpose(1, 2).contiguous()
+        output = self.inner_attention(
+            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
+        ).contiguous()
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
@@ -302,14 +281,14 @@ class DeepSeekV3Model(Decoder):
                 )
                 self.layer.moe.experts.use_grouped_mm = False
 
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend != "sdpa"
+            if parallelism.context_parallel_degree > 1 and not isinstance(
+                self.layer.attention.inner_attention,
+                ScaledDotProductAttention.Config,
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA attention. "
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
-                    f"FlexAttention and varlen attention are not supported with CP."
+                    "Context Parallel for DeepSeek V3 only supports "
+                    "ScaledDotProductAttention. Got "
+                    f"{type(self.layer.attention.inner_attention).__name__}."
                 )
 
             self.layer.moe.router._debug_force_load_balance = (

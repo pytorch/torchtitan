@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 from einops import rearrange
 from torch import nn, Tensor
-from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.module import Module, Sequential
@@ -61,7 +61,7 @@ class EmbedND(Module):
             dim=-3,
         )
 
-        return emb.unsqueeze(1)
+        return emb.unsqueeze(2)
 
 
 def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 1000.0):
@@ -151,7 +151,7 @@ class SelfAttention(Module):
         )
         self.norm = QKNorm(dim=head_dim)
         self.proj = Linear.Config(bias=True).build(in_features=dim, out_features=dim)
-        self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.inner_attention = ScaledDotProductAttention.Config().build()
 
     def init_weights(self, **kwargs) -> None:
         for layer in (self.qkv, self.proj):
@@ -161,11 +161,11 @@ class SelfAttention(Module):
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
         x = self.inner_attention(q, k, v, is_causal=False)
-        x = rearrange(x, "B H L D -> B L (H D)")
+        x = rearrange(x, "B L H D -> B L (H D)")
         x = self.proj(x)
         return x
 
@@ -261,7 +261,7 @@ class DoubleStreamBlock(Module):
             ),
         )
 
-        self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.inner_attention = ScaledDotProductAttention.Config().build()
 
     def init_weights(self, **kwargs) -> None:
         # initialize all the nn.Linear submodules
@@ -295,7 +295,7 @@ class DoubleStreamBlock(Module):
         img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
         img_q, img_k, img_v = rearrange(
-            img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads
+            img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
         )
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
@@ -304,18 +304,18 @@ class DoubleStreamBlock(Module):
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         txt_q, txt_k, txt_v = rearrange(
-            txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads
+            txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
         )
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
-        q = torch.cat((txt_q, img_q), dim=2)
-        k = torch.cat((txt_k, img_k), dim=2)
-        v = torch.cat((txt_v, img_v), dim=2)
+        q = torch.cat((txt_q, img_q), dim=1)
+        k = torch.cat((txt_k, img_k), dim=1)
+        v = torch.cat((txt_v, img_v), dim=1)
 
         q, k = apply_rope(q, k, pe)
         attn = self.inner_attention(q, k, v)
-        attn = rearrange(attn, "B H L D -> B L (H D)")
+        attn = rearrange(attn, "B L H D -> B L (H D)")
 
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
@@ -376,7 +376,7 @@ class SingleStreamBlock(Module):
 
         self.mlp_act = GELU(approximate="tanh")
         self.modulation = Modulation(dim=config.hidden_size, double=False)
-        self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.inner_attention = ScaledDotProductAttention.Config().build()
 
     def init_weights(self, **kwargs) -> None:
         for layer in (self.linear1, self.linear2):
@@ -393,13 +393,13 @@ class SingleStreamBlock(Module):
             self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
         )
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
 
         # compute attention
         q, k = apply_rope(q, k, pe)
         attn = self.inner_attention(q, k, v)
-        attn = rearrange(attn, "B H L D -> B L (H D)")
+        attn = rearrange(attn, "B L H D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))

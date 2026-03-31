@@ -147,13 +147,11 @@ def parallelize_llama(
             hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
         )
 
-    attn_backend = model.config.layer.attention.attn_backend
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            attn_backend,
         )
 
     model_compile_enabled = (
