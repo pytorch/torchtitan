@@ -35,7 +35,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
             "language_model.model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "language_model.model.layers.{}.feed_forward.router.weight": "layers.{}.moe.router.gate.weight",
             "language_model.model.layers.{}.feed_forward.experts.down_proj": "layers.{}.moe.experts.w2",
-            None: "layers.{}.moe.expert_bias",
+            None: "layers.{}.moe.router.expert_bias",
             "language_model.model.layers.{}.feed_forward.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
             "language_model.model.layers.{}.feed_forward.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
             "language_model.model.layers.{}.feed_forward.shared_expert.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
