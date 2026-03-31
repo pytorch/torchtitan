@@ -517,9 +517,12 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
+    enable_sp: bool = True,
     pad_multiple: int | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
+
+    sp_layout = Shard(1) if enable_sp else Replicate()
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
@@ -529,15 +532,16 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
-                # input / output sharding on the seqlen dim
-                # all-gather for input, reduce-scatter for output
+                # With SP: all-gather (Shard→Replicate) for input,
+                # reduce-scatter (Partial→Shard) for output.
+                # Without SP: input is already Replicate,
+                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
-                    input_layouts=(Shard(1),),
+                    input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
-                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
                     use_local_input=False,
                     output_layouts=(Partial(),),
-                    desired_output_layouts=(Shard(1),),
+                    desired_output_layouts=(sp_layout,),
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(

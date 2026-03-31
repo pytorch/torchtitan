@@ -34,7 +34,7 @@ import torch.nn.functional as F
 torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpoint import ModelWrapper
-from torchtitan.models.qwen3_vl import Qwen3VLSpecialTokens, model_registry
+from torchtitan.models.qwen3_vl import model_registry, Qwen3VLSpecialTokens
 from transformers import AutoProcessor
 
 
@@ -57,10 +57,13 @@ def top_k_match(logits_a, logits_b, k=5):
     topk_a = logits_a.topk(k, dim=-1).indices
     topk_b = logits_b.topk(k, dim=-1).indices
     top1 = (topk_a[..., 0] == topk_b[..., 0]).float().mean().item()
-    overlap = sum(
-        (topk_a[..., i : i + 1] == topk_b).any(dim=-1).float().mean().item()
-        for i in range(k)
-    ) / k
+    overlap = (
+        sum(
+            (topk_a[..., i : i + 1] == topk_b).any(dim=-1).float().mean().item()
+            for i in range(k)
+        )
+        / k
+    )
     return top1, overlap
 
 
@@ -128,12 +131,19 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         hf_inputs.append(hf_in)
 
         # --- TT path ---
-        img_tensor = process_image(pil_image, patch_size=patch_size, merge_size=merge_size)
+        img_tensor = process_image(
+            pil_image, patch_size=patch_size, merge_size=merge_size
+        )
         assert img_tensor is not None, f"process_image failed for sample {i}"
         patches, grid_thw = vision_to_patches(
-            img_tensor, patch_size, temporal_patch_size, merge_size,
+            img_tensor,
+            patch_size,
+            temporal_patch_size,
+            merge_size,
         )
-        tt_inputs.append((hf_in["input_ids"], patches.unsqueeze(0), grid_thw.unsqueeze(0)))
+        tt_inputs.append(
+            (hf_in["input_ids"], patches.unsqueeze(0), grid_thw.unsqueeze(0))
+        )
 
         # --- Compare pixel values in image space ---
         # Reshape both HF and TT patches back to (T, H, W, C) for comparison.
@@ -142,9 +152,15 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         t_p, h_p, w_p = grid_thw.tolist()
         pattern = "(t bh bw m n) (c pt ph pw) -> (t pt) (bh m ph) (bw n pw) c"
         kwargs = dict(
-            t=t_p, bh=h_p // merge_size, bw=w_p // merge_size,
-            m=merge_size, n=merge_size,
-            c=3, pt=temporal_patch_size, ph=patch_size, pw=patch_size,
+            t=t_p,
+            bh=h_p // merge_size,
+            bw=w_p // merge_size,
+            m=merge_size,
+            n=merge_size,
+            c=3,
+            pt=temporal_patch_size,
+            ph=patch_size,
+            pw=patch_size,
         )
         hf_img = E.rearrange(hf_pv, pattern, **kwargs)
         tt_img = E.rearrange(patches, pattern, **kwargs)
@@ -180,7 +196,9 @@ def print_pixel_comparisons(comparisons):
     total_differ = sum(c["num_differ"] for c in comparisons)
     total_pixels = sum(c["total_pixels"] for c in comparisons)
     avg_max = sum(c["max_diff"] for c in comparisons) / len(comparisons)
-    print(f"\n  Total: {total_differ}/{total_pixels} pixels differ, avg max_diff={avg_max:.2e}")
+    print(
+        f"\n  Total: {total_differ}/{total_pixels} pixels differ, avg max_diff={avg_max:.2e}"
+    )
     if avg_max < 1e-2:
         print("  Pixel preprocessing: MATCH")
     else:
@@ -209,7 +227,10 @@ def run_hf(model_path, hf_inputs, device):
 
     outputs = []
     for i, inp in enumerate(hf_inputs):
-        inp = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inp.items()}
+        inp = {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in inp.items()
+        }
         logits = model(**inp).logits
         outputs.append(logits[:, -1:, :].cpu())
         print(f"  HF  {i + 1}/{len(hf_inputs)}")
@@ -242,7 +263,9 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
     model.to(device)
 
     # Replace flex attention with SDPA for single-process inference.
-    from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
+    from torchtitan.models.common.attention import (
+        ScaledDotProductAttentionWrapper,  # pyrefly: ignore [missing-module-attribute]
+    )
 
     for layer in model.layers.values():
         layer.attention.attn_backend = "sdpa"
@@ -332,21 +355,27 @@ def main():
     parser.add_argument("--hf_model_path", type=str, required=True)
     parser.add_argument("--tt_checkpoint_path", type=str, required=True)
     parser.add_argument(
-        "--model_flavor", type=str, default="2B",
+        "--model_flavor",
+        type=str,
+        default="2B",
         choices=["2B", "8B", "30B-A3B", "235B-A22B"],
     )
     parser.add_argument("--num_samples", type=int, default=10)
     args = parser.parse_args()
 
     assert os.path.exists(args.hf_model_path), f"Not found: {args.hf_model_path}"
-    assert os.path.exists(args.tt_checkpoint_path), f"Not found: {args.tt_checkpoint_path}"
+    assert os.path.exists(
+        args.tt_checkpoint_path
+    ), f"Not found: {args.tt_checkpoint_path}"
 
     device = torch.device("cuda:0")
     print(f"Using {torch.cuda.get_device_name(0)}")
 
     print(f"\nBuilding {args.num_samples} test samples ...")
     hf_inputs, tt_inputs, pixel_comparisons = build_inputs(
-        args.hf_model_path, args.model_flavor, args.num_samples,
+        args.hf_model_path,
+        args.model_flavor,
+        args.num_samples,
     )
     print_pixel_comparisons(pixel_comparisons)
 
@@ -355,7 +384,10 @@ def main():
 
     print("\nRunning TorchTitan inference ...")
     tt_outputs = run_tt(
-        args.model_flavor, args.tt_checkpoint_path, tt_inputs, device,
+        args.model_flavor,
+        args.tt_checkpoint_path,
+        tt_inputs,
+        device,
     )
 
     compare(hf_outputs, tt_outputs)

@@ -8,9 +8,9 @@
 
 import numpy as np
 import torch
+from torchtitan.tools.logging import logger
 
 from .image import smart_resize
-from torchtitan.tools.logging import logger
 
 
 def load_video(

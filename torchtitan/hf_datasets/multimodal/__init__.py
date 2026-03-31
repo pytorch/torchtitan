@@ -57,4 +57,5 @@ class MMSpecialTokens:
             special_tokens_dict[f"{prefix}_token"] = tok
             special_tokens_dict[f"{prefix}_id"] = token_to_id[tok]
 
+        # pyrefly: ignore [bad-argument-type]
         return cls(**special_tokens_dict)

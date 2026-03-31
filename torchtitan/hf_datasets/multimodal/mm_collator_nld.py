@@ -100,6 +100,7 @@ class MultiModalCollatorNLD:
         input_ids = pad_sequence(
             [s["input_ids"] for s in batch],
             batch_first=True,
+            # pyrefly: ignore [missing-attribute]
             padding_value=self.special_tokens.pad_id,
         )
         labels = pad_sequence(
@@ -117,6 +118,7 @@ class MultiModalCollatorNLD:
             input_ids,
             labels,
             self.seq_len + 1,
+            # pyrefly: ignore [missing-attribute]
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
@@ -124,6 +126,7 @@ class MultiModalCollatorNLD:
         if positions.shape[1] < self.seq_len + 1:
             positions = torch.nn.functional.pad(
                 positions,
+                # pyrefly: ignore [bad-argument-type]
                 (0, self.seq_len + 1 - positions.shape[1]),
                 value=0,
             )
@@ -134,12 +137,14 @@ class MultiModalCollatorNLD:
             input_ids,
             labels,
             self.batch_size,
+            # pyrefly: ignore [missing-attribute]
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
         if positions.shape[0] < self.batch_size:
             positions = torch.nn.functional.pad(
                 positions,
+                # pyrefly: ignore [bad-argument-type]
                 (0, 0, 0, self.batch_size - positions.shape[0]),
                 value=0,
             )

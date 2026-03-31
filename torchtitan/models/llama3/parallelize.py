@@ -32,7 +32,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_dense
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy, disable_fsdp_gradient_division
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer

@@ -21,7 +21,9 @@ from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import FlexAttentionWrapper
+from torchtitan.models.common.attention import (
+    FlexAttention,  # pyrefly: ignore [missing-module-attribute]
+)
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
 
@@ -86,9 +88,7 @@ def _compute_learned_pos_embeds(
     dtype = learned_pos_embed.dtype
     merge_size = spatial_merge_size
 
-    pos_embeds = torch.zeros(
-        num_visual, max_num_patch, dim, device=device, dtype=dtype
-    )
+    pos_embeds = torch.zeros(num_visual, max_num_patch, dim, device=device, dtype=dtype)
 
     # Group images by (h, w) to batch compute position embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -124,9 +124,7 @@ def _compute_learned_pos_embeds(
         # Permute learned pos_hw from raster order to block order
         # to match the patch sequence produced by image_to_patches
         pos_hw_block = (
-            pos_hw.view(
-                h // merge_size, merge_size, w // merge_size, merge_size, -1
-            )
+            pos_hw.view(h // merge_size, merge_size, w // merge_size, merge_size, -1)
             .permute(0, 2, 1, 3, 4)
             .flatten(0, 3)
         )  # (h*w, dim)
@@ -142,7 +140,7 @@ def _compute_learned_pos_embeds(
             else:
                 pos_embeds[i, :seq_len] = pos_hw_block
 
-    return pos_embeds
+    return pos_embeds  # pyrefly: ignore [bad-return]
 
 
 def _compute_2d_rope_cache(
@@ -238,11 +236,11 @@ def _compute_2d_rope_cache(
 
     # Compute cos/sin in model dtype (HF uses .float() here).
     rope_embeds = torch.cat((rope_embeds, rope_embeds), dim=-1)  # (N, L, head_dim)
-    rope_cache = torch.cat(
-        [rope_embeds.cos(), rope_embeds.sin()], dim=-1
-    ).unsqueeze(2)  # (N, L, 1, head_dim*2)
+    rope_cache = torch.cat([rope_embeds.cos(), rope_embeds.sin()], dim=-1).unsqueeze(
+        2
+    )  # (N, L, 1, head_dim*2)
 
-    return rope_cache
+    return rope_cache  # pyrefly: ignore [bad-return]
 
 
 class PatchEmbed(Module):
@@ -403,7 +401,7 @@ class VisionAttention(Module):
         self.proj = Linear.Config(bias=True).build(
             in_features=self.dim, out_features=self.dim
         )
-        self.flex_attention = FlexAttentionWrapper()
+        self.flex_attention = FlexAttention.Config().build()
 
     def forward(
         self,
@@ -439,6 +437,7 @@ class VisionAttention(Module):
         v = v.transpose(1, 2)
 
         # FlexAttention
+        # pyrefly: ignore [bad-argument-type]
         attn_output = self.flex_attention(q, k, v, block_mask=attention_mask)
 
         # Reshape back: (num_visual, max_num_patch, dim)
@@ -663,19 +662,31 @@ class Qwen3VLVisionEncoder(Module):
                     device_mesh=learned_pos_embed.device_mesh,
                 )
             learned_pos = self._local_map_learned_pos_fn(
-                learned_pos_embed, grid_thw, max_num_patch,
-                self.num_grid_per_side, self.spatial_merge_size, self.config.dim,
+                learned_pos_embed,
+                grid_thw,  # pyrefly: ignore [bad-argument-count]
+                max_num_patch,
+                self.num_grid_per_side,
+                self.spatial_merge_size,
+                self.config.dim,
             )
         else:
             learned_pos = _compute_learned_pos_embeds(
-                learned_pos_embed, grid_thw, max_num_patch,
-                self.num_grid_per_side, self.spatial_merge_size, self.config.dim,
+                learned_pos_embed,
+                grid_thw,
+                max_num_patch,
+                self.num_grid_per_side,
+                self.spatial_merge_size,
+                self.config.dim,
             )
 
         # Compute 2D RoPE cache (no DTensor involvement)
         rope_cache = _compute_2d_rope_cache(
-            self._cached_freq_table, grid_thw, max_num_patch,
-            self.spatial_merge_size, head_dim, self.pos_embed.dtype,
+            self._cached_freq_table,
+            grid_thw,
+            max_num_patch,
+            self.spatial_merge_size,
+            head_dim,
+            self.pos_embed.dtype,
         )
 
         # pyrefly: ignore [bad-return]

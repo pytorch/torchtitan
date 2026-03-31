@@ -132,7 +132,6 @@ class RoPE(Module):
                 linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (
                     max_val - min_val
                 )
-                # pyrefly: ignore [bad-return]
                 return torch.clamp(linear_func, 0, 1)
 
             low, high = find_correction_range(
@@ -144,7 +143,6 @@ class RoPE(Module):
         t = torch.arange(end, device=freqs.device)
         freqs = torch.outer(t, freqs).float()
         freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-        # pyrefly: ignore [bad-return]
         return freqs_cis
 
     def _precompute_cos_sin(self) -> torch.Tensor:
@@ -195,7 +193,6 @@ class RoPE(Module):
 
         cos = theta.cos() * mscale
         sin = theta.sin() * mscale
-        # pyrefly: ignore [bad-return]
         return torch.cat([cos, sin], dim=-1)
 
     def forward(
@@ -226,24 +223,19 @@ def _reshape_for_broadcast_complex(
     assert ndim > 1
     seqlen = x.shape[1]
     if positions is None:
-        # pyrefly: ignore [bad-assignment]
         freqs_cis = freqs_cis[0:seqlen]
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        # pyrefly: ignore [bad-return]
         return freqs_cis.view(*shape)
     elif positions.size(0) == 1:
         assert positions.shape == (1, seqlen)
-        # pyrefly: ignore [bad-assignment]
         freqs_cis = freqs_cis[positions.squeeze(0)]
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        # pyrefly: ignore [bad-return]
         return freqs_cis.view(*shape)
     else:
         assert positions.shape == (x.shape[0], seqlen)
         freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
-        # pyrefly: ignore [bad-assignment]
         freqs_cis = torch.gather(
             freqs_cis_expanded,
             dim=1,
@@ -268,24 +260,19 @@ def _reshape_for_broadcast_cos_sin(
     assert ndim > 1
     bz, seqlen, _, head_dim = x.shape
     if positions is None:
-        # pyrefly: ignore [bad-assignment]
         rope_cache = rope_cache[0:seqlen]
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
-        # pyrefly: ignore [bad-return]
         return rope_cache.view(*shape)
     elif positions.size(0) == 1:
         assert positions.shape == (1, seqlen)
-        # pyrefly: ignore [bad-assignment]
         rope_cache = rope_cache[positions.squeeze(0)]
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
-        # pyrefly: ignore [bad-return]
         return rope_cache.view(*shape)
     else:
         assert positions.shape == (bz, seqlen)
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bz, -1, -1, -1)
-        # pyrefly: ignore [bad-assignment]
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
@@ -299,7 +286,6 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
-    # pyrefly: ignore [bad-return]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -358,11 +344,9 @@ def apply_rotary_emb_complex(
     positions = _maybe_wrap_positions(positions, xq)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    # pyrefly: ignore [bad-argument-type]
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    # pyrefly: ignore [bad-argument-type, bad-return]
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -380,12 +364,9 @@ def apply_rotary_emb_single_complex(
     """
     positions = _maybe_wrap_positions(positions, x)
     dtype = x.dtype
-    # pyrefly: ignore [bad-assignment]
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
-    # pyrefly: ignore [unsupported-operation]
     y = torch.view_as_real(x * freqs_cis).flatten(3)
-    # pyrefly: ignore [bad-return]
     return y.to(dtype)
 
 
@@ -412,9 +393,6 @@ def apply_rotary_emb_cos_sin(
     sin = rope_cache[..., head_dim:].to(device=xq.device)
     xq_f = xq.float()
     xk_f = xk.float()
-    # pyrefly: ignore [bad-argument-type]
     xq_out = (xq_f * cos) + (_rotate_half(xq_f) * sin)
-    # pyrefly: ignore [bad-argument-type]
     xk_out = (xk_f * cos) + (_rotate_half(xk_f) * sin)
-    # pyrefly: ignore [bad-argument-type, bad-return]
     return xq_out.type_as(xq), xk_out.type_as(xk)

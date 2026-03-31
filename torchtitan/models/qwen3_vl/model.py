@@ -16,11 +16,12 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
-from .special_tokens import Qwen3VLSpecialTokens
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
+
+from .special_tokens import Qwen3VLSpecialTokens
 
 from .vision_encoder import Qwen3VLVisionEncoder
 
@@ -73,16 +74,6 @@ class Qwen3VLModel(Qwen3Model):
                     debug.moe_force_load_balance
                 )
 
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend == "varlen"
-            ):
-                raise NotImplementedError(
-                    f"Context Parallel only supports SDPA and FlexAttention. "
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
-                    f"Varlen attention is not supported with CP."
-                )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -103,8 +94,9 @@ class Qwen3VLModel(Qwen3Model):
         # Vision encoder
         self.vision_encoder = Qwen3VLVisionEncoder(config.vision_encoder)
 
-        # MRoPE section for interleaved multi-dimensional RoPE
+        # MRoPE config: [temporal, height, width] frequency section sizes
         self.mrope_section = config.mrope_section
+        self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
         # Number of early LLM layers that receive DeepStack visual features
         self.num_deepstack_layers = len(config.vision_encoder.deepstack_visual_indices)
@@ -146,7 +138,7 @@ class Qwen3VLModel(Qwen3Model):
             )
             grid_thw_videos[:, 0] = 1
 
-        spatial_merge_size = self.vision_encoder.spatial_merge_size
+        spatial_merge_size = self.spatial_merge_size
         image_token_id = special_tokens.img_id
         video_token_id = special_tokens.vid_id
         vision_start_token_id = special_tokens.vision_start_id
@@ -181,7 +173,10 @@ class Qwen3VLModel(Qwen3Model):
                     if pos_i[t] < pos_i[t - 1]:
                         doc_starts.append(t)
                 doc_ranges = [
-                    (doc_starts[d], doc_starts[d + 1] if d + 1 < len(doc_starts) else seq_len)
+                    (
+                        doc_starts[d],
+                        doc_starts[d + 1] if d + 1 < len(doc_starts) else seq_len,
+                    )
                     for d in range(len(doc_starts))
                 ]
             else:
@@ -202,7 +197,7 @@ class Qwen3VLModel(Qwen3Model):
                         elif doc_tokens[j + 1] == video_token_id:
                             doc_video_nums += 1
 
-                seg_start = doc_start # used to index input_tokens
+                seg_start = doc_start  # used to index input_tokens
                 remain_images, remain_videos = doc_image_nums, doc_video_nums
                 # pyrefly: ignore [bad-assignment, no-matching-overload]
                 for _ in range(doc_image_nums + doc_video_nums):
@@ -210,7 +205,9 @@ class Qwen3VLModel(Qwen3Model):
                     next_image_pos = doc_end + 1
                     if remain_images > 0:
                         next_image_pos = input_tokens.index(
-                            image_token_id, seg_start, doc_end
+                            image_token_id,
+                            seg_start,  # pyrefly: ignore [bad-argument-type]
+                            doc_end,
                         )
                     next_video_pos = doc_end + 1
                     if remain_videos > 0:
@@ -248,8 +245,7 @@ class Qwen3VLModel(Qwen3Model):
                     )
                     # Add position IDs for [text]
                     doc_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1)
-                        + pos_id_offset
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
                     )
                     # Add position IDs for [vision]
                     t_index = (
@@ -278,9 +274,7 @@ class Qwen3VLModel(Qwen3Model):
                         + text_len
                         + pos_id_offset
                     )
-                    seg_start = (
-                        next_vision_pos + llm_grid_t * llm_grid_h * llm_grid_w
-                    )
+                    seg_start = next_vision_pos + llm_grid_t * llm_grid_h * llm_grid_w
 
                 # After [text][vision] repetitions, handle trailing [text] or padding
                 if seg_start < doc_end:
@@ -291,8 +285,7 @@ class Qwen3VLModel(Qwen3Model):
                     )
                     text_len = doc_end - seg_start
                     doc_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1)
-                        + pos_id_offset
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
                     )
 
                 llm_pos_ids_list.extend(doc_pos_ids_list)
@@ -374,10 +367,9 @@ class Qwen3VLModel(Qwen3Model):
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit
         max_tokens = merged_embeds.shape[1]
-        valid_mask = (
-            torch.arange(max_tokens, device=merged_embeds.device).unsqueeze(0)
-            < num_tokens_per_item.unsqueeze(1)
-        )
+        valid_mask = torch.arange(max_tokens, device=merged_embeds.device).unsqueeze(
+            0
+        ) < num_tokens_per_item.unsqueeze(1)
 
         vision_embeds = merged_embeds[valid_mask]
         deepstack_embeds = [ds_feat[valid_mask] for ds_feat in deepstack_features]
@@ -499,9 +491,7 @@ class Qwen3VLModel(Qwen3Model):
         # Process image inputs
         image_mask = None
         deepstack_image_embeds = None
-        if (
-            pixel_values is not None and grid_thw is not None
-        ):
+        if pixel_values is not None and grid_thw is not None:
             image_embeds, deepstack_image_embeds = self._get_vision_embeds(
                 pixel_values, grid_thw
             )
@@ -516,9 +506,7 @@ class Qwen3VLModel(Qwen3Model):
         # Process video inputs
         video_mask = None
         deepstack_video_embeds = None
-        if (
-            pixel_values_videos is not None and grid_thw_videos is not None
-        ):
+        if pixel_values_videos is not None and grid_thw_videos is not None:
             video_embeds, deepstack_video_embeds = self._get_vision_embeds(
                 pixel_values_videos, grid_thw_videos
             )
@@ -558,7 +546,7 @@ class Qwen3VLModel(Qwen3Model):
         # pyrefly: ignore [bad-return]
         return inputs_embeds, vision_pos_masks, deepstack_vision_embeds
 
-    def forward(
+    def forward(  # pyrefly: ignore [bad-param-name-override]
         self,
         tokens: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
@@ -630,7 +618,10 @@ class Qwen3VLModel(Qwen3Model):
                 )
 
         # Final normalization and output
-        hidden_states = self.norm(hidden_states)
-        output = self.output(hidden_states)
-
+        hidden_states = (
+            self.norm(hidden_states) if self.norm is not None else hidden_states
+        )
+        output = (
+            self.output(hidden_states) if self.output is not None else hidden_states
+        )
         return output

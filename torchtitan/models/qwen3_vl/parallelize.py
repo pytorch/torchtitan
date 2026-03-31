@@ -17,12 +17,11 @@ import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import distribute_tensor, Partial, Replicate, Shard
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -37,114 +36,13 @@ from torchtitan.config import (
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.expert_parallel import (
-    ExpertParallel,
-    ExpertTensorParallel,
-    ReordererSequenceParallel,
-    TensorParallel,
-)
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.distributed.tensor_parallel import (
-    ColwiseParallelWithGradPlacement,
-    NoParallel,
-)
-from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.distributed.compile import apply_compile_dense, apply_compile_sparse
-from torchtitan.models.llama4.parallelize import apply_fsdp
-from torchtitan.models.qwen3.parallelize import _op_sac_save_list
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.llama3.parallelize import apply_replicate
+from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
-
-def _apply_moe_ep_tp_to_decoder(
-    model: nn.Module,
-    tp_mesh: DeviceMesh | None,
-    ep_mesh: DeviceMesh | None,
-    etp_mesh: DeviceMesh | None,
-    ep_etp_mesh: DeviceMesh | None = None,
-):
-    """Apply TP and EP to MoE layers for decoder (no SequenceParallel).
-
-    Unlike llama4's apply_moe_ep_tp which assumes Shard(1) hidden states
-    (from SequenceParallel), this uses Replicate input/output layouts because
-    Qwen3-VL keeps hidden states as replicated plain tensors on every rank (no
-    sequence sharding) for vision scatter and DeepStack.
-
-    The key difference: MoE output uses Partial → Replicate (all-reduce)
-    instead of Partial → Shard(1) (reduce-scatter).
-    """
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        # pyrefly: ignore [missing-attribute]
-        if not transformer_block.moe_enabled:
-            continue
-
-        # Apply TP plan for MoE boundary (router, shared experts, input/output)
-        if tp_mesh is not None:
-            moe_layer_plan = {
-                "moe": PrepareModuleInputOutput(
-                    input_layouts=(Replicate(),),
-                    desired_input_layouts=(Replicate(),),
-                    use_local_input=False,
-                    output_layouts=(Partial(),),
-                    desired_output_layouts=(Replicate(),),
-                ),
-                "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Partial(),),
-                ),
-            }
-
-            if ep_mesh is not None and etp_mesh is None:
-                # pyrefly: ignore [no-matching-overload]
-                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
-
-            # pyrefly: ignore [missing-attribute]
-            if transformer_block.moe.shared_experts is not None:
-                # pyrefly: ignore [no-matching-overload]
-                moe_layer_plan.update(
-                    {
-                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
-                        ),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial(),
-                        ),
-                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
-                        ),
-                    }
-                )
-
-            parallelize_module(
-                # pyrefly: ignore [bad-argument-type]
-                module=transformer_block,
-                device_mesh=tp_mesh,
-                # pyrefly: ignore [bad-argument-type]
-                parallelize_plan=moe_layer_plan,
-            )
-
-        # Apply expert parallelism plan
-        if ep_mesh is None:
-            # TP-only: shard experts across TP ranks
-            assert tp_mesh is not None
-            experts_mesh = tp_mesh
-            experts_plan = TensorParallel()
-        elif etp_mesh is None:
-            # EP-only or TP+EP without ETP
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
-        else:
-            # EP + ETP
-            assert ep_etp_mesh is not None
-            experts_mesh = ep_etp_mesh
-            experts_plan = ExpertTensorParallel()
-
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=transformer_block.moe.experts,
-            device_mesh=experts_mesh,
-            parallelize_plan=experts_plan,
-        )
 
 
 def _apply_non_moe_tp_to_decoder(
@@ -156,14 +54,10 @@ def _apply_non_moe_tp_to_decoder(
     """Apply tensor parallelism to the decoder without SequenceParallel.
 
     Unlike Qwen3's apply_non_moe_tp which uses SequenceParallel (hidden states
-    are Shard(1) DTensors between blocks), this keeps hidden states as
-    replicated plain tensors on every rank (no sequence sharding). This is necessary for
-    VLM because vision scatter and DeepStack operate on the full sequence with
-    boolean masks that aren't DTensor-aware.
-
-    The trade-off is slightly higher activation memory (full sequence on each
-    rank instead of 1/TP), but it avoids costly all-gather/re-shard at every
-    vision scatter and DeepStack layer.
+    are Shard(1) DTensors between blocks), this keeps hidden states as plain
+    tensors on every rank. This is required because vision scatter and DeepStack
+    use boolean indexing (masked_scatter, tensor[bool_mask]) which DTensor does
+    not support.
     """
     # Parallelize embedding, norm, and output — no SequenceParallel
     top_level_plan = {
@@ -182,19 +76,19 @@ def _apply_non_moe_tp_to_decoder(
     parallelize_module(model, tp_mesh, top_level_plan)
 
     # Apply TP to every transformer block's linear layers.
-    # NoParallel on norms sets their params as Replicate DTensors on tp_mesh
-    # (for consistent (fsdp, tp) mesh after FSDP) and inserts I/O hooks that
-    # convert local tensor ↔ DTensor at the norm boundary, keeping the block's
-    # data path in local-tensor space as RowwiseParallel(use_local_output=True)
-    # expects.
+    # NoParallel on norms distributes their params as Replicate DTensors on
+    # tp_mesh (needed for consistent (fsdp, tp) mesh after FSDP). Its input
+    # hook wraps plain tensors as DTensor(Replicate); its output stays as
+    # DTensor (no unwrap) so downstream modules receive DTensors.
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": NoParallel(),
             "ffn_norm": NoParallel(),
-            # Wrap attention inputs so rope_cache becomes a Replicate DTensor,
-            # needed because wq/wk/wv outputs are DTensors and apply_rotary_emb
-            # multiplies them with cos/sin from rope_cache.
+            # Wrap plain tensors (hidden_states, freqs_cis) as DTensor(Replicate)
+            # so they can interact with DTensor outputs from wq/wk/wv in
+            # apply_rotary_emb. Layouts are identity — the wrapping is the point.
+            # NOTE: 4th arg (positions) is None because CP is not supported yet.
             "attention": PrepareModuleInput(
                 input_layouts=(Replicate(), Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
@@ -392,15 +286,16 @@ def parallelize_qwen3_vl(
         )
 
     # Apply MoE parallelism to decoder layers.
-    # Uses Replicate input/output instead of Shard(1) since Qwen3-VL keeps
-    # hidden states as replicated plain tensors for vision scatter and DeepStack.
+    # enable_sp=False because Qwen3-VL keeps hidden states as plain tensors
+    # (not Shard(1) DTensors) for vision scatter and DeepStack.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        _apply_moe_ep_tp_to_decoder(
+        apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            enable_sp=False,
         )
 
     # Apply activation checkpointing
@@ -409,8 +304,7 @@ def parallelize_qwen3_vl(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
+            base_folder=dump_folder,
         )
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
@@ -439,7 +333,7 @@ def parallelize_qwen3_vl(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        # FSDP the vision encoder components individually for memory efficiency
+        # FSDP the vision encoder as a single unit (see _apply_fsdp_to_vision_encoder)
         if model.vision_encoder is not None:
             _apply_fsdp_to_vision_encoder(
                 # pyrefly: ignore [bad-argument-type]

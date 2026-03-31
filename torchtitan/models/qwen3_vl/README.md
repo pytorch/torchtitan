@@ -52,19 +52,6 @@ pip install av torchvision
 | `cc12m` | Image-text pairs | WebDataset (streaming) |
 | `cc12m-test` | Image-text pairs | Local WebDataset (for testing) |
 | `obelics` | Interleaved image-text | HuggingFace (streaming) |
-| `nemotron-video` | Video QA | HuggingFace + local video files |
-
-### Video dataset setup (nemotron-video)
-
-The Nemotron dataset (`nvidia/Nemotron-VLM-Dataset-V2`) streams text/metadata from HuggingFace but references video files by path. You need to download the video files separately:
-
-```bash
-# Download NExT-QA videos (~150 GB)
-huggingface-cli download rhymes-ai/NeXTVideo --repo-type dataset --local-dir ./assets/videos/
-cd ./assets/videos && unzip NExTVideo.zip
-```
-
-Set `video_dir="./assets/videos"` in the dataloader config so paths resolve correctly.
 
 ## Supported Features
 
@@ -78,6 +65,5 @@ Set `video_dir="./assets/videos"` in the dataloader config so paths resolve corr
 ## TODO
 
 - Add Pipeline Parallelism support
-- Add default video dataset training configs
-- Multi-worker data loading for video
-- GPU-accelerated video decoding
+- Add Context Parallel support
+- Add video dataset training configs
