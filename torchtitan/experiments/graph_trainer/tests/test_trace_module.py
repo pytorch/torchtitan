@@ -674,83 +674,76 @@ class TestTraceModels(unittest.TestCase):
         batch_size, seq_len = 2, 2048
         dtype = torch.bfloat16
         num_steps = 3
-        tokens = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE)
-        labels = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE)
+        lr = 1e-3
 
-        # Create reference weights on CPU.
-        ref_model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
-        with torch.no_grad():
-            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
-        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
-        del ref_model
-        torch.cuda.empty_cache()
+        tokens = torch.randint(
+            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
+        )
+        labels = torch.randint(
+            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
+        )
 
         def make_model():
             model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
             with torch.no_grad():
                 model.init_weights(buffer_device=torch.device(self.DEVICE))
-            model.load_state_dict(state)
             apply_ac(model, ActivationCheckpointConfig(mode="selective"))
             return model
 
-        def run_steps(step_fn, model):
-            """Run num_steps training steps, return losses and peak memory."""
-            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
-            losses = []
+        def run(mode):
+            model = make_model()
+            model.load_state_dict(state)
+            if mode == "traced":
+                train_step = make_train_step(get_loss)
+                traced = minimal_fx_tracer(train_step, (model, tokens, labels))
+            opt = torch.optim.Adam(model.parameters(), lr=lr)
+            step_results = []
             torch.cuda.reset_peak_memory_stats()
             for _ in range(num_steps):
-                loss, grads = step_fn(model)
-                losses.append(loss.detach().cpu())
-                for p, g in zip(model.parameters(), grads, strict=True):
-                    p.grad = g
+                if mode == "traced":
+                    result = traced(model, tokens, labels)
+                    loss, grads = result[0], result[1:]
+                    for p, g in zip(model.parameters(), grads, strict=True):
+                        p.grad = g
+                else:
+                    logits = model(tokens)
+                    loss = get_loss(logits, labels)
+                    loss.backward()
+                    grads = [p.grad for p in model.parameters()]
+                step_results.append((
+                    loss.detach().cpu(),
+                    [g.clone().cpu() for g in grads],
+                ))
                 opt.step()
                 opt.zero_grad()
             peak = torch.cuda.max_memory_allocated() / 1e9
-            del opt
-            return losses, peak
+            del model, opt
+            torch.cuda.empty_cache()
+            return step_results, peak
 
-        def eager_step(model):
-            logits = model(tokens)
-            loss = get_loss(logits, labels)
-            loss.backward()
-            grads = [p.grad.clone() for p in model.parameters()]
-            return loss, grads
-
-        def traced_step_factory(model):
-            train_step = make_train_step(get_loss)
-            traced = minimal_fx_tracer(train_step, (model, tokens, labels))
-
-            def step(model):
-                result = traced(model, tokens, labels)
-                return result[0], result[1:]
-
-            return step
-
-        # Eager + AC
-        model_eager = make_model()
-        eager_losses, peak_eager = run_steps(eager_step, model_eager)
-        del model_eager
+        ref = make_model()
+        state = ref.state_dict()
+        del ref
         torch.cuda.empty_cache()
 
-        # Traced + AC
-        model_traced = make_model()
-        traced_step = traced_step_factory(model_traced)
-        traced_losses, peak_traced = run_steps(traced_step, model_traced)
-        del model_traced
-        torch.cuda.empty_cache()
+        eager_results, peak_eager = run("eager")
+        traced_results, peak_traced = run("traced")
 
-        torch.use_deterministic_algorithms(False)
-
-        # Verify bitwise-identical loss across all steps.
-        for step, (el, tl) in enumerate(
-            zip(eager_losses, traced_losses, strict=True)
+        # Bitwise-identical loss and grads across all steps.
+        for step, ((el, eg), (tl, tg)) in enumerate(
+            zip(eager_results, traced_results, strict=True)
         ):
             self.assertTrue(
                 torch.equal(el, tl),
-                f"Step {step}: eager loss={el.item():.6f} vs traced loss={tl.item():.6f}",
+                f"Step {step}: loss mismatch — eager={el.item():.6f} vs traced={tl.item():.6f}",
             )
+            for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
+                self.assertTrue(
+                    torch.equal(ge, gt),
+                    f"Step {step}: grad[{i}] mismatch — max_diff={( ge - gt).abs().max().item():.2e}",
+                )
 
-        # Verify peak memory within 10%.
+        # Peak memory within 10%.
         ratio = peak_traced / peak_eager
         self.assertLess(
             ratio,
