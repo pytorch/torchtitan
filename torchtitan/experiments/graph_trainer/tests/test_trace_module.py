@@ -119,7 +119,11 @@ class TestTraceModule(unittest.TestCase):
 
     def test_mlp_forward(self):
         model, tokens, labels, loss_fn = self._make_mlp()
-        traced = aot_function(model, (tokens,))
+
+        def forward(model, tokens):
+            return model(tokens)
+
+        traced = aot_function(forward, (model, tokens))
         out_eager = model(tokens)
         wrapped = traced(model, tokens)
         self.assertTrue(torch.equal(out_eager, wrapped))
@@ -257,7 +261,10 @@ class TestTraceDTensor(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
 
-        traced = aot_function(model, (tokens_dt,))
+        def forward(model, tokens):
+            return model(tokens)
+
+        traced = aot_function(forward, (model, tokens_dt))
         has_subclass = any(
             layout.meta is not None for layout in traced.input_subclass_layouts
         )
@@ -624,7 +631,11 @@ class TestTraceModels(unittest.TestCase):
             "sliding_window_mask": sliding_window_mask,
         }
         with annotate_flex_attention_for_regional_inductor():
-            traced = aot_function(model, (tokens, attn_masks))
+
+            def forward(model, tokens, attn_masks):
+                return model(tokens, attn_masks)
+
+            traced = aot_function(forward, (model, tokens, attn_masks))
 
         flex_nodes = [
             n
