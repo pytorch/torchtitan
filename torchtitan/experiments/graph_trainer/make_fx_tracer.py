@@ -284,7 +284,6 @@ class TracedResult:
     def __init__(
         self,
         gm: torch.fx.GraphModule,
-        module_index: int,
         param_fqns: list[str],
         num_params: int,
         num_flat_inputs: int,
@@ -296,7 +295,6 @@ class TracedResult:
         """
         Args:
             gm: The traced FX graph (a pure function of flat tensors).
-            module_index: Position of the ``nn.Module`` in the original ``args``.
             param_fqns: Fully qualified names of the module's parameters and
                 buffers, recorded at trace time for validation.
             num_params: Number of parameters + buffers (flat count).
@@ -310,7 +308,6 @@ class TracedResult:
                 used to reconstruct the output structure.
         """
         self.gm = gm
-        self.module_index = module_index
         self.param_fqns = param_fqns
         self.num_params = num_params
         self.num_flat_inputs = num_flat_inputs
@@ -323,12 +320,15 @@ class TracedResult:
     def __call__(self, *args: Any) -> Any:
         """Execute the traced graph, reading fresh params from the module in ``args``.
 
+        The module must be the first argument (position 0), matching the
+        convention enforced by :func:`aot_function`.
+
         Runs under ``torch.no_grad()`` because the graph already contains
         explicit backward ops (from ``torch.autograd.grad`` traced by make_fx).
         Without this, PyTorch would build a redundant autograd graph on top,
         keeping all forward intermediates alive via ``grad_fn`` references.
         """
-        mod = args[self.module_index]
+        mod = args[0]
         params_dict = {
             **dict(mod.named_parameters(remove_duplicate=False)),
             **dict(mod.named_buffers(remove_duplicate=False)),
@@ -337,15 +337,15 @@ class TracedResult:
             fqns = list(params_dict.keys())
             if fqns != self.param_fqns:
                 raise ValueError(
-                    f"Module at arg position {self.module_index} has different "
-                    f"parameter/buffer names than during tracing.\n"
+                    f"Module at args[0] has different parameter/buffer "
+                    f"names than during tracing.\n"
                     f"  Traced: {self.param_fqns}\n"
                     f"  Got:    {fqns}"
                 )
             self._validated = True
         params_flat = list(params_dict.values())
 
-        user_args = [a for i, a in enumerate(args) if i != self.module_index]
+        user_args = list(args[1:])
         user_args_flat, _ = pytree.tree_flatten(user_args)
 
         all_args = params_flat + list(user_args_flat)
@@ -365,7 +365,7 @@ def aot_function(
 ) -> TracedResult:
     """Trace ``fn(*args)`` into a flat FX graph, unwrapping tensor subclasses.
 
-    Exactly one ``nn.Module`` must be present in ``args``.  Its parameters and
+    The first element of ``args`` must be an ``nn.Module``.  Its parameters and
     buffers are lifted as extra graph inputs so the returned graph is a pure
     function.  Tensor subclasses (e.g. DTensor) are recursively unwrapped into
     plain tensors for tracing, and the layouts needed to rewrap them are
@@ -383,8 +383,8 @@ def aot_function(
 
     Args:
         fn: The callable (or ``nn.Module``) to trace.
-        args: The positional arguments to trace with.  Must contain exactly one
-            ``nn.Module`` whose parameters will be lifted.
+        args: The positional arguments to trace with.  The first element must
+            be an ``nn.Module`` whose parameters will be lifted.
     """
     # When fn is an nn.Module, treat it as the first arg so its params get
     # lifted like any other module arg.
@@ -404,8 +404,7 @@ def aot_function(
             f"The nn.Module must be the first argument (position 0), "
             f"got it at position {module_indices[0]}."
         )
-    module_index = 0
-    mod = args[module_index]
+    mod = args[0]
 
     # Extract params/buffers from the module.
     params_dict = {
@@ -416,8 +415,8 @@ def aot_function(
     params_flat = list(params_dict.values())
     num_params = len(params_flat)
 
-    # User args: everything except the module.
-    user_args = [a for i, a in enumerate(args) if i != module_index]
+    # User args: everything after the module.
+    user_args = list(args[1:])
     user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
 
     # Validate leaves: tensors and make_fx-safe primitives are allowed.
@@ -465,14 +464,9 @@ def aot_function(
         params_for_mod = dict(zip(param_fqns, params_wrapped, strict=True))
         user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
 
-        # Reconstruct the original args: module position keeps the live module,
-        # other positions get the traced user tensors.
-        rebuilt: list = list(args)
-        user_idx = 0
-        for i in range(len(args)):
-            if i != module_index:
-                rebuilt[i] = user_list[user_idx]
-                user_idx += 1
+        # Reconstruct the original args: module at position 0 keeps the live
+        # module, remaining positions get the traced user tensors.
+        rebuilt = [mod] + user_list
 
         with stateless._reparametrize_module(mod, params_for_mod):
             with _patch_engine_run_backward():
@@ -500,7 +494,6 @@ def aot_function(
     assert output_spec is not None
     return TracedResult(
         gm=traced,
-        module_index=module_index,
         param_fqns=param_fqns,
         num_params=num_params,
         num_flat_inputs=num_full_args,
