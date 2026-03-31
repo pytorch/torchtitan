@@ -46,6 +46,9 @@ def _patch_checkpoint_wrapper_ac_graph_id() -> Generator[None, None, None]:
 
     In AOTAutograd this is handled by ``TagActivationCheckpoint.tag_nodes``,
     but make_fx doesn't go through that path.
+
+    FIXME: Remove once https://github.com/pytorch/pytorch/pull/175348 lands,
+    which revamps the AC implementation to handle this natively.
     """
     from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
         CheckpointWrapper,
@@ -539,10 +542,11 @@ def minimal_fx_tracer(
     # Must run before DCE so that forward nodes used for matching aren't removed.
     _copy_fwd_metadata_to_bw_nodes(traced)
 
-    # Promote ac_graph_id from custom dict to top-level meta so that
+    # FIXME: Promote ac_graph_id from custom dict to top-level meta so that
     # cleanup_recompute_tags (called by the remat pass) can find it.
     # torch.fx.traceback.annotate puts values under meta["custom"], but
     # cleanup_recompute_tags reads meta["ac_graph_id"] directly.
+    # Remove once https://github.com/pytorch/pytorch/pull/175348 lands.
     for node in traced.graph.nodes:
         ac_id = node.meta.get("custom", {}).get("ac_graph_id")
         if ac_id is not None:
