@@ -279,6 +279,14 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
 
 
+def _get_params_and_buffers(mod: nn.Module) -> dict[str, torch.Tensor]:
+    """Return a merged dict of the module's named parameters and buffers."""
+    return {
+        **dict(mod.named_parameters(remove_duplicate=False)),
+        **dict(mod.named_buffers(remove_duplicate=False)),
+    }
+
+
 class TracedResult:
     """Holds the traced graph and metadata needed to execute it.
 
@@ -336,10 +344,7 @@ class TracedResult:
         keeping all forward intermediates alive via ``grad_fn`` references.
         """
         mod = args[0]
-        params_dict = {
-            **dict(mod.named_parameters(remove_duplicate=False)),
-            **dict(mod.named_buffers(remove_duplicate=False)),
-        }
+        params_dict = _get_params_and_buffers(mod)
         if not self._validated:
             fqns = list(params_dict.keys())
             if fqns != self.param_fqns:
@@ -395,25 +400,20 @@ def minimal_fx_tracer(
         args: The positional arguments to trace with.  The first element must
             be an ``nn.Module`` whose parameters will be lifted.
     """
-    # Find the single nn.Module in args — must be at position 0.
-    module_indices = [i for i, a in enumerate(args) if isinstance(a, nn.Module)]
-    if len(module_indices) != 1:
+    if not isinstance(args[0], nn.Module):
         raise ValueError(
-            f"minimal_fx_tracer expects exactly one nn.Module in args, "
-            f"got {len(module_indices)} at positions {module_indices}."
+            "minimal_fx_tracer requires args[0] to be an nn.Module, "
+            f"got {type(args[0]).__name__}."
         )
-    if module_indices[0] != 0:
+    if any(isinstance(a, nn.Module) for a in args[1:]):
         raise ValueError(
-            f"The nn.Module must be the first argument (position 0), "
-            f"got it at position {module_indices[0]}."
+            "minimal_fx_tracer supports exactly one nn.Module at args[0]. "
+            "Additional nn.Module instances found in args[1:]."
         )
     mod = args[0]
 
     # Extract params/buffers from the module.
-    params_dict = {
-        **dict(mod.named_parameters(remove_duplicate=False)),
-        **dict(mod.named_buffers(remove_duplicate=False)),
-    }
+    params_dict = _get_params_and_buffers(mod)
     param_fqns = list(params_dict.keys())
     params_flat = list(params_dict.values())
     num_params = len(params_flat)
