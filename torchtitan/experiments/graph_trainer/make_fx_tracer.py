@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -57,14 +56,6 @@ class SubclassLayout:
     meta: SubclassMeta | None
 
 
-@dataclass
-class _ModuleParamsMeta:
-    """Per-module parameter metadata captured during tracing."""
-
-    fqns: list[str]
-    num_params: int
-
-
 def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta | None]:
     if not is_traceable_wrapper_subclass(t):
         return [t], None
@@ -105,19 +96,46 @@ def _wrap_to_subclass(
     )
 
 
-def _wrap_to_subclasses(
-    flat_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
-    layouts: list[SubclassLayout],
-) -> list[torch.Tensor]:
+def _unwrap_subclasses(
+    args: list,
+) -> tuple[list, dict[int, SubclassLayout]]:
+    """Unwrap tensor subclasses into plain tensors.
+
+    Returns the flattened plain tensors and a dict mapping original arg index
+    to its SubclassLayout.  Plain tensors have no entry.
+    """
+    flat: list = []
+    layouts: dict[int, SubclassLayout] = {}
+    for i, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor) and is_traceable_wrapper_subclass(arg):
+            inner_tensors, meta = _unwrap_subclass(arg)
+            layouts[i] = SubclassLayout(len(inner_tensors), meta)
+            flat.extend(inner_tensors)
+        else:
+            flat.append(arg)
+    return flat, layouts
+
+
+def _wrap_subclasses(
+    flat_tensors: tuple | list,
+    num_args: int,
+    layouts: dict[int, SubclassLayout],
+) -> list:
+    """Rewrap plain tensors back into their original subclass types.
+
+    Positions not in ``layouts`` are plain tensors (taken one-to-one).
+    """
     wrapped = []
     idx = 0
-    for layout in layouts:
-        tensors = flat_tensors[idx : idx + layout.num_tensors]
-        idx += layout.num_tensors
-        if layout.meta is None:
-            wrapped.append(tensors[0])
-        else:
+    for i in range(num_args):
+        if i in layouts:
+            layout = layouts[i]
+            tensors = flat_tensors[idx : idx + layout.num_tensors]
+            idx += layout.num_tensors
             wrapped.append(_wrap_to_subclass(list(tensors), layout.meta))
+        else:
+            wrapped.append(flat_tensors[idx])
+            idx += 1
     return wrapped
 
 
@@ -192,10 +210,6 @@ def _patch_engine_run_backward() -> Generator[None, None, None]:
     nodes back to their forward counterparts (needed by
     ``_copy_fwd_metadata_to_bw_nodes``).
 
-    This context manager patches ``_engine_run_backward`` to call
-    ``setup_stacktrace_preservation_hooks`` before the autograd engine runs,
-    restoring ``seq_nr`` propagation during tracing.
-
     We must patch the name in both modules since ``torch.autograd.__init__``
     imports it via ``from .graph import``.
     """
@@ -250,30 +264,11 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
 
 
-def _collect_module_params(
-    args: tuple, module_indices: list[int]
-) -> tuple[list[_ModuleParamsMeta], list[torch.Tensor]]:
-    """Extract flattened params/buffers for each nn.Module arg."""
-    per_module: list[_ModuleParamsMeta] = []
-    all_flat: list[torch.Tensor] = []
-    for i in module_indices:
-        mod = args[i]
-        params_dict = {
-            **dict(mod.named_parameters(remove_duplicate=False)),
-            **dict(mod.named_buffers(remove_duplicate=False)),
-        }
-        fqns = list(params_dict.keys())
-        flat = list(params_dict.values())
-        per_module.append(_ModuleParamsMeta(fqns=fqns, num_params=len(flat)))
-        all_flat.extend(flat)
-    return per_module, all_flat
-
-
 class TracedResult:
     """Holds the traced graph and metadata needed to execute it.
 
     Returned by :func:`aot_function`.  Call the instance directly to execute
-    the traced graph with fresh parameters read from the live modules::
+    the traced graph with fresh parameters read from the live module::
 
         traced = aot_function(train_step, (model, tokens, labels))
         result = traced(model, tokens, labels)
@@ -282,56 +277,78 @@ class TracedResult:
     def __init__(
         self,
         gm: torch.fx.GraphModule,
-        module_indices: list[int],
-        per_module_params: list[_ModuleParamsMeta],
-        input_subclass_layouts: list[SubclassLayout],
-        output_subclass_layouts: list[SubclassLayout],
+        module_index: int,
+        param_fqns: list[str],
+        num_params: int,
+        num_flat_inputs: int,
+        input_subclass_layouts: dict[int, SubclassLayout],
+        num_flat_outputs: int,
+        output_subclass_layouts: dict[int, SubclassLayout],
         output_spec: pytree.TreeSpec,
     ) -> None:
+        """
+        Args:
+            gm: The traced FX graph (a pure function of flat tensors).
+            module_index: Position of the ``nn.Module`` in the original ``args``.
+            param_fqns: Fully qualified names of the module's parameters and
+                buffers, recorded at trace time for validation.
+            num_params: Number of parameters + buffers (flat count).
+            num_flat_inputs: Number of original args (before subclass unwrapping).
+            input_subclass_layouts: Maps arg positions that are tensor subclasses
+                to their unwrap/rewrap metadata.  Plain tensors have no entry.
+            num_flat_outputs: Number of original outputs (before subclass unwrapping).
+            output_subclass_layouts: Maps output positions that are tensor subclasses
+                to their rewrap metadata.  Plain tensors have no entry.
+            output_spec: Pytree spec of the original function's return value,
+                used to reconstruct the output structure.
+        """
         self.gm = gm
-        self.module_indices = module_indices
-        self.per_module_params = per_module_params
+        self.module_index = module_index
+        self.param_fqns = param_fqns
+        self.num_params = num_params
+        self.num_flat_inputs = num_flat_inputs
         self.input_subclass_layouts = input_subclass_layouts
+        self.num_flat_outputs = num_flat_outputs
         self.output_subclass_layouts = output_subclass_layouts
         self.output_spec = output_spec
+        self._validated = False
 
-    def __call__(self, *args: Any) -> list[torch.Tensor]:
-        """Execute the traced graph, reading fresh params from modules in ``args``."""
-        module_indices_set = set(self.module_indices)
+    def __call__(self, *args: Any) -> Any:
+        """Execute the traced graph, reading fresh params from the module in ``args``.
 
-        # Read current params from live modules.
-        all_params_flat: list[torch.Tensor] = []
-        for i, pmp in zip(self.module_indices, self.per_module_params, strict=True):
-            mod = args[i]
-            params_dict = {
-                **dict(mod.named_parameters(remove_duplicate=False)),
-                **dict(mod.named_buffers(remove_duplicate=False)),
-            }
+        Runs under ``torch.no_grad()`` because the graph already contains
+        explicit backward ops (from ``torch.autograd.grad`` traced by make_fx).
+        Without this, PyTorch would build a redundant autograd graph on top,
+        keeping all forward intermediates alive via ``grad_fn`` references.
+        """
+        mod = args[self.module_index]
+        params_dict = {
+            **dict(mod.named_parameters(remove_duplicate=False)),
+            **dict(mod.named_buffers(remove_duplicate=False)),
+        }
+        if not self._validated:
             fqns = list(params_dict.keys())
-            if fqns != pmp.fqns:
+            if fqns != self.param_fqns:
                 raise ValueError(
-                    f"Module at arg position {i} has different parameter/buffer "
-                    f"names than during tracing.\n"
-                    f"  Traced: {pmp.fqns}\n"
+                    f"Module at arg position {self.module_index} has different "
+                    f"parameter/buffer names than during tracing.\n"
+                    f"  Traced: {self.param_fqns}\n"
                     f"  Got:    {fqns}"
                 )
-            flat, _ = pytree.tree_flatten(params_dict)
-            all_params_flat.extend(flat)
+            self._validated = True
+        params_flat = list(params_dict.values())
 
-        user_args = [a for i, a in enumerate(args) if i not in module_indices_set]
+        user_args = [a for i, a in enumerate(args) if i != self.module_index]
         user_args_flat, _ = pytree.tree_flatten(user_args)
 
-        all_args = all_params_flat + list(user_args_flat)
-        flat_inputs: list = []
-        for a in all_args:
-            if isinstance(a, torch.Tensor) and is_traceable_wrapper_subclass(a):
-                inner, _ = _unwrap_subclass(a)
-                flat_inputs.extend(inner)
-            else:
-                flat_inputs.append(a)
+        all_args = params_flat + list(user_args_flat)
+        flat_inputs, _ = _unwrap_subclasses(all_args)
 
-        flat_outputs = self.gm(*flat_inputs)
-        wrapped = _wrap_to_subclasses(flat_outputs, self.output_subclass_layouts)
+        with torch.no_grad():
+            flat_outputs = self.gm(*flat_inputs)
+        wrapped = _wrap_subclasses(
+            flat_outputs, self.num_flat_outputs, self.output_subclass_layouts
+        )
         return pytree.tree_unflatten(wrapped, self.output_spec)
 
 
@@ -341,45 +358,62 @@ def aot_function(
 ) -> TracedResult:
     """Trace ``fn(*args)`` into a flat FX graph, unwrapping tensor subclasses.
 
-    Parameters and buffers from ``nn.Module`` instances in ``args`` are lifted
-    as extra graph inputs so the returned graph is a pure function.  Tensor
-    subclasses (e.g. DTensor) are recursively unwrapped into plain tensors for
-    tracing, and the layouts needed to rewrap them are recorded in the returned
-    :class:`TracedResult`.
+    Exactly one ``nn.Module`` must be present in ``args``.  Its parameters and
+    buffers are lifted as extra graph inputs so the returned graph is a pure
+    function.  Tensor subclasses (e.g. DTensor) are recursively unwrapped into
+    plain tensors for tracing, and the layouts needed to rewrap them are
+    recorded in the returned :class:`TracedResult`.
 
     ``fn`` may be an ``nn.Module`` — in which case it is treated as though the
     caller wrote ``aot_function(lambda m, *a: m(*a), (fn,) + args)``, i.e. the
     module is prepended to ``args`` and its parameters are lifted automatically.
 
     The returned :class:`TracedResult` is directly callable — pass the same
-    positional arguments (with live modules) to execute the graph::
+    positional arguments (with the live module) to execute the graph::
 
         traced = aot_function(train_step, (model, tokens, labels))
         result = traced(model, tokens, labels)
 
     Args:
         fn: The callable (or ``nn.Module``) to trace.
-        args: The positional arguments to trace with.  ``nn.Module`` instances
-            are detected automatically and their parameters are lifted.
+        args: The positional arguments to trace with.  Must contain exactly one
+            ``nn.Module`` whose parameters will be lifted.
     """
     # When fn is an nn.Module, treat it as the first arg so its params get
     # lifted like any other module arg.
     if isinstance(fn, nn.Module):
         args = (fn,) + args
         fn = type(fn).__call__
+
+    # Find the single nn.Module in args — must be at position 0.
     module_indices = [i for i, a in enumerate(args) if isinstance(a, nn.Module)]
-    module_indices_set = set(module_indices)
+    if len(module_indices) != 1:
+        raise ValueError(
+            f"aot_function expects exactly one nn.Module in args, "
+            f"got {len(module_indices)} at positions {module_indices}."
+        )
+    if module_indices[0] != 0:
+        raise ValueError(
+            f"The nn.Module must be the first argument (position 0), "
+            f"got it at position {module_indices[0]}."
+        )
+    module_index = 0
+    mod = args[module_index]
 
-    per_module_params, all_params_flat = _collect_module_params(args, module_indices)
-    params_len = len(all_params_flat)
+    # Extract params/buffers from the module.
+    params_dict = {
+        **dict(mod.named_parameters(remove_duplicate=False)),
+        **dict(mod.named_buffers(remove_duplicate=False)),
+    }
+    param_fqns = list(params_dict.keys())
+    params_flat = list(params_dict.values())
+    num_params = len(params_flat)
 
-    # User args: positional args that are not nn.Module instances.
-    user_args = [a for i, a in enumerate(args) if i not in module_indices_set]
+    # User args: everything except the module.
+    user_args = [a for i, a in enumerate(args) if i != module_index]
     user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
 
-    # Validate leaves: tensors and make_fx-safe primitives (int, float, bool,
-    # str) are allowed.  Everything else (callables, custom objects) should be
-    # registered as pytree nodes/constants or captured in fn's closure.
+    # Validate leaves: tensors and make_fx-safe primitives are allowed.
     _ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
     for leaf in user_args_flat:
         if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
@@ -392,18 +426,9 @@ def aot_function(
             )
 
     # Combined flat input: [*params, *user_args] with subclasses unwrapped.
-    full_args = all_params_flat + list(user_args_flat)
-
-    unwrapped_args: list = []
-    input_layouts: list[SubclassLayout] = []
-    for arg in full_args:
-        if isinstance(arg, torch.Tensor) and is_traceable_wrapper_subclass(arg):
-            inner_tensors, meta = _unwrap_subclass(arg)
-            unwrapped_args.extend(inner_tensors)
-            input_layouts.append(SubclassLayout(len(inner_tensors), meta))
-        else:
-            unwrapped_args.append(arg)
-            input_layouts.append(SubclassLayout(1, None))
+    full_args = params_flat + list(user_args_flat)
+    num_full_args = len(full_args)
+    unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
 
     fake_mode = FakeTensorMode(
         allow_non_fake_inputs=True,
@@ -418,55 +443,37 @@ def aot_function(
         for a in unwrapped_args
     )
 
-    output_layouts: list[SubclassLayout] = []
+    output_layouts: dict[int, SubclassLayout] = {}
+    num_flat_outputs: int = 0
     output_spec: pytree.TreeSpec | None = None
 
     def fn_with_subclass_handling(*plain_args: Any) -> list:
-        nonlocal output_layouts, output_spec
-        output_layouts = []
+        nonlocal output_layouts, output_spec, num_flat_outputs
+        output_layouts = {}
 
-        wrapped = _wrap_to_subclasses(plain_args, input_layouts)
-        all_params = wrapped[:params_len]
-        user_flat = wrapped[params_len:]
+        wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
+        params_wrapped = wrapped[:num_params]
+        user_flat = wrapped[num_params:]
 
-        # Reconstruct per-module param dicts.
-        offset = 0
-        module_param_dicts = []
-        for pmp in per_module_params:
-            flat = all_params[offset : offset + pmp.num_params]
-            module_param_dicts.append(dict(zip(pmp.fqns, flat, strict=True)))
-            offset += pmp.num_params
-
+        params_for_mod = dict(zip(param_fqns, params_wrapped, strict=True))
         user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
 
-        # Reconstruct the original args: module positions keep the live module
-        # (already in args), non-module positions get the traced user tensors.
+        # Reconstruct the original args: module position keeps the live module,
+        # other positions get the traced user tensors.
         rebuilt: list = list(args)
         user_idx = 0
         for i in range(len(args)):
-            if i not in module_indices_set:
+            if i != module_index:
                 rebuilt[i] = user_list[user_idx]
                 user_idx += 1
 
-        with contextlib.ExitStack() as stack:
-            for i, pmp_dict in zip(module_indices, module_param_dicts, strict=True):
-                stack.enter_context(
-                    stateless._reparametrize_module(args[i], pmp_dict)
-                )
-
+        with stateless._reparametrize_module(mod, params_for_mod):
             with _patch_engine_run_backward():
                 result = fn(*rebuilt)
 
         flat_outs, output_spec = pytree.tree_flatten(result)
-        unwrapped_outs: list = []
-        for out in flat_outs:
-            if isinstance(out, torch.Tensor) and is_traceable_wrapper_subclass(out):
-                inner, meta = _unwrap_subclass(out)
-                unwrapped_outs.extend(inner)
-                output_layouts.append(SubclassLayout(len(inner), meta))
-            else:
-                unwrapped_outs.append(out)
-                output_layouts.append(SubclassLayout(1, None))
+        num_flat_outputs = len(flat_outs)
+        unwrapped_outs, output_layouts = _unwrap_subclasses(flat_outs)
         return unwrapped_outs
 
     ctx = TracingContext(fake_mode)
@@ -486,9 +493,12 @@ def aot_function(
     assert output_spec is not None
     return TracedResult(
         gm=traced,
-        module_indices=module_indices,
-        per_module_params=per_module_params,
+        module_index=module_index,
+        param_fqns=param_fqns,
+        num_params=num_params,
+        num_flat_inputs=num_full_args,
         input_subclass_layouts=input_layouts,
+        num_flat_outputs=num_flat_outputs,
         output_subclass_layouts=output_layouts,
         output_spec=output_spec,
     )

@@ -178,72 +178,6 @@ class TestTraceModule(unittest.TestCase):
             for gr, gt in zip(grads_ref, grads_tr, strict=True):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
-    def test_module_not_first_arg(self):
-        """Module in the middle of args: fn(tokens, model, labels)."""
-        model_ref, tokens, labels, loss_fn = self._make_mlp()
-        model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        model_test.load_state_dict(model_ref.state_dict())
-
-        def train_step(tokens, model, labels):
-            logits = model(tokens)
-            loss = get_loss(logits, labels)
-            params = list(model.parameters())
-            grads = torch.autograd.grad(loss, params)
-            return [loss] + list(grads)
-
-        traced = aot_function(train_step, (tokens, model_ref, labels))
-
-        logits_ref = model_ref(tokens)
-        loss_ref = get_loss(logits_ref, labels)
-        loss_ref.backward()
-        grads_ref = [p.grad.clone() for p in model_ref.parameters()]
-
-        wrapped = traced(tokens, model_test, labels)
-        loss_tr = wrapped[0]
-        grads_tr = wrapped[1:]
-
-        self.assertTrue(torch.equal(loss_ref, loss_tr))
-        for gr, gt in zip(grads_ref, grads_tr, strict=True):
-            self.assertTrue(torch.equal(gr, gt))
-
-    def test_multiple_modules(self):
-        """Two modules interleaved with tensors: fn(model_a, x, model_b)."""
-        torch.manual_seed(42)
-        dim = 64
-        model_a = nn.Linear(dim, dim).to(device=self.DEVICE, dtype=self.DTYPE)
-        model_b = nn.Linear(dim, dim).to(device=self.DEVICE, dtype=self.DTYPE)
-        model_a_copy = nn.Linear(dim, dim).to(device=self.DEVICE, dtype=self.DTYPE)
-        model_b_copy = nn.Linear(dim, dim).to(device=self.DEVICE, dtype=self.DTYPE)
-        model_a_copy.load_state_dict(model_a.state_dict())
-        model_b_copy.load_state_dict(model_b.state_dict())
-
-        x = torch.randn(4, dim, device=self.DEVICE, dtype=self.DTYPE)
-
-        def two_model_step(model_a, x, model_b):
-            out = model_b(torch.relu(model_a(x)))
-            loss = out.sum()
-            params = list(model_a.parameters()) + list(model_b.parameters())
-            grads = torch.autograd.grad(loss, params)
-            return [loss] + list(grads)
-
-        traced = aot_function(two_model_step, (model_a, x, model_b))
-
-        # Eager reference.
-        out_ref = model_b(torch.relu(model_a(x)))
-        loss_ref = out_ref.sum()
-        loss_ref.backward()
-        grads_ref = [p.grad.clone() for p in model_a.parameters()] + [
-            p.grad.clone() for p in model_b.parameters()
-        ]
-
-        wrapped = traced(model_a_copy, x, model_b_copy)
-        loss_tr = wrapped[0]
-        grads_tr = wrapped[1:]
-
-        self.assertTrue(torch.equal(loss_ref, loss_tr))
-        for gr, gt in zip(grads_ref, grads_tr, strict=True):
-            self.assertTrue(torch.equal(gr, gt))
-
     def test_mismatched_module_raises(self):
         """Executing with a module that has different params than at trace time raises."""
         model, tokens, labels, loss_fn = self._make_mlp()
@@ -482,11 +416,12 @@ class TestTraceModels(unittest.TestCase):
     ):
         train_step = make_train_step(get_loss)
 
-        with (
+        maybe_regional_inductor = (
             annotate_flex_attention_for_regional_inductor()
             if use_regional_inductor
             else contextlib.nullcontext()
-        ):
+        )
+        with maybe_regional_inductor:
             traced = aot_function(train_step, (model_ref, *fwd_args, labels))
 
         if check_collective_ops:
@@ -777,11 +712,12 @@ class TestTraceFSDP(FSDPTest):
 
         train_step = make_train_step(get_loss)
 
-        with (
+        maybe_regional_inductor = (
             annotate_flex_attention_for_regional_inductor()
             if use_regional_inductor
             else contextlib.nullcontext()
-        ):
+        )
+        with maybe_regional_inductor:
             traced = aot_function(train_step, (model_ref, *fwd_args, labels))
 
         ag = sum(
