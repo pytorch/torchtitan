@@ -32,7 +32,6 @@ from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 
 from torchtitan.models.common.linear import Linear
-
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
@@ -541,8 +540,8 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wqkv: Linear.Config  # shared config for wq, wk, wv
-        wo: Linear.Config  # separate config for wo (depth-scaled init)
+        wqkv: Linear.Config
+        wo: Linear.Config
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None

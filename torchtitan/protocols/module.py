@@ -24,22 +24,8 @@ class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
 
-    Initialization follows a three-phase pattern:
-
-    1. ``init_states`` auto-recurses into children, then calls
-       ``_init_self_parameters`` and ``_init_self_buffers`` on the current module.
-    2. ``_init_self_parameters`` iterates own parameters and calls
-       ``_init_param`` for each one.
-    3. ``_init_param`` looks up the parameter name in ``_param_init`` (a dict).
-       Raises ``ValueError`` if ``_param_init`` is None or the name is missing.
-    4. ``_init_self_buffers`` is a no-op by default.
-       Override for device-aware buffer init (e.g., RoPE, MoE).
-
-    ``param_init`` is a ``dict[str, Callable]`` mapping parameter names to
-    init functions.  It is set on every sub-config in the model config
-    registry.  ``DeferredCallable.Config`` markers are resolved during
-    layer expansion.
-
+    ``init_states`` auto-recurses into children, then initializes the current
+    module's parameters (via ``_param_init`` dict lookup) and buffers.
     Subclasses should NOT override ``init_states`` unless they need custom
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.

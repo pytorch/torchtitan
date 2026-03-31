@@ -42,8 +42,8 @@ class FeedForward(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hidden_dim: int
-        w1: Linear.Config  # base init, used for module attribute w1 only
-        w2w3: Linear.Config  # depth-scaled init, used for module attributes w2 and w3
+        w1: Linear.Config
+        w2w3: Linear.Config
         dim: int = field(init=False)
 
     def __init__(self, config: Config):

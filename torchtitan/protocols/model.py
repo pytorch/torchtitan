@@ -17,8 +17,8 @@ class BaseModel(Module):
     Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
     The model is constructed via ``config.build()``.
 
-    ``init_states`` (from Module) auto-recurses; override only for
-    custom ordering (e.g., weight tying before init).
+    ``init_states`` (from Module) auto-recurses; override only for custom
+    ordering (e.g., weight tying before init).
     """
 
     def verify_module_protocol(self) -> None:

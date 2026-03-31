@@ -24,9 +24,6 @@ class RMSNorm(nn.RMSNorm, Module):
     ``Config.__init__``.  It is typically supplied via ``build()`` kwargs
     from the parent model. See ``Configurable`` docstring to understand
     the design pattern.
-
-    Parameter initialization is handled by ``param_init`` set on the
-    Config in the model registry (e.g., ``{"weight": nn.init.ones_}``).
     """
 
     @dataclass(kw_only=True, slots=True)

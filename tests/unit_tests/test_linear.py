@@ -8,7 +8,6 @@ import unittest
 from functools import partial
 
 import torch
-
 import torch.nn as nn
 
 from torchtitan.components.quantization.module_utils import (
