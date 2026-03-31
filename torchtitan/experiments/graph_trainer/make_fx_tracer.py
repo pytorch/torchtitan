@@ -353,38 +353,34 @@ class TracedResult:
 
 
 def aot_function(
-    fn: nn.Module | Callable,
+    fn: Callable,
     args: tuple,
 ) -> TracedResult:
     """Trace ``fn(*args)`` into a flat FX graph, unwrapping tensor subclasses.
 
-    The first element of ``args`` must be an ``nn.Module``.  Its parameters and
-    buffers are lifted as extra graph inputs so the returned graph is a pure
-    function.  Tensor subclasses (e.g. DTensor) are recursively unwrapped into
-    plain tensors for tracing, and the layouts needed to rewrap them are
-    recorded in the returned :class:`TracedResult`.
+    ``args[0]`` must be an ``nn.Module``.  Its parameters and buffers are
+    lifted as extra graph inputs so the returned graph is a pure function.
+    Tensor subclasses (e.g. DTensor) are recursively unwrapped into plain
+    tensors for tracing, and the layouts needed to rewrap them are recorded
+    in the returned :class:`TracedResult`.
 
-    ``fn`` may be an ``nn.Module`` — in which case it is treated as though the
-    caller wrote ``aot_function(lambda m, *a: m(*a), (fn,) + args)``, i.e. the
-    module is prepended to ``args`` and its parameters are lifted automatically.
+    ``fn`` must be a plain callable (not an ``nn.Module``).  This keeps the
+    trace and execute calling conventions identical — the same ``args`` are
+    passed at both trace time and execution time, with no hidden arg
+    prepending.  Non-tensor, non-module values like ``loss_fn`` should be
+    captured in ``fn``'s closure rather than passed as args.
 
     The returned :class:`TracedResult` is directly callable — pass the same
-    positional arguments (with the live module) to execute the graph::
+    positional arguments (with the live module first) to execute the graph::
 
         traced = aot_function(train_step, (model, tokens, labels))
         result = traced(model, tokens, labels)
 
     Args:
-        fn: The callable (or ``nn.Module``) to trace.
+        fn: The callable to trace.
         args: The positional arguments to trace with.  The first element must
             be an ``nn.Module`` whose parameters will be lifted.
     """
-    # When fn is an nn.Module, treat it as the first arg so its params get
-    # lifted like any other module arg.
-    if isinstance(fn, nn.Module):
-        args = (fn,) + args
-        fn = type(fn).__call__
-
     # Find the single nn.Module in args — must be at position 0.
     module_indices = [i for i, a in enumerate(args) if isinstance(a, nn.Module)]
     if len(module_indices) != 1:
