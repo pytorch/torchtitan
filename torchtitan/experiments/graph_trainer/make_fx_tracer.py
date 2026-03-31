@@ -197,7 +197,8 @@ def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
 
 @contextmanager
 def _patch_engine_run_backward() -> Generator[None, None, None]:
-    """Patch _engine_run_backward to install stacktrace preservation hooks.
+    """Patch _engine_run_backward to install stacktrace preservation hooks and
+    annotate backward nodes for the activation checkpointing remat pass.
 
     Why this is needed:
     When make_fx traces a function that calls loss.backward(), the backward
@@ -209,6 +210,11 @@ def _patch_engine_run_backward() -> Generator[None, None, None]:
     ``seq_nr`` metadata. Without ``seq_nr``, we can't correlate backward
     nodes back to their forward counterparts (needed by
     ``_copy_fwd_metadata_to_bw_nodes``).
+
+    Additionally, we annotate all backward nodes with
+    ``{"remat_pass_tag": "is_backward"}`` so that
+    ``remat_using_tags_for_fwd_loss_bwd_graph`` can identify the backward
+    region boundary for activation checkpointing rematerialization.
 
     We must patch the name in both modules since ``torch.autograd.__init__``
     imports it via ``from .graph import``.
@@ -226,7 +232,8 @@ def _patch_engine_run_backward() -> Generator[None, None, None]:
         ]
         if roots:
             setup_stacktrace_preservation_hooks(roots)
-        return _orig_fn(t_outputs, *args, **kwargs)
+        with torch.fx.traceback.annotate({"remat_pass_tag": "is_backward"}):
+            return _orig_fn(t_outputs, *args, **kwargs)
 
     torch.autograd.graph._engine_run_backward = _patched  # type: ignore[assignment]
     torch.autograd._engine_run_backward = _patched  # type: ignore[assignment]
