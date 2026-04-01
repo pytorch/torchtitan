@@ -93,8 +93,7 @@ class HFTransformerModel(BaseModel):
 
         def __init__(
             self,
-            titan_dense_config,
-            titan_moe_config=None,
+            model_config,
             # HuggingFace specific args
             attn_implementation: str = "sdpa_torchtitan",
             **kwargs,
@@ -104,9 +103,13 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=attn_implementation, **kwargs
             )
-            assert titan_dense_config is not None, "titan_dense_config is required"
+            assert model_config is not None, "model_config is required"
 
-            self._has_moe = titan_moe_config is not None
+            from torchtitan.experiments.transformers_modeling_backend import (
+                TitanMoeModelConfig,
+            )
+
+            self._has_moe = isinstance(model_config, TitanMoeModelConfig)
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
             self._create_getter_setter_dynamically(has_moe=self._has_moe)
@@ -114,17 +117,14 @@ class HFTransformerModel(BaseModel):
             self._titan_injected_model_args = {}
             self._configure_hf_attention(attn_implementation)
 
-            self._initialize_dense_attributes(titan_dense_config)
-
-            if titan_moe_config is not None:
-                self._initialize_moe_attributes(titan_moe_config)
+            self._initialize_attributes(model_config)
 
         def _replace(self, **overrides):
             """Override to use ``copy.copy()`` instead of ``dataclasses.replace()``.
 
             ``dataclasses.replace()`` re-invokes ``__init__``, which is
             incompatible with the custom ``__init__`` here (it expects
-            ``titan_dense_config`` and calls ``PretrainedConfig.__init__``).
+            ``model_config`` and calls ``PretrainedConfig.__init__``).
             A shallow copy preserves all dynamically-set HF attributes.
             """
             clone = copy.copy(self)
@@ -142,28 +142,22 @@ class HFTransformerModel(BaseModel):
                     )
             return clone
 
-        def _initialize_dense_attributes(self, titan_dense_config):
-            """Initialize all dense model attributes."""
+        def _initialize_attributes(self, model_config):
+            """Initialize all model attributes from the config."""
             # Set mapped attributes (TorchTitan <-> HuggingFace)
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
-                if hasattr(titan_dense_config, titan_name):
-                    value = getattr(titan_dense_config, titan_name)
-                    setattr(self, hf_name, value)
+                if hasattr(model_config, titan_name):
+                    setattr(self, hf_name, getattr(model_config, titan_name))
 
-            # Set TorchTitan-only attributes
-            for attr_name in _TT_SPECIFIC_ATTRIBUTES:
-                if hasattr(titan_dense_config, attr_name):
-                    setattr(self, attr_name, getattr(titan_dense_config, attr_name))
-
-            # Update passed_args
-            self._titan_injected_model_args.update(titan_dense_config.__dict__)
-
-        def _initialize_moe_attributes(self, titan_moe_config):
-            """Initialize MoE-specific attributes."""
-            for attr_name, value in vars(titan_moe_config).items():
-                if not attr_name.startswith("_"):
+            # Set all remaining attributes directly (TorchTitan-only + MoE)
+            for attr_name, value in vars(model_config).items():
+                if (
+                    not attr_name.startswith("_")
+                    and attr_name not in self._tt_to_hf_attribute_map
+                ):
                     setattr(self, attr_name, value)
-            self._titan_injected_model_args.update(titan_moe_config.__dict__)
+
+            self._titan_injected_model_args.update(model_config.__dict__)
 
         def _configure_hf_attention(self, attn_implementation: str):
             """Configure HuggingFace attention settings."""
@@ -343,7 +337,7 @@ class HFTransformerModel(BaseModel):
         # of index_add_). Works transparently with hook-based EP/TP because
         # all hooks preserve the standard (hidden_states, top_k_index,
         # top_k_weights) interface.
-        if hasattr(config, "_experts_implementation"):
+        if config._has_moe and hasattr(config, "_experts_implementation"):
             config._experts_implementation = "grouped_mm"
 
         self.model = model_cls(config=config)

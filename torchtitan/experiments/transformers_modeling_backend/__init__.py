@@ -18,8 +18,8 @@ __all__ = [
 
 
 @dataclass
-class TitanDenseModelConfig:
-    """Arguments for the base TorchTitan model."""
+class TitanModelConfig:
+    """Base model config for the transformers backend."""
 
     dim: int = 4096
     n_layers: int = 32
@@ -37,8 +37,8 @@ class TitanDenseModelConfig:
 
 
 @dataclass
-class TitanMoeModelConfig:
-    """MoE-specific config overrides for TorchTitan model."""
+class TitanMoeModelConfig(TitanModelConfig):
+    """MoE model config — adds expert parameters to the base config."""
 
     num_experts: int = 128
     num_experts_per_tok: int = 8
@@ -49,7 +49,7 @@ class TitanMoeModelConfig:
 
 flavors = {
     "debugmodel": HFTransformerModel.Config(
-        titan_dense_config=TitanDenseModelConfig(
+        model_config=TitanModelConfig(
             dim=256,
             n_layers=2,
             n_heads=16,
@@ -57,30 +57,26 @@ flavors = {
         ),
     ),
     "debugmodel_moe": HFTransformerModel.Config(
-        titan_dense_config=TitanDenseModelConfig(
+        model_config=TitanMoeModelConfig(
             dim=256,
             n_layers=8,
             n_heads=16,
             n_kv_heads=8,
-        ),
-        titan_moe_config=TitanMoeModelConfig(
             num_experts=8,
             num_experts_per_tok=2,
             moe_intermediate_size=128,
         ),
     ),
     "full": HFTransformerModel.Config(
-        titan_dense_config=TitanDenseModelConfig(),
+        model_config=TitanModelConfig(),
     ),
     "full_moe": HFTransformerModel.Config(
-        titan_dense_config=TitanDenseModelConfig(
+        model_config=TitanMoeModelConfig(
             dim=2048,
             n_layers=48,
             n_heads=32,
             n_kv_heads=4,
             norm_eps=1e-6,
-        ),
-        titan_moe_config=TitanMoeModelConfig(
             num_experts=128,
             num_experts_per_tok=8,
             moe_intermediate_size=768,
