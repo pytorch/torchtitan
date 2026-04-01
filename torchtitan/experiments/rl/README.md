@@ -95,24 +95,20 @@ We provide two independent tools for debugging and reproducibility. They address
 
 Batch-invariant mode guarantees that a model's output for a given input is **identical regardless of what other inputs are in the batch**. This is critical for RL training because the generator computes log-probs in one batch composition (e.g. 8 completions), while the trainer recomputes them in a different batch composition (e.g. 2 completions after DP sharding). Without batch-invariant mode, the same input can produce different log-probs in different batch contexts due to floating-point accumulation order differences.
 
-Enable it in your config:
-```python
-from torchtitan.config.configs import DebugConfig
-
-RLTrainer.Config(
-    debug=DebugConfig(batch_invariant_mode=True),
-    ...
-)
-```
-
-When enabled, this:
+When enabled, batch-invariant mode will:
 - Replaces `mm`, `addmm`, `log_softmax`, and `mean.dim` with Triton kernels that use a fixed tile iteration order (via [batch_invariant_ops](https://github.com/thinking-machines-lab/batch_invariant_ops))
 - Forces NCCL to use Ring all-reduce with a single channel for deterministic inter-GPU collectives
 - Disables reduced-precision reductions and TF32 to prevent batch-size-dependent rounding
 - Forces `num_splits=1` in flash attention to prevent non-deterministic split-k reductions
-- Enables `torch.use_deterministic_algorithms(True)` to ensure all PyTorch operations use deterministic implementations
-
 
 
 ### Verifying generator/trainer logprob parity
-When a user wants to run true on-policy mode in TorchTitan RL and debug generator/trainer log-prob parity, they should enable `batch-invariant-mode` to eliminate potential numerical differences caused by batch-size discrepancies between the generator and trainer. The `batch-invariant-mode` provides run-to-run determinism for both the trainer and generator. If the model has randomness (e.g., dropout), you should also ensure consistent behavior between the trainer and generator by specifying a `seed`.
+If you want to run true on-policy mode in TorchTitan RL and debug generator/trainer log-prob parity, you should enable `batch-invariant-mode` to eliminate potential numerical differences caused by batch-size discrepancies between the generator and trainer. The `batch-invariant-mode` provides run-to-run determinism for both the trainer and generator. If the model has randomness (e.g., dropout), you should also ensure consistent behavior between the trainer and generator by specifying a `seed`.
+
+Now we only support logprob bitwise parity when trainer and generator are under the same parallelism.
+Example:
+```bash
+python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config  rl_grpo_qwen3_0_6b_on_policy
+```
+
+This config sets `DebugConfig(batch_invariant_mode=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).

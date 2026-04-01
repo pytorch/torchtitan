@@ -37,7 +37,6 @@ from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mod
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
-from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -115,18 +114,6 @@ class PolicyTrainer(Actor, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-
-        # Activate FA3 on Hopper so varlen attention on the trainer uses
-        # the same FAv3 kernel as the generator's CUSTOM backend.
-        # Blackwell (SM 10.0+) and older hardware use FA2.
-        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
-            from torch.nn.attention import (
-                activate_flash_attention_impl,
-                current_flash_attention_impl,
-            )
-
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
 
         # Initialize state dict adapter for HF checkpoint loading
         if model_spec.state_dict_adapter is not None:

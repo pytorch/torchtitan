@@ -599,9 +599,6 @@ class GQAttention(BaseAttention):
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
-        batch_invariant: bool = False
-        """Enable batch-invariant varlen attention (num_splits=1, no compile).
-        Only applies when attn_backend="varlen"."""
 
         def __post_init__(self):
             BaseAttention.Config.__post_init__(self)

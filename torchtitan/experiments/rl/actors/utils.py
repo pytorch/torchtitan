@@ -10,20 +10,6 @@ import torch.nn.functional as F
 from torchtitan.models.common.attention import VarlenMetadata
 
 
-# TODO We should either unify all the mask creation for RL, or move them to a
-#      single file.
-def _make_causal_varlen_metadata(
-    batch_size: int, seq_len: int, device: torch.device
-) -> VarlenMetadata:
-    """Build VarlenMetadata for a batch of equal-length causal sequences."""
-    cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=device
-    )
-    return VarlenMetadata(
-        cu_seq_q=cu_seqlens, cu_seq_k=cu_seqlens, max_q=seq_len, max_k=seq_len
-    )
-
-
 def build_varlen_metadata(
     input_sequences: list[tuple[torch.Tensor, int, int]], device: torch.device
 ) -> VarlenMetadata:

@@ -55,25 +55,18 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.configs import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.actors.generator import (
-    GeneratorCompileConfig,
-    SamplingConfig,
-    VLLMGenerator,
-)
-from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.actors.utils import (
-    _make_causal_varlen_metadata,
+    build_varlen_metadata,
     compute_token_log_probs,
 )
+from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_on_policy
 from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 from torchtitan.experiments.rl.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
 from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
-from torchtitan.models.qwen3 import model_registry
 from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
@@ -83,39 +76,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-
-
-def _test_config(
-    tp: int = 1,
-    generator_compile_backend: str = "none",
-    generator_cudagraph_mode: str = "none",
-    hf_assets_path: str = "torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-) -> RLTrainer.Config:
-    model_spec = model_registry("0.6B", attn_backend_override="varlen")
-    model_spec.model.layer.attention.inner_attention.batch_invariant = True
-    return RLTrainer.Config(
-        model_spec=model_spec,
-        hf_assets_path=hf_assets_path,
-        debug=DebugConfig(batch_invariant_mode=True, deterministic=True),
-        trainer=PolicyTrainer.Config(
-            training=TrainingConfig(dtype="bfloat16"),
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=tp,
-                data_parallel_replicate_degree=1,
-            ),
-        ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            gpu_memory_limit=0.5,
-            parallelism=ParallelismConfig(tensor_parallel_degree=tp),
-            compile=GeneratorCompileConfig(
-                backend=generator_compile_backend,
-                cudagraph_mode=generator_cudagraph_mode,
-            ),
-            num_samples_per_prompt=1,
-            sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=50),
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +221,7 @@ def compute_trainer_prefill_logprobs(model, token_ids, device):
     seq_len = input_tensor.shape[1]
     positions = torch.arange(seq_len, device=device).unsqueeze(0)
 
-    attention_masks = _make_causal_varlen_metadata(1, seq_len, device)
+    attention_masks = build_varlen_metadata([(input_tensor[0], 0, 0)], device)
 
     logits = model(input_tensor, attention_masks=attention_masks, positions=positions)
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
@@ -500,12 +460,20 @@ def main():
     )
     args, _ = parser.parse_known_args()
 
-    config = _test_config(
-        tp=args.tp,
-        generator_compile_backend=args.gen_compile_backend,
-        generator_cudagraph_mode=args.generator_cudagraph_mode,
-        hf_assets_path=args.hf_assets_path,
-    )
+    config = rl_grpo_qwen3_0_6b_on_policy()
+    # CLI overrides for test flexibility
+    config.hf_assets_path = args.hf_assets_path
+    config.trainer.parallelism.tensor_parallel_degree = args.tp
+    config.generator.parallelism.tensor_parallel_degree = args.tp
+    config.generator.compile.backend = args.gen_compile_backend
+    config.generator.compile.cudagraph_mode = args.generator_cudagraph_mode
+    # Test runs generator and trainer in the same process, so limit GPU memory
+    config.generator.gpu_memory_limit = 0.5
+    # Greedy decoding for deterministic generation in parity tests
+    config.generator.num_samples_per_prompt = 1
+    config.generator.sampling.temperature = 0.0
+    config.generator.sampling.top_p = 1.0
+    config.generator.sampling.max_tokens = 50
     config.model_spec.parallelize_fn = parallelize_qwen3
 
     from torchtitan.tools.utils import has_cuda_capability

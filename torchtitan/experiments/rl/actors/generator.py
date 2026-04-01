@@ -14,6 +14,7 @@ import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import DebugConfig, ParallelismConfig
+from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
 from torchtitan.experiments.rl.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
@@ -170,10 +171,6 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
         if config.debug.batch_invariant_mode:
-            from torchtitan.experiments.rl.batch_invariant import (
-                enable_batch_invariant_mode,
-            )
-
             enable_batch_invariant_mode()
 
         # The generator doesn't use torchtitan's ParallelDims, so we apply

@@ -63,7 +63,6 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
@@ -262,6 +261,7 @@ class VLLMAttentionWrapper(LocalMapInnerAttention):
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        # TODO: This need to be compatible with Pipeline Parallelism
         layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,

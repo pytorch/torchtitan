@@ -42,8 +42,9 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
@@ -80,6 +81,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
@@ -125,7 +127,6 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
@@ -144,13 +145,10 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
-    """Batch-invariant GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
+def rl_grpo_qwen3_0_6b_on_policy() -> RLTrainer.Config:
+    """On-policy GRPO config for Qwen3-0.6B under same parallelism (4 GPUs: 2 gen + 2 train).
 
-    Enables deterministic + batch-invariant mode for bitwise-reproducible
-    training. Use this config for batch invariance testing; do not enable
-    batch_invariant_mode on the base configs as it interferes with weight
-    sync tests.
+    Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
     model_spec = model_registry("0.6B", attn_backend_override="varlen")
     return RLTrainer.Config(
@@ -160,7 +158,6 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         debug=DebugConfig(
             batch_invariant_mode=True,
             deterministic=True,
-            seed=42,
         ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
@@ -168,6 +165,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
+            # bfloat16 is needed for trainer to align with generator dtype
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
