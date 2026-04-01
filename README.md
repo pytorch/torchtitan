@@ -65,15 +65,16 @@ We look forward to your contributions!
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
 7. [MXFP8 training for dense and MoE models](docs/mxfp8.md) on Blackwell GPUs.
-7. DDP and HSDP
-8. [TorchFT](https://github.com/pytorch/torchft) integration
-9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
-10. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
-11. Flexible learning rate scheduler (warmup-stable-decay)
-12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-13. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-14. All options easily configured via [Python config registry](torchtitan/models/llama3/config_registry.py) with `--module` and `--config` CLI flags
-15. [Helper scripts](scripts/) to
+8. Supervised Fine-Tuning (SFT) with ChatDataset and ChatDataLoader
+9. DDP and HSDP
+10. [TorchFT](https://github.com/pytorch/torchft) integration
+11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
+12. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
+13. Flexible learning rate scheduler (warmup-stable-decay)
+14. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
+15. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
+16. All options easily configured via [Python config registry](torchtitan/models/llama3/config_registry.py) with `--module` and `--config` CLI flags
+17. [Helper scripts](scripts/) to
     - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
     - estimate FSDP/HSDP memory usage without materializing the model
