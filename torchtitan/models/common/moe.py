@@ -324,6 +324,7 @@ class TokenReorderer(Module):
         )
 
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
         return (
             top_scores_experts_sorted,
@@ -451,7 +452,7 @@ class MoE(Module):
         ) = self.reorderer(top_scores, selected_experts_indices)
 
         # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted // self.router.top_k]
+        routed_input = x[token_indices_experts_sorted]
 
         if self.score_before_experts:
             routed_input = (
@@ -465,33 +466,25 @@ class MoE(Module):
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
-        out = self.shared_experts(x) if self.shared_experts is not None else None
+        out = (
+            self.shared_experts(x)
+            if self.shared_experts is not None
+            else torch.zeros_like(x)
+        )
 
-        # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            -1, self.router.top_k, dim
-        )
         if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
-            )
-        else:
-            out_experts = routed_output_unsorted.sum(dim=1)
+            routed_output = (
+                routed_output.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
+            ).to(x.dtype)
 
-        if out is None:
-            return out_experts.reshape(bs, slen, dim)
-        return (out + out_experts).reshape(bs, slen, dim)
+        out = out.scatter_add(
+            dim=0,
+            index=token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            src=routed_output,
+        )
+        out = out.reshape(bs, slen, dim)
+        return out
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
