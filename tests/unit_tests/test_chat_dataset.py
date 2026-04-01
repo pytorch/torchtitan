@@ -40,13 +40,21 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
+def _get_full_tokens(tokenizer, messages):
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    return full_tokens
 
-class TestChatDatasetLabelMasking(unittest.TestCase):
-    """Prompt tokens should be masked (IGNORE_INDEX), assistant tokens should not."""
 
-    def test_prompt_masked_response_unmasked(self):
+class TestChatDatasetDefaultSupervision(unittest.TestCase):
+    """Without a detector, labels supervise the full rendered conversation."""
+
+    def test_default_supervises_full_sequence(self):
         tokenizer = _load_tokenizer()
-        ds = _load_dataset()
+        sample = _load_dataset()[0]
+        ds = Dataset.from_list([sample])
         chat_ds = ChatDataset(
             dataset=ds,
             tokenizer=tokenizer,
@@ -59,20 +67,21 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
         input_ids = batch["input"]
         label_ids = labels
 
+        messages = _process_sample(sample)
+        full_tokens = _get_full_tokens(tokenizer, messages)
+        expected_input = full_tokens[:-1]
+        expected_label = full_tokens[1:]
+        seq_len_actual = len(expected_input)
+
         self.assertEqual(input_ids.shape, label_ids.shape)
         self.assertEqual(input_ids.shape[0], 2048)
-
-        # Some labels at the start should be IGNORE_INDEX (prompt masking)
-        masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
-        unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
-        self.assertGreater(len(masked), 0, "Expected some masked prompt labels")
-        self.assertGreater(len(unmasked), 0, "Expected some unmasked response labels")
-
-        # All masked positions should precede all unmasked non-padding positions.
-        # The unmasked region is the response, then padding follows with IGNORE_INDEX.
-        # Find first unmasked position and last contiguous unmasked position.
-        first_unmasked = unmasked[0].item()
-        self.assertGreater(first_unmasked, 0, "First token label should be masked")
+        self.assertEqual(input_ids[:seq_len_actual].tolist(), expected_input)
+        self.assertEqual(label_ids[:seq_len_actual].tolist(), expected_label)
+        self.assertNotIn(IGNORE_INDEX, label_ids[:seq_len_actual].tolist())
+        self.assertTrue(
+            torch.all(label_ids[seq_len_actual:] == IGNORE_INDEX).item(),
+            "Only padding should be masked by default",
+        )
 
 
 class TestChatDatasetShiftedTokens(unittest.TestCase):
@@ -80,7 +89,8 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
-        ds = _load_dataset()
+        sample = _load_dataset()[0]
+        ds = Dataset.from_list([sample])
         chat_ds = ChatDataset(
             dataset=ds,
             tokenizer=tokenizer,
@@ -94,11 +104,8 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         label_ids = labels
 
         # Tokenize the first sample directly to get ground truth tokens
-        sample = ds[0]
         messages = _process_sample(sample)
-        full_text = tokenizer.apply_chat_template(messages)
-        # Chat templates already include end tokens, so no add_eos
-        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        full_tokens = _get_full_tokens(tokenizer, messages)
 
         expected_input = full_tokens[:-1]
         expected_label = full_tokens[1:]
@@ -109,24 +116,11 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             input_ids[:seq_len_actual].tolist(),
             expected_input,
         )
-        # The non-masked, non-padded portion of label_ids that corresponds to
-        # the response should come from full_tokens[1:]
-        # Just verify the response portion matches
-        prompt_text = tokenizer.apply_chat_template(
-            messages[:1], add_generation_prompt=True
-        )
-        prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        response_start = len(prompt_tokens) - 1
-        self.assertGreaterEqual(response_start, 0)
-        self.assertNotEqual(
-            label_ids[response_start].item(),
-            IGNORE_INDEX,
-            "First assistant token should not be masked",
-        )
         self.assertEqual(
-            label_ids[response_start:seq_len_actual].tolist(),
-            expected_label[response_start:],
+            label_ids[:seq_len_actual].tolist(),
+            expected_label,
         )
+        self.assertTrue(torch.all(label_ids[seq_len_actual:] == IGNORE_INDEX).item())
 
 
 class TestChatDatasetGreedyPacking(unittest.TestCase):
@@ -447,10 +441,10 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
         self.assertGreaterEqual(chat_ds._epoch, 1)
 
 
-class TestChatDatasetMultiTurnMasking(unittest.TestCase):
-    """Only assistant spans should be unmasked in multi-turn conversations."""
+class TestChatDatasetMultiTurnDefaultSupervision(unittest.TestCase):
+    """Without a detector, multi-turn conversations are fully supervised."""
 
-    def test_multiturn_only_assistant_unmasked(self):
+    def test_multiturn_supervises_all_turns(self):
         tokenizer = _load_tokenizer()
 
         messages = [
@@ -473,25 +467,199 @@ class TestChatDatasetMultiTurnMasking(unittest.TestCase):
         )
 
         batch, labels = next(iter(chat_ds))
-        label_ids = labels
+        input_ids = batch["input"]
+        full_tokens = _get_full_tokens(tokenizer, messages)
+        expected_input = full_tokens[:-1]
+        expected_label = full_tokens[1:]
+        seq_len_actual = len(expected_input)
 
-        # There should be unmasked regions (assistant tokens)
-        unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
-        self.assertGreater(len(unmasked), 0, "Expected unmasked assistant tokens")
-
-        # There should be masked regions between assistant spans (user/template tokens)
-        masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
-        self.assertGreater(len(masked), 0, "Expected masked non-assistant tokens")
-
-        # Verify there are at least 2 separate unmasked regions
-        # (one per assistant turn) by checking for gaps in unmasked indices
-        gaps = 0
-        for i in range(1, len(unmasked)):
-            if unmasked[i] - unmasked[i - 1] > 1:
-                gaps += 1
-        self.assertGreaterEqual(
-            gaps, 1, "Expected at least 2 separate unmasked regions for 2 turns"
+        self.assertEqual(input_ids[:seq_len_actual].tolist(), expected_input)
+        self.assertEqual(labels[:seq_len_actual].tolist(), expected_label)
+        self.assertNotIn(IGNORE_INDEX, labels[:seq_len_actual].tolist())
+        self.assertTrue(
+            torch.all(labels[seq_len_actual:] == IGNORE_INDEX).item(),
+            "Only padding should be masked by default",
         )
+
+
+class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
+    def _get_supervised_text(
+        self,
+        *,
+        detector: str,
+        chat_template: str,
+        messages: list[dict[str, str]],
+    ) -> str:
+        tokenizer = _load_tokenizer()
+        tokenizer.set_chat_template(chat_template)
+
+        chat_ds = ChatDataset(
+            dataset=Dataset.from_list([{"id": 1}]),
+            tokenizer=tokenizer,
+            sample_processor=lambda sample, messages=messages: messages,
+            span_detection_model_type=detector,
+            seq_len=512,
+            infinite=False,
+        )
+
+        _, labels = next(iter(chat_ds))
+        return tokenizer.decode(
+            [token for token in labels.tolist() if token != IGNORE_INDEX]
+        )
+
+    def test_debugmodel_detector_supervises_content(self):
+        supervised_text = self._get_supervised_text(
+            detector="debugmodel",
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertEqual(supervised_text, "4")
+        self.assertNotIn("assistant\n", supervised_text)
+
+    def test_gpt_oss_detector_supervises_content_and_turn_end(self):
+        assistant_text = (
+            "<|channel|>analysis<|message|>Simple arithmetic.<|end|>\n"
+            "<|start|>assistant<|channel|>final<|message|>2 + 2 = 4.<|return|>"
+        )
+        supervised_text = self._get_supervised_text(
+            detector="gpt_oss",
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{% if msg.role == 'user' %}"
+                "<|start|>user<|message|>{{ msg.content }}<|end|>"
+                "{% else %}"
+                "{{ msg.content }}"
+                "{% endif %}"
+                "{{ eos_token }}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "What is 2 + 2?"},
+                {"role": "assistant", "content": assistant_text},
+            ],
+        )
+
+        self.assertIn(
+            "Simplearithmetic.<|end|>",
+            supervised_text,
+        )
+        self.assertIn(
+            "2+2=4.<|return|>",
+            supervised_text,
+        )
+        self.assertNotIn("<|channel|>analysis<|message|>", supervised_text)
+        self.assertNotIn(
+            "<|start|>assistant<|channel|>final<|message|>",
+            supervised_text,
+        )
+        self.assertNotIn("What is 2 + 2?", supervised_text)
+
+    def test_qwen3_detector_supervises_content_and_turn_end(self):
+        supervised_text = self._get_supervised_text(
+            detector="qwen3",
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{% if msg.role == 'user' %}"
+                "<|im_start|>user\n{{ msg.content }}<|im_end|>\n"
+                "{% else %}"
+                "<|im_start|>assistant\n"
+                "{% if msg.reasoning_content is defined %}"
+                "<think>\n{{ msg.reasoning_content }}\n</think>\n\n"
+                "{% endif %}"
+                "{{ msg.content }}<|im_end|>\n"
+                "{% endif %}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "calc",
+                    "content": "4",
+                },
+            ],
+        )
+
+        self.assertIn("<think>calc</think>", supervised_text)
+        self.assertIn("4<|im_end|>", supervised_text)
+        self.assertNotIn("<|im_start|>assistant", supervised_text)
+        self.assertNotIn("<|im_start|>userQ?<|im_end|>", supervised_text)
+
+    def test_llama3_detector_supervises_content_and_turn_end(self):
+        supervised_text = self._get_supervised_text(
+            detector="llama3",
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "<|start_header_id|>{{ msg.role }}<|end_header_id|>\n\n"
+                "{{ msg.content }}<|eot_id|>"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertIn("4<|eot_id|>", supervised_text)
+        self.assertNotIn(
+            "<|start_header_id|>assistant<|end_header_id|>", supervised_text
+        )
+        self.assertNotIn(
+            "<|start_header_id|>user<|end_header_id|>Q?<|eot_id|>",
+            supervised_text,
+        )
+
+    def test_llama4_detector_supervises_content_and_turn_end(self):
+        supervised_text = self._get_supervised_text(
+            detector="llama4",
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "<|header_start|>{{ msg.role }}<|header_end|>\n\n"
+                "{{ msg.content }}<|eot|>"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertIn("4<|eot|>", supervised_text)
+        self.assertNotIn("<|header_start|>assistant<|header_end|>", supervised_text)
+        self.assertNotIn(
+            "<|header_start|>user<|header_end|>Q?<|eot|>",
+            supervised_text,
+        )
+
+    def test_deepseek_v3_detector_supervises_content_and_turn_end(self):
+        supervised_text = self._get_supervised_text(
+            detector="deepseek_v3",
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{% if msg.role == 'user' %}"
+                "<｜User｜>{{ msg.content }}"
+                "{% else %}"
+                "<｜Assistant｜>{{ msg.content }}<｜end▁of▁sentence｜>"
+                "{% endif %}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertIn("4<endofsentence>", supervised_text)
+        self.assertNotIn("<Assistant>", supervised_text)
+        self.assertNotIn("<User>Q?", supervised_text)
 
 
 class TestChatDatasetPositionBoundaries(unittest.TestCase):
@@ -515,10 +683,11 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=lambda sample: messages,
+            span_detection_model_type="debugmodel",
             seq_len=sample_len * 2,
             infinite=False,
         )
-        spans = chat_ds._get_assistant_spans(messages, full_tokens)
+        spans = chat_ds._get_assistant_spans(messages, full_tokens, full_text)
 
         batch, _ = next(iter(chat_ds))
         positions = batch["positions"].unsqueeze(0)

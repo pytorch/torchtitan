@@ -18,8 +18,13 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.hf_datasets.span_detectors import (
+    SpanDetectionModelType,
+    char_spans_to_token_spans,
+    get_span_detector,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -251,10 +256,11 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 class ChatDataset(IterableDataset, Stateful):
     """Dataset for single-turn and multi-turn chat/instruction-tuning.
 
-    Tokenizes conversations with alternating user/assistant turns, masks
-    all non-assistant tokens with IGNORE_INDEX in labels, and uses greedy
-    sequence packing with per-document positions. Implements Stateful for
-    checkpointing.
+    Tokenizes conversations with alternating user/assistant turns and uses
+    greedy sequence packing with per-document positions. By default, labels
+    supervise the full rendered conversation. When a model-specific span
+    detector is configured, labels supervise assistant spans only. Implements
+    Stateful for checkpointing.
     """
 
     def __init__(
@@ -262,6 +268,8 @@ class ChatDataset(IterableDataset, Stateful):
         dataset: Dataset,
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
+        *,
+        span_detection_model_type: SpanDetectionModelType | None = None,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -279,6 +287,14 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
+        self._span_detector = get_span_detector(span_detection_model_type)
+
+        if self._span_detector is not None and not isinstance(
+            self._tokenizer, HuggingFaceTokenizer
+        ):
+            raise ValueError(
+                "Model-specific span detectors require a HuggingFaceTokenizer"
+            )
 
         self._dataset_id = f"{dataset.info.dataset_name}/{dataset.split}"
 
@@ -308,8 +324,7 @@ class ChatDataset(IterableDataset, Stateful):
         """
         if len(messages) < 2:
             raise ValueError(
-                f"Expected at least 2 messages (user + assistant), "
-                f"got {len(messages)}"
+                f"Expected at least 2 messages (user + assistant), got {len(messages)}"
             )
 
         # Determine where the user/assistant alternation starts
@@ -328,50 +343,29 @@ class ChatDataset(IterableDataset, Stateful):
             expected = "user" if i % 2 == 0 else "assistant"
             if msg["role"] != expected:
                 raise ValueError(
-                    f"Message {start + i} should be '{expected}', "
-                    f"got '{msg['role']}'"
+                    f"Message {start + i} should be '{expected}', got '{msg['role']}'"
                 )
 
     def _get_assistant_spans(
         self,
         messages: list[dict[str, str]],
         full_tokens: list[int],
+        full_text: str,
     ) -> list[tuple[int, int]]:
-        """Find token spans for each assistant turn via incremental tokenization.
+        """Find token spans for each assistant turn using the span detector."""
+        assert self._span_detector is not None
+        assert isinstance(self._tokenizer, HuggingFaceTokenizer)
 
-        Returns list of (start, end) indices into full_tokens for each
-        assistant turn. Uses prefix re-tokenization to avoid BPE merge errors.
-        """
-        spans = []
-        for i, msg in enumerate(messages):
-            if msg["role"] != "assistant":
-                continue
+        char_spans = self._span_detector.find_char_spans(messages, full_text)
+        encoding = self._tokenizer.tokenizer.encode(full_text)
+        spans = char_spans_to_token_spans(encoding, char_spans)
 
-            # Start: tokenize everything before this assistant turn with
-            # add_generation_prompt=True to include the assistant header.
-            prefix_text = self._tokenizer.apply_chat_template(
-                messages[:i], add_generation_prompt=True
-            )
-            prefix_tokens = self._tokenizer.encode(
-                prefix_text, add_bos=True, add_eos=False
-            )
-            start = len(prefix_tokens)
+        if not self._tokenizer.hf_adds_bos and self._tokenizer.bos_id is not None:
+            spans = [(start + 1, end + 1) for start, end in spans]
 
-            # End: for non-final turns, tokenize through this turn.
-            # For the final turn, use len(full_tokens) to include the
-            # terminal EOS appended after rendering.
-            if i < len(messages) - 1:
-                through_text = self._tokenizer.apply_chat_template(
-                    messages[: i + 1]
-                )
-                through_tokens = self._tokenizer.encode(
-                    through_text, add_bos=True, add_eos=False
-                )
-                end = len(through_tokens)
-            else:
-                end = len(full_tokens)
-
-            spans.append((start, end))
+        if spans:
+            last_start, _ = spans[-1]
+            spans[-1] = (last_start, len(full_tokens))
 
         return spans
 
@@ -381,13 +375,14 @@ class ChatDataset(IterableDataset, Stateful):
         """Tokenize a chat sample and create input/label pairs.
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:] with non-assistant tokens masked as
-        IGNORE_INDEX. Supports both single-turn and multi-turn conversations.
-        Returns None if the sample exceeds seq_len (dropped to avoid
-        training on truncated responses).
+        label_ids = tokens[1:]. By default, the full rendered conversation is
+        supervised. When a model-specific span detector is configured,
+        non-assistant tokens are masked with IGNORE_INDEX. Supports both
+        single-turn and multi-turn conversations. Returns None if the sample
+        exceeds seq_len (dropped to avoid training on truncated responses).
 
-        Uses incremental prefix re-tokenization to find assistant token
-        boundaries, avoiding BPE merge errors.
+        Uses a configured model-specific span detector only when assistant-only
+        supervision is requested.
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
@@ -414,12 +409,15 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
+        if self._span_detector is None:
+            return input_ids, label_ids
+
         # Find assistant spans and unmask only those in labels.
         # Labels are shifted by 1: label_ids[j] = full_tokens[j+1], so
         # an assistant span (start, end) in full_tokens maps to
         # label indices [start-1, end-1) (the model predicts each
         # assistant token from the preceding position).
-        spans = self._get_assistant_spans(messages, full_tokens)
+        spans = self._get_assistant_spans(messages, full_tokens, full_text)
 
         # Start with everything masked
         masked_labels = [IGNORE_INDEX] * len(label_ids)
@@ -560,6 +558,12 @@ class ChatDataLoader(ParallelAwareDataloader):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
+        span_detection_model_type: SpanDetectionModelType | None = None
+        """Model type for assistant-only span detection.
+        
+        Use None to train on the full rendered conversation.
+        """
+
         infinite: bool = True
         """Whether to loop the dataset infinitely. Might hang on multi-GPU."""
 
@@ -586,6 +590,7 @@ class ChatDataLoader(ParallelAwareDataloader):
             dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
+            span_detection_model_type=config.span_detection_model_type,
             seq_len=seq_len,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
