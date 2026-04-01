@@ -11,8 +11,6 @@ from typing import ClassVar
 
 logger = logging.getLogger(__name__)
 
-import torch
-
 
 class Configurable:
     """Base class for all configurable components.
@@ -134,7 +132,15 @@ class Configurable:
             return clone
 
         def build(self, **kwargs):
-            """Construct the owning class. Auto-wired by __init_subclass__."""
+            """Construct the owning class. Auto-wired by __init_subclass__.
+
+            Two modes:
+            - No kwargs: ``self._owner(config=self._replace())``
+            - With kwargs (runtime objects not in config): forwarded to
+              ``self._owner(config=..., **kwargs)``.  Used by non-model
+              Configurables (tokenizer, dataloader, optimizer, etc.)
+              that receive runtime objects at construction time.
+            """
             if self._owner is None:
                 raise NotImplementedError(
                     f"{type(self).__name__} has no owner class. "
@@ -143,36 +149,6 @@ class Configurable:
             if not kwargs:
                 return self._owner(config=self._replace())
 
-            config_field_names = {f.name for f in fields(self)}
-            kwargs_in_config = set(kwargs) & config_field_names
-            kwargs_not_in_config = set(kwargs) - config_field_names
-
-            if kwargs_in_config and kwargs_not_in_config:
-                raise TypeError(
-                    f"{type(self).__name__}.build() kwargs must either all be "
-                    f"config fields or all be constructor arguments. Got config "
-                    f"fields {kwargs_in_config} mixed with non-config fields "
-                    f"{kwargs_not_in_config}."
-                )
-
-            if kwargs_in_config:
-                # All kwargs are config fields: validate and absorb into clone.
-                for key, value in kwargs.items():
-                    if hasattr(self, key):
-                        existing = getattr(self, key)
-                        if isinstance(existing, torch.Tensor):
-                            mismatch = not torch.equal(existing, value)
-                        else:
-                            mismatch = existing != value
-                        if mismatch:
-                            raise ValueError(
-                                f"{type(self).__name__}.build() conflict for "
-                                f"'{key}': config has {existing!r} "
-                                f"but got {value!r}"
-                            )
-                return self._owner(config=self._replace(**kwargs))
-
-            # TODO: Old style, will be deprecated.
             return self._owner(config=self._replace(), **kwargs)
 
     def __init_subclass__(cls, **kwargs):

@@ -131,14 +131,10 @@ class FluxModel(BaseModel):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_heads
         self.pe_embedder = config.pe_config.build()
-        self.img_in = config.img_in.build(
-            in_features=self.in_channels, out_features=self.hidden_size
-        )
+        self.img_in = config.img_in.build()
         self.time_in = config.time_in_config.build()
         self.vector_in = config.vector_in_config.build()
-        self.txt_in = config.txt_in.build(
-            in_features=config.context_in_dim, out_features=self.hidden_size
-        )
+        self.txt_in = config.txt_in.build()
 
         assert config.double_blocks_expanded, (
             "config.double_blocks_expanded must be populated by expand_layer_configs() "

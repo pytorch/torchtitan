@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from copy import deepcopy
 
 import torch
 from torch.utils.flop_counter import FlopCounterMode
@@ -27,12 +28,16 @@ class TransformerBlock(Module):
     def __init__(self):
         super().__init__()
         linear_config = Linear.Config(bias=False)
+        linear_config.in_features = 512
+        linear_config.out_features = 512
         self.moe = Module()
         self.moe.router = Module()
-        self.moe.router.gate = linear_config.build(in_features=512, out_features=512)
+        self.moe.router.gate = linear_config.build()
         self.attention = Module()
-        self.attention.wq = linear_config.build(in_features=512, out_features=512)
-        self.output = linear_config.build(in_features=512, out_features=1024)
+        self.attention.wq = linear_config.build()
+        output_config = deepcopy(linear_config)
+        output_config.out_features = 1024
+        self.output = output_config.build()
 
     def forward(self, x):
         gate_out = self.moe.router.gate(x)

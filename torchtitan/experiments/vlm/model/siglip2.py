@@ -87,12 +87,8 @@ class VisionEmbeddings(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.patch_embedding = config.patch_embedding.build(
-            in_features=config.patch_in_features, out_features=config.dim
-        )
-        self.position_embedding = config.position_embedding.build(
-            num_embeddings=config.n_pos_embs**2, embedding_dim=config.dim
-        )
+        self.patch_embedding = config.patch_embedding.build()
+        self.position_embedding = config.position_embedding.build()
         self.n_pos_embs = config.n_pos_embs
 
     def forward(self, pixels_NLD: torch.Tensor, grid_hw: torch.Tensor) -> torch.Tensor:
@@ -121,22 +117,24 @@ class Attention(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        qkv: Linear.Config  # shared config for q, k, v projections
+        qkv: Linear.Config  # template for q, k, v projections
         out_proj: Linear.Config
         n_heads: int
         dim: int = field(init=False)
+        # Expanded fields, populated by _expand_vlm_layer_configs()
+        q_proj: Linear.Config = field(init=False)
+        k_proj: Linear.Config = field(init=False)
+        v_proj: Linear.Config = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
         self.dim = config.dim
         self.head_dim = config.dim // config.n_heads
 
-        self.q_proj = config.qkv.build(in_features=self.dim, out_features=self.dim)
-        self.k_proj = config.qkv.build(in_features=self.dim, out_features=self.dim)
-        self.v_proj = config.qkv.build(in_features=self.dim, out_features=self.dim)
-        self.out_proj = config.out_proj.build(
-            in_features=self.dim, out_features=self.dim
-        )
+        self.q_proj = config.q_proj.build()
+        self.k_proj = config.k_proj.build()
+        self.v_proj = config.v_proj.build()
+        self.out_proj = config.out_proj.build()
 
         self.inner_attention = FlexAttention.Config().build()
 
@@ -167,8 +165,8 @@ class FeedForward(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.fc1 = config.fc1.build(in_features=config.dim, out_features=config.ffn_dim)
-        self.fc2 = config.fc2.build(in_features=config.ffn_dim, out_features=config.dim)
+        self.fc1 = config.fc1.build()
+        self.fc2 = config.fc2.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)

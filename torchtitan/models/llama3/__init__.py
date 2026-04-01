@@ -22,6 +22,11 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.config_expand import (
+    fill_decoder_fields,
+    fill_ffn_fields,
+    fill_gqa_fields,
+)
 from torchtitan.models.common.param_init import (
     depth_scaled_std,
     resolve_deferred,
@@ -43,13 +48,21 @@ __all__ = [
 def expand_layer_configs(config) -> None:
     """Expand the layer template into per-layer configs for a single model config.
 
-    Deep-copies the ``layer`` template N times, then resolves ``DepthScaled``
-    markers. Mutates config in place.
+    Deep-copies the ``layer`` template N times, resolves ``DeferredCallable``
+    markers, and fills all ``field(init=False)`` fields. Mutates config in place.
     """
+    dim = config.dim
+    fill_decoder_fields(config)
+    # Fill fields on the template before deep-copying
+    config.layer.attention_norm.normalized_shape = dim
+    config.layer.ffn_norm.normalized_shape = dim
     layers = []
     for layer_id in range(config.n_layers):
         cfg = deepcopy(config.layer)
         resolve_deferred(cfg, layer_id)
+        fill_gqa_fields(cfg.attention, dim)
+        assert cfg.feed_forward is not None
+        fill_ffn_fields(cfg.feed_forward, dim)
         layers.append(cfg)
     config.layers = layers
 
@@ -115,79 +128,17 @@ def _debugmodel() -> Llama3Model.Config:
 
 
 def _debugmodel_flex_attn() -> Llama3Model.Config:
-    dim = 256
-    n_heads = 16
-    n_layers = 6
-    return Llama3Model.Config(
-        dim=dim,
-        n_layers=n_layers,
-        vocab_size=2048,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
-    )
+    config = _debugmodel()
+    config.layer.attention.inner_attention = FlexAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
 
 
 def _debugmodel_varlen_attn() -> Llama3Model.Config:
-    dim = 256
-    n_heads = 16
-    n_layers = 6
-    return Llama3Model.Config(
-        dim=dim,
-        n_layers=n_layers,
-        vocab_size=2048,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=VarlenAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
-    )
+    config = _debugmodel()
+    config.layer.attention.inner_attention = VarlenAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
 
 
 def _1b() -> Llama3Model.Config:
@@ -310,85 +261,17 @@ def _8b() -> Llama3Model.Config:
 
 
 def _8b_flex() -> Llama3Model.Config:
-    dim = 4096
-    n_heads = 32
-    n_kv_heads = 8
-    n_layers = 32
-    return Llama3Model.Config(
-        dim=dim,
-        n_layers=n_layers,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(
-                    dim, multiple_of=1024, ffn_dim_multiplier=1.3
-                ),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
-    )
+    config = _8b()
+    config.layer.attention.inner_attention = FlexAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
 
 
 def _8b_varlen() -> Llama3Model.Config:
-    dim = 4096
-    n_heads = 32
-    n_kv_heads = 8
-    n_layers = 32
-    return Llama3Model.Config(
-        dim=dim,
-        n_layers=n_layers,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(
-                    dim, multiple_of=1024, ffn_dim_multiplier=1.3
-                ),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=VarlenAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
-    )
+    config = _8b()
+    config.layer.attention.inner_attention = VarlenAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
 
 
 def _70b() -> Llama3Model.Config:

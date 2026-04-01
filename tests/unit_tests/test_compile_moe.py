@@ -18,8 +18,10 @@ class TransformerBlock(Module):
     def __init__(self, dim=512):
         super().__init__()
         linear_config = Linear.Config(bias=False)
-        self.attention = linear_config.build(in_features=dim, out_features=dim)
-        self.mlp = linear_config.build(in_features=dim, out_features=dim)
+        linear_config.in_features = dim
+        linear_config.out_features = dim
+        self.attention = linear_config.build()
+        self.mlp = linear_config.build()
         self.moe_enabled = False
 
     def forward(self, x):

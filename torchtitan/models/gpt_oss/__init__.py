@@ -14,6 +14,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config import DeferredCallable
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
+from torchtitan.models.common.config_expand import fill_decoder_fields, fill_moe_fields
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
 from torchtitan.protocols.model_spec import ModelSpec
@@ -31,18 +32,49 @@ __all__ = [
 ]
 
 
+def _fill_gptoss_attn_fields(attn: Attention.Config, dim: int) -> None:
+    """Fill expanded fields on a GPT-OSS Attention.Config."""
+    from copy import deepcopy as _dc
+
+    attn.dim = dim
+    n_heads = attn.n_heads
+    n_kv_heads = attn.n_kv_heads
+    head_dim = attn.head_dim
+
+    attn.wq = _dc(attn.wqkv)
+    attn.wq.in_features = dim
+    attn.wq.out_features = n_heads * head_dim
+    attn.wk = _dc(attn.wqkv)
+    attn.wk.in_features = dim
+    attn.wk.out_features = n_kv_heads * head_dim
+    attn.wv = _dc(attn.wqkv)
+    attn.wv.in_features = dim
+    attn.wv.out_features = n_kv_heads * head_dim
+    attn.wo.in_features = n_heads * head_dim
+    attn.wo.out_features = dim
+
+
 def expand_layer_configs(config) -> None:
     """Expand the layer template into per-layer configs for a single model config.
 
     Sets use_sliding_attention=True on even-indexed layers.
     Mutates config in place.
     """
+    dim = config.dim
+    fill_decoder_fields(config)
     assert isinstance(config.layer, GptOssTransformerBlock.Config)
+    config.layer.attention_norm.normalized_shape = dim
+    config.layer.ffn_norm.normalized_shape = dim
     layers = []
     for layer_id in range(config.n_layers):
         cfg = deepcopy(config.layer)
         cfg = replace(cfg, use_sliding_attention=(layer_id % 2 == 0))
         resolve_deferred(cfg, layer_id)
+        _fill_gptoss_attn_fields(
+            cfg.attention, dim  # pyrefly: ignore [bad-argument-type]
+        )
+        assert cfg.moe is not None
+        fill_moe_fields(cfg.moe, dim)
         layers.append(cfg)
     config.layers = layers
 
@@ -93,7 +125,7 @@ _GPTOSS_EXPERT_INIT = DeferredCallable.Config(
 _GPTOSS_EXPERTS_CONFIG = GptOssGroupedExperts.Config(param_init=_GPTOSS_EXPERT_INIT)
 
 
-def _debugmodel():
+def _debugmodel() -> GptOssModel.Config:
     dim = 256
     return GptOssModel.Config(
         vocab_size=2048,
@@ -138,9 +170,11 @@ def _debugmodel():
     )
 
 
-def _20b():
+def _20b() -> GptOssModel.Config:
     hidden_dim = 2880
     return GptOssModel.Config(
+        dim=2880,
+        vocab_size=201088,
         n_layers=24,
         tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
         norm=RMSNorm.Config(param_init=_NORM_INIT),
@@ -181,9 +215,11 @@ def _20b():
     )
 
 
-def _120b():
+def _120b() -> GptOssModel.Config:
     hidden_dim = 2880
     return GptOssModel.Config(
+        dim=2880,
+        vocab_size=201088,
         n_layers=36,
         tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
         norm=RMSNorm.Config(param_init=_NORM_INIT),

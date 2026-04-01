@@ -44,11 +44,38 @@ def _get_dict(obj) -> dict[str, Any]:
     return {field.name: getattr(obj, field.name) for field in fields(obj)}
 
 
+def _fill_vision_attn_fields(attn, dim: int) -> None:
+    """Fill expanded fields on a siglip2 Attention.Config."""
+    from copy import deepcopy as _dc
+
+    attn.dim = dim
+    attn.q_proj = _dc(attn.qkv)
+    attn.q_proj.in_features = dim
+    attn.q_proj.out_features = dim
+    attn.k_proj = _dc(attn.qkv)
+    attn.k_proj.in_features = dim
+    attn.k_proj.out_features = dim
+    attn.v_proj = _dc(attn.qkv)
+    attn.v_proj.in_features = dim
+    attn.v_proj.out_features = dim
+    attn.out_proj.in_features = dim
+    attn.out_proj.out_features = dim
+
+
+def _fill_vision_ffn_fields(ffn, dim: int) -> None:
+    """Fill expanded fields on a siglip2 FeedForward.Config."""
+    ffn.dim = dim
+    ffn.fc1.in_features = dim
+    ffn.fc1.out_features = ffn.ffn_dim
+    ffn.fc2.in_features = ffn.ffn_dim
+    ffn.fc2.out_features = dim
+
+
 def _expand_vlm_layer_configs(config) -> None:
     """Expand encoder layer template into per-layer configs via deepcopy.
 
     Also sets computed init=False fields (dim, patch_in_features) on the
-    encoder and projector sub-configs.
+    encoder, projector, and all leaf Linear/Embedding sub-configs.
     Mutates config in place.
     """
     encoder = config.encoder
@@ -59,11 +86,19 @@ def _expand_vlm_layer_configs(config) -> None:
     encoder.embeddings.patch_in_features = (
         encoder.n_channels * encoder.patch_size * encoder.patch_size
     )
+    encoder.embeddings.patch_embedding.in_features = (
+        encoder.embeddings.patch_in_features
+    )
+    encoder.embeddings.patch_embedding.out_features = dim
+    encoder.embeddings.position_embedding.num_embeddings = (
+        encoder.embeddings.n_pos_embs**2
+    )
+    encoder.embeddings.position_embedding.embedding_dim = dim
 
     # Set computed fields on layer template
     encoder.layer.dim = dim
-    encoder.layer.self_attn.dim = dim
-    encoder.layer.mlp.dim = dim
+    _fill_vision_attn_fields(encoder.layer.self_attn, dim)
+    _fill_vision_ffn_fields(encoder.layer.mlp, dim)
 
     # Expand layers
     encoder.layers = [deepcopy(encoder.layer) for _ in range(encoder.n_layers)]
@@ -71,6 +106,10 @@ def _expand_vlm_layer_configs(config) -> None:
     # Set computed fields on projector
     config.projector.in_dim = encoder.dim
     config.projector.out_dim = config.dim
+    config.projector.w1.in_features = encoder.dim
+    config.projector.w1.out_features = encoder.dim
+    config.projector.w2.in_features = encoder.dim
+    config.projector.w2.out_features = config.dim
 
 
 def _debugmodel() -> Llama3Siglip2Transformer.Config:

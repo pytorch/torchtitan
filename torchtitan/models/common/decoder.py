@@ -39,7 +39,7 @@ class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
     All language model TransformerBlocks share:
-    - Attention module (from ``attention.build(dim=dim)``)
+    - Attention module (from ``attention.build()``)
     - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
     - Two RMSNorms (``attention_norm``, ``ffn_norm``)
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
@@ -84,10 +84,7 @@ class Decoder(BaseModel):
         super().__init__()
         self.config = config
 
-        self.tok_embeddings = config.tok_embeddings.build(
-            num_embeddings=config.vocab_size, embedding_dim=config.dim
-        )
-
+        self.tok_embeddings = config.tok_embeddings.build()
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
@@ -97,14 +94,10 @@ class Decoder(BaseModel):
         )
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
-            self.layers[str(i)] = layer_config.build(
-                layer_id=i, dim=config.dim, n_layers=config.n_layers
-            )
+            self.layers[str(i)] = layer_config.build()
 
-        self.norm = config.norm.build(normalized_shape=config.dim)
-        self.output = config.output.build(
-            in_features=config.dim, out_features=config.vocab_size
-        )
+        self.norm = config.norm.build()
+        self.output = config.output.build()
 
     def init_states(
         self,

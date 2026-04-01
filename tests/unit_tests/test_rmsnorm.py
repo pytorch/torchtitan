@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -18,7 +19,8 @@ class TestRMSNorm(unittest.TestCase):
     def test_config_build(self):
         """RMSNorm.Config.build() creates a working norm."""
         config = RMSNorm.Config()
-        norm = config.build(normalized_shape=32)
+        config.normalized_shape = 32
+        norm = config.build()
         self.assertIsInstance(norm, RMSNorm)
         self.assertIsInstance(norm, nn.RMSNorm)
         self.assertEqual(norm.weight.shape, torch.Size([32]))
@@ -32,7 +34,8 @@ class TestRMSNorm(unittest.TestCase):
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
         config = RMSNorm.Config(param_init={"weight": nn.init.ones_})
-        norm = config.build(normalized_shape=16)
+        config.normalized_shape = 16
+        norm = config.build()
 
         nn.init.zeros_(norm.weight)
         self.assertTrue(torch.all(norm.weight == 0))
@@ -42,19 +45,22 @@ class TestRMSNorm(unittest.TestCase):
     def test_custom_eps(self):
         """RMSNorm respects custom eps."""
         config = RMSNorm.Config(eps=1e-6)
-        norm = config.build(normalized_shape=32)
+        config.normalized_shape = 32
+        norm = config.build()
         self.assertEqual(norm.eps, 1e-6)
 
     def test_elementwise_affine_false(self):
         """RMSNorm supports elementwise_affine=False."""
         config = RMSNorm.Config(elementwise_affine=False)
-        norm = config.build(normalized_shape=16)
+        config.normalized_shape = 16
+        norm = config.build()
         self.assertIsNone(norm.weight)
 
     def test_forward(self):
         """Forward pass works through nn.RMSNorm's implementation."""
         config = RMSNorm.Config()
-        norm = config.build(normalized_shape=32)
+        config.normalized_shape = 32
+        norm = config.build()
         x = torch.randn(2, 10, 32)
         out = norm(x)
         self.assertEqual(out.shape, torch.Size([2, 10, 32]))
@@ -71,8 +77,12 @@ class TestRMSNorm(unittest.TestCase):
         is safe because build() clones the config internally.
         """
         config = RMSNorm.Config(eps=1e-6)
-        norm1 = config.build(normalized_shape=16)
-        norm2 = config.build(normalized_shape=32)
+        config1 = deepcopy(config)
+        config1.normalized_shape = 16
+        norm1 = config1.build()
+        config2 = deepcopy(config)
+        config2.normalized_shape = 32
+        norm2 = config2.build()
 
         # They are separate module instances
         self.assertIsNot(norm1, norm2)

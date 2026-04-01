@@ -105,13 +105,9 @@ class MLPEmbedder(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.in_layer = config.in_layer.build(
-            in_features=config.in_dim, out_features=config.hidden_dim
-        )
+        self.in_layer = config.in_layer.build()
         self.silu = SiLU()
-        self.out_layer = config.out_layer.build(
-            in_features=config.hidden_dim, out_features=config.hidden_dim
-        )
+        self.out_layer = config.out_layer.build()
 
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
@@ -126,8 +122,8 @@ class QKNorm(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.query_norm = config.query_norm.build(normalized_shape=config.dim)
-        self.key_norm = config.key_norm.build(normalized_shape=config.dim)
+        self.query_norm = config.query_norm.build()
+        self.key_norm = config.key_norm.build()
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         q = self.query_norm(q)
@@ -148,10 +144,9 @@ class SelfAttention(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.num_heads = config.num_heads
-        head_dim = config.dim // config.num_heads
-        self.qkv = config.qkv.build(in_features=config.dim, out_features=config.dim * 3)
-        self.norm = config.norm.build(dim=head_dim)
-        self.proj = config.proj.build(in_features=config.dim, out_features=config.dim)
+        self.qkv = config.qkv.build()
+        self.norm = config.norm.build()
+        self.proj = config.proj.build()
         self.inner_attention = ScaledDotProductAttention.Config().build()
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
@@ -183,9 +178,7 @@ class Modulation(Module):
         super().__init__()
         self.is_double = config.double
         self.multiplier = 6 if config.double else 3
-        self.lin = config.lin.build(
-            in_features=config.dim, out_features=self.multiplier * config.dim
-        )
+        self.lin = config.lin.build()
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
         out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(
@@ -217,45 +210,36 @@ class DoubleStreamBlock(Module):
     def __init__(self, config: Config):
         super().__init__()
 
-        mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.img_mod = config.img_mod.build(dim=config.hidden_size, double=True)
+        self.img_mod = config.img_mod.build()
         self.img_norm1 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.img_attn = config.img_attn.build(dim=config.hidden_size)
+        self.img_attn = config.img_attn.build()
 
         self.img_norm2 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.img_mlp = Sequential(
-            config.img_mlp_in.build(
-                in_features=config.hidden_size, out_features=mlp_hidden_dim
-            ),
+            config.img_mlp_in.build(),
             GELU(approximate="tanh"),
-            config.img_mlp_out.build(
-                in_features=mlp_hidden_dim, out_features=config.hidden_size
-            ),
+            config.img_mlp_out.build(),
         )
 
-        self.txt_mod = config.txt_mod.build(dim=config.hidden_size, double=True)
+        self.txt_mod = config.txt_mod.build()
         self.txt_norm1 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.txt_attn = config.txt_attn.build(dim=config.hidden_size)
+        self.txt_attn = config.txt_attn.build()
 
         self.txt_norm2 = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
         self.txt_mlp = Sequential(
-            config.txt_mlp_in.build(
-                in_features=config.hidden_size, out_features=mlp_hidden_dim
-            ),
+            config.txt_mlp_in.build(),
             GELU(approximate="tanh"),
-            config.txt_mlp_out.build(
-                in_features=mlp_hidden_dim, out_features=config.hidden_size
-            ),
+            config.txt_mlp_out.build(),
         )
 
         self.inner_attention = ScaledDotProductAttention.Config().build()
@@ -335,17 +319,11 @@ class SingleStreamBlock(Module):
 
         self.mlp_hidden_dim = int(config.hidden_size * config.mlp_ratio)
         # qkv and mlp_in
-        self.linear1 = config.linear1.build(
-            in_features=config.hidden_size,
-            out_features=config.hidden_size * 3 + self.mlp_hidden_dim,
-        )
+        self.linear1 = config.linear1.build()
         # proj and mlp_out
-        self.linear2 = config.linear2.build(
-            in_features=config.hidden_size + self.mlp_hidden_dim,
-            out_features=config.hidden_size,
-        )
+        self.linear2 = config.linear2.build()
 
-        self.norm = config.norm.build(dim=head_dim)
+        self.norm = config.norm.build()
 
         self.hidden_size = config.hidden_size
         self.pre_norm = LayerNorm(
@@ -353,7 +331,7 @@ class SingleStreamBlock(Module):
         )
 
         self.mlp_act = GELU(approximate="tanh")
-        self.modulation = config.modulation.build(dim=config.hidden_size, double=False)
+        self.modulation = config.modulation.build()
         self.inner_attention = ScaledDotProductAttention.Config().build()
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
@@ -390,15 +368,10 @@ class LastLayer(Module):
         self.norm_final = LayerNorm(
             config.hidden_size, elementwise_affine=False, eps=1e-6
         )
-        self.linear = config.linear.build(
-            in_features=config.hidden_size,
-            out_features=config.patch_size * config.patch_size * config.out_channels,
-        )
+        self.linear = config.linear.build()
         self.adaLN_modulation = Sequential(
             SiLU(),
-            config.adaln_linear.build(
-                in_features=config.hidden_size, out_features=2 * config.hidden_size
-            ),
+            config.adaln_linear.build(),
         )
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:

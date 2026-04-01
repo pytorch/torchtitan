@@ -76,20 +76,20 @@ class Llama4TransformerBlock(TransformerBlock):
         interleave_moe_layer_step: int = 2
         fixed_attn_block_size: int = 8192
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.attention = config.attention.build(dim=dim)
+        self.attention = config.attention.build()
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            self.moe = config.moe.build()
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
+            self.feed_forward = config.feed_forward.build()
 
-        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
-        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
     def forward(
         self,

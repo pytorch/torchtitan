@@ -36,27 +36,25 @@ class FeedForward(Module):
 
     Config takes the **final** hidden_dim (no internal 2/3 scaling).
     Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
-    Runtime ``dim`` is passed as a build() kwarg.
+    ``dim`` and per-linear configs (``w1``, ``w2``, ``w3``) are populated
+    by ``expand_layer_configs()`` before ``build()`` is called.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hidden_dim: int
-        w1: Linear.Config
-        w2w3: Linear.Config
+        w1: Linear.Config  # template for w1 (base init)
+        w2w3: Linear.Config  # template for w2, w3 (depth-scaled init)
+        # Expanded fields, populated by expand_layer_configs()
         dim: int = field(init=False)
+        w2: Linear.Config = field(init=False)
+        w3: Linear.Config = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w1 = config.w1.build(
-            in_features=config.dim, out_features=config.hidden_dim
-        )
-        self.w2 = config.w2w3.build(
-            in_features=config.hidden_dim, out_features=config.dim
-        )
-        self.w3 = config.w2w3.build(
-            in_features=config.dim, out_features=config.hidden_dim
-        )
+        self.w1 = config.w1.build()
+        self.w2 = config.w2.build()
+        self.w3 = config.w3.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))

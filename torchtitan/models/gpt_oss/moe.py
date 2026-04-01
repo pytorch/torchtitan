@@ -276,9 +276,9 @@ class GptOssMoE(MoE):
     class Config(MoE.Config):
         swiglu_limit: float = 7.0
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         # Initialize the base MoE class
-        super().__init__(config, dim=dim)
+        super().__init__(config)
 
         # Override the base GroupedExperts with GptOssGroupedExperts
         gptoss_experts_config = GptOssGroupedExperts.Config(
@@ -286,9 +286,8 @@ class GptOssMoE(MoE):
             use_grouped_mm=config.experts.use_grouped_mm,
             param_init=config.experts.param_init,
         )
+        gptoss_experts_config.dim = config.dim
+        gptoss_experts_config.hidden_dim = config.hidden_dim
+        gptoss_experts_config.num_experts = config.num_experts
         # pyrefly: ignore [bad-assignment]
-        self.experts = gptoss_experts_config.build(
-            dim=dim,
-            hidden_dim=config.hidden_dim,
-            num_experts=config.num_experts,
-        )
+        self.experts = gptoss_experts_config.build()

@@ -24,6 +24,12 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.config_expand import (
+    fill_decoder_fields,
+    fill_ffn_fields,
+    fill_gqa_fields,
+    fill_moe_fields,
+)
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.moe.moe import GroupedExperts
 from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
@@ -46,12 +52,16 @@ def expand_layer_configs(config) -> None:
     Handles iRoPE (NoPE on every N layers) and MoE interleaving.
     Mutates config in place.
     """
+    dim = config.dim
+    fill_decoder_fields(config)
     assert isinstance(config.layer, Llama4TransformerBlock.Config)
     if (
         config.layer.every_n_layers_nope is not None
         and config.layer.every_n_layers_nope <= 1
     ):
         raise ValueError("every_n_layers_nope must be greater than 1")
+    config.layer.attention_norm.normalized_shape = dim
+    config.layer.ffn_norm.normalized_shape = dim
     layers = []
     for layer_id in range(config.n_layers):
         cfg = deepcopy(config.layer)
@@ -66,6 +76,11 @@ def expand_layer_configs(config) -> None:
         else:
             cfg = replace(cfg, moe=None)
         resolve_deferred(cfg, layer_id)
+        fill_gqa_fields(cfg.attention, dim)  # pyrefly: ignore [bad-argument-type]
+        if cfg.feed_forward is not None:
+            fill_ffn_fields(cfg.feed_forward, dim)
+        if cfg.moe is not None:
+            fill_moe_fields(cfg.moe, dim)
         layers.append(cfg)
     config.layers = layers
 
@@ -99,7 +114,7 @@ def _output_linear_init(dim: int):
     }
 
 
-def _debugmodel():
+def _debugmodel() -> Llama4Model.Config:
     dim = 256
     n_heads = 16
     return Llama4Model.Config(
@@ -152,7 +167,7 @@ def _debugmodel():
     )
 
 
-def _17bx16e():
+def _17bx16e() -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
     n_kv_heads = 8
@@ -216,7 +231,7 @@ def _17bx16e():
     )
 
 
-def _17bx128e():
+def _17bx128e() -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
     n_kv_heads = 8

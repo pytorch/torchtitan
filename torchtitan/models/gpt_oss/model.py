@@ -6,7 +6,7 @@
 
 import dataclasses
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -41,15 +41,20 @@ class Attention(BaseAttention):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
-        wqkv: Linear.Config
+        dim: int = field(init=False)
+        wqkv: Linear.Config  # template for wq, wk, wv
         wo: Linear.Config
         inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
         mask_type: str = "causal"
         sliding_window_size: int = 128
+        # Expanded fields, populated by expand_layer_configs()
+        wq: Linear.Config = field(init=False)
+        wk: Linear.Config = field(init=False)
+        wv: Linear.Config = field(init=False)
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
         self.head_dim = config.head_dim
         self.n_heads = config.n_heads
@@ -61,18 +66,10 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        self.wq = config.wqkv.build(
-            in_features=dim, out_features=config.n_heads * config.head_dim
-        )
-        self.wk = config.wqkv.build(
-            in_features=dim, out_features=config.n_kv_heads * config.head_dim
-        )
-        self.wv = config.wqkv.build(
-            in_features=dim, out_features=config.n_kv_heads * config.head_dim
-        )
-        self.wo = config.wo.build(
-            in_features=config.n_heads * config.head_dim, out_features=dim
-        )
+        self.wq = config.wq.build()
+        self.wk = config.wk.build()
+        self.wv = config.wv.build()
+        self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert isinstance(
             config.inner_attention, FlexAttention.Config
@@ -142,18 +139,16 @@ class GptOssTransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         use_sliding_attention: bool = False
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
         self.use_sliding_attention = config.use_sliding_attention
-        self.attention = config.attention.build(dim=dim)
-        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
-        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
+        self.attention = config.attention.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
         assert config.moe is not None
-        self.moe = config.moe.build(dim=dim)
+        self.moe = config.moe.build()
         self.moe_enabled = True  # for composability with load balancing
-
-        self.layer_id = layer_id
 
     def forward(
         self,

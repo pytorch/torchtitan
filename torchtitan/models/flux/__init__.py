@@ -43,17 +43,111 @@ _NORMAL_02 = {"weight": partial(nn.init.normal_, std=0.02), "bias": nn.init.zero
 _NORM_INIT = {"weight": nn.init.ones_}
 
 
+def _fill_modulation_fields(mod, *, dim: int, double: bool) -> None:
+    """Fill expanded fields on a Modulation.Config."""
+    mod.dim = dim
+    mod.double = double
+    multiplier = 6 if double else 3
+    mod.lin.in_features = dim
+    mod.lin.out_features = multiplier * dim
+
+
+def _fill_self_attn_fields(attn, *, dim: int) -> None:
+    """Fill expanded fields on a flux SelfAttention.Config."""
+    attn.dim = dim
+    head_dim = dim // attn.num_heads
+    attn.qkv.in_features = dim
+    attn.qkv.out_features = dim * 3
+    attn.proj.in_features = dim
+    attn.proj.out_features = dim
+    attn.norm.dim = head_dim
+    attn.norm.query_norm.normalized_shape = head_dim
+    attn.norm.key_norm.normalized_shape = head_dim
+
+
+def _fill_double_block_fields(cfg) -> None:
+    """Fill expanded fields on a DoubleStreamBlock.Config."""
+    hs = cfg.hidden_size
+    mlp_hidden_dim = int(hs * cfg.mlp_ratio)
+    _fill_modulation_fields(cfg.img_mod, dim=hs, double=True)
+    _fill_self_attn_fields(cfg.img_attn, dim=hs)
+    cfg.img_mlp_in.in_features = hs
+    cfg.img_mlp_in.out_features = mlp_hidden_dim
+    cfg.img_mlp_out.in_features = mlp_hidden_dim
+    cfg.img_mlp_out.out_features = hs
+    _fill_modulation_fields(cfg.txt_mod, dim=hs, double=True)
+    _fill_self_attn_fields(cfg.txt_attn, dim=hs)
+    cfg.txt_mlp_in.in_features = hs
+    cfg.txt_mlp_in.out_features = mlp_hidden_dim
+    cfg.txt_mlp_out.in_features = mlp_hidden_dim
+    cfg.txt_mlp_out.out_features = hs
+
+
+def _fill_single_block_fields(cfg) -> None:
+    """Fill expanded fields on a SingleStreamBlock.Config."""
+    hs = cfg.hidden_size
+    head_dim = hs // cfg.num_heads
+    mlp_hidden_dim = int(hs * cfg.mlp_ratio)
+    cfg.linear1.in_features = hs
+    cfg.linear1.out_features = hs * 3 + mlp_hidden_dim
+    cfg.linear2.in_features = hs + mlp_hidden_dim
+    cfg.linear2.out_features = hs
+    cfg.norm.dim = head_dim
+    cfg.norm.query_norm.normalized_shape = head_dim
+    cfg.norm.key_norm.normalized_shape = head_dim
+    _fill_modulation_fields(cfg.modulation, dim=hs, double=False)
+
+
+def _fill_mlp_embedder_fields(cfg) -> None:
+    """Fill Linear sub-config fields on a MLPEmbedder.Config."""
+    cfg.in_layer.in_features = cfg.in_dim
+    cfg.in_layer.out_features = cfg.hidden_dim
+    cfg.out_layer.in_features = cfg.hidden_dim
+    cfg.out_layer.out_features = cfg.hidden_dim
+
+
+def _fill_last_layer_fields(cfg) -> None:
+    """Fill Linear sub-config fields on a LastLayer.Config."""
+    hs = cfg.hidden_size
+    cfg.linear.in_features = hs
+    cfg.linear.out_features = cfg.patch_size * cfg.patch_size * cfg.out_channels
+    cfg.adaln_linear.in_features = hs
+    cfg.adaln_linear.out_features = 2 * hs
+
+
 def expand_layer_configs(config) -> None:
     """Expand block templates into per-block configs via deepcopy.
 
+    Also fills all field(init=False) fields on the config tree.
     Mutates config in place.
     """
-    config.double_blocks_expanded = [
-        deepcopy(config.double_block_config) for _ in range(config.depth)
-    ]
-    config.single_blocks_expanded = [
-        deepcopy(config.single_block_config) for _ in range(config.depth_single_blocks)
-    ]
+    hs = config.hidden_size
+
+    # Top-level Linears
+    config.img_in.in_features = config.in_channels
+    config.img_in.out_features = hs
+    config.txt_in.in_features = config.context_in_dim
+    config.txt_in.out_features = hs
+
+    # MLPEmbedders
+    _fill_mlp_embedder_fields(config.time_in_config)
+    _fill_mlp_embedder_fields(config.vector_in_config)
+
+    # LastLayer
+    _fill_last_layer_fields(config.final_layer_config)
+
+    # Expand double and single blocks
+    config.double_blocks_expanded = []
+    for _ in range(config.depth):
+        cfg = deepcopy(config.double_block_config)
+        _fill_double_block_fields(cfg)
+        config.double_blocks_expanded.append(cfg)
+
+    config.single_blocks_expanded = []
+    for _ in range(config.depth_single_blocks):
+        cfg = deepcopy(config.single_block_config)
+        _fill_single_block_fields(cfg)
+        config.single_blocks_expanded.append(cfg)
 
 
 def _make_double_block_config(
@@ -121,7 +215,7 @@ def _make_single_block_config(
     )
 
 
-def _flux_dev():
+def _flux_dev() -> FluxModel.Config:
     hidden_size = 3072
     num_heads = 24
     mlp_ratio = 4.0
@@ -187,7 +281,7 @@ def _flux_dev():
     )
 
 
-def _flux_schnell():
+def _flux_schnell() -> FluxModel.Config:
     hidden_size = 3072
     num_heads = 24
     mlp_ratio = 4.0
@@ -253,7 +347,7 @@ def _flux_schnell():
     )
 
 
-def _flux_debug():
+def _flux_debug() -> FluxModel.Config:
     hidden_size = 1536
     num_heads = 12
     mlp_ratio = 4.0

@@ -16,6 +16,12 @@ from torchtitan.config import DeferredCallable
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.config_expand import (
+    fill_decoder_fields,
+    fill_ffn_fields,
+    fill_gqa_fields,
+    fill_moe_fields,
+)
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import (
     depth_scaled_std,
@@ -42,7 +48,11 @@ def expand_layer_configs(config) -> None:
     Handles MoE vs. dense feed-forward selection based on moe_enabled flag.
     Mutates config in place.
     """
+    dim = config.dim
+    fill_decoder_fields(config)
     assert isinstance(config.layer, Qwen3TransformerBlock.Config)
+    config.layer.attention_norm.normalized_shape = dim
+    config.layer.ffn_norm.normalized_shape = dim
     layers = []
     for layer_id in range(config.n_layers):
         cfg = deepcopy(config.layer)
@@ -51,6 +61,11 @@ def expand_layer_configs(config) -> None:
         else:
             cfg = replace(cfg, moe=None)
         resolve_deferred(cfg, layer_id)
+        fill_gqa_fields(cfg.attention, dim)  # pyrefly: ignore [bad-argument-type]
+        if cfg.feed_forward is not None:
+            fill_ffn_fields(cfg.feed_forward, dim)
+        if cfg.moe is not None:
+            fill_moe_fields(cfg.moe, dim)
         layers.append(cfg)
     config.layers = layers
 
@@ -85,7 +100,7 @@ def _output_linear_init(dim: int):
     }
 
 
-def _debugmodel():
+def _debugmodel() -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     return Qwen3Model.Config(
@@ -124,48 +139,42 @@ def _debugmodel():
     )
 
 
-def _debugmodel_flex():
-    dim = 256
-    head_dim = 128
-    return Qwen3Model.Config(
-        vocab_size=2048,
-        dim=dim,
-        n_layers=8,
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_SKIP_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=3072,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=16,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="cos_sin",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
+def _debugmodel_flex() -> Qwen3Model.Config:
+    config = _debugmodel()
+    config.layer.attention.inner_attention = FlexAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
+
+
+def _debugmodel_flex_flash() -> Qwen3Model.Config:
+    from torchtitan.tools.utils import has_cuda_capability
+
+    if has_cuda_capability(10, 0):
+        # NOTE: On NVIDIA Blackwell, to use FLASH backend we need
+        # block size at least (256, 128) due to how the kernel works.
+        block_size = (256, 128)
+    elif has_cuda_capability(9, 0):
+        block_size = (128, 128)
+    else:
+        raise ValueError(
+            "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+        )
+    config = _debugmodel()
+    config.layer.attention.inner_attention = FlexAttention.Config(
+        block_size=block_size, kernel_options={"BACKEND": "FLASH"}
     )
+    config.layer.attention.mask_type = "block_causal"
+    return config
 
 
-def _0_6b():
+def _debugmodel_varlen() -> Qwen3Model.Config:
+    config = _debugmodel()
+    config.layer.attention.inner_attention = VarlenAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
+
+
+def _0_6b() -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
     return Qwen3Model.Config(
@@ -204,7 +213,7 @@ def _0_6b():
     )
 
 
-def _1_7b():
+def _1_7b() -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
     return Qwen3Model.Config(
@@ -243,7 +252,7 @@ def _1_7b():
     )
 
 
-def _4b():
+def _4b() -> Qwen3Model.Config:
     dim = 2560
     head_dim = 128
     return Qwen3Model.Config(
@@ -282,7 +291,21 @@ def _4b():
     )
 
 
-def _8b():
+def _0_6b_varlen() -> Qwen3Model.Config:
+    config = _0_6b()
+    config.layer.attention.inner_attention = VarlenAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
+
+
+def _1_7b_varlen() -> Qwen3Model.Config:
+    config = _1_7b()
+    config.layer.attention.inner_attention = VarlenAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
+
+
+def _8b() -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
     return Qwen3Model.Config(
@@ -320,7 +343,14 @@ def _8b():
     )
 
 
-def _14b():
+def _8b_varlen() -> Qwen3Model.Config:
+    config = _8b()
+    config.layer.attention.inner_attention = VarlenAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
+
+
+def _14b() -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     return Qwen3Model.Config(
@@ -358,7 +388,7 @@ def _14b():
     )
 
 
-def _32b():
+def _32b() -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     return Qwen3Model.Config(
@@ -399,7 +429,7 @@ def _32b():
 # Qwen3-MoE models
 
 
-def _debugmodel_moe():
+def _debugmodel_moe() -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     return Qwen3Model.Config(
@@ -450,7 +480,7 @@ def _debugmodel_moe():
     )
 
 
-def _30b_a3b():
+def _30b_a3b() -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
     return Qwen3Model.Config(
@@ -501,7 +531,7 @@ def _30b_a3b():
     )
 
 
-def _235b_a22b():
+def _235b_a22b() -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
     return Qwen3Model.Config(
@@ -555,10 +585,15 @@ def _235b_a22b():
 qwen3_configs = {
     "debugmodel": _debugmodel,
     "debugmodel_flex": _debugmodel_flex,
+    "debugmodel_flex_flash": _debugmodel_flex_flash,
+    "debugmodel_varlen": _debugmodel_varlen,
     "0.6B": _0_6b,
+    "0.6B_varlen": _0_6b_varlen,
     "1.7B": _1_7b,
+    "1.7B_varlen": _1_7b_varlen,
     "4B": _4b,
     "8B": _8b,
+    "8B_varlen": _8b_varlen,
     "14B": _14b,
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
@@ -567,43 +602,8 @@ qwen3_configs = {
 }
 
 
-def model_registry(flavor: str, attn_backend_override: str | None = None) -> ModelSpec:
+def model_registry(flavor: str) -> ModelSpec:
     config = qwen3_configs[flavor]()
-    if attn_backend_override is not None:
-        from torchtitan.models.common import ScaledDotProductAttention
-
-        match attn_backend_override:
-            case "sdpa":
-                config.layer.attention.inner_attention = (
-                    ScaledDotProductAttention.Config()
-                )
-            case "flex":
-                config.layer.attention.inner_attention = FlexAttention.Config()
-                config.layer.attention.mask_type = "block_causal"
-            case "flex_flash":
-                from torchtitan.tools.utils import has_cuda_capability
-
-                if has_cuda_capability(10, 0):
-                    # NOTE: On NVIDIA Blackwell, to use FLASH backend we need
-                    # block size at least (256, 128) due to how the kernel works.
-                    block_size = (256, 128)
-                elif has_cuda_capability(9, 0):
-                    block_size = (128, 128)
-                else:
-                    raise ValueError(
-                        "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
-                    )
-                config.layer.attention.inner_attention = FlexAttention.Config(
-                    block_size=block_size, kernel_options={"BACKEND": "FLASH"}
-                )
-                config.layer.attention.mask_type = "block_causal"
-            case "varlen":
-                config.layer.attention.inner_attention = VarlenAttention.Config()
-                config.layer.attention.mask_type = "block_causal"
-            case _:
-                raise ValueError(
-                    f"Invalid attn_backend_override: {attn_backend_override}"
-                )
     expand_layer_configs(config)
     return ModelSpec(
         name="qwen3",

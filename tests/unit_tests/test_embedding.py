@@ -20,7 +20,9 @@ class TestEmbedding(unittest.TestCase):
     def test_config_build(self):
         """Embedding.Config.build() creates a working embedding."""
         config = Embedding.Config()
-        emb = config.build(num_embeddings=100, embedding_dim=32)
+        config.num_embeddings = 100
+        config.embedding_dim = 32
+        emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
@@ -36,7 +38,9 @@ class TestEmbedding(unittest.TestCase):
         config = Embedding.Config(
             param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)}
         )
-        emb = config.build(num_embeddings=50, embedding_dim=16)
+        config.num_embeddings = 50
+        config.embedding_dim = 16
+        emb = config.build()
 
         nn.init.zeros_(emb.weight)
         self.assertTrue(torch.all(emb.weight == 0))
@@ -48,7 +52,9 @@ class TestEmbedding(unittest.TestCase):
         config = Embedding.Config(
             param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)}
         )
-        emb = config.build(num_embeddings=1000, embedding_dim=160)
+        config.num_embeddings = 1000
+        config.embedding_dim = 160
+        emb = config.build()
 
         torch.manual_seed(42)
         emb.init_states()
@@ -71,7 +77,8 @@ class TestEmbedding(unittest.TestCase):
         """Embedding.Config with one field pre-specified, other via build()."""
         config = Embedding.Config()
         config.num_embeddings = 100
-        emb = config.build(embedding_dim=32)
+        config.embedding_dim = 32
+        emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 

@@ -33,13 +33,13 @@ class Llama3TransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         pass
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.attention = config.attention.build(dim=dim)
+        self.attention = config.attention.build()
         assert config.feed_forward is not None
-        self.feed_forward = config.feed_forward.build(dim=dim)
-        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
-        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
+        self.feed_forward = config.feed_forward.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
     def forward(
         self,

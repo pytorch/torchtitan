@@ -48,10 +48,8 @@ class Projector(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w1 = config.w1.build(in_features=config.in_dim, out_features=config.in_dim)
-        self.w2 = config.w2.build(
-            in_features=config.in_dim, out_features=config.out_dim
-        )
+        self.w1 = config.w1.build()
+        self.w2 = config.w2.build()
 
     def forward(self, x_NLD: torch.Tensor):
         x_NLD = self.w1(x_NLD)

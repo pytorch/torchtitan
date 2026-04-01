@@ -16,6 +16,11 @@ from torchtitan.config import DeferredCallable
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.config_expand import (
+    fill_decoder_fields,
+    fill_ffn_fields,
+    fill_moe_fields,
+)
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
 from torchtitan.protocols.model_spec import ModelSpec
@@ -32,13 +37,45 @@ __all__ = [
 ]
 
 
+def _fill_dsv3_attn_fields(attn: Attention.Config, dim: int) -> None:
+    """Fill expanded fields on a DeepSeek V3 MLA Attention.Config."""
+    attn.dim = dim
+    n_heads = attn.n_heads
+    qk_head_dim = attn.qk_nope_head_dim + attn.qk_rope_head_dim
+
+    if attn.q_lora_rank == 0:
+        if attn.wq is not None:
+            attn.wq.in_features = dim
+            attn.wq.out_features = n_heads * qk_head_dim
+    else:
+        if attn.wq_a is not None:
+            attn.wq_a.in_features = dim
+            attn.wq_a.out_features = attn.q_lora_rank
+        attn.q_norm.normalized_shape = attn.q_lora_rank
+        if attn.wq_b is not None:
+            attn.wq_b.in_features = attn.q_lora_rank
+            attn.wq_b.out_features = n_heads * qk_head_dim
+
+    attn.wkv_a.in_features = dim
+    attn.wkv_a.out_features = attn.kv_lora_rank + attn.qk_rope_head_dim
+    attn.kv_norm.normalized_shape = attn.kv_lora_rank
+    attn.wkv_b.in_features = attn.kv_lora_rank
+    attn.wkv_b.out_features = n_heads * (attn.qk_nope_head_dim + attn.v_head_dim)
+    attn.wo.in_features = n_heads * attn.v_head_dim
+    attn.wo.out_features = dim
+
+
 def expand_layer_configs(config) -> None:
     """Expand the layer template into per-layer configs for a single model config.
 
     Handles dense vs. MoE layer selection based on n_dense_layers.
     Mutates config in place.
     """
+    dim = config.dim
+    fill_decoder_fields(config)
     assert isinstance(config.layer, DeepSeekV3TransformerBlock.Config)
+    config.layer.attention_norm.normalized_shape = dim
+    config.layer.ffn_norm.normalized_shape = dim
     n_dense = config.layer.n_dense_layers
     layers = []
     for layer_id in range(config.n_layers):
@@ -48,6 +85,13 @@ def expand_layer_configs(config) -> None:
         else:
             cfg = replace(cfg, moe=None)
         resolve_deferred(cfg, layer_id)
+        _fill_dsv3_attn_fields(
+            cfg.attention, dim  # pyrefly: ignore [bad-argument-type]
+        )
+        if cfg.feed_forward is not None:
+            fill_ffn_fields(cfg.feed_forward, dim)
+        if cfg.moe is not None:
+            fill_moe_fields(cfg.moe, dim)
         layers.append(cfg)
     config.layers = layers
 
@@ -81,7 +125,7 @@ def _output_linear_init(dim: int):
     }
 
 
-def _debugmodel():
+def _debugmodel() -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
     vocab_size = 2048
@@ -152,80 +196,14 @@ def _debugmodel():
     )
 
 
-def _debugmodel_flex_attn():
-    dim = 256
-    n_layers = 6
-    vocab_size = 2048
-    n_heads = 16
-    moe_hidden_dim = 256
-    num_shared_experts = 2
-    dense_hidden_dim = 1024
-    rope_dim = 64
-    return DeepSeekV3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        n_layers=n_layers,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=DeepSeekV3TransformerBlock.Config(
-            n_dense_layers=1,
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            moe=MoE.Config(
-                hidden_dim=moe_hidden_dim,
-                num_experts=8,
-                score_before_experts=False,
-                router=TokenChoiceTopKRouter.Config(
-                    top_k=3,
-                    score_func="softmax",
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-                shared_experts=FeedForward.Config(
-                    hidden_dim=moe_hidden_dim * num_shared_experts,
-                    w1=Linear.Config(param_init=_LINEAR_INIT),
-                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-            ),
-            attention=Attention.Config(
-                q_norm=RMSNorm.Config(param_init=_NORM_INIT),
-                kv_norm=RMSNorm.Config(param_init=_NORM_INIT),
-                n_heads=n_heads,
-                q_lora_rank=0,
-                kv_lora_rank=512,
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=rope_dim,
-                v_head_dim=128,
-                mscale=0.70,
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                wq=Linear.Config(param_init=_LINEAR_INIT),
-                wkv_a=Linear.Config(param_init=_LINEAR_INIT),
-                wkv_b=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            feed_forward=FeedForward.Config(
-                hidden_dim=dense_hidden_dim,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=rope_dim,
-            max_seq_len=4096 * 4,
-            theta=10000.0,
-            backend="complex",
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
-        ),
-    )
+def _debugmodel_flex_attn() -> DeepSeekV3Model.Config:
+    config = _debugmodel()
+    config.layer.attention.inner_attention = FlexAttention.Config()
+    config.layer.attention.mask_type = "block_causal"
+    return config
 
 
-def _16b():
+def _16b() -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
     vocab_size = 102400
@@ -298,7 +276,7 @@ def _16b():
     )
 
 
-def _236b():
+def _236b() -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
     vocab_size = 102400
@@ -375,7 +353,7 @@ def _236b():
     )
 
 
-def _671b():
+def _671b() -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
     vocab_size = 129280

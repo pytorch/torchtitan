@@ -157,9 +157,7 @@ class TokenChoiceTopKRouter(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.gate = config.gate.build(
-            in_features=config.dim, out_features=config.num_experts
-        )
+        self.gate = config.gate.build()
         self.num_experts = config.num_experts
         self.num_expert_groups = config.num_expert_groups
         self.num_limited_groups = config.num_limited_groups
@@ -364,23 +362,21 @@ class MoE(Module):
             default_factory=TokenChoiceTopKRouter.Config
         )
         shared_experts: FeedForward.Config | None = None
+        dim: int = field(init=False)
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
 
+        dim = config.dim
         num_experts = config.num_experts
         hidden_dim = config.hidden_dim
-        self.experts = config.experts.build(
-            dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
-        )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.experts = config.experts.build()
+        self.router = config.router.build()
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
         self.shared_experts = (
-            config.shared_experts.build(dim=dim)
-            if config.shared_experts is not None
-            else None
+            config.shared_experts.build() if config.shared_experts is not None else None
         )
         self.score_before_experts = config.score_before_experts
 

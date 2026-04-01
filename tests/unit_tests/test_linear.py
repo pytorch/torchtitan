@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from copy import deepcopy
 from functools import partial
 
 import torch
@@ -25,7 +26,9 @@ class TestLinear(unittest.TestCase):
     def test_config_build(self):
         """Linear.Config.build() creates a working linear."""
         config = Linear.Config()
-        linear = config.build(in_features=32, out_features=16)
+        config.in_features = 32
+        config.out_features = 16
+        linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertIsInstance(linear, nn.Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
@@ -34,7 +37,9 @@ class TestLinear(unittest.TestCase):
     def test_config_build_with_bias(self):
         """Linear.Config(bias=True).build() creates a linear with bias."""
         config = Linear.Config(bias=True)
-        linear = config.build(in_features=32, out_features=16)
+        config.in_features = 32
+        config.out_features = 16
+        linear = config.build()
         self.assertIsNotNone(linear.bias)
         self.assertEqual(linear.bias.shape, torch.Size([16]))
 
@@ -52,7 +57,9 @@ class TestLinear(unittest.TestCase):
                 "bias": nn.init.zeros_,
             }
         )
-        linear = config.build(in_features=16, out_features=8)
+        config.in_features = 16
+        config.out_features = 8
+        linear = config.build()
 
         with torch.no_grad():
             nn.init.zeros_(linear.weight)
@@ -68,7 +75,9 @@ class TestLinear(unittest.TestCase):
                 "bias": nn.init.zeros_,
             }
         )
-        linear = config.build(in_features=1000, out_features=500)
+        config.in_features = 1000
+        config.out_features = 500
+        linear = config.build()
 
         torch.manual_seed(42)
         with torch.no_grad():
@@ -82,7 +91,9 @@ class TestLinear(unittest.TestCase):
     def test_forward(self):
         """Forward pass works through nn.Linear's implementation."""
         config = Linear.Config()
-        linear = config.build(in_features=32, out_features=16)
+        config.in_features = 32
+        config.out_features = 16
+        linear = config.build()
         x = torch.randn(2, 10, 32)
         out = linear(x)
         self.assertEqual(out.shape, torch.Size([2, 10, 16]))
@@ -90,8 +101,14 @@ class TestLinear(unittest.TestCase):
     def test_shared_config_builds_independent_instances(self):
         """A single Linear.Config can build multiple independent linears."""
         config = Linear.Config()
-        l1 = config.build(in_features=32, out_features=16)
-        l2 = config.build(in_features=64, out_features=8)
+        cfg1 = deepcopy(config)
+        cfg1.in_features = 32
+        cfg1.out_features = 16
+        l1 = cfg1.build()
+        cfg2 = deepcopy(config)
+        cfg2.in_features = 64
+        cfg2.out_features = 8
+        l2 = cfg2.build()
         self.assertIsNot(l1, l2)
         self.assertEqual(l1.weight.shape, torch.Size([16, 32]))
         self.assertEqual(l2.weight.shape, torch.Size([8, 64]))
@@ -99,7 +116,9 @@ class TestLinear(unittest.TestCase):
     def test_isinstance_checks(self):
         """Linear is instance of nn.Linear, and Module."""
         config = Linear.Config()
-        linear = config.build(in_features=8, out_features=4)
+        config.in_features = 8
+        config.out_features = 4
+        linear = config.build()
         self.assertIsInstance(linear, nn.Linear)
         self.assertIsInstance(linear, Module)
 
@@ -132,7 +151,8 @@ class TestLinear(unittest.TestCase):
         """Linear.Config with one field pre-specified, other via build()."""
         config = Linear.Config()
         config.in_features = 32
-        linear = config.build(out_features=16)
+        config.out_features = 16
+        linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
@@ -159,7 +179,9 @@ class TestModuleInjection(unittest.TestCase):
         """Our Linear (already Module) is not patched."""
         model = nn.Module()
         config = Linear.Config()
-        model.fc = config.build(in_features=8, out_features=4)
+        config.in_features = 8
+        config.out_features = 4
+        model.fc = config.build()
         orig_cls = type(model.fc)
 
         inject_module_protocol(model, Linear)
@@ -205,7 +227,9 @@ class TestModuleInjection(unittest.TestCase):
         # Build model with our Linear
         model = nn.Module()
         config = Linear.Config(bias=True)
-        model.fc = config.build(in_features=8, out_features=4)
+        config.in_features = 8
+        config.out_features = 4
+        model.fc = config.build()
 
         # Capture attrs
         saved = capture_module_attrs(model, [])
@@ -246,7 +270,9 @@ class TestModuleInjection(unittest.TestCase):
 
         model = nn.Module()
         config = Linear.Config()
-        model.fc = config.build(in_features=8, out_features=4)
+        config.in_features = 8
+        config.out_features = 4
+        model.fc = config.build()
 
         model.fc.__class__ = FakeQuantLinear
         self.assertFalse(isinstance(model.fc, Module))
@@ -278,8 +304,14 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         """No error when all nn.Linear modules are Linear."""
         model = nn.Module()
         config = Linear.Config()
-        model.fc1 = config.build(in_features=8, out_features=4)
-        model.fc2 = config.build(in_features=4, out_features=2)
+        cfg1 = deepcopy(config)
+        cfg1.in_features = 8
+        cfg1.out_features = 4
+        model.fc1 = cfg1.build()
+        cfg2 = deepcopy(config)
+        cfg2.in_features = 4
+        cfg2.out_features = 2
+        model.fc2 = cfg2.build()
 
         # Should not raise
         verify_module_protocol(model, nn.Linear, Linear)
@@ -301,7 +333,9 @@ class TestVerifyModuleProtocol(unittest.TestCase):
 
         model = nn.Module()
         config = Linear.Config()
-        model.fc1 = config.build(in_features=8, out_features=4)
+        config.in_features = 8
+        config.out_features = 4
+        model.fc1 = config.build()
         model.fc2 = FakeQuantLinear(16, 8)
 
         inject_module_protocol(model, Linear)
