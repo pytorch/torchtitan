@@ -227,10 +227,12 @@ def sft_debugmodel() -> Trainer.Config:
         ]
 
     model_spec = model_registry("debugmodel")
+    from torchtitan.models.common.attention import FlexAttention
+
     # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.attn_backend = "flex"
+    model_spec.model.layer.attention.inner_attention = FlexAttention.Config()
     # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.attn_mask_type = "block_causal"
+    model_spec.model.layer.attention.mask_type = "block_causal"
 
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",

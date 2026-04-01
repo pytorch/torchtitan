@@ -90,9 +90,10 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if (
-        parallelism.context_parallel_degree > 1
-        and model.config.layer.attention.attn_backend != "sdpa"
+    from torchtitan.models.common.attention import ScaledDotProductAttention
+
+    if parallelism.context_parallel_degree > 1 and not isinstance(
+        model.config.layer.attention.inner_attention, ScaledDotProductAttention.Config
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 

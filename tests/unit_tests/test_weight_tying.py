@@ -57,7 +57,6 @@ def _make_config(enable_weight_tying: bool = False):
                 n_heads=4,
                 wqkv=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                attn_backend="sdpa",
                 rope_backend="complex",
             ),
         ),

@@ -515,24 +515,26 @@ class BaseAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
-        attn_backend: str
-        attn_mask_type: str
+        inner_attention: LocalMapInnerAttention.Config
+        mask_type: str
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
-            assert self.attn_backend in [
-                "flex",
-                "varlen",
-                "sdpa",
-            ], f"attn_backend must be one of ['flex', 'varlen', 'sdpa'], got {self.attn_backend}"
-            assert self.attn_mask_type in [
+            assert isinstance(self.inner_attention, LocalMapInnerAttention.Config), (
+                f"inner_attention must be a LocalMapInnerAttention.Config, "
+                f"got {type(self.inner_attention)}"
+            )
+            assert self.mask_type in [
                 "causal",
                 "block_causal",
-            ], f"attn_mask_type must be one of ['causal', 'block_causal'], got {self.attn_mask_type}"
-            if self.attn_backend == "sdpa" and self.attn_mask_type == "block_causal":
+            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
+            if (
+                isinstance(self.inner_attention, ScaledDotProductAttention.Config)
+                and self.mask_type == "block_causal"
+            ):
                 raise ValueError(
-                    "attn_mask_type 'block_causal' is not supported with "
-                    "attn_backend 'sdpa'"
+                    "mask_type 'block_causal' is not supported with "
+                    "ScaledDotProductAttention"
                 )
 
 
@@ -557,8 +559,10 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
-        attn_backend: str = "sdpa"
-        attn_mask_type: str = "causal"
+        inner_attention: LocalMapInnerAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
+        mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
 
         def __post_init__(self):
@@ -602,17 +606,7 @@ class GQAttention(BaseAttention):
             in_features=self.n_heads * self.head_dim, out_features=dim
         )
 
-        self.attn_backend = config.attn_backend
-        self.inner_attention: Module
-        match self.attn_backend:
-            case "flex":
-                self.inner_attention = FlexAttention.Config().build()
-            case "varlen":
-                self.inner_attention = VarlenAttention.Config().build()
-            case "sdpa":
-                self.inner_attention = ScaledDotProductAttention.Config().build()
-            case _:
-                raise ValueError(f"Unknown attention type: {self.attn_backend}")
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,

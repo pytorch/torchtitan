@@ -87,7 +87,6 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                 n_kv_heads=n_kv_heads,
                 wqkv=Linear.Config(),
                 wo=Linear.Config(),
-                attn_backend="sdpa",
                 rope_backend="complex",
             ),
         ),

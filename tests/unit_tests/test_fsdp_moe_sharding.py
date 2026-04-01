@@ -23,6 +23,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.llama4.model import (
     compute_moe_hidden_dim,
@@ -57,8 +58,8 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
                 n_heads=n_heads,
                 wqkv=Linear.Config(),
                 wo=Linear.Config(),
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 rope_backend="complex",
             ),
             moe=MoE.Config(

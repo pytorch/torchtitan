@@ -21,6 +21,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
+    LocalMapInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -42,8 +43,10 @@ class Attention(BaseAttention):
         head_dim: int = 64
         wqkv: Linear.Config
         wo: Linear.Config
-        attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
-        attn_mask_type: str = "causal"
+        inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
+            default_factory=FlexAttention.Config
+        )
+        mask_type: str = "causal"
         sliding_window_size: int = 128
 
     def __init__(self, config: Config, *, dim: int):
@@ -71,8 +74,10 @@ class Attention(BaseAttention):
             in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
-        assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
-        self.inner_attention = FlexAttention.Config().build()
+        assert isinstance(
+            config.inner_attention, FlexAttention.Config
+        ), "gpt-oss only supports FlexAttention"
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -268,7 +273,7 @@ class GptOssModel(Decoder):
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(self.config.layer.attention.sliding_window_size)
         ]
-        match self.config.layer.attention.attn_mask_type:
+        match self.config.layer.attention.mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
@@ -280,7 +285,7 @@ class GptOssModel(Decoder):
                 )
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.layer.attention.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.layer.attention.mask_type}"
                 )
 
         # create basic attention mask: causal or block_causal

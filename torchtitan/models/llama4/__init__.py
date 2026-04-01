@@ -23,6 +23,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.moe.moe import GroupedExperts
 from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
@@ -122,8 +123,8 @@ def _debugmodel():
                 n_heads=n_heads,
                 wqkv=Linear.Config(param_init=_LINEAR_INIT),
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 rope_backend="complex",
             ),
             moe=MoE.Config(
@@ -198,8 +199,8 @@ def _17bx16e():
                 n_kv_heads=n_kv_heads,
                 wqkv=Linear.Config(param_init=_LINEAR_INIT),
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),
@@ -261,8 +262,8 @@ def _17bx128e():
                 n_kv_heads=n_kv_heads,
                 wqkv=Linear.Config(param_init=_LINEAR_INIT),
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 rope_backend="complex",
             ),
         ),

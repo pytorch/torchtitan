@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -88,14 +88,12 @@ class Llama3Model(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layers[0].attention.attn_backend == "varlen"
+            if parallelism.context_parallel_degree > 1 and isinstance(
+                self.layers[0].attention.inner_attention, VarlenAttention.Config
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA and FlexAttention."
-                    f"Got attn_backend='{self.layers[0].attention.attn_backend}'. "
-                    f"Varlen attention is not supported with CP."
+                    "Context Parallel only supports SDPA and FlexAttention. "
+                    "Varlen attention is not supported with CP."
                 )
 
             tp = parallelism.tensor_parallel_degree

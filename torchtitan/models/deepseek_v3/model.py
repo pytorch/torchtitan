@@ -6,7 +6,7 @@
 
 import dataclasses
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    LocalMapInnerAttention,
     ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -48,8 +49,10 @@ class Attention(BaseAttention):
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        attn_backend: str = "sdpa"
-        attn_mask_type: str = "causal"
+        inner_attention: LocalMapInnerAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
+        mask_type: str = "causal"
         mscale: float = 1.0
         rope_factor: float = 1.0
         rope_max_seq_len: int = 4096
@@ -101,16 +104,7 @@ class Attention(BaseAttention):
             mscale = 0.1 * config.mscale * math.log(config.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.attn_backend = config.attn_backend
-        match self.attn_backend:
-            case "flex":
-                from torchtitan.models.common.attention import FlexAttention
-
-                self.inner_attention = FlexAttention.Config().build()
-            case "sdpa":
-                self.inner_attention = ScaledDotProductAttention.Config().build()
-            case _:
-                raise ValueError(f"Unknown attention type: {self.attn_backend}")
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -259,14 +253,14 @@ class DeepSeekV3Model(Decoder):
                         }
                         layer_cfg.moe = DeepEPMoE.Config(**init_kwargs)
 
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layers[0].attention.attn_backend != "sdpa"
+            if parallelism.context_parallel_degree > 1 and not isinstance(
+                self.layers[0].attention.inner_attention,
+                ScaledDotProductAttention.Config,
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA attention. "
-                    f"Got attn_backend='{self.layers[0].attention.attn_backend}'. "
-                    f"FlexAttention and varlen attention are not supported with CP."
+                    "Context Parallel for DeepSeek V3 only supports "
+                    "ScaledDotProductAttention. Got "
+                    f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
 
         def get_nparams_and_flops(

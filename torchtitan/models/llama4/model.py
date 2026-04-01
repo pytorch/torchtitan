@@ -203,7 +203,7 @@ class Llama4Model(Decoder):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-        match self.config.layer.attention.attn_mask_type:
+        match self.config.layer.attention.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -212,7 +212,7 @@ class Llama4Model(Decoder):
                 B = input_batch.shape[0]
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.layer.attention.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.layer.attention.mask_type}"
                 )
 
         assert isinstance(self.config.layer, Llama4TransformerBlock.Config)

@@ -209,8 +209,10 @@ class PolicyTrainer(Actor, Configurable):
         """
 
         # TODO Also support flex attention backend later.
-        assert (
-            model_spec.model.layer.attention.attn_backend == "varlen"
+        from torchtitan.models.common.attention import VarlenAttention
+
+        assert isinstance(
+            model_spec.model.layer.attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
 
         with torch.device("meta"):

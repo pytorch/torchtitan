@@ -15,6 +15,7 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config import DeferredCallable
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
 from torchtitan.protocols.model_spec import ModelSpec
@@ -197,8 +198,8 @@ def _debugmodel_flex_attn():
                 qk_rope_head_dim=rope_dim,
                 v_head_dim=128,
                 mscale=0.70,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq=Linear.Config(param_init=_LINEAR_INIT),
                 wkv_a=Linear.Config(param_init=_LINEAR_INIT),
                 wkv_b=Linear.Config(param_init=_LINEAR_INIT),
@@ -270,8 +271,8 @@ def _16b():
                 qk_rope_head_dim=rope_dim,
                 v_head_dim=128,
                 mscale=0.70,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq=Linear.Config(param_init=_LINEAR_INIT),
                 wkv_a=Linear.Config(param_init=_LINEAR_INIT),
                 wkv_b=Linear.Config(param_init=_LINEAR_INIT),
@@ -346,8 +347,8 @@ def _236b():
                 qk_nope_head_dim=128,
                 qk_rope_head_dim=rope_dim,
                 v_head_dim=128,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq_a=Linear.Config(param_init=_LINEAR_INIT),
                 wq_b=Linear.Config(param_init=_LINEAR_INIT),
                 wkv_a=Linear.Config(param_init=_LINEAR_INIT),
@@ -424,8 +425,8 @@ def _671b():
                 qk_nope_head_dim=128,
                 qk_rope_head_dim=rope_dim,
                 v_head_dim=128,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq_a=Linear.Config(param_init=_LINEAR_INIT),
                 wq_b=Linear.Config(param_init=_LINEAR_INIT),
                 wkv_a=Linear.Config(param_init=_LINEAR_INIT),

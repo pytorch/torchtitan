@@ -37,13 +37,6 @@ __all__ = [
     "parallelize_flux",
 ]
 
-# Flux DiT-style param_init constants:
-# - Modulation weights: zero-init for stable training start
-# - LastLayer output weights: zero-init for output stability
-# - MLPEmbedder (time_in, vector_in): normal(std=0.02)
-# - RMSNorm weights (QKNorm children): ones
-# - Default: xavier_uniform for remaining weights
-# - Default: zeros for all biases
 _ZERO_LINEAR = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
 _XAVIER_LINEAR = {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_}
 _NORMAL_02 = {"weight": partial(nn.init.normal_, std=0.02), "bias": nn.init.zeros_}

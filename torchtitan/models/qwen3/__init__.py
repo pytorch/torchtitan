@@ -3,8 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
+
 
 from copy import deepcopy
 from dataclasses import replace
@@ -16,6 +15,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.config import DeferredCallable
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import (
     depth_scaled_std,
@@ -85,9 +85,6 @@ def _output_linear_init(dim: int):
     }
 
 
-# Adding different variants of the model
-
-
 def _debugmodel():
     dim = 256
     head_dim = 128
@@ -115,7 +112,6 @@ def _debugmodel():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -155,7 +151,8 @@ def _debugmodel_flex():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="flex",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 rope_backend="cos_sin",
             ),
         ),
@@ -195,7 +192,6 @@ def _0_6b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -235,7 +231,6 @@ def _1_7b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -275,7 +270,6 @@ def _4b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -314,7 +308,6 @@ def _8b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -353,7 +346,6 @@ def _14b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -392,7 +384,6 @@ def _32b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -447,7 +438,6 @@ def _debugmodel_moe():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -499,7 +489,6 @@ def _30b_a3b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -551,7 +540,6 @@ def _235b_a22b():
                 wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
                 k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -582,14 +570,40 @@ qwen3_configs = {
 def model_registry(flavor: str, attn_backend_override: str | None = None) -> ModelSpec:
     config = qwen3_configs[flavor]()
     if attn_backend_override is not None:
-        assert attn_backend_override in [
-            "sdpa",
-            "flex",
-            "varlen",
-        ], f"Invalid attn_backend_override: {attn_backend_override}"
-        config.layer.attention.attn_backend = attn_backend_override
-        if attn_backend_override == "varlen":
-            config.layer.attention.attn_mask_type = "block_causal"
+        from torchtitan.models.common import ScaledDotProductAttention
+
+        match attn_backend_override:
+            case "sdpa":
+                config.layer.attention.inner_attention = (
+                    ScaledDotProductAttention.Config()
+                )
+            case "flex":
+                config.layer.attention.inner_attention = FlexAttention.Config()
+                config.layer.attention.mask_type = "block_causal"
+            case "flex_flash":
+                from torchtitan.tools.utils import has_cuda_capability
+
+                if has_cuda_capability(10, 0):
+                    # NOTE: On NVIDIA Blackwell, to use FLASH backend we need
+                    # block size at least (256, 128) due to how the kernel works.
+                    block_size = (256, 128)
+                elif has_cuda_capability(9, 0):
+                    block_size = (128, 128)
+                else:
+                    raise ValueError(
+                        "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+                    )
+                config.layer.attention.inner_attention = FlexAttention.Config(
+                    block_size=block_size, kernel_options={"BACKEND": "FLASH"}
+                )
+                config.layer.attention.mask_type = "block_causal"
+            case "varlen":
+                config.layer.attention.inner_attention = VarlenAttention.Config()
+                config.layer.attention.mask_type = "block_causal"
+            case _:
+                raise ValueError(
+                    f"Invalid attn_backend_override: {attn_backend_override}"
+                )
     expand_layer_configs(config)
     return ModelSpec(
         name="qwen3",
