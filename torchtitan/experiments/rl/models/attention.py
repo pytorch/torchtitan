@@ -15,6 +15,7 @@ from torch.nn.attention import (
 )
 from torchtitan.experiments.rl.batch_invariant import is_batch_invariant_mode_enabled
 from torchtitan.models.common.attention import LocalMapInnerAttention
+from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
@@ -24,6 +25,8 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+
+logger = logging.getLogger(__name__)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
@@ -60,23 +63,16 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # FA3 requires SM 9.0+ (e.g. H100); check capability explicitly because
-        # activate_flash_attention_impl("FA3") succeeds even on SM80.
-        # Fall back to FA2 which requires page_size to be a multiple of 256.
+        # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
-            self._use_fa3 = True
         else:
-            logger.warning(
-                "FA3 not available (requires SM 9.0+), falling back to FA2. "
-                "vLLM block_size must be set to 256 for FA2 paged attention."
+            warn_once(
+                logger,
+                "Using FA2 attention. "
+                "vLLM block_size must be set to 256 for FA2 paged attention.",
             )
-            self._use_fa3 = False
-
-        from torchtitan.experiments.rl.batch_invariant import (
-            is_batch_invariant_mode_enabled,
-        )
 
         self._batch_invariant = is_batch_invariant_mode_enabled()
 
@@ -164,7 +160,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         # FA3 can infer cu_seqlens_k from block_table + seqused_k.
         # FA2 requires cu_seqlens_k to be explicitly set.
-        if self._use_fa3:
+        if current_flash_attention_impl() == "FA3":
             cu_seqlens_k = None
         else:
             num_seqs = seqused_k.shape[0]
@@ -172,9 +168,12 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
                 num_seqs + 1, dtype=torch.int32, device=query.device
             )
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
-        # Force num_splits=1 in batch-invariant mode to prevent
-        # non-deterministic split-k reductions in flash attention.
-        num_splits = 1 if is_batch_invariant_mode_enabled() else 0
+        # FA3 + batch-invariant: fix num_splits=1 to prevent non-deterministic
+        # split-k reductions. FA2 is automatically batch-invariant and does
+        # not accept num_splits.
+        extra_kwargs = {}
+        if self._batch_invariant and current_flash_attention_impl() == "FA3":
+            extra_kwargs["num_splits"] = 1
 
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
@@ -189,11 +188,8 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
             window_size=sliding_window_size,
             block_table=block_table,
             seqused_k=seqused_k,
-            num_splits=num_splits,
+            **extra_kwargs,
         )
-
-
-logger = logging.getLogger(__name__)
 
 
 class VLLMAttentionWrapper(LocalMapInnerAttention):

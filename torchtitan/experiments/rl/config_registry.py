@@ -36,11 +36,6 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        debug=DebugConfig(
-            batch_invariant_mode=True,
-            deterministic=True,
-            seed=42,
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -53,6 +48,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
@@ -78,11 +74,6 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
-        debug=DebugConfig(
-            batch_invariant_mode=True,
-            deterministic=True,
-            seed=42,
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -95,6 +86,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
@@ -133,6 +125,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
@@ -146,6 +139,56 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 temperature=1.0,
                 top_p=0.95,
                 max_tokens=50,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
+    """Batch-invariant GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
+
+    Enables deterministic + batch-invariant mode for bitwise-reproducible
+    training. Use this config for batch invariance testing; do not enable
+    batch_invariant_mode on the base configs as it interferes with weight
+    sync tests.
+    """
+    model_spec = model_registry("0.6B", attn_backend_override="varlen")
+    return RLTrainer.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=10,
+        debug=DebugConfig(
+            batch_invariant_mode=True,
+            deterministic=True,
+            seed=42,
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+            ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
             ),
         ),
     )

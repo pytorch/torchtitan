@@ -36,7 +36,6 @@ Run:
 """
 
 import argparse
-import dataclasses
 import logging
 import os
 
@@ -151,8 +150,8 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
-    if gen_config.seed is not None:
-        engine_kwargs["seed"] = gen_config.seed
+    if gen_config.debug.seed is not None:
+        engine_kwargs["seed"] = gen_config.debug.seed
 
     engine = LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
     if dist.get_rank() == 0:
@@ -176,13 +175,9 @@ def build_trainer_model(
         )
 
         enable_batch_invariant_mode()
+        model_spec.model.layer.attention.inner_attention.batch_invariant = True
 
-        attn_cfg = model_spec.model.layer.attention
-        new_attn = dataclasses.replace(attn_cfg, attn_backend="varlen")
-        new_layer = dataclasses.replace(model_spec.model.layer, attention=new_attn)
-        model_config = dataclasses.replace(model_spec.model, layer=new_layer)
-    else:
-        model_config = model_spec.model
+    model_config = model_spec.model
 
     # Device setup
     device_module, device_type = utils.device_module, utils.device_type
@@ -266,13 +261,7 @@ def compute_trainer_prefill_logprobs(model, token_ids, device):
     seq_len = input_tensor.shape[1]
     positions = torch.arange(seq_len, device=device).unsqueeze(0)
 
-    attn_cfg = getattr(
-        getattr(getattr(model, "config", None), "layer", None), "attention", None
-    )
-    if attn_cfg is not None and getattr(attn_cfg, "attn_backend", None) == "varlen":
-        attention_masks = _make_causal_varlen_metadata(1, seq_len, device)
-    else:
-        attention_masks = None
+    attention_masks = _make_causal_varlen_metadata(1, seq_len, device)
 
     logits = model(input_tensor, attention_masks=attention_masks, positions=positions)
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
@@ -513,7 +502,7 @@ def main():
 
     config = _test_config(
         tp=args.tp,
-        generator_compile_backend=args.generator_compile_backend,
+        generator_compile_backend=args.gen_compile_backend,
         generator_cudagraph_mode=args.generator_cudagraph_mode,
         hf_assets_path=args.hf_assets_path,
     )
@@ -521,7 +510,8 @@ def main():
 
     from torchtitan.tools.utils import has_cuda_capability
 
-    if has_cuda_capability(9, 0):
+    # Hopper (SM 9.0) uses FA3; Blackwell (SM 10.0+) and older use FA2.
+    if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
         from torch.nn.attention import (
             activate_flash_attention_impl,
             current_flash_attention_impl,

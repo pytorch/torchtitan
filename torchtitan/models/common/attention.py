@@ -161,18 +161,23 @@ class VarlenAttention(LocalMapInnerAttention):
         super().__init__(config)
         self.batch_invariant = config.batch_invariant
 
-        # num_splits requires FA3 on Hopper (SM 9.0+). Activate it once when
-        # batch-invariant mode is requested so varlen_attn accepts num_splits.
+        # Hopper (SM 9.0) uses FA3; Blackwell (SM 10.0+) and older use FA2.
         from torchtitan.tools.utils import has_cuda_capability
 
-        if config.batch_invariant and has_cuda_capability(9, 0):
+        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,
             )
 
             if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+                try:
+                    activate_flash_attention_impl("FA3")
+                except Exception as e:
+                    raise RuntimeError(
+                        "VarlenAttention requires FlashAttention v3 on Hopper GPUs. "
+                        "Install it with: pip install flash-attn --no-build-isolation"
+                    ) from e
 
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
@@ -223,9 +228,13 @@ class VarlenAttention(LocalMapInnerAttention):
             window_size=(-1, 0),
         )
         if self.batch_invariant:
-            # Fix split count to 1 to prevent non-deterministic split-k
-            # reductions that vary with batch composition.
-            varlen_kwargs["num_splits"] = 1
+            from torch.nn.attention import current_flash_attention_impl
+
+            if current_flash_attention_impl() == "FA3":
+                # Fix split count to 1 to prevent non-deterministic split-k
+                # reductions that vary with batch composition.
+                # Only needed for FA3; FA2 is automatically batch-invariant.
+                varlen_kwargs["num_splits"] = 1
 
         out_packed = varlen_attn(
             xq_packed,

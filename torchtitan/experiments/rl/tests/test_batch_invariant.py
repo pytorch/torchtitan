@@ -23,6 +23,8 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 
+from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config.configs import DebugConfig
 from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.tools.utils import set_default_dtype
@@ -42,14 +44,31 @@ def _make_varlen_metadata(
     )
 
 
-def _build_debug_model(device="cuda"):
-    """Build a Qwen3 debugmodel with random weights on the given device."""
+def _build_debug_model(
+    debug: DebugConfig,
+    *,
+    dtype: str = "bfloat16",
+    device: str = "cuda",
+):
+    """Build a Qwen3 debugmodel with random weights on the given device.
+
+    Mirrors PolicyTrainer._build_model() — uses DebugConfig to drive
+    batch_invariant and training dtype from config instead of hardcoding.
+    """
+    from torchtitan.models.common.attention import VarlenAttention
     from torchtitan.models.qwen3 import model_registry
 
     model_spec = model_registry("debugmodel", attn_backend_override="varlen")
-    model_spec.model.layer.attention.inner_attention.batch_invariant = True
-    with set_default_dtype(torch.bfloat16):
-        with torch.device("meta"):
+
+    if debug.batch_invariant_mode:
+        assert isinstance(
+            model_spec.model.layer.attention.inner_attention,
+            VarlenAttention.Config,
+        ), "Only varlen attention backend is allowed."
+        model_spec.model.layer.attention.inner_attention.batch_invariant = True
+
+    with torch.device("meta"):
+        with set_default_dtype(TORCH_DTYPE_MAP[dtype]):
             model = model_spec.model.build()
 
     model.to_empty(device=device)
@@ -65,6 +84,7 @@ class TestBatchInvariant(unittest.TestCase):
 
     def setUp(self):
         enable_batch_invariant_mode()
+        self.debug = DebugConfig(batch_invariant_mode=True, deterministic=True)
 
     def test_forward_invariance(self):
         """The same sequence produces bit-identical logits regardless of
@@ -75,7 +95,7 @@ class TestBatchInvariant(unittest.TestCase):
         """
         enable_batch_invariant_mode()
 
-        model, vocab_size = _build_debug_model()
+        model, vocab_size = _build_debug_model(self.debug)
         model.eval()
 
         torch.manual_seed(123)
@@ -123,9 +143,10 @@ class TestBatchInvariant(unittest.TestCase):
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
 
+        debug = DebugConfig(batch_invariant_mode=True, deterministic=True)
         enable_batch_invariant_mode()
 
-        model, vocab_size = _build_debug_model()
+        model, vocab_size = _build_debug_model(debug)
 
         # tp_degree == world_size (all GPUs used for TP)
         with patch("torchtitan.distributed.parallel_dims.device_type", "cuda"):

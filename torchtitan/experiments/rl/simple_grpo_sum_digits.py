@@ -149,17 +149,15 @@ class RLTrainer(Configurable):
                 if not self.debug.deterministic:
                     raise ValueError("batch_invariant_mode requires deterministic=True")
                 if self.trainer.training.dtype != "bfloat16":
-                    logger.warning(
+                    raise ValueError(
                         f"batch_invariant_mode requires bfloat16 training dtype, "
-                        f"overriding {self.trainer.training.dtype!r} -> 'bfloat16'"
+                        f"got {self.trainer.training.dtype!r}"
                     )
-                    self.trainer.training.dtype = "bfloat16"
                 if self.generator.model_dtype != "bfloat16":
-                    logger.warning(
+                    raise ValueError(
                         f"batch_invariant_mode requires bfloat16 generator dtype, "
-                        f"overriding {self.generator.model_dtype!r} -> 'bfloat16'"
+                        f"got {self.generator.model_dtype!r}"
                     )
-                    self.generator.model_dtype = "bfloat16"
 
     def __init__(self, config: Config):
         self.config = config

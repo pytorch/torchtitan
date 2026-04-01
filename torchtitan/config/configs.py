@@ -410,8 +410,8 @@ class DebugConfig:
     Note: incurs significant overhead; for debugging only."""
 
     batch_invariant_mode: bool = False
-    """Enable batch-invariant mode for deterministic NCCL collective
-    operations and bitwise-reproducible forward/backward passes."""
+    """Enable batch-invariant mode to use batch-invariant ops in model
+    forward and deterministic NCCL collective reduction order"""
 
     print_config: bool = False
     """Print the job configs to terminal"""

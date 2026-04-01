@@ -33,6 +33,7 @@ from torchtitan.experiments.rl.actors.utils import (
     compute_token_log_probs,
     verify_logprob_identity,
 )
+from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -101,10 +102,6 @@ class PolicyTrainer(Actor, Configurable):
         # Enable batch-invariant mode BEFORE init_distributed so NCCL env
         # vars are set before the first communicator is created.
         if config.debug.batch_invariant_mode:
-            from torchtitan.experiments.rl.batch_invariant import (
-                enable_batch_invariant_mode,
-            )
-
             enable_batch_invariant_mode()
 
         world_size = dist_utils.init_distributed(config.comm)
@@ -119,9 +116,10 @@ class PolicyTrainer(Actor, Configurable):
             distinct_seed_mesh_dims=["pp"],
         )
 
-        # Activate FA3 when using Hopper machine so that varlen attention
-        # on the trainer uses the same FAv3 kernel as the generator's CUSTOM backend.
-        if config.debug.batch_invariant_mode and has_cuda_capability(9, 0):
+        # Activate FA3 on Hopper so varlen attention on the trainer uses
+        # the same FAv3 kernel as the generator's CUSTOM backend.
+        # Blackwell (SM 10.0+) and older hardware use FA2.
+        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,
