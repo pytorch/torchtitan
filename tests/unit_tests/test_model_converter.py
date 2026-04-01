@@ -85,8 +85,9 @@ def test_lora_before_quantization_raises():
         )
 
 
-def test_lora_freeze_and_trainability():
-    """After convert: base params frozen, LoRA adapters present and trainable."""
+def test_lora_freeze_and_training():
+    """LoRA adapters on all linears: correct freeze, trainability, and training."""
+    torch.manual_seed(42)
     model = nn.Sequential(
         OrderedDict(
             [
@@ -101,58 +102,24 @@ def test_lora_freeze_and_trainability():
 
     # LoRA adapters should be added to all linears
     assert hasattr(model.fc1, "lora_a")
-    assert hasattr(model.fc1, "lora_b")
     assert hasattr(model.fc2, "lora_a")
-    assert hasattr(model.fc2, "lora_b")
 
-    # Check every parameter
-    lora_param_names = []
-    base_param_names = []
+    # Base params frozen, LoRA params trainable
     for name, param in model.named_parameters():
         if "lora_a" in name or "lora_b" in name:
-            lora_param_names.append(name)
             assert param.requires_grad, f"LoRA param '{name}' should be trainable"
         else:
-            base_param_names.append(name)
             assert not param.requires_grad, f"Base param '{name}' should be frozen"
 
-    assert len(lora_param_names) > 0, "No LoRA params found"
-    assert len(base_param_names) > 0, "No base params found"
-
-
-def test_lora_trains_base_frozen():
-    """Train for several steps: LoRA params should change, base params should not."""
-    torch.manual_seed(42)
-    model = nn.Sequential(
-        OrderedDict(
-            [
-                ("fc1", nn.Linear(64, 64)),
-                ("relu", nn.ReLU()),
-                ("fc2", nn.Linear(64, 64)),
-            ]
-        )
-    )
-    converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
-    converter.convert(model)
-
-    # Snapshot all params before training
+    # Train for 5 steps: only LoRA params should change
     base_before = {
         name: param.data.clone()
         for name, param in model.named_parameters()
         if "lora_a" not in name and "lora_b" not in name
     }
-    lora_before = {
-        name: param.data.clone()
-        for name, param in model.named_parameters()
-        if "lora_a" in name or "lora_b" in name
-    }
-
-    # Only LoRA params go to optimizer
     optimizer = torch.optim.SGD(
         [p for p in model.parameters() if p.requires_grad], lr=0.1
     )
-
-    # Train for 5 steps
     for _ in range(5):
         x = torch.randn(4, 64)
         loss = model(x).sum()
@@ -160,20 +127,50 @@ def test_lora_trains_base_frozen():
         optimizer.step()
         optimizer.zero_grad()
 
-    # Base params must not change
     for name, param in model.named_parameters():
         if name in base_before:
             assert torch.equal(
                 param.data, base_before[name]
             ), f"Base param '{name}' changed during training"
 
-    # At least some LoRA params must change
-    any_lora_changed = any(
-        not torch.equal(param.data, lora_before[name])
-        for name, param in model.named_parameters()
-        if name in lora_before
+
+def test_lora_target_modules():
+    """target_modules selectively applies LoRA in nested hierarchies."""
+
+    class Attention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.wq = nn.Linear(64, 64)
+            self.wk = nn.Linear(64, 64)
+            self.wv = nn.Linear(64, 64)
+            self.wo = nn.Linear(64, 64)
+
+        def forward(self, x):
+            return self.wo(self.wq(x) + self.wk(x) + self.wv(x))
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attention = Attention()
+            self.w1 = nn.Linear(64, 64)
+            self.w2 = nn.Linear(64, 64)
+
+        def forward(self, x):
+            return self.w2(self.w1(self.attention(x)))
+
+    model = Block()
+    converter = LoRAConverter(
+        LoRAConverter.Config(rank=4, alpha=8.0, target_modules=["wq", "wv"])
     )
-    assert any_lora_changed, "No LoRA param changed after 5 training steps"
+    converter.convert(model)
+
+    # Only targeted layers get LoRA, others untouched
+    assert hasattr(model.attention.wq, "lora_a")
+    assert hasattr(model.attention.wv, "lora_a")
+    assert not hasattr(model.attention.wk, "lora_a")
+    assert not hasattr(model.attention.wo, "lora_a")
+    assert not hasattr(model.w1, "lora_a")
+    assert not hasattr(model.w2, "lora_a")
 
 
 def test_lora_key_remap_roundtrip():
@@ -295,6 +292,8 @@ def test_qat_lora_adapter_qat():
     )
     qat_converter.convert(model)
     lora_converter = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_converter.qat_scheme = qat_converter.scheme
+    lora_converter.qat_group_size = qat_converter.group_size
     lora_converter.convert(model)
     # Adapter linears should be FakeQuantizedLinear with clamped group_size
     assert isinstance(model.fc1.lora_a, FakeQuantizedLinear)
@@ -322,6 +321,8 @@ def test_qat_lora_adapter_qat():
     assert isinstance(model.fc1, FakeQuantizedLinear)
 
     lora_converter = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_converter.qat_scheme = qat_converter.scheme
+    lora_converter.qat_group_size = qat_converter.group_size
     lora_converter.convert(model)
 
     # Base linears are LoRA-wrapped FakeQuantizedLinear

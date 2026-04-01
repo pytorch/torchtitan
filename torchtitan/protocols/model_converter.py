@@ -93,6 +93,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
             )
             for cc in config.converters
         ]
+        _wire_qat_to_lora(self.converters)
         self.print_after_conversion = config.print_after_conversion
 
     def convert(self, model: nn.Module):
@@ -190,3 +191,17 @@ def _validate_qat_lora_finalize(converters: list[Configurable.Config]):
             "real quantization. With merge_adapter=False, QAT CONVERT will be "
             "skipped at end of training.",
         )
+
+
+def _wire_qat_to_lora(converters: list[ModelConverter]):
+    """Pass QAT scheme/group_size to LoRA so it can fake-quantize adapters."""
+    from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization.qat import QATConverter
+
+    qat_converter = None
+    for c in converters:
+        if isinstance(c, QATConverter):
+            qat_converter = c
+        elif isinstance(c, LoRAConverter) and qat_converter is not None:
+            c.qat_scheme = qat_converter.scheme
+            c.qat_group_size = qat_converter.group_size
