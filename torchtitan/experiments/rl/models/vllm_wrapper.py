@@ -54,6 +54,32 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
+# NOTE: Monkeypatch DTensor placement types' __repr__ to use fully
+# qualified names. vLLM's compilation/codegen.py falls back to repr()
+# when stringifying non-primitive graph args, producing bare names like
+# "Shard(dim=2)". The generated execution_fn is exec'd in a namespace
+# that only does "import torch", so these bare references raise
+# NameError. qwen3's TP parallelize plan emits redistribute(placements=
+# (Shard(1),...)) which hits this path. Returning a qualified name like
+# "torch.distributed.tensor.placement_types.Shard(dim=2)" resolves
+# cleanly against the torch-only globals.
+from torch.distributed.tensor.placement_types import (  # noqa: E402
+    Partial as _Partial,
+    Replicate as _Replicate,
+    Shard as _Shard,
+)
+
+_Shard.__repr__ = (
+    lambda self: f"torch.distributed.tensor.placement_types.Shard(dim={self.dim})"
+)
+_Replicate.__repr__ = (
+    lambda self: "torch.distributed.tensor.placement_types.Replicate()"
+)
+_Partial.__repr__ = (
+    lambda self: f"torch.distributed.tensor.placement_types.Partial({self.reduce_op!r})"
+)
+
+
 def create_torchtitan_config_from_vllm_config(
     vllm_config: VllmConfig,
 ) -> tuple[ParallelDims, ParallelismConfig]:

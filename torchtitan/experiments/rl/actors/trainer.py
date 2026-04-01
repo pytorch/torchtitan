@@ -98,7 +98,7 @@ class PolicyTrainer(Actor, Configurable):
         init_logger()
 
         self.config = config
-        self.loss_fn = config.loss.build()
+        self.loss_fn = config.loss.build(compile_config=config.compile)
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -315,7 +315,7 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        loss, loss_metrics = self.loss_fn(
+        loss, loss_metric_tensors = self.loss_fn(
             policy_logprobs=policy_logprobs,
             advantages=advantages,
         )
@@ -336,6 +336,10 @@ class PolicyTrainer(Actor, Configurable):
         # Backward pass
         self.optimizers.zero_grad()
         loss.backward()
+
+        # Call .item() after backward to match the idiomatic "queue GPU
+        # work first, then sync" pattern.
+        loss_metrics = {k: v.item() for k, v in loss_metric_tensors.items()}
 
         return {
             "loss": loss.item(),

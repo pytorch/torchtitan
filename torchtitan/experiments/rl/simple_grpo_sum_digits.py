@@ -36,7 +36,7 @@ import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.config import CompileConfig, Configurable, ParallelismConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
@@ -46,6 +46,34 @@ from torchtitan.experiments.rl.types import Episode, TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+def _grpo_surrogate(
+    mean_log_ratio: torch.Tensor,
+    advantages: torch.Tensor,
+    clip_eps: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compile-friendly PPO-clipped surrogate over per-sample mean log ratios.
+
+    Takes the already-reduced ``mean_log_ratio`` [batch] tensor (one scalar
+    per sample) — the per-sample ``.mean()`` over variable-length sequences
+    is done in Python before calling this, since padding to a rectangular
+    tensor adds more overhead than it saves. Metrics are returned as
+    on-device tensors so the caller can ``.item()`` them after
+    ``loss.backward()``.
+    """
+    ratio = torch.exp(mean_log_ratio)
+    unclipped_loss = ratio * advantages
+    clipped_ratio = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+    clipped_loss = clipped_ratio * advantages
+    pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
+
+    metrics = {
+        "pg_loss": pg_loss,
+        "ratio_mean": ratio.mean(),
+        "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6).float().mean(),
+    }
+    return pg_loss, metrics
 
 
 class GRPOLoss(Configurable):
@@ -60,35 +88,39 @@ class GRPOLoss(Configurable):
         clip_eps: float = 0.2
         """PPO clipping epsilon for the probability ratio."""
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        *,
+        compile_config: CompileConfig | None = None,
+    ):
         self.clip_eps = config.clip_eps
+
+        loss_fn = _grpo_surrogate
+        if (
+            compile_config is not None
+            and compile_config.enable
+            and "loss" in compile_config.components
+        ):
+            logger.info("Compiling GRPO loss surrogate with torch.compile")
+            loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
+        self._loss_fn = loss_fn
 
     def __call__(
         self,
         policy_logprobs: list[torch.Tensor],
         advantages: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        per_sample_mean_lps = []
-        for policy_lps in policy_logprobs:
-            per_sample_mean_lps.append(policy_lps.mean())
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Returns ``(pg_loss, metrics)`` with metrics as on-device tensors.
 
-        mean_log_ratio = torch.stack(per_sample_mean_lps)
-        ratio = torch.exp(mean_log_ratio)
-
-        unclipped_loss = ratio * advantages
-        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-        clipped_loss = clipped_ratio * advantages
-        pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
-
-        metrics = {
-            "pg_loss": pg_loss.item(),
-            "ratio_mean": ratio.mean().item(),
-            "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
-            .float()
-            .mean()
-            .item(),
-        }
-        return pg_loss, metrics
+        Caller is expected to ``.item()`` the metric values after
+        ``loss.backward()``.
+        """
+        # Per-sample mean over variable-length sequences — kept in Python
+        # because padding to a rectangular tensor costs more than it saves
+        # at typical RL batch sizes (5-16 samples).
+        mean_log_ratio = torch.stack([lps.mean() for lps in policy_logprobs])
+        return self._loss_fn(mean_log_ratio, advantages, self.clip_eps)
 
 
 class Provisioner:
