@@ -12,6 +12,7 @@ from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.hf_datasets.span_detectors import ChatFormat
 from torchtitan.hf_datasets.text_datasets import ChatDataset
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
@@ -486,7 +487,7 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
     def _get_supervised_text(
         self,
         *,
-        detector: str,
+        detector: ChatFormat,
         chat_template: str,
         messages: list[dict[str, str]],
     ) -> str:
@@ -497,7 +498,7 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
             dataset=Dataset.from_list([{"id": 1}]),
             tokenizer=tokenizer,
             sample_processor=lambda sample, messages=messages: messages,
-            span_detection_model_type=detector,
+            chat_format=detector,
             seq_len=512,
             infinite=False,
         )
@@ -683,7 +684,7 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=lambda sample: messages,
-            span_detection_model_type="debugmodel",
+            chat_format="debugmodel",
             seq_len=sample_len * 2,
             infinite=False,
         )

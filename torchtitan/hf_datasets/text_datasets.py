@@ -21,7 +21,7 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.hf_datasets.span_detectors import (
-    SpanDetectionModelType,
+    ChatFormat,
     char_spans_to_token_spans,
     get_span_detector,
 )
@@ -269,7 +269,7 @@ class ChatDataset(IterableDataset, Stateful):
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
         *,
-        span_detection_model_type: SpanDetectionModelType | None = None,
+        chat_format: ChatFormat | None = None,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -287,7 +287,7 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-        self._span_detector = get_span_detector(span_detection_model_type)
+        self._span_detector = get_span_detector(chat_format)
 
         if self._span_detector is not None and not isinstance(
             self._tokenizer, HuggingFaceTokenizer
@@ -558,8 +558,8 @@ class ChatDataLoader(ParallelAwareDataloader):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
-        span_detection_model_type: SpanDetectionModelType | None = None
-        """Model type for assistant-only span detection.
+        chat_format: ChatFormat | None = None
+        """Chat format for assistant-only loss.
         
         Use None to train on the full rendered conversation.
         """
@@ -590,7 +590,7 @@ class ChatDataLoader(ParallelAwareDataloader):
             dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
-            span_detection_model_type=config.span_detection_model_type,
+            chat_format=config.chat_format,
             seq_len=seq_len,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,

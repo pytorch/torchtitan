@@ -13,7 +13,7 @@ from torchtitan.tools.logging import logger, warn_once
 if TYPE_CHECKING:
     from tokenizers import Encoding
 
-SpanDetectionModelType = Literal[
+ChatFormat = Literal[
     "debugmodel",
     "gpt_oss",
     "qwen3",
@@ -167,7 +167,7 @@ def char_spans_to_token_spans(
 
 
 def get_span_detector(
-    model_type: SpanDetectionModelType | None,
+    model_type: ChatFormat | None,
 ) -> RegexSpanDetector | None:
     if model_type is None:
         return None
