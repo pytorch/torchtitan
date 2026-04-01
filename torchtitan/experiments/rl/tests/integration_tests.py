@@ -38,6 +38,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--generator.num_samples_per_prompt 2",
                     "--no_batch_invariant_mode",
+                    "--trainer.compile.no-enable",
                     "--generator.compile.backend none",
                     "--generator.compile.cudagraph_mode none",
                 ],

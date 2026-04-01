@@ -124,14 +124,14 @@ class Qwen3Model(Decoder):
                     debug.moe_force_load_balance
                 )
 
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend == "varlen"
+            from torchtitan.models.common.attention import VarlenAttention
+
+            if parallelism.context_parallel_degree > 1 and isinstance(
+                self.layer.attention.inner_attention, VarlenAttention.Config
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA and FlexAttention."
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
-                    f"Varlen attention is not supported with CP."
+                    "Context Parallel only supports SDPA and FlexAttention. "
+                    "Varlen attention is not supported with CP."
                 )
 
             if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
