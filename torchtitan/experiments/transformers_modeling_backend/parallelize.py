@@ -7,6 +7,24 @@
 import torch
 import torch.nn as nn
 
+# Patch torch.topk to compute values via gather instead of native topk values.
+# torch.topk backward uses aten.scatter.src which crashes on DTensor.
+# gather backward uses aten.scatter_add which works on DTensor.
+# This makes topk safe for DTensor without changing any model code.
+# Native titan avoids this by using topk for indices only + gather for scores
+# (moe.py:274,281). HF routers use topk for both, so we patch topk itself.
+_orig_topk = torch.topk
+
+
+def _topk_with_gather(input, k, dim=-1, largest=True, sorted=True, *, out=None):
+    with torch.no_grad():
+        _, indices = _orig_topk(input, k, dim=dim, largest=largest, sorted=sorted)
+    values = input.gather(dim, indices)
+    return torch.return_types.topk((values, indices))
+
+
+torch.topk = _topk_with_gather
+
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
@@ -220,24 +238,33 @@ def _replicate_gate_params(moe_block: nn.Module, tp_mesh: DeviceMesh):
             )
 
 
-def _gate_to_local_pre_hook(module, args):
-    """Shadow gate weight with local tensor for the HF router forward.
+def _gate_input_to_dtensor_pre_hook(module, args):
+    """Wrap plain tensor gate input as Replicate DTensor if needed.
 
-    The gate weight is a Replicate DTensor on the TP mesh (for FSDP mesh
-    alignment). Shadowing with to_local() ensures F.linear produces a
-    plain tensor output, so topk never sees DTensors (avoiding the
-    aten.scatter.src backward crash).
+    When the gate weight is a Replicate DTensor (from _replicate_gate_params)
+    but the input is a plain tensor (from _moe_to_local_pre_hook), F.linear
+    needs both operands as DTensors.
     """
-    weight = module.weight
-    if isinstance(weight, DTensor):
-        module.__dict__["weight"] = weight.to_local()
+    hidden_states = args[0]
+    if not isinstance(hidden_states, DTensor):
+        weight = module.weight
+        if isinstance(weight, DTensor):
+            hidden_states = DTensor.from_local(
+                hidden_states, weight.device_mesh, (Replicate(),), run_check=False
+            )
+            return (hidden_states,) + args[1:]
     return None
 
 
-def _gate_restore_post_hook(module, args, output):
-    """Restore gate DTensor weight after the forward."""
-    module.__dict__.pop("weight", None)
-    return output
+def _gate_output_to_local_hook(module, args, output):
+    """Convert DTensor gate outputs to local for downstream plain-tensor computation.
+
+    The gate runs on DTensors (Replicate weight from _replicate_gate_params).
+    topk backward is safe thanks to _topk_with_gather, but downstream code
+    (experts for-loop, index_add_) needs plain tensors. This hook converts
+    all DTensor elements in the gate's tuple output to local.
+    """
+    return tuple(o.to_local() if isinstance(o, DTensor) else o for o in output)
 
 
 def _make_moe_to_local_pre_hook(grad_placements):
@@ -636,10 +663,11 @@ def apply_moe_ep_tp(
             # Replicate gate params on TP mesh (FSDP mesh alignment)
             _replicate_gate_params(moe_block, tp_mesh)
 
-            # Shadow gate weight with to_local so F.linear produces plain
-            # output and topk never sees DTensors
-            moe_block.gate.register_forward_pre_hook(_gate_to_local_pre_hook)
-            moe_block.gate.register_forward_hook(_gate_restore_post_hook)
+            # Wrap plain input as DTensor for F.linear compatibility,
+            # then convert DTensor outputs to local for downstream
+            # plain-tensor computation (experts for-loop, index_add_)
+            moe_block.gate.register_forward_pre_hook(_gate_input_to_dtensor_pre_hook)
+            moe_block.gate.register_forward_hook(_gate_output_to_local_hook)
 
             # MoE block TP boundary (TP-only): all-gather input, reduce-
             # scatter output. Must be registered BEFORE to_local hook so
