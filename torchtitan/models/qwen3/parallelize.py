@@ -107,12 +107,10 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
-        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            attn_backend,
         )
 
     if ac_config.mode != "none":

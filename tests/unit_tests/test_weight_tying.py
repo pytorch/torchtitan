@@ -32,7 +32,6 @@ def _make_config(enable_weight_tying: bool = False):
             ),
             attention=GQAttention.Config(
                 n_heads=4,
-                attn_backend="sdpa",
                 rope_backend="complex",
             ),
         ),

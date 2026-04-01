@@ -81,7 +81,6 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
             attention=GQAttention.Config(
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
-                attn_backend="sdpa",
                 rope_backend="complex",
             ),
         ),

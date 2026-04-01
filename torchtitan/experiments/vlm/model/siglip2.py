@@ -13,7 +13,7 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
-    FlexAttentionWrapper,
+    FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
@@ -140,7 +140,7 @@ class Attention(Module):
         self.v_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
         self.out_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
 
-        self.inner_attention = FlexAttentionWrapper()
+        self.inner_attention = FlexAttention.Config().build()
 
     def forward(self, x: torch.Tensor, attention_masks: AttentionMasksType):
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
@@ -148,13 +148,13 @@ class Attention(Module):
         # Use self.head_dim instead of `n_heads` to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
         # after the above linear ops.
-        xq = E.rearrange(xq, "b l (h d) -> b h l d", d=self.head_dim)
-        xk = E.rearrange(xk, "b l (h d) -> b h l d", d=self.head_dim)
-        xv = E.rearrange(xv, "b l (h d) -> b h l d", d=self.head_dim)
+        xq = E.rearrange(xq, "b l (h d) -> b l h d", d=self.head_dim)
+        xk = E.rearrange(xk, "b l (h d) -> b l h d", d=self.head_dim)
+        xv = E.rearrange(xv, "b l (h d) -> b l h d", d=self.head_dim)
 
         assert isinstance(attention_masks, BlockMask)
-        output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        output = E.rearrange(output, "b h l d -> b l (h d)").contiguous()
+        output = self.inner_attention(xq, xk, xv, attention_masks=attention_masks)
+        output = E.rearrange(output, "b l h d -> b l (h d)").contiguous()
 
         return self.out_proj(output)
 

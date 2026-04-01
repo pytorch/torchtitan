@@ -15,8 +15,10 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
+    FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
+    VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
@@ -161,7 +163,7 @@ class Decoder(BaseModel):
         mask_mods = [get_causal_mask_mod()]
         positions = extra_inputs.get("positions") if extra_inputs else None
 
-        match self.attn_config.attn_mask_type:
+        match self.attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -173,11 +175,17 @@ class Decoder(BaseModel):
                 mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.attn_config.attn_mask_type}"
+                    f"Unknown attention mask type: {self.attn_config.mask_type}"
                 )
 
+        assert isinstance(self.attn_config.inner_attention, FlexAttention.Config)
         return create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+            and_masks(*mask_mods),
+            B,
+            None,
+            input_batch.shape[1],
+            input_batch.shape[1],
+            BLOCK_SIZE=self.attn_config.inner_attention.block_size,
         )
 
     def get_attention_masks(
@@ -185,25 +193,26 @@ class Decoder(BaseModel):
         input_batch: torch.Tensor,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        match self.attn_config.attn_backend:
-            case "flex":
-                return self._get_flex_attention_masks(input_batch, extra_inputs)
-            case "varlen":
-                if self.attn_config.attn_mask_type != "block_causal":
-                    raise ValueError(
-                        f"varlen attention is only supported with block_causal "
-                        f"attention mask type, got {self.attn_config.attn_mask_type}"
-                    )
-                positions = (
-                    extra_inputs.get("positions") if extra_inputs else None
+        inner_attn = self.attn_config.inner_attention
+        if isinstance(inner_attn, FlexAttention.Config):
+            return self._get_flex_attention_masks(input_batch, extra_inputs)
+        elif isinstance(inner_attn, VarlenAttention.Config):
+            if self.attn_config.mask_type != "block_causal":
+                raise ValueError(
+                    f"varlen attention is only supported with block_causal "
+                    f"attention mask type, got {self.attn_config.mask_type}"
                 )
-                if positions is None:
-                    raise ValueError(
-                        "block_causal varlen attention requires positions in extra_inputs"
-                    )
-                return create_varlen_metadata_for_document(positions=positions)
-            case _:
-                raise TypeError("Only varlen and flex attn masks are supported")
+            positions = extra_inputs.get("positions") if extra_inputs else None
+            if positions is None:
+                raise ValueError(
+                    "block_causal varlen attention requires positions in extra_inputs"
+                )
+            return create_varlen_metadata_for_document(positions=positions)
+        else:
+            raise TypeError(
+                f"Only VarlenAttention and FlexAttention support attention masks, "
+                f"got {type(inner_attn).__name__}"
+            )
 
     @property
     def attn_config(self):
