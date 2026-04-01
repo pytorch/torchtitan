@@ -65,4 +65,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"Training failed with error: {e}", exc_info=True)
+        sys.exit(1)
