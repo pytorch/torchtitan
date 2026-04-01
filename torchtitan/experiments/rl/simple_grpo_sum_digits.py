@@ -145,30 +145,31 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
+        def __post_init__(self):
+            # Propagate debug settings to sub-configs
+            self.generator.seed = self.debug.seed
+            self.trainer.batch_invariant_mode = self.debug.batch_invariant_mode
+            self.generator.batch_invariant_mode = self.debug.batch_invariant_mode
+
+            # Batch-invariant mode requires bf16 on both trainer and generator
+            # so that attention kernels (FA3) run identically on both sides
+            # without any dtype casting that could break bitwise identity.
+            if self.debug.batch_invariant_mode:
+                if self.trainer.training.dtype != "bfloat16":
+                    logger.warning(
+                        f"batch_invariant_mode requires bfloat16 training dtype, "
+                        f"overriding {self.trainer.training.dtype!r} -> 'bfloat16'"
+                    )
+                    self.trainer.training.dtype = "bfloat16"
+                if self.generator.model_dtype != "bfloat16":
+                    logger.warning(
+                        f"batch_invariant_mode requires bfloat16 generator dtype, "
+                        f"overriding {self.generator.model_dtype!r} -> 'bfloat16'"
+                    )
+                    self.generator.model_dtype = "bfloat16"
+
     def __init__(self, config: Config):
         self.config = config
-
-        # Propagate debug settings to sub-configs
-        config.generator.seed = config.debug.seed
-        config.trainer.batch_invariant_mode = config.debug.batch_invariant_mode
-        config.generator.batch_invariant_mode = config.debug.batch_invariant_mode
-
-        # Batch-invariant mode requires bf16 on both trainer and generator
-        # so that attention kernels (FA3) run identically on both sides
-        # without any dtype casting that could break bitwise identity.
-        if config.debug.batch_invariant_mode:
-            if config.trainer.training.dtype != "bfloat16":
-                logger.warning(
-                    f"batch_invariant_mode requires bfloat16 training dtype, "
-                    f"overriding {config.trainer.training.dtype!r} -> 'bfloat16'"
-                )
-                config.trainer.training.dtype = "bfloat16"
-            if config.generator.model_dtype != "bfloat16":
-                logger.warning(
-                    f"batch_invariant_mode requires bfloat16 generator dtype, "
-                    f"overriding {config.generator.model_dtype!r} -> 'bfloat16'"
-                )
-                config.generator.model_dtype = "bfloat16"
 
         # Patch model_spec to use the RL-specific parallelize function.
         # TODO: Switch to canonical Qwen3 parallel plan
