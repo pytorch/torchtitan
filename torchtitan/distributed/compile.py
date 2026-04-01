@@ -101,6 +101,7 @@ def apply_compile_sparse(
                             # https://github.com/pytorch/torchtitan/issues/1940
                             continue
                         submod.compile(backend=compile_config.backend, fullgraph=True)
+                    moe.compile(backend=compile_config.backend, fullgraph=False)
                 else:
                     submod.compile(backend=compile_config.backend, fullgraph=True)
         else:
