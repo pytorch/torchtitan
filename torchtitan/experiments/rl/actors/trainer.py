@@ -336,7 +336,8 @@ class PolicyTrainer(Actor, Configurable):
 
         # All-reduce gradients across DP ranks so all ranks have consistent
         # weight updates despite processing different data shards.
-        if self.dp_enabled:
+        # Skip when FSDP is active — it handles gradient sync automatically.
+        if self.dp_enabled and self.parallel_dims.dp_shard == 1:
             for param in self.model.parameters():
                 if param.grad is not None:
                     dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
