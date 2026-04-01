@@ -226,8 +226,9 @@ def sft_debugmodel() -> Trainer.Config:
             {"role": "assistant", "content": sample["answer"]},
         ]
 
+    from torchtitan.models.common import FlexAttention
+
     model_spec = model_registry("debugmodel")
-    from torchtitan.models.common.attention import FlexAttention
 
     # pyrefly: ignore [missing-attribute]
     model_spec.model.layer.attention.inner_attention = FlexAttention.Config()

@@ -77,10 +77,8 @@ class Decoder(BaseModel):
         # and Attention. Also RoPE itself as a standalone module requires PP special
         # handling, see below.
         rope: RoPE.Config
-        layer: TransformerBlock.Config  # template; expand_layer_configs() creates per-layer configs
-        layers: list | None = (
-            None  # populated by expand_layer_configs() in the model registry
-        )
+        layer: TransformerBlock.Config
+        layers: list | None = None
 
     def __init__(self, config: Config):
         super().__init__()

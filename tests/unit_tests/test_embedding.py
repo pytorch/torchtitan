@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
-
 import torch.nn as nn
 
 from torchtitan.models.common.embedding import Embedding

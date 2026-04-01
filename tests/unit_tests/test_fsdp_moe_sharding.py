@@ -18,12 +18,12 @@ from torchtitan.models.common import (
     compute_ffn_hidden_dim,
     Embedding,
     FeedForward,
+    FlexAttention,
     GQAttention,
     Linear,
     RMSNorm,
     RoPE,
 )
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.llama4.model import (
     compute_moe_hidden_dim,

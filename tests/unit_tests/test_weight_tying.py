@@ -8,8 +8,8 @@ import unittest
 from functools import partial
 
 import torch.nn as nn
-from torchtitan.config import DeferredCallable
 
+from torchtitan.config import DeferredCallable
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import compute_ffn_hidden_dim, FeedForward
