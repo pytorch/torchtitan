@@ -73,8 +73,6 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
                 "vLLM block_size must be set to 256 for FA2 paged attention.",
             )
 
-        self._batch_invariant = is_batch_invariant_mode_enabled()
-
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
     def forward(
@@ -171,7 +169,10 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
         # split-k reductions. FA2 is automatically batch-invariant and does
         # not accept num_splits.
         extra_kwargs = {}
-        if self._batch_invariant and current_flash_attention_impl() == "FA3":
+        if (
+            is_batch_invariant_mode_enabled()
+            and current_flash_attention_impl() == "FA3"
+        ):
             extra_kwargs["num_splits"] = 1
 
         return torch.nn.attention.varlen.varlen_attn_out(

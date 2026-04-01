@@ -25,23 +25,11 @@ import torch.distributed as dist
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.configs import DebugConfig
+from torchtitan.experiments.rl.actors.utils import build_varlen_metadata
 from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
-from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.tools.utils import set_default_dtype
 
 _SEQ_LEN = 256
-
-
-def _make_varlen_metadata(
-    batch_size: int, seq_len: int, device: str = "cuda"
-) -> VarlenMetadata:
-    """Build VarlenMetadata for a batch of equal-length sequences."""
-    cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=device
-    )
-    return VarlenMetadata(
-        cu_seq_q=cu_seqlens, cu_seq_k=cu_seqlens, max_q=seq_len, max_k=seq_len
-    )
 
 
 def _build_debug_model(
@@ -104,13 +92,18 @@ class TestBatchInvariant(unittest.TestCase):
         ]
 
         with torch.no_grad():
-            single_meta = _make_varlen_metadata(1, _SEQ_LEN)
             outputs_alone = [
-                model(seq, attention_masks=single_meta) for seq in sequences
+                model(
+                    seq,
+                    attention_masks=build_varlen_metadata([(seq[0], 0, 0)], seq.device),
+                )
+                for seq in sequences
             ]
 
             batched = torch.cat(sequences, dim=0)
-            batch_meta = _make_varlen_metadata(len(sequences), _SEQ_LEN)
+            batch_meta = build_varlen_metadata(
+                [(seq[0], 0, 0) for seq in sequences], batched.device
+            )
             output_batched = model(batched, attention_masks=batch_meta)
 
         for i, out_alone in enumerate(outputs_alone):
@@ -179,11 +172,15 @@ class TestBatchInvariant(unittest.TestCase):
 
         with torch.no_grad():
             batch_3 = torch.cat(sequences[:3], dim=0)
-            meta_3 = _make_varlen_metadata(3, _SEQ_LEN)
+            meta_3 = build_varlen_metadata(
+                [(seq[0], 0, 0) for seq in sequences[:3]], batch_3.device
+            )
             out_3 = model(batch_3, attention_masks=meta_3)
 
             batch_5 = torch.cat(sequences, dim=0)
-            meta_5 = _make_varlen_metadata(5, _SEQ_LEN)
+            meta_5 = build_varlen_metadata(
+                [(seq[0], 0, 0) for seq in sequences], batch_5.device
+            )
             out_5 = model(batch_5, attention_masks=meta_5)
 
         for i in range(3):
