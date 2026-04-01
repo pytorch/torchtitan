@@ -161,23 +161,17 @@ class VarlenAttention(LocalMapInnerAttention):
         super().__init__(config)
         self.batch_invariant = config.batch_invariant
 
-        # Hopper (SM 9.0) uses FA3; Blackwell (SM 10.0+) and older use FA2.
         from torchtitan.tools.utils import has_cuda_capability
 
-        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
+        # Hopper (SM 9.0) uses FA3
+        if has_cuda_capability(9, 0):
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,
             )
 
             if current_flash_attention_impl() != "FA3":
-                try:
-                    activate_flash_attention_impl("FA3")
-                except Exception as e:
-                    raise RuntimeError(
-                        "VarlenAttention requires FlashAttention v3 on Hopper GPUs. "
-                        "Install it with: pip install flash-attn --no-build-isolation"
-                    ) from e
+                activate_flash_attention_impl("FA3")
 
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(

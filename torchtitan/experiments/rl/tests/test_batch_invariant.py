@@ -194,4 +194,26 @@ class TestBatchInvariant(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    import argparse
+    import subprocess
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--tp", type=int, default=0, help="TP degree. 0 = single-GPU only."
+    )
+    args, remaining = parser.parse_known_args()
+
+    if args.tp > 0:
+        # Re-launch under torchrun for the TP test
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={args.tp}",
+            "-m",
+            "pytest",
+            __file__ + "::TestBatchInvariant::test_forward_invariance_tp",
+            "-v",
+        ] + remaining
+        sys.exit(subprocess.call(cmd))
+    else:
+        unittest.main(argv=[sys.argv[0]] + remaining)
