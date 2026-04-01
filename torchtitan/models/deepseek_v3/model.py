@@ -9,14 +9,12 @@ import math
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
-from torch.nn.attention.flex_attention import BlockMask
+from torch import nn
 
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    FlexAttentionWrapper,
-    ScaledDotProductAttentionWrapper,
+    ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -104,16 +102,15 @@ class Attention(BaseAttention):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.attn_backend = config.attn_backend
-        self.inner_attention: nn.Module
         match self.attn_backend:
             case "flex":
-                self.inner_attention = FlexAttentionWrapper()
+                from torchtitan.models.common.attention import FlexAttention
+
+                self.inner_attention = FlexAttention.Config().build()
             case "sdpa":
-                self.inner_attention = ScaledDotProductAttentionWrapper()
-            case "varlen":
-                raise ValueError("Varlen attention is not supported with Deepseek V3.")
+                self.inner_attention = ScaledDotProductAttention.Config().build()
             case _:
-                raise ValueError(f"Unknown attention backend: {self.attn_backend}")
+                raise ValueError(f"Unknown attention type: {self.attn_backend}")
 
     def forward(
         self,
@@ -148,21 +145,9 @@ class Attention(BaseAttention):
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        match self.attn_backend:
-            case "flex":
-                assert isinstance(attention_masks, BlockMask)
-                output = self.inner_attention(
-                    q, k, v, block_mask=attention_masks, scale=self.softmax_scale
-                )
-            case _:
-                assert attention_masks is None
-                output = self.inner_attention(q, k, v, scale=self.softmax_scale)
-
-        output = output.transpose(1, 2).contiguous()
+        output = self.inner_attention(
+            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
+        ).contiguous()
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 

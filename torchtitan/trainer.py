@@ -603,21 +603,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # so sequential RoPE positions (positions=None) are correct.
         layer = getattr(self.model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
-        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
-        if attn_mask_type != "block_causal":
+        mask_type = getattr(attn_config, "mask_type", "causal")
+        if mask_type != "block_causal":
             extra_inputs.pop("positions", None)
 
-        attn_backend = getattr(attn_config, "attn_backend", "sdpa")
-        if attn_backend in ["flex", "varlen"]:
-            assert (
-                self.tokenizer is not None
-            ), "tokenizer is required for flex/varlen attention"
-            model = cast(Decoder, self.model_parts[0])
-            extra_kwargs["attention_masks"] = model.get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
+        inner_attention = getattr(attn_config, "inner_attention", None)
+        if inner_attention is not None:
+            from torchtitan.models.common.attention import (
+                FlexAttention,
+                VarlenAttention,
             )
+
+            if isinstance(
+                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+            ):
+                assert (
+                    self.tokenizer is not None
+                ), "tokenizer is required for flex/varlen attention"
+                model = cast(Decoder, self.model_parts[0])
+                extra_kwargs["attention_masks"] = model.get_attention_masks(
+                    input_batch=inputs,
+                    tokenizer=self.tokenizer,
+                    extra_inputs=extra_inputs,
+                )
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

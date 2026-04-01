@@ -17,7 +17,7 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_attention_mask,
-    FlexAttentionWrapper,
+    FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
@@ -72,7 +72,7 @@ class Attention(BaseAttention):
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
-        self.inner_attention = FlexAttentionWrapper()
+        self.inner_attention = FlexAttention.Config().build()
 
     def forward(
         self,
@@ -102,27 +102,23 @@ class Attention(BaseAttention):
 
         q, k = apply_rotary_emb_cos_sin(q, k, freqs_cis, positions)
 
-        xq = q.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = k.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
-        xv = v.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
-
         assert isinstance(attention_masks, BlockMask), attention_masks
+        # FlexAttention handles transpose internally; returns (bs, seq, heads, dim)
+        # and lse as (bs, seq, heads)
         output, lse = self.inner_attention(
-            xq,
-            xk,
-            xv,
-            block_mask=attention_masks,
+            q,
+            k,
+            v,
+            attention_masks=attention_masks,
             scale=self.softmax_scale,
             return_lse=True,
             enable_gqa=self.enable_gqa,
         )
 
         # Apply attention sink rescaling: rescale by sigma(lse - w[h])
-        # This is mathematically equivalent to concatenating learnable sink weights
-        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
+        # output: (bs, seq, heads, dim), lse: (bs, seq, heads)
+        sink_scale = torch.sigmoid(lse - self.sinks.view(1, 1, -1)).unsqueeze(-1)
         output = output * sink_scale.to(output.dtype)
-
-        output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
         # Reshape and project output
         output = output.reshape(
@@ -229,11 +225,6 @@ class GptOssModel(Decoder):
                             "Failed to use grouped mm, which is only supported on SM90 or later",
                         )
                         layer_cfg.moe.experts.use_grouped_mm = False
-
-            if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "CP support for gpt-oss model is still in progress."
-                )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:

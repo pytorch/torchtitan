@@ -127,9 +127,9 @@ def set_determinism(
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.common.attention import FlexAttentionWrapper
+        from torchtitan.models.common.attention import FlexAttention
 
-        FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
+        FlexAttention._compiled_flex_attn = torch.compile(flex_attention)
 
     if debug_config.detect_anomaly:
         logger.warning(
