@@ -125,7 +125,9 @@ class LoRAConverter(Configurable):
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
-        self.target_modules = set(config.target_modules) if config.target_modules else set()
+        self.target_modules = (
+            set(config.target_modules) if config.target_modules else set()
+        )
         self.merge_adapter = config.merge_adapter
         if self.target_modules:
             logger.info(
