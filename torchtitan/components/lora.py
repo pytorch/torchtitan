@@ -94,6 +94,14 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 else:
                     nn.init.zeros_(self.lora_b.weight)
 
+            def named_parameters(self, *args, **kwargs):
+                # Force recurse=False so ColwiseParallel._partition_linear_fn
+                # only sees direct params (weight, bias), not dotted names like
+                # "lora_a.weight". The adapter submodules are visited separately
+                # by distribute_module and made Replicate automatically.
+                kwargs["recurse"] = False
+                yield from super().named_parameters(*args, **kwargs)
+
             def forward(self, input: torch.Tensor) -> torch.Tensor:
                 base_out = super().forward(input)
                 lora_out = self.lora_b(self.lora_a(input))
@@ -264,7 +272,14 @@ def apply_expert_lora(
 
 
 class LoRAConverter(Configurable):
-    """Apply LoRA adapters to all Linear layers and GroupedExperts in a model."""
+    """Apply LoRA adapters to Linear layers and GroupedExperts in a model.
+
+    When ``target_modules`` is None (default), every ``nn.Linear`` (except
+    router gates) and ``GroupedExperts`` receives a LoRA adapter.  When
+    specified, only modules whose attribute name matches one of the entries
+    are converted (e.g. ``["wq", "wv"]`` targets the query and value
+    projections).
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -273,6 +288,10 @@ class LoRAConverter(Configurable):
 
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
+
+        target_modules: list[str] | None = None
+        """Module attribute names to apply LoRA to (e.g. ["wq", "wv"]).
+        None means all nn.Linear layers."""
 
         merge_adapter: bool = False
         """When True, adapters are folded into base weights
@@ -283,8 +302,21 @@ class LoRAConverter(Configurable):
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
+        self.target_modules = set(config.target_modules) if config.target_modules else set()
         self.merge_adapter = config.merge_adapter
-        logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
+        # Set by ModelConvertersContainer when QAT is also active.
+        self.qat_scheme: str | None = None
+        self.qat_group_size: int = 128
+        if self.target_modules:
+            logger.info(
+                f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
+                f"target_modules={sorted(self.target_modules)}"
+            )
+        else:
+            logger.info(
+                f"LoRA training active with rank={self.rank}, alpha={self.alpha} "
+                f"(all Linear layers)"
+            )
 
     @staticmethod
     def _is_lora_key(key: str) -> bool:
@@ -353,6 +385,17 @@ class LoRAConverter(Configurable):
         if dist.is_initialized():
             dist.barrier()
 
+    @staticmethod
+    def _lora_module_names(state_dict: dict[str, Any]) -> set[str]:
+        """Extract leaf module names that have LoRA keys in a state dict."""
+        names = set()
+        for k in state_dict:
+            for marker in (".lora_a.", ".lora_b."):
+                if marker in k:
+                    names.add(k.rsplit(marker, 1)[0].rsplit(".", 1)[-1])
+                    break
+        return names
+
     def _load_peft(
         self,
         path: str,
@@ -363,6 +406,9 @@ class LoRAConverter(Configurable):
 
         Loads ``adapter_model.safetensors``, remaps keys from HF PEFT naming
         to torchtitan naming, and broadcasts from rank 0.
+
+        Warns when the loaded adapter targets different modules than
+        the current model's LoRA modules.
         """
         import functools
 
@@ -372,6 +418,28 @@ class LoRAConverter(Configurable):
         adapter_sd = load_file(safetensors_path)
         if hooks.from_hf_map is not None:
             adapter_sd = remap_lora_keys_from_hf(adapter_sd, hooks.from_hf_map)
+
+        # Warn on mismatch between checkpoint and model LoRA targets
+        ckpt_targets = self._lora_module_names(adapter_sd)
+        model_targets = {
+            name.rsplit(".", 1)[-1]
+            for part in model_parts
+            for name, mod in part.named_modules()
+            if hasattr(mod, "lora_a")
+        }
+        only_in_ckpt = ckpt_targets - model_targets
+        only_in_model = model_targets - ckpt_targets
+        if only_in_ckpt:
+            logger.warning(
+                f"Loaded adapter has LoRA for {sorted(only_in_ckpt)} but the "
+                f"current model does not (will be ignored)."
+            )
+        if only_in_model:
+            logger.warning(
+                f"Current model has LoRA for {sorted(only_in_model)} but the "
+                f"loaded adapter does not (will start from init)."
+            )
+
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=adapter_sd,
@@ -387,13 +455,11 @@ class LoRAConverter(Configurable):
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
 
-        # If QATConverter was applied before LoRA, apply the same QAT to
-        # the newly created adapter linears. QATConverter stores its config
-        # on the model as _qat_scheme / _qat_group_size.
-        qat_scheme = getattr(model, "_qat_scheme", None)
-        if qat_scheme is not None:
-            qat_group_size = getattr(model, "_qat_group_size", 128)
-            self._apply_adapter_qat(model, qat_scheme, qat_group_size)
+        # QATConverter must run before LoRAConverter: quantize_() replaces
+        # nn.Linear via from_linear() which discards lora_a/lora_b.
+        # With QAT first, LoRA inherits from FakeQuantizedLinear instead.
+        if self.qat_scheme is not None:
+            self._apply_adapter_qat(model, self.qat_scheme, self.qat_group_size)
 
         if self.merge_adapter:
             hooks = ConverterCheckpointHooks(key_filter=self._is_lora_key)
@@ -405,41 +471,54 @@ class LoRAConverter(Configurable):
             )
         model._converter_hooks = hooks  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _qat_compatible(rank: int, scheme: str, group_size: int) -> bool:
+        """Check if QAT scheme is compatible with the given in_features size.
+
+        Tests prepare + forward on a temporary linear, since some schemes
+        (e.g. int4_weight_only) only fail at forward time.
+        """
+        import torch
+
+        from torchtitan.components.quantization.qat import apply_qat_prepare
+
+        try:
+            probe = nn.ModuleDict(
+                {"l": nn.Linear(rank, rank, bias=False).to("cuda")}
+            )
+            apply_qat_prepare(probe, scheme, group_size)
+            probe.l(torch.randn(1, rank, device="cuda", dtype=probe.l.weight.dtype))
+            return True
+        except (ValueError, RuntimeError, AssertionError):
+            return False
+
     def _apply_adapter_qat(
         self, model: nn.Module, scheme: str, group_size: int
     ) -> None:
-        """Apply QAT fake quantization to LoRA adapter linears (lora_a, lora_b).
+        """Apply QAT to LoRA adapter linears.
 
-        For schemes with per-group quantization, the group_size is clamped to
-        the LoRA rank so that lora_b (weight shape: out_features x rank) is
-        compatible.
+        Always applies to lora_a. For lora_b, skips if rank is incompatible
+        with the scheme's block/group size (Unsloth approach).
         """
-        from torchtitan.components.quantization.qat import (
-            _SCHEMES_WITH_GROUP_SIZE,
-            apply_qat_prepare,
-        )
+        from torchtitan.components.quantization.qat import apply_qat_prepare
 
-        # Clamp group_size to rank for per-group schemes so lora_b's
-        # in_features (= rank) dimension is divisible.
-        adapter_group_size = group_size
-        if scheme in _SCHEMES_WITH_GROUP_SIZE:
-            adapter_group_size = min(group_size, self.rank)
-            if adapter_group_size != group_size:
-                logger.info(
-                    f"Adapter QAT: clamped group_size from {group_size} to "
-                    f"{adapter_group_size} to fit LoRA rank={self.rank}"
-                )
+        def _is_lora(suffix: str):
+            def fn(mod: nn.Module, fqn: str) -> bool:
+                return isinstance(mod, nn.Linear) and fqn.endswith(suffix)
 
-        def _is_lora_linear(mod: nn.Module, fqn: str) -> bool:
-            return isinstance(mod, nn.Linear) and (
-                fqn.endswith(".lora_a") or fqn.endswith(".lora_b")
+            return fn
+
+        apply_qat_prepare(model, scheme, group_size, filter_fn=_is_lora(".lora_a"))
+
+        skip_lora_b = not self._qat_compatible(self.rank, scheme, group_size)
+        if not skip_lora_b:
+            apply_qat_prepare(
+                model, scheme, group_size, filter_fn=_is_lora(".lora_b")
             )
 
-        apply_qat_prepare(model, scheme, adapter_group_size, filter_fn=_is_lora_linear)
-
         logger.info(
-            f"Applied adapter QAT fake quantization "
-            f"(scheme={scheme}, group_size={adapter_group_size})"
+            f"Applied adapter QAT (scheme={scheme}, group_size={group_size}, "
+            f"lora_b={'skipped' if skip_lora_b else 'applied'})"
         )
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
@@ -450,11 +529,24 @@ class LoRAConverter(Configurable):
             if isinstance(child, TokenChoiceTopKRouter):
                 router_gate_ids.add(id(child.gate))
 
-        for _, child in list(module.named_modules()):
-            if isinstance(child, nn.Linear) and id(child) not in router_gate_ids:
-                apply_lora(child, self.rank, self.alpha)
-            elif isinstance(child, GroupedExperts):
-                apply_expert_lora(child, self.rank, self.alpha)
+        matched = set()
+        for _, parent in list(module.named_modules()):
+            for attr_name, child in list(parent.named_children()):
+                if self.target_modules and attr_name not in self.target_modules:
+                    continue
+                if isinstance(child, nn.Linear) and id(child) not in router_gate_ids:
+                    apply_lora(child, self.rank, self.alpha)
+                    matched.add(attr_name)
+                elif isinstance(child, GroupedExperts):
+                    apply_expert_lora(child, self.rank, self.alpha)
+                    matched.add(attr_name)
+        unmatched = self.target_modules - matched
+        if unmatched:
+            logger.warning(
+                f"LoRA target_modules {sorted(unmatched)} did not match any "
+                f"nn.Linear or GroupedExperts in the model. "
+                f"Check module attribute names."
+            )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass

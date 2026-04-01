@@ -61,7 +61,9 @@ def _build_base_config(scheme: str, group_size: int):
     elif scheme == "float8_dynamic_act_float8_weight":
         from torchao.quantization import Float8DynamicActivationFloat8WeightConfig
 
-        return Float8DynamicActivationFloat8WeightConfig()
+        return Float8DynamicActivationFloat8WeightConfig(
+            activation_value_lb=1e-12,
+        )
 
     elif scheme == "float8_dynamic_act_int4_weight":
         from torchao.quantization import Float8DynamicActivationInt4WeightConfig
@@ -211,11 +213,6 @@ class QATConverter(Configurable):
 
     def convert(self, model: nn.Module) -> None:
         apply_qat_prepare(model, self.scheme, self.group_size)
-
-        # Store QAT config on the model so downstream converters (e.g. LoRA)
-        # can apply the same QAT to newly created modules.
-        model._qat_scheme = self.scheme  # type: ignore[attr-defined]
-        model._qat_group_size = self.group_size  # type: ignore[attr-defined]
 
         logger.info(
             f"Applied QAT fake quantization (scheme={self.scheme}, "
