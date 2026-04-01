@@ -7,7 +7,14 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
+from torchtitan.models.common import (
+    Embedding,
+    FeedForward,
+    FlexAttention,
+    Linear,
+    RMSNorm,
+    RoPE,
+)
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
@@ -103,8 +110,8 @@ deepseekv3_configs = {
                 qk_rope_head_dim=64,
                 v_head_dim=128,
                 mscale=0.70,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq=Linear.Config(),
             ),
             feed_forward=FeedForward.Config(
@@ -154,8 +161,8 @@ deepseekv3_configs = {
                 qk_rope_head_dim=64,
                 v_head_dim=128,
                 mscale=0.70,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq=Linear.Config(),
             ),
             feed_forward=FeedForward.Config(
@@ -207,8 +214,8 @@ deepseekv3_configs = {
                 qk_nope_head_dim=128,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq_a=Linear.Config(),
                 wq_b=Linear.Config(),
             ),
@@ -262,8 +269,8 @@ deepseekv3_configs = {
                 qk_nope_head_dim=128,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
+                inner_attention=FlexAttention.Config(),
+                mask_type="block_causal",
                 wq_a=Linear.Config(),
                 wq_b=Linear.Config(),
             ),

@@ -35,6 +35,7 @@ from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.protocols import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
+
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: DeepSeekV3Model,
@@ -116,17 +117,10 @@ def parallelize_deepseekv3(
         )
 
     if parallel_dims.cp_enabled:
-        if parallel_dims.tp_enabled:
-            raise NotImplementedError(
-                "Context Parallel with Tensor Parallel is not yet supported for DeepSeek-V3. "
-                "See https://github.com/pytorch/torchtitan/issues/2446"
-            )
-        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            attn_backend,
         )
 
     model_compile_enabled = (

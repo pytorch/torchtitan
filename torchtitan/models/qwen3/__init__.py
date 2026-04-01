@@ -10,7 +10,15 @@ import copy
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
+from torchtitan.models.common import (
+    Embedding,
+    FeedForward,
+    FlexAttention,
+    GQAttention,
+    Linear,
+    RoPE,
+    VarlenAttention,
+)
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -48,36 +56,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
-                rope_backend="cos_sin",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=128,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
-    ),
-    "debugmodel_flex": Qwen3Model.Config(
-        vocab_size=2048,
-        dim=256,
-        n_layers=8,
-        norm=RMSNorm.Config(eps=1e-6),
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(),
-        output=Linear.Config(),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6),
-            ffn_norm=RMSNorm.Config(eps=1e-6),
-            feed_forward=FeedForward.Config(hidden_dim=3072),
-            attention=GQAttention.Config(
-                n_heads=16,
-                n_kv_heads=8,
-                head_dim=128,
-                q_norm=RMSNorm.Config(eps=1e-6),
-                k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="flex",
                 rope_backend="cos_sin",
             ),
         ),
@@ -108,7 +86,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -139,7 +116,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -170,7 +146,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -200,7 +175,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -230,7 +204,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -260,7 +233,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -303,7 +275,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -345,7 +316,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -387,7 +357,6 @@ qwen3_configs = {
                 head_dim=128,
                 q_norm=RMSNorm.Config(eps=1e-6),
                 k_norm=RMSNorm.Config(eps=1e-6),
-                attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
         ),
@@ -404,14 +373,41 @@ qwen3_configs = {
 def model_registry(flavor: str, attn_backend_override: str | None = None) -> ModelSpec:
     model = copy.deepcopy(qwen3_configs[flavor])
     if attn_backend_override is not None:
-        assert attn_backend_override in [
-            "sdpa",
-            "flex",
-            "varlen",
-        ], f"Invalid attn_backend_override: {attn_backend_override}"
-        model.layer.attention.attn_backend = attn_backend_override
-        if attn_backend_override == "varlen":
-            model.layer.attention.attn_mask_type = "block_causal"
+        from torchtitan.models.common import ScaledDotProductAttention
+
+        match attn_backend_override:
+            case "sdpa":
+                model.layer.attention.inner_attention = (
+                    ScaledDotProductAttention.Config()
+                )
+            case "flex":
+                model.layer.attention.inner_attention = FlexAttention.Config()
+                model.layer.attention.mask_type = "block_causal"
+            case "flex_flash":
+                from torchtitan.tools.utils import has_cuda_capability
+
+                if has_cuda_capability(10, 0):
+                    # NOTE: On NVIDIA Blackwell, to use FLASH backend we need
+                    # block size at least (256, 128) due to how the kernel works.
+                    block_size = (256, 128)
+                elif has_cuda_capability(9, 0):
+                    block_size = (128, 128)
+                else:
+                    raise ValueError(
+                        "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+                    )
+                model.layer.attention.inner_attention = FlexAttention.Config(
+                    block_size=block_size, kernel_options={"BACKEND": "FLASH"}
+                )
+                model.layer.attention.mask_type = "block_causal"
+            case "varlen":
+                model.layer.attention.inner_attention = VarlenAttention.Config()
+                model.layer.attention.mask_type = "block_causal"
+            case _:
+                raise ValueError(
+                    f"Invalid attn_backend_override: {attn_backend_override}"
+                )
+
     return ModelSpec(
         name="qwen3",
         flavor=flavor,

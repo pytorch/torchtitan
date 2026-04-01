@@ -13,17 +13,8 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    GQAttention,
-    LocalMapAttention,
-)
-from torchtitan.models.common.rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-)
+from torchtitan.models.common.attention import LocalMapInnerAttention
 from torchtitan.tools.utils import has_cuda_capability
-
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import (
@@ -194,17 +185,17 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 logger = logging.getLogger(__name__)
 
 
-class VLLMInnerAttention(LocalMapAttention):
+class VLLMAttentionWrapper(LocalMapInnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
     but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
 
-    Called by :class:`VLLMGQAttention` with ``(bs, seq, heads, dim)`` layout
-    (heads on dim 2). DTensor with ``Shard(2)`` placements is handled by
-    the base class ``LocalMapAttention.__call__``.
+    Receives ``(bs, seq, heads, dim)`` layout from GQAttention. DTensor with
+    ``Shard(2)`` placements is handled by the base class
+    ``LocalMapInnerAttention.__call__``.
 
-    Used by the **generator** (via :class:`VLLMGQAttention`).
+    Used as ``inner_attention`` in GQAttention via Config-based construction.
     """
 
     # vLLM requires a unique prefix per Attention layer for
@@ -214,40 +205,61 @@ class VLLMInnerAttention(LocalMapAttention):
     # where layers are built on different ranks.
     _layer_counter: itertools.count = itertools.count()
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        scale: float | None = None,
-    ) -> None:
-        super().__init__()
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalMapInnerAttention.Config):
+        hidden_size: int
+        num_heads: int
+        num_kv_heads: int
+        head_dim: int
+        scale: float | None = None
 
-        self.hidden_size = hidden_size
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
 
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        tp_degree = vllm_config.parallel_config.tensor_parallel_size
 
+        num_heads = config.num_heads
+        num_kv_heads = config.num_kv_heads
+
+        if num_kv_heads < tp_degree:
+            raise ValueError(
+                f"num_kv_heads ({num_kv_heads}) must be >= "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        if num_kv_heads % tp_degree != 0:
+            raise ValueError(
+                f"num_kv_heads ({num_kv_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        if num_heads % tp_degree != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+
+        num_heads = num_heads // tp_degree
+        num_kv_heads = num_kv_heads // tp_degree
+        head_dim = config.head_dim
+        scale = config.scale if config.scale is not None else head_dim**-0.5
+
+        self.hidden_size = config.hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-
-        if scale is None:
-            self.scale = head_dim**-0.5
-        else:
-            self.scale = scale
+        self.scale = scale
 
         cache_config = (
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
-        layer_id = next(VLLMInnerAttention._layer_counter)
+        layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
-            scale=self.scale,
+            scale=scale,
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
@@ -259,14 +271,9 @@ class VLLMInnerAttention(LocalMapAttention):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
-
-        Called by :class:`VLLMGQAttention` which passes tensors in
-        ``(batch, seq_len, num_heads, head_dim)`` layout — the natural
-        contiguous layout after QKV projection + RoPE. This allows a
-        zero-copy reshape to ``(batch*seq_len, num_heads, head_dim)``
-        for vLLM.
 
         Args:
             q: ``(batch, seq_len, num_heads, head_dim)``
@@ -274,10 +281,12 @@ class VLLMInnerAttention(LocalMapAttention):
             v: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, seq_len, num_heads * head_dim)`` — ready for ``wo``
+            ``(batch, seq_len, num_heads * head_dim)`` — ready for
+            ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
         batch_size, seq_len, _, head_dim = q.shape
 
+        # vllm attention expects (bs*seqlen, n_heads, head_dim)
         # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
         q = q.reshape(batch_size * seq_len, -1, head_dim)
         k = k.reshape(batch_size * seq_len, -1, head_dim)
@@ -290,84 +299,7 @@ class VLLMInnerAttention(LocalMapAttention):
         # shape under torch.compile.  Narrow to trim this padding.
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # (bs*seq, heads*dim) -> (bs, seq, heads*dim)
-        return output_flat.view(batch_size, seq_len, -1)
+        # Reshape back to the format expected by GQAttention.forward()
+        output = output_flat.view(batch_size, seq_len, -1, head_dim)
 
-
-class VLLMGQAttention(GQAttention):
-    """GQAttention subclass with zero-copy path for vLLM attention.
-
-    Eliminates redundant transposes between GQAttention and VLLMInnerAttention.
-
-    Standard GQAttention + VLLMInnerAttention flow:
-      (bs,seq,heads,dim) -> transpose -> (bs,heads,seq,dim)
-      -> VLLMInnerAttention transpose back -> (bs*seq,heads,dim)
-      -> vllm_attn -> reshape -> transpose  (4 layout ops)
-
-    This subclass:
-      (bs,seq,heads,dim) -> reshape -> (bs*seq,heads,dim)  (1 zero-copy op)
-      -> vllm_attn -> view -> (bs,seq,hidden)
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GQAttention.Config):
-        attn_backend: str = "varlen"
-
-    def __init__(self, config: Config, *, dim: int):
-        super().__init__(config, dim=dim)
-
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-        tp_degree = vllm_config.parallel_config.tensor_parallel_size
-
-        n_heads = config.n_heads
-        n_kv_heads = config.n_kv_heads or config.n_heads
-        head_dim = config.head_dim if config.head_dim is not None else dim // n_heads
-
-        if n_kv_heads < tp_degree:
-            raise ValueError(
-                f"n_kv_heads ({n_kv_heads}) must be >= "
-                f"tensor_parallel_size ({tp_degree})"
-            )
-        assert n_kv_heads % tp_degree == 0
-        assert n_heads % tp_degree == 0
-
-        self.inner_attention = VLLMInnerAttention(
-            hidden_size=dim,
-            num_heads=n_heads // tp_degree,
-            num_kv_heads=n_kv_heads // tp_degree,
-            head_dim=head_dim,
-            scale=head_dim**-0.5,
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        rope_cache: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
-
-        if self.q_norm is not None:
-            xq = self.q_norm(xq)
-        if self.k_norm is not None:
-            xk = self.k_norm(xk)
-
-        if self.use_rope:
-            if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
-            else:
-                xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
-                )
-
-        output = self.inner_attention(xq, xk, xv)
-
-        return self.wo(output)
+        return output
