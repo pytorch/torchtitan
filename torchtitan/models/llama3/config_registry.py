@@ -157,7 +157,6 @@ def llama3_debugmodel_qat_lora() -> Trainer.Config:
     return config
 
 
-
 def llama3_debugmodel_qat_lora_int8act() -> Trainer.Config:
     """QAT (int8_dynamic_act_intx_weight, group_size=8) + LoRA rank=8."""
     config = llama3_debugmodel()
