@@ -97,7 +97,7 @@ def _test_config(
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path=hf_assets_path,
-        batch_invariant_mode=True,
+        debug=RLTrainer.Config.RLDebugConfig(batch_invariant_mode=True),
         trainer=PolicyTrainer.Config(
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
@@ -128,7 +128,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    if config.batch_invariant_mode:
+    if config.debug.batch_invariant_mode:
         from torchtitan.experiments.rl.batch_invariant import (
             enable_batch_invariant_mode,
         )
@@ -170,7 +170,7 @@ def build_trainer_model(
     model_spec = config.model_spec
     hf_assets_path = config.hf_assets_path
 
-    if config.batch_invariant_mode:
+    if config.debug.batch_invariant_mode:
         from torchtitan.experiments.rl.batch_invariant import (
             enable_batch_invariant_mode,
         )

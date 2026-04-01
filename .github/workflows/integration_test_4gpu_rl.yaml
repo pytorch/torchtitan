@@ -45,7 +45,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 90
+      timeout: 45
       script: |
         set -eux
 
@@ -67,8 +67,7 @@ jobs:
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
 
-        # 2. Install Flash Attention 3 kernels and batch-invariant ops
-        uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
+        # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
         # 3. Install PyTorch nightly, vllm, and xformers

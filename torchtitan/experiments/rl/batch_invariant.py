@@ -26,15 +26,11 @@ Usage:
 
 import logging
 import os
-from typing import Any
 
 import torch
 
 # https://github.com/thinking-machines-lab/batch_invariant_ops.
-from batch_invariant_ops import (
-    disable_batch_invariant_mode as _upstream_disable,
-    enable_batch_invariant_mode as _upstream_enable,
-)
+from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +38,6 @@ logger = logging.getLogger(__name__)
 # Enable / disable
 # ---------------------------------------------------------------------------
 
-_SAVED_STATE: dict[str, Any] | None = None
 _enabled: bool = False
 
 
@@ -66,21 +61,12 @@ def enable_batch_invariant_mode() -> None:
 
     Safe to call multiple times (idempotent).
     """
-    global _SAVED_STATE, _enabled
+    global _enabled
     if _enabled:
         return
 
     # Register batch-invariant ATen overrides via upstream package
     _upstream_enable()
-
-    # Save current state for restoration
-    _SAVED_STATE = {
-        "bf16": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
-        "fp16": torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction,
-        "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
-        "tf32_cudnn": torch.backends.cudnn.allow_tf32,
-        "deterministic": torch.are_deterministic_algorithms_enabled(),
-    }
 
     # Set NCCL env vars for deterministic inter-GPU collectives.
     # Must be set BEFORE dist.init_process_group.
@@ -115,25 +101,3 @@ def enable_batch_invariant_mode() -> None:
         "overridden with Triton kernels (via batch_invariant_ops); "
         "reduced-precision reductions and TF32 disabled"
     )
-
-
-def disable_batch_invariant_mode() -> None:
-    """Unregister batch-invariant ATen overrides and restore settings."""
-    global _SAVED_STATE, _enabled
-
-    # Unregister upstream ATen overrides
-    _upstream_disable()
-
-    # Restore saved settings
-    if _SAVED_STATE is not None:
-        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
-            _SAVED_STATE["bf16"]
-        )
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
-            _SAVED_STATE["fp16"]
-        )
-        torch.backends.cuda.matmul.allow_tf32 = _SAVED_STATE["tf32_matmul"]
-        torch.backends.cudnn.allow_tf32 = _SAVED_STATE["tf32_cudnn"]
-        torch.use_deterministic_algorithms(_SAVED_STATE["deterministic"])
-    _SAVED_STATE = None
-    _enabled = False

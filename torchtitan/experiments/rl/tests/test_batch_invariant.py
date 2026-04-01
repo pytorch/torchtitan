@@ -13,33 +13,41 @@ the generator produces sequences individually but the trainer processes them
 as a batch.
 
 Single-GPU test: run with pytest.
-TP test: torchrun --nproc_per_node=<N> -m pytest <file>::TestBatchInvariant::test_forward_invariance_tp -v --tp <N>
+TP test: torchrun --nproc_per_node=<N> -m pytest <file>::TestBatchInvariant::test_forward_invariance_tp -v
 """
 
-import argparse
 import os
-import sys
 import unittest
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 
-from torchtitan.experiments.rl.batch_invariant import (
-    disable_batch_invariant_mode,
-    enable_batch_invariant_mode,
-)
+from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
+from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.tools.utils import set_default_dtype
 
 _SEQ_LEN = 256
-_TP_DEGREE = None  # Set via --tp flag
+
+
+def _make_varlen_metadata(
+    batch_size: int, seq_len: int, device: str = "cuda"
+) -> VarlenMetadata:
+    """Build VarlenMetadata for a batch of equal-length sequences."""
+    cu_seqlens = torch.arange(
+        0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=device
+    )
+    return VarlenMetadata(
+        cu_seq_q=cu_seqlens, cu_seq_k=cu_seqlens, max_q=seq_len, max_k=seq_len
+    )
 
 
 def _build_debug_model(device="cuda"):
     """Build a Qwen3 debugmodel with random weights on the given device."""
     from torchtitan.models.qwen3 import model_registry
 
-    model_spec = model_registry("debugmodel")
+    model_spec = model_registry("debugmodel", attn_backend_override="varlen")
+    model_spec.model.layer.attention.inner_attention.batch_invariant = True
     with set_default_dtype(torch.bfloat16):
         with torch.device("meta"):
             model = model_spec.model.build()
@@ -56,10 +64,7 @@ class TestBatchInvariant(unittest.TestCase):
     """Test batch invariance on Qwen3 debugmodel."""
 
     def setUp(self):
-        disable_batch_invariant_mode()
-
-    def tearDown(self):
-        disable_batch_invariant_mode()
+        enable_batch_invariant_mode()
 
     def test_forward_invariance(self):
         """The same sequence produces bit-identical logits regardless of
@@ -79,10 +84,14 @@ class TestBatchInvariant(unittest.TestCase):
         ]
 
         with torch.no_grad():
-            outputs_alone = [model(seq) for seq in sequences]
+            single_meta = _make_varlen_metadata(1, _SEQ_LEN)
+            outputs_alone = [
+                model(seq, attention_masks=single_meta) for seq in sequences
+            ]
 
             batched = torch.cat(sequences, dim=0)
-            output_batched = model(batched)
+            batch_meta = _make_varlen_metadata(len(sequences), _SEQ_LEN)
+            output_batched = model(batched, attention_masks=batch_meta)
 
         for i, out_alone in enumerate(outputs_alone):
             out_from_batch = output_batched[i : i + 1]
@@ -91,26 +100,24 @@ class TestBatchInvariant(unittest.TestCase):
                 f"{(out_alone - out_from_batch).abs().max():.6e}"
             )
 
-    @unittest.skipUnless(_TP_DEGREE is not None, "requires --tp flag")
+    @unittest.skipUnless(
+        dist.is_initialized() or "RANK" in os.environ,
+        "requires torchrun launcher",
+    )
     def test_forward_invariance_tp(self):
         """Test batch invariance with tensor parallelism.
 
-        Run with: torchrun --nproc_per_node=<N> -m pytest <file>::TestBatchInvariant::test_forward_invariance_tp -v --tp <N>
+        Run with: torchrun --nproc_per_node=<N> -m pytest <file>::TestBatchInvariant::test_forward_invariance_tp -v
         """
         from torchtitan.config import ParallelismConfig
         from torchtitan.distributed import ParallelDims
         from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-
-        tp_degree = _TP_DEGREE
 
         if not dist.is_initialized():
             dist.init_process_group(backend="nccl")
 
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-        assert (
-            world_size == tp_degree
-        ), f"This test requires exactly {tp_degree} GPUs, got {world_size}"
 
         local_rank = int(os.environ.get("LOCAL_RANK", rank))
         device = torch.device(f"cuda:{local_rank}")
@@ -120,22 +127,23 @@ class TestBatchInvariant(unittest.TestCase):
 
         model, vocab_size = _build_debug_model()
 
+        # tp_degree == world_size (all GPUs used for TP)
         with patch("torchtitan.distributed.parallel_dims.device_type", "cuda"):
             parallel_dims = ParallelDims(
                 dp_replicate=1,
                 dp_shard=1,
                 cp=1,
-                tp=tp_degree,
+                tp=world_size,
                 pp=1,
                 ep=1,
                 etp=1,
-                world_size=tp_degree,
+                world_size=world_size,
             )
 
         parallelize_qwen3(
             model,
             parallel_dims=parallel_dims,
-            parallelism=ParallelismConfig(tensor_parallel_degree=tp_degree),
+            parallelism=ParallelismConfig(tensor_parallel_degree=world_size),
         )
 
         model.to_empty(device="cuda")
@@ -150,10 +158,12 @@ class TestBatchInvariant(unittest.TestCase):
 
         with torch.no_grad():
             batch_3 = torch.cat(sequences[:3], dim=0)
-            out_3 = model(batch_3)
+            meta_3 = _make_varlen_metadata(3, _SEQ_LEN)
+            out_3 = model(batch_3, attention_masks=meta_3)
 
             batch_5 = torch.cat(sequences, dim=0)
-            out_5 = model(batch_5)
+            meta_5 = _make_varlen_metadata(5, _SEQ_LEN)
+            out_5 = model(batch_5, attention_masks=meta_5)
 
         for i in range(3):
             assert torch.equal(out_3[i], out_5[i]), (
@@ -162,23 +172,8 @@ class TestBatchInvariant(unittest.TestCase):
                 f"Max diff: {(out_3[i] - out_5[i]).abs().max():.6e}"
             )
 
-        disable_batch_invariant_mode()
         dist.destroy_process_group()
 
-
-def _parse_tp_arg():
-    """Parse --tp from sys.argv without interfering with pytest's arg parsing."""
-    global _TP_DEGREE
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--tp", type=int, default=None)
-    known, remaining = parser.parse_known_args()
-    if known.tp is not None:
-        _TP_DEGREE = known.tp
-    # Remove --tp from sys.argv so pytest doesn't choke on it
-    sys.argv = [sys.argv[0]] + remaining
-
-
-_parse_tp_arg()
 
 if __name__ == "__main__":
     unittest.main()

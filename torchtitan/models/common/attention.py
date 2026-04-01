@@ -161,16 +161,19 @@ class VarlenAttention(LocalMapInnerAttention):
         super().__init__(config)
         self.batch_invariant = config.batch_invariant
 
-        # num_splits requires FA3. Activate it once when batch-invariant mode
-        # is requested so that varlen_attn can accept the num_splits kwarg.
+        # num_splits requires FA3 on Hopper (SM 9.0+). Activate it once when
+        # batch-invariant mode is requested so varlen_attn accepts num_splits.
         if config.batch_invariant:
-            from torch.nn.attention import (
-                activate_flash_attention_impl,
-                current_flash_attention_impl,
-            )
+            from torchtitan.tools.utils import has_cuda_capability
 
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+            if has_cuda_capability(9, 0):
+                from torch.nn.attention import (
+                    activate_flash_attention_impl,
+                    current_flash_attention_impl,
+                )
+
+                if current_flash_attention_impl() != "FA3":
+                    activate_flash_attention_impl("FA3")
 
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(

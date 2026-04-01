@@ -37,6 +37,7 @@ from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import Configurable
+from torchtitan.config.configs import DebugConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
@@ -108,6 +109,14 @@ class RLTrainer(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
+        @dataclass(kw_only=True, slots=True)
+        class RLDebugConfig(DebugConfig):
+            """RL-specific debug config extending core DebugConfig."""
+
+            batch_invariant_mode: bool = False
+            """Enable batch-invariant mode for deterministic NCCL collective
+            operations and bitwise-reproducible forward/backward passes."""
+
         model_spec: ModelSpec | None = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
@@ -118,16 +127,11 @@ class RLTrainer(Configurable):
         num_steps: int = 10
         """Number of RL training steps."""
 
-        seed: int = 42
-        """Base RNG seed for reproducibility. Propagated to trainer,
-        generator, and task."""
+        debug: RLDebugConfig = field(default_factory=RLDebugConfig)
+        """Debug and determinism settings."""
 
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
-
-        batch_invariant_mode: bool = True
-        """Enable batch-invariant mode for deterministic NCCL collective
-        operations and bitwise-reproducible forward/backward passes."""
 
         num_episodes_per_step: int = 5
         """Number of episodes to create before every training step."""
@@ -144,17 +148,15 @@ class RLTrainer(Configurable):
     def __init__(self, config: Config):
         self.config = config
 
-        # Propagate seed to generator for deterministic sampling
-        config.generator.seed = config.seed
-
-        # Propagate batch_invariant_mode to sub-configs
-        config.trainer.batch_invariant_mode = config.batch_invariant_mode
-        config.generator.batch_invariant_mode = config.batch_invariant_mode
+        # Propagate debug settings to sub-configs
+        config.generator.seed = config.debug.seed
+        config.trainer.batch_invariant_mode = config.debug.batch_invariant_mode
+        config.generator.batch_invariant_mode = config.debug.batch_invariant_mode
 
         # Batch-invariant mode requires bf16 on both trainer and generator
         # so that attention kernels (FA3) run identically on both sides
         # without any dtype casting that could break bitwise identity.
-        if config.batch_invariant_mode:
+        if config.debug.batch_invariant_mode:
             if config.trainer.training.dtype != "bfloat16":
                 logger.warning(
                     f"batch_invariant_mode requires bfloat16 training dtype, "

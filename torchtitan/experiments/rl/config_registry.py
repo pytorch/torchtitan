@@ -31,7 +31,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        batch_invariant_mode=True,
+        debug=RLTrainer.Config.RLDebugConfig(
+            batch_invariant_mode=True,
+            seed=42,
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -69,7 +72,10 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
-        batch_invariant_mode=True,
+        debug=RLTrainer.Config.RLDebugConfig(
+            batch_invariant_mode=True,
+            seed=42,
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -106,7 +112,6 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_spec,
         num_steps=5,
-        batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
