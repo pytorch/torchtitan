@@ -302,7 +302,9 @@ class LoRAConverter(Configurable):
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
-        self.target_modules = set(config.target_modules) if config.target_modules else set()
+        self.target_modules = (
+            set(config.target_modules) if config.target_modules else set()
+        )
         self.merge_adapter = config.merge_adapter
         # Set by ModelConvertersContainer when QAT is also active.
         self.qat_scheme: str | None = None
@@ -483,9 +485,7 @@ class LoRAConverter(Configurable):
         from torchtitan.components.quantization.qat import apply_qat_prepare
 
         try:
-            probe = nn.ModuleDict(
-                {"l": nn.Linear(rank, rank, bias=False).to("cuda")}
-            )
+            probe = nn.ModuleDict({"l": nn.Linear(rank, rank, bias=False).to("cuda")})
             apply_qat_prepare(probe, scheme, group_size)
             probe.l(torch.randn(1, rank, device="cuda", dtype=probe.l.weight.dtype))
             return True
@@ -512,9 +512,7 @@ class LoRAConverter(Configurable):
 
         skip_lora_b = not self._qat_compatible(self.rank, scheme, group_size)
         if not skip_lora_b:
-            apply_qat_prepare(
-                model, scheme, group_size, filter_fn=_is_lora(".lora_b")
-            )
+            apply_qat_prepare(model, scheme, group_size, filter_fn=_is_lora(".lora_b"))
 
         logger.info(
             f"Applied adapter QAT (scheme={scheme}, group_size={group_size}, "
