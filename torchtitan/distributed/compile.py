@@ -6,7 +6,8 @@
 
 import torch
 import torch.nn as nn
-from torch._subclasses.fake_tensor import FakeTensorMode
+
+# from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
@@ -19,9 +20,9 @@ from torchtitan.tools.logging import logger
 # TODO: Remove this monkeypatch once FakeTensorMode.__init__ is decorated with
 # @torch.compiler.disable(recursive=True) upstream.
 # See https://github.com/pytorch/pytorch/issues/178887
-FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
-    FakeTensorMode.__init__, recursive=True
-)
+# FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
+#     FakeTensorMode.__init__, recursive=True
+# )
 
 
 def apply_compile_dense(model: nn.Module, compile_config: CompileConfig) -> None:
