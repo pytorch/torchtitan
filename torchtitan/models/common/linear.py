@@ -12,13 +12,13 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable nn.Linear with init_weights support.
+    """Configurable nn.Linear.
 
     Uses diamond inheritance (nn.Linear + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
     - All nn.Linear logic (forward, state_dict, etc.) is reused as-is.
-    - The Module protocol (``init_weights``) is satisfied and ``build()``
-      is inherited from ``Configurable.Config``.
+    - The Module protocol is satisfied and ``build()`` is inherited from
+      ``Configurable.Config``.
 
     ``in_features`` and ``out_features`` use ``field(init=False)`` so
     they are excluded from ``Config.__init__()``.  They are typically supplied
@@ -30,8 +30,6 @@ class Linear(nn.Linear, Module):
         in_features: int = field(init=False)
         out_features: int = field(init=False)
         bias: bool = False
-        init_mean: float = 0.0
-        init_std: float = 0.02
 
     def __init__(self, config: Config):
         if not hasattr(config, "in_features") or not hasattr(config, "out_features"):
@@ -45,12 +43,3 @@ class Linear(nn.Linear, Module):
             config.out_features,
             bias=config.bias,
         )
-        self._init_mean = config.init_mean
-        self._init_std = config.init_std
-
-    def init_weights(self, **kwargs) -> None:
-        init_std: float | None = kwargs.pop("init_std", None)
-        std = init_std if init_std is not None else self._init_std
-        nn.init.trunc_normal_(self.weight, mean=self._init_mean, std=std)
-        if self.bias is not None:
-            nn.init.zeros_(self.bias)

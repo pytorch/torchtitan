@@ -192,7 +192,7 @@ class Validator(BaseValidator):
         model_config = getattr(model_parts[0], "config", None)
         layer = getattr(model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
-        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
+        attn_mask_type = getattr(attn_config, "mask_type", "causal")
         if attn_mask_type != "block_causal":
             extra_inputs.pop("positions", None)
 
