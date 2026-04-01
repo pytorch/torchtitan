@@ -74,6 +74,14 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
                 nn.init.zeros_(self.lora_b.weight)
 
+            def named_parameters(self, *args, **kwargs):
+                # Force recurse=False so ColwiseParallel._partition_linear_fn
+                # only sees direct params (weight, bias), not dotted names like
+                # "lora_a.weight". The adapter submodules are visited separately
+                # by distribute_module and made Replicate automatically.
+                kwargs["recurse"] = False
+                yield from super().named_parameters(*args, **kwargs)
+
             def forward(self, input: torch.Tensor) -> torch.Tensor:
                 base_out = super().forward(input)
                 lora_out = self.lora_b(self.lora_a(input))
@@ -88,7 +96,13 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
 
 
 class LoRAConverter(Configurable):
-    """Apply LoRA adapters to all Linear layers in a model."""
+    """Apply LoRA adapters to Linear layers in a model.
+
+    When ``target_modules`` is None (default), every ``nn.Linear`` receives a
+    LoRA adapter.  When specified, only modules whose attribute name matches one
+    of the entries are converted (e.g. ``["wq", "wv"]`` targets the query and
+    value projections).
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -97,6 +111,10 @@ class LoRAConverter(Configurable):
 
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
+
+        target_modules: list[str] | None = None
+        """Module attribute names to apply LoRA to (e.g. ["wq", "wv"]).
+        None means all nn.Linear layers."""
 
         merge_adapter: bool = False
         """When True, adapters are folded into base weights
@@ -107,8 +125,18 @@ class LoRAConverter(Configurable):
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
+        self.target_modules = set(config.target_modules) if config.target_modules else set()
         self.merge_adapter = config.merge_adapter
-        logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
+        if self.target_modules:
+            logger.info(
+                f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
+                f"target_modules={sorted(self.target_modules)}"
+            )
+        else:
+            logger.info(
+                f"LoRA training active with rank={self.rank}, alpha={self.alpha} "
+                f"(all Linear layers)"
+            )
 
     @staticmethod
     def _is_lora_key(key: str) -> bool:
@@ -177,6 +205,17 @@ class LoRAConverter(Configurable):
         if dist.is_initialized():
             dist.barrier()
 
+    @staticmethod
+    def _lora_module_names(state_dict: dict[str, Any]) -> set[str]:
+        """Extract leaf module names that have LoRA keys in a state dict."""
+        names = set()
+        for k in state_dict:
+            for marker in (".lora_a.", ".lora_b."):
+                if marker in k:
+                    names.add(k.rsplit(marker, 1)[0].rsplit(".", 1)[-1])
+                    break
+        return names
+
     def _load_peft(
         self,
         path: str,
@@ -187,6 +226,9 @@ class LoRAConverter(Configurable):
 
         Loads ``adapter_model.safetensors``, remaps keys from HF PEFT naming
         to torchtitan naming, and broadcasts from rank 0.
+
+        Warns when the loaded adapter targets different modules than
+        the current model's LoRA modules.
         """
         import functools
 
@@ -196,6 +238,28 @@ class LoRAConverter(Configurable):
         adapter_sd = load_file(safetensors_path)
         if hooks.from_hf_map is not None:
             adapter_sd = remap_lora_keys_from_hf(adapter_sd, hooks.from_hf_map)
+
+        # Warn on mismatch between checkpoint and model LoRA targets
+        ckpt_targets = self._lora_module_names(adapter_sd)
+        model_targets = {
+            name.rsplit(".", 1)[-1]
+            for part in model_parts
+            for name, mod in part.named_modules()
+            if hasattr(mod, "lora_a")
+        }
+        only_in_ckpt = ckpt_targets - model_targets
+        only_in_model = model_targets - ckpt_targets
+        if only_in_ckpt:
+            logger.warning(
+                f"Loaded adapter has LoRA for {sorted(only_in_ckpt)} but the "
+                f"current model does not (will be ignored)."
+            )
+        if only_in_model:
+            logger.warning(
+                f"Current model has LoRA for {sorted(only_in_model)} but the "
+                f"loaded adapter does not (will start from init)."
+            )
+
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=adapter_sd,
@@ -222,9 +286,21 @@ class LoRAConverter(Configurable):
         model._converter_hooks = hooks  # type: ignore[attr-defined]
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
-        for _, child in list(module.named_modules()):
-            if isinstance(child, nn.Linear):
+        matched = set()
+        for _, parent in list(module.named_modules()):
+            for attr_name, child in list(parent.named_children()):
+                if not isinstance(child, nn.Linear):
+                    continue
+                if self.target_modules and attr_name not in self.target_modules:
+                    continue
                 apply_lora(child, self.rank, self.alpha)
+                matched.add(attr_name)
+        unmatched = self.target_modules - matched
+        if unmatched:
+            logger.warning(
+                f"LoRA target_modules {sorted(unmatched)} did not match any "
+                f"nn.Linear in the model. Check module attribute names."
+            )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
