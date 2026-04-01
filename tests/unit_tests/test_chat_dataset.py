@@ -12,7 +12,6 @@ from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.span_detectors import ChatFormat
 from torchtitan.hf_datasets.text_datasets import ChatDataset
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
@@ -50,7 +49,7 @@ def _get_full_tokens(tokenizer, messages):
 
 
 class TestChatDatasetDefaultSupervision(unittest.TestCase):
-    """Without a detector, labels supervise the full rendered conversation."""
+    """With train_on='all', labels supervise the full rendered conversation."""
 
     def test_default_supervises_full_sequence(self):
         tokenizer = _load_tokenizer()
@@ -443,7 +442,7 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
 
 
 class TestChatDatasetMultiTurnDefaultSupervision(unittest.TestCase):
-    """Without a detector, multi-turn conversations are fully supervised."""
+    """With train_on='all', multi-turn conversations are fully supervised."""
 
     def test_multiturn_supervises_all_turns(self):
         tokenizer = _load_tokenizer()
@@ -483,14 +482,13 @@ class TestChatDatasetMultiTurnDefaultSupervision(unittest.TestCase):
         )
 
 
-class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
-    def _get_supervised_text(
+class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
+    def _get_supervised_output(
         self,
         *,
-        detector: ChatFormat,
         chat_template: str,
         messages: list[dict[str, str]],
-    ) -> str:
+    ) -> tuple[HuggingFaceTokenizer, list[int], str]:
         tokenizer = _load_tokenizer()
         tokenizer.set_chat_template(chat_template)
 
@@ -498,19 +496,35 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
             dataset=Dataset.from_list([{"id": 1}]),
             tokenizer=tokenizer,
             sample_processor=lambda sample, messages=messages: messages,
-            chat_format=detector,
+            train_on="assistant",
             seq_len=512,
             infinite=False,
         )
 
         _, labels = next(iter(chat_ds))
-        return tokenizer.decode(
-            [token for token in labels.tolist() if token != IGNORE_INDEX]
+        supervised_token_ids = [
+            token for token in labels.tolist() if token != IGNORE_INDEX
+        ]
+        supervised_text = tokenizer.decode(
+            supervised_token_ids, skip_special_tokens=False
+        )
+        return tokenizer, supervised_token_ids, supervised_text
+
+    def _get_supervised_text(
+        self,
+        *,
+        chat_template: str,
+        messages: list[dict[str, str]],
+    ) -> str:
+        _, _, supervised_text = self._get_supervised_output(
+            chat_template=chat_template,
+            messages=messages,
         )
 
-    def test_debugmodel_detector_supervises_content(self):
-        supervised_text = self._get_supervised_text(
-            detector="debugmodel",
+        return supervised_text
+
+    def test_debugmodel_template_supervises_content_only(self):
+        tokenizer, supervised_token_ids, supervised_text = self._get_supervised_output(
             chat_template=(
                 "{{ bos_token }}{% for msg in messages %}"
                 "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
@@ -523,15 +537,15 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
         )
 
         self.assertEqual(supervised_text, "4")
+        self.assertNotEqual(supervised_token_ids[-1], tokenizer.eos_id)
         self.assertNotIn("assistant\n", supervised_text)
 
-    def test_gpt_oss_detector_supervises_content_and_turn_end(self):
+    def test_gpt_oss_template_supervises_assistant_message_content_only(self):
         assistant_text = (
             "<|channel|>analysis<|message|>Simple arithmetic.<|end|>\n"
             "<|start|>assistant<|channel|>final<|message|>2 + 2 = 4.<|return|>"
         )
-        supervised_text = self._get_supervised_text(
-            detector="gpt_oss",
+        tokenizer, supervised_token_ids, supervised_text = self._get_supervised_output(
             chat_template=(
                 "{{ bos_token }}{% for msg in messages %}"
                 "{% if msg.role == 'user' %}"
@@ -549,23 +563,26 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
         )
 
         self.assertIn(
+            "<|channel|>analysis<|message|>",
+            supervised_text,
+        )
+        self.assertIn(
             "Simplearithmetic.<|end|>",
+            supervised_text,
+        )
+        self.assertIn(
+            "<|start|>assistant<|channel|>final<|message|>",
             supervised_text,
         )
         self.assertIn(
             "2+2=4.<|return|>",
             supervised_text,
         )
-        self.assertNotIn("<|channel|>analysis<|message|>", supervised_text)
-        self.assertNotIn(
-            "<|start|>assistant<|channel|>final<|message|>",
-            supervised_text,
-        )
+        self.assertNotEqual(supervised_token_ids[-1], tokenizer.eos_id)
         self.assertNotIn("What is 2 + 2?", supervised_text)
 
-    def test_qwen3_detector_supervises_content_and_turn_end(self):
+    def test_qwen3_template_supervises_assistant_content_only(self):
         supervised_text = self._get_supervised_text(
-            detector="qwen3",
             chat_template=(
                 "{{ bos_token }}{% for msg in messages %}"
                 "{% if msg.role == 'user' %}"
@@ -580,23 +597,30 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
                 "{% endfor %}"
             ),
             messages=[
-                {"role": "user", "content": "Q?"},
+                {"role": "user", "content": "Q1?"},
                 {
                     "role": "assistant",
-                    "reasoning_content": "calc",
                     "content": "4",
+                },
+                {"role": "user", "content": "Q2?"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "calc2",
+                    "content": "6",
                 },
             ],
         )
 
-        self.assertIn("<think>calc</think>", supervised_text)
-        self.assertIn("4<|im_end|>", supervised_text)
+        self.assertIn("4", supervised_text)
+        self.assertIn("calc2", supervised_text)
+        self.assertIn("6", supervised_text)
         self.assertNotIn("<|im_start|>assistant", supervised_text)
-        self.assertNotIn("<|im_start|>userQ?<|im_end|>", supervised_text)
+        self.assertNotIn("<|im_end|>", supervised_text)
+        self.assertNotIn("<|im_start|>userQ1?<|im_end|>", supervised_text)
+        self.assertNotIn("<|im_start|>userQ2?<|im_end|>", supervised_text)
 
-    def test_llama3_detector_supervises_content_and_turn_end(self):
+    def test_llama3_template_supervises_assistant_content_only(self):
         supervised_text = self._get_supervised_text(
-            detector="llama3",
             chat_template=(
                 "{{ bos_token }}{% for msg in messages %}"
                 "<|start_header_id|>{{ msg.role }}<|end_header_id|>\n\n"
@@ -609,18 +633,18 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
             ],
         )
 
-        self.assertIn("4<|eot_id|>", supervised_text)
+        self.assertEqual(supervised_text, "4")
         self.assertNotIn(
             "<|start_header_id|>assistant<|end_header_id|>", supervised_text
         )
+        self.assertNotIn("<|eot_id|>", supervised_text)
         self.assertNotIn(
             "<|start_header_id|>user<|end_header_id|>Q?<|eot_id|>",
             supervised_text,
         )
 
-    def test_llama4_detector_supervises_content_and_turn_end(self):
+    def test_llama4_template_supervises_assistant_content_only(self):
         supervised_text = self._get_supervised_text(
-            detector="llama4",
             chat_template=(
                 "{{ bos_token }}{% for msg in messages %}"
                 "<|header_start|>{{ msg.role }}<|header_end|>\n\n"
@@ -633,16 +657,16 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
             ],
         )
 
-        self.assertIn("4<|eot|>", supervised_text)
+        self.assertEqual(supervised_text, "4")
         self.assertNotIn("<|header_start|>assistant<|header_end|>", supervised_text)
+        self.assertNotIn("<|eot|>", supervised_text)
         self.assertNotIn(
             "<|header_start|>user<|header_end|>Q?<|eot|>",
             supervised_text,
         )
 
-    def test_deepseek_v3_detector_supervises_content_and_turn_end(self):
+    def test_deepseek_v3_template_supervises_assistant_content_only(self):
         supervised_text = self._get_supervised_text(
-            detector="deepseek_v3",
             chat_template=(
                 "{{ bos_token }}{% for msg in messages %}"
                 "{% if msg.role == 'user' %}"
@@ -658,8 +682,9 @@ class TestChatDatasetModelSpecificDetectors(unittest.TestCase):
             ],
         )
 
-        self.assertIn("4<endofsentence>", supervised_text)
+        self.assertEqual(supervised_text, "4")
         self.assertNotIn("<Assistant>", supervised_text)
+        self.assertNotIn("<endofsentence>", supervised_text)
         self.assertNotIn("<User>Q?", supervised_text)
 
 
@@ -684,11 +709,11 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=lambda sample: messages,
-            chat_format="debugmodel",
+            train_on="assistant",
             seq_len=sample_len * 2,
             infinite=False,
         )
-        spans = chat_ds._get_assistant_spans(messages, full_tokens, full_text)
+        spans = chat_ds._get_assistant_spans(messages, full_tokens)
 
         batch, _ = next(iter(chat_ds))
         positions = batch["positions"].unsqueeze(0)

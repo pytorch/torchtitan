@@ -18,13 +18,8 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.hf_datasets.span_detectors import (
-    ChatFormat,
-    char_spans_to_token_spans,
-    get_span_detector,
-)
 from torchtitan.tools.logging import logger
 
 
@@ -258,9 +253,9 @@ class ChatDataset(IterableDataset, Stateful):
 
     Tokenizes conversations with alternating user/assistant turns and uses
     greedy sequence packing with per-document positions. By default, labels
-    supervise the full rendered conversation. When a model-specific span
-    detector is configured, labels supervise assistant spans only. Implements
-    Stateful for checkpointing.
+    supervise the full rendered conversation. When ``train_on="assistant"``,
+    labels supervise assistant content spans only. Implements Stateful for
+    checkpointing.
     """
 
     def __init__(
@@ -269,12 +264,17 @@ class ChatDataset(IterableDataset, Stateful):
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
         *,
-        chat_format: ChatFormat | None = None,
+        train_on: str = "all",
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
     ) -> None:
+        if train_on not in ("all", "assistant"):
+            raise ValueError(
+                f"train_on must be 'all' or 'assistant', got '{train_on}'"
+            )
+
         if tokenizer.eos_id is None:
             raise ValueError(
                 "Tokenizer does not have an eos_id set. "
@@ -287,14 +287,7 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-        self._span_detector = get_span_detector(chat_format)
-
-        if self._span_detector is not None and not isinstance(
-            self._tokenizer, HuggingFaceTokenizer
-        ):
-            raise ValueError(
-                "Model-specific span detectors require a HuggingFaceTokenizer"
-            )
+        self._assistant_only = train_on == "assistant"
 
         self._dataset_id = f"{dataset.info.dataset_name}/{dataset.split}"
 
@@ -346,26 +339,64 @@ class ChatDataset(IterableDataset, Stateful):
                     f"Message {start + i} should be '{expected}', got '{msg['role']}'"
                 )
 
+    def _render_conversation(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        ensure_final_eos: bool = True,
+    ) -> tuple[str, list[int]]:
+        full_text = self._tokenizer.apply_chat_template(messages)
+        full_text = full_text.rstrip("\n")
+        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if ensure_final_eos and full_tokens[-1] != self._eos_id:
+            full_tokens.append(self._eos_id)
+        return full_text, full_tokens
+
     def _get_assistant_spans(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         full_tokens: list[int],
-        full_text: str,
     ) -> list[tuple[int, int]]:
-        """Find token spans for each assistant turn using the span detector."""
-        assert self._span_detector is not None
-        assert isinstance(self._tokenizer, HuggingFaceTokenizer)
+        """Find token spans for each assistant turn's rendered content."""
+        spans = []
 
-        char_spans = self._span_detector.find_char_spans(messages, full_text)
-        encoding = self._tokenizer.tokenizer.encode(full_text)
-        spans = char_spans_to_token_spans(encoding, char_spans)
+        for assistant_idx, message in enumerate(messages):
+            if message["role"] != "assistant":
+                continue
 
-        if not self._tokenizer.hf_adds_bos and self._tokenizer.bos_id is not None:
-            spans = [(start + 1, end + 1) for start, end in spans]
+            # Same conversation structure, just empty content for this turn.
+            # Strips extra fields (e.g. reasoning_content) so template
+            # conditionals like Qwen3's <think> insertion also differ.
+            blanked_messages = [
+                {"role": msg["role"], "content": ""}
+                if idx == assistant_idx
+                else msg
+                for idx, msg in enumerate(messages)
+            ]
 
-        if spans:
-            last_start, _ = spans[-1]
-            spans[-1] = (last_start, len(full_tokens))
+            _, dummy_tokens = self._render_conversation(blanked_messages)
+
+            # Scan from front to find where they diverge.
+            start = 0
+            max_prefix = min(len(full_tokens), len(dummy_tokens))
+            while start < max_prefix and full_tokens[start] == dummy_tokens[start]:
+                start += 1
+
+            # Scan from back to find where they reconverge.
+            end = len(full_tokens)
+            dummy_end = len(dummy_tokens)
+            while (
+                end > start
+                and dummy_end > start
+                and full_tokens[end - 1] == dummy_tokens[dummy_end - 1]
+            ):
+                end -= 1
+                dummy_end -= 1
+
+            if end <= start:
+                raise ValueError("Blanked assistant turn did not produce a token diff")
+
+            spans.append((start, end))
 
         return spans
 
@@ -376,23 +407,18 @@ class ChatDataset(IterableDataset, Stateful):
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
         label_ids = tokens[1:]. By default, the full rendered conversation is
-        supervised. When a model-specific span detector is configured,
-        non-assistant tokens are masked with IGNORE_INDEX. Supports both
-        single-turn and multi-turn conversations. Returns None if the sample
-        exceeds seq_len (dropped to avoid training on truncated responses).
-
-        Uses a configured model-specific span detector only when assistant-only
-        supervision is requested.
+        supervised. When assistant-only supervision is enabled, non-assistant
+        tokens are masked with IGNORE_INDEX by diffing the rendered
+        conversation against versions with each assistant turn blanked. This
+        supervises assistant content only; generic turn terminators such as
+        EOT/EOS are not included. Supports both single-turn and multi-turn
+        conversations. Returns None if the sample exceeds seq_len (dropped to
+        avoid training on truncated responses).
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
 
-        full_text = self._tokenizer.apply_chat_template(messages)
-        # Strip extra newline and ensure the sequence ends with EOS without duplicates
-        full_text = full_text.rstrip("\n")
-        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
-        if full_tokens[-1] != self._eos_id:
-            full_tokens.append(self._eos_id)
+        full_text, full_tokens = self._render_conversation(messages)
 
         if not self._logged_first_sample:
             logger.info(f"[ChatDataset] First sample full:\n{full_text}")
@@ -409,15 +435,14 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        if self._span_detector is None:
+        if not self._assistant_only:
             return input_ids, label_ids
 
         # Find assistant spans and unmask only those in labels.
         # Labels are shifted by 1: label_ids[j] = full_tokens[j+1], so
         # an assistant span (start, end) in full_tokens maps to
-        # label indices [start-1, end-1) (the model predicts each
-        # assistant token from the preceding position).
-        spans = self._get_assistant_spans(messages, full_tokens, full_text)
+        # label indices [start-1, end-1) when supervising assistant content.
+        spans = self._get_assistant_spans(messages, full_tokens)
 
         # Start with everything masked
         masked_labels = [IGNORE_INDEX] * len(label_ids)
@@ -425,7 +450,7 @@ class ChatDataset(IterableDataset, Stateful):
         for start, end in spans:
             # In label space: first supervised position is start - 1
             # (predicting full_tokens[start] from position start-1),
-            # last supervised position is end - 2
+            # and last supervised position is end - 2
             # (predicting full_tokens[end-1] from position end-2).
             label_start = max(start - 1, 0)
             label_end = min(end - 1, len(label_ids))
@@ -558,11 +583,8 @@ class ChatDataLoader(ParallelAwareDataloader):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
-        chat_format: ChatFormat | None = None
-        """Chat format for assistant-only loss.
-        
-        Use None to train on the full rendered conversation.
-        """
+        train_on: str = "all"
+        """Which tokens to supervise: 'all' or 'assistant'."""
 
         infinite: bool = True
         """Whether to loop the dataset infinitely. Might hang on multi-GPU."""
@@ -590,7 +612,7 @@ class ChatDataLoader(ParallelAwareDataloader):
             dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
-            chat_format=config.chat_format,
+            train_on=config.train_on,
             seq_len=seq_len,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
