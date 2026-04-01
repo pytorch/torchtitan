@@ -97,8 +97,10 @@ Batch-invariant mode guarantees that a model's output for a given input is **ide
 
 Enable it in your config:
 ```python
+from torchtitan.config.configs import DebugConfig
+
 RLTrainer.Config(
-    batch_invariant_mode=True,
+    debug=DebugConfig(batch_invariant_mode=True),
     ...
 )
 ```

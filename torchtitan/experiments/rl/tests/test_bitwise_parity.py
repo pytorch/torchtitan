@@ -56,7 +56,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.configs import ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
@@ -97,7 +97,7 @@ def _test_config(
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path=hf_assets_path,
-        debug=RLTrainer.Config.RLDebugConfig(batch_invariant_mode=True),
+        debug=DebugConfig(batch_invariant_mode=True, deterministic=True),
         trainer=PolicyTrainer.Config(
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(

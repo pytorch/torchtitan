@@ -163,17 +163,16 @@ class VarlenAttention(LocalMapInnerAttention):
 
         # num_splits requires FA3 on Hopper (SM 9.0+). Activate it once when
         # batch-invariant mode is requested so varlen_attn accepts num_splits.
-        if config.batch_invariant:
-            from torchtitan.tools.utils import has_cuda_capability
+        from torchtitan.tools.utils import has_cuda_capability
 
-            if has_cuda_capability(9, 0):
-                from torch.nn.attention import (
-                    activate_flash_attention_impl,
-                    current_flash_attention_impl,
-                )
+        if config.batch_invariant and has_cuda_capability(9, 0):
+            from torch.nn.attention import (
+                activate_flash_attention_impl,
+                current_flash_attention_impl,
+            )
 
-                if current_flash_attention_impl() != "FA3":
-                    activate_flash_attention_impl("FA3")
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
 
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
@@ -209,14 +208,7 @@ class VarlenAttention(LocalMapInnerAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        out_packed = varlen_attn(
-            xq_packed,
-            xk_packed,
-            xv_packed,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,  # pyrefly: ignore [bad-argument-type]
-            max_k,  # pyrefly: ignore [bad-argument-type]
+        varlen_kwargs = dict(
             scale=scale,
             # window_size=(left, right) controls the attention window relative to each
             # query position. 'left' is how many tokens before the query to attend to,
@@ -229,6 +221,21 @@ class VarlenAttention(LocalMapInnerAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
+        )
+        if self.batch_invariant:
+            # Fix split count to 1 to prevent non-deterministic split-k
+            # reductions that vary with batch composition.
+            varlen_kwargs["num_splits"] = 1
+
+        out_packed = varlen_attn(
+            xq_packed,
+            xk_packed,
+            xv_packed,
+            cu_seq_q,
+            cu_seq_k,
+            max_q,  # pyrefly: ignore [bad-argument-type]
+            max_k,  # pyrefly: ignore [bad-argument-type]
+            **varlen_kwargs,
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()

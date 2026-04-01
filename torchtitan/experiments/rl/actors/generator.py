@@ -13,7 +13,7 @@ import torch
 import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
-from torchtitan.config.configs import ParallelismConfig
+from torchtitan.config.configs import DebugConfig, ParallelismConfig
 from torchtitan.experiments.rl.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
@@ -140,11 +140,8 @@ class VLLMGenerator(Actor, Configurable):
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
 
-        seed: int | None = None
-        """Random seed for vLLM engine and sampling. None for non-deterministic."""
-
-        batch_invariant_mode: bool = False
-        """Enable batch-invariant mode for deterministic ops."""
+        debug: DebugConfig = field(default_factory=DebugConfig)
+        """Debug and determinism settings."""
 
         def __post_init__(self):
             assert self.parallelism.data_parallel_shard_degree in (1, -1), (
@@ -172,12 +169,25 @@ class VLLMGenerator(Actor, Configurable):
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
-        if config.batch_invariant_mode:
+        if config.debug.batch_invariant_mode:
             from torchtitan.experiments.rl.batch_invariant import (
                 enable_batch_invariant_mode,
             )
 
             enable_batch_invariant_mode()
+
+        # The generator doesn't use torchtitan's ParallelDims, so we apply
+        # the deterministic flags directly in generator
+        if config.debug.deterministic:
+            torch.use_deterministic_algorithms(
+                True, warn_only=config.debug.deterministic_warn_only
+            )
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+        if config.debug.seed is not None:
+            torch.manual_seed(config.debug.seed)
 
         # Extract needed fields from configs
         self.model_path = model_path
@@ -209,8 +219,8 @@ class VLLMGenerator(Actor, Configurable):
         vllm_compilation_config = config.compile.get_vllm_compilation_config()
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
-        if config.seed is not None:
-            engine_kwargs["seed"] = config.seed
+        if config.debug.seed is not None:
+            engine_kwargs["seed"] = config.debug.seed
         engine_args = EngineArgs(**engine_kwargs)
 
         logger.info("Initializing LLMEngine from EngineArgs...")
@@ -256,7 +266,7 @@ class VLLMGenerator(Actor, Configurable):
                 top_p=self.top_p,
                 max_tokens=self.max_new_tokens,
                 n=self.num_samples_per_prompt,
-                seed=self.config.seed,
+                seed=self.config.debug.seed,
                 logprobs=1,
                 prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs

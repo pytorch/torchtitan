@@ -74,6 +74,12 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
             )
             self._use_fa3 = False
 
+        from torchtitan.experiments.rl.batch_invariant import (
+            is_batch_invariant_mode_enabled,
+        )
+
+        self._batch_invariant = is_batch_invariant_mode_enabled()
+
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
     def forward(
@@ -170,7 +176,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
         # non-deterministic split-k reductions in flash attention.
         num_splits = 1 if is_batch_invariant_mode_enabled() else 0
 
-        torch.nn.attention.varlen.varlen_attn_out(
+        return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
@@ -185,8 +191,6 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
             seqused_k=seqused_k,
             num_splits=num_splits,
         )
-
-        return output
 
 
 logger = logging.getLogger(__name__)

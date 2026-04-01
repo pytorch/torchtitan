@@ -13,7 +13,12 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import (
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
@@ -31,8 +36,9 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        debug=RLTrainer.Config.RLDebugConfig(
+        debug=DebugConfig(
             batch_invariant_mode=True,
+            deterministic=True,
             seed=42,
         ),
         trainer=PolicyTrainer.Config(
@@ -72,8 +78,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
-        debug=RLTrainer.Config.RLDebugConfig(
+        debug=DebugConfig(
             batch_invariant_mode=True,
+            deterministic=True,
             seed=42,
         ),
         trainer=PolicyTrainer.Config(

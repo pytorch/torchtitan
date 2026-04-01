@@ -109,14 +109,6 @@ class RLTrainer(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        @dataclass(kw_only=True, slots=True)
-        class RLDebugConfig(DebugConfig):
-            """RL-specific debug config extending core DebugConfig."""
-
-            batch_invariant_mode: bool = False
-            """Enable batch-invariant mode for deterministic NCCL collective
-            operations and bitwise-reproducible forward/backward passes."""
-
         model_spec: ModelSpec | None = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
@@ -127,7 +119,7 @@ class RLTrainer(Configurable):
         num_steps: int = 10
         """Number of RL training steps."""
 
-        debug: RLDebugConfig = field(default_factory=RLDebugConfig)
+        debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
         dump_folder: str = "outputs/rl"
@@ -147,14 +139,15 @@ class RLTrainer(Configurable):
 
         def __post_init__(self):
             # Propagate debug settings to sub-configs
-            self.generator.seed = self.debug.seed
-            self.trainer.batch_invariant_mode = self.debug.batch_invariant_mode
-            self.generator.batch_invariant_mode = self.debug.batch_invariant_mode
+            self.trainer.debug = self.debug
+            self.generator.debug = self.debug
 
             # Batch-invariant mode requires bf16 on both trainer and generator
             # so that attention kernels (FA3) run identically on both sides
             # without any dtype casting that could break bitwise identity.
             if self.debug.batch_invariant_mode:
+                if not self.debug.deterministic:
+                    raise ValueError("batch_invariant_mode requires deterministic=True")
                 if self.trainer.training.dtype != "bfloat16":
                     logger.warning(
                         f"batch_invariant_mode requires bfloat16 training dtype, "

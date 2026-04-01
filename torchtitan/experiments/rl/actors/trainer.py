@@ -69,8 +69,6 @@ class PolicyTrainer(Actor, Configurable):
         """Communication configuration for distributed initialization."""
         compile: CompileConfig = field(default_factory=CompileConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
-        batch_invariant_mode: bool = False
-        """Enable batch-invariant mode for deterministic training."""
 
     def __init__(
         self,
@@ -102,7 +100,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Enable batch-invariant mode BEFORE init_distributed so NCCL env
         # vars are set before the first communicator is created.
-        if config.batch_invariant_mode:
+        if config.debug.batch_invariant_mode:
             from torchtitan.experiments.rl.batch_invariant import (
                 enable_batch_invariant_mode,
             )
@@ -123,7 +121,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Activate FA3 when using Hopper machine so that varlen attention
         # on the trainer uses the same FAv3 kernel as the generator's CUSTOM backend.
-        if config.batch_invariant_mode and has_cuda_capability(9, 0):
+        if config.debug.batch_invariant_mode and has_cuda_capability(9, 0):
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,
@@ -233,6 +231,9 @@ class PolicyTrainer(Actor, Configurable):
         assert isinstance(
             model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
+
+        if config.debug.batch_invariant_mode:
+            model_spec.model.layer.attention.inner_attention.batch_invariant = True
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):

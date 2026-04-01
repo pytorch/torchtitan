@@ -29,9 +29,6 @@ import os
 
 import torch
 
-# https://github.com/thinking-machines-lab/batch_invariant_ops.
-from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -57,15 +54,19 @@ def enable_batch_invariant_mode() -> None:
     On top of that, this function applies torchtitan-specific settings:
     - NCCL env vars for deterministic inter-GPU collectives
     - Disables reduced-precision reductions and TF32
-    - Enables deterministic algorithms
 
-    Safe to call multiple times (idempotent).
+    Note: callers must set ``debug.deterministic=True`` separately (enforced
+    by ``RLTrainer.Config.__post_init__``), which handles
+    ``torch.use_deterministic_algorithms`` via ``set_determinism()``.
     """
     global _enabled
     if _enabled:
         return
 
     # Register batch-invariant ATen overrides via upstream package
+    # https://github.com/thinking-machines-lab/batch_invariant_ops
+    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
+
     _upstream_enable()
 
     # Set NCCL env vars for deterministic inter-GPU collectives.
@@ -90,9 +91,6 @@ def enable_batch_invariant_mode() -> None:
     # Disable TF32 for exact fp32 accumulation
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-
-    # Enable deterministic algorithms for run-to-run reproducibility.
-    torch.use_deterministic_algorithms(True)
 
     _enabled = True
 
