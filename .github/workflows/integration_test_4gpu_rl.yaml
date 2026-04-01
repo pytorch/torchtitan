@@ -95,3 +95,6 @@ jobs:
         torchrun --nproc-per-node=2 \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py --tp 2 \
           --hf-assets-path "$MODEL_PATH"
+
+        # Run batch-invariant unit test (TP=2)
+        python torchtitan/experiments/rl/tests/test_batch_invariant.py --tp 2

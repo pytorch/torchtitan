@@ -62,6 +62,17 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_tp2_compile",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module rl",
+                    "--config rl_grpo_qwen3_0_6b_on_policy",
+                ],
+            ],
+            "RL GRPO TP=2 on-policy (batch-invariant + deterministic)",
+            "rl_grpo_tp2_on_policy",
+            ngpu=4,
+        ),
     ]
 
 
