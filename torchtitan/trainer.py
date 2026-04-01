@@ -377,7 +377,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(BaseModel, m).init_states(buffer_device=buffer_device)
+                    # TODO: Change this back to init_weights once
+                    # autoparallel contains the wrap_init_states
+                    cast(BaseModel, m).init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -401,7 +403,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                cast(BaseModel, model).init_states(buffer_device=buffer_device)
+                # TODO: Change this back to init_weights once
+                # autoparallel contains the wrap_init_states
+                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
