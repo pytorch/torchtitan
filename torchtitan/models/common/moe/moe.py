@@ -317,6 +317,38 @@ class TokenChoiceTopKRouter(Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
+        # === DEBUG: Check gate weight consistency across ranks ===
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            rank = dist.get_rank()
+            gate_weight = self.gate.weight
+            if isinstance(gate_weight, DTensor):
+                gate_weight_local = gate_weight.to_local()
+            else:
+                gate_weight_local = gate_weight
+            # allgather gate weights from all ranks
+            gathered = [
+                torch.zeros_like(gate_weight_local)
+                for _ in range(dist.get_world_size())
+            ]
+            dist.all_gather(gathered, gate_weight_local.contiguous())
+            # check if all ranks have the same gate weight
+            for other_rank, other_weight in enumerate(gathered):
+                if other_rank != rank:
+                    if not torch.equal(gate_weight_local, other_weight):
+                        max_diff = (gate_weight_local - other_weight).abs().max().item()
+                        print(
+                            f"[DEBUG] GATE WEIGHT DIVERGED! rank {rank} vs rank {other_rank}, "
+                            f"max_diff={max_diff:.6e}, "
+                            f"rank_{rank}_norm={gate_weight_local.norm().item():.6f}, "
+                            f"rank_{other_rank}_norm={other_weight.norm().item():.6f}"
+                        )
+                    else:
+                        print(
+                            f"[DEBUG] GATE WEIGHT MATCH: rank {rank} == rank {other_rank}"
+                        )
+        # === END DEBUG ===
         # scores shape (bs*slen, num_experts)
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
@@ -378,7 +410,9 @@ class TokenChoiceTopKRouter(Module):
         # per expert. scatter is wrapped with local_map for DTensor support,
         # while sum has native DTensor support.
         if isinstance(selected_experts_indices, DTensor):
-            assert isinstance(scores, DTensor), "scores and selected_experts_indices should both be DTensors"
+            assert isinstance(
+                scores, DTensor
+            ), "scores and selected_experts_indices should both be DTensors"
             _local_generate_routing_map = local_map(
                 _generate_routing_map,
                 out_placements=(list(selected_experts_indices.placements),),
@@ -391,9 +425,7 @@ class TokenChoiceTopKRouter(Module):
         else:
             _local_generate_routing_map = _generate_routing_map
 
-        routing_map = _local_generate_routing_map(
-            scores, selected_experts_indices
-        )
+        routing_map = _local_generate_routing_map(scores, selected_experts_indices)
         num_tokens_per_expert = routing_map.sum(dim=0)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
@@ -491,7 +523,9 @@ class MoE(Module):
             dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
         self.router = config.router.build(
-            dim=dim, num_experts=num_experts, load_balance_coeff=config.load_balance_coeff
+            dim=dim,
+            num_experts=num_experts,
+            load_balance_coeff=config.load_balance_coeff,
         )
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
