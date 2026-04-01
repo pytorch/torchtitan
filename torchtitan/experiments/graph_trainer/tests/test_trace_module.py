@@ -735,7 +735,7 @@ class TestGraphBasedSAC(unittest.TestCase):
             annotate_ac_regions(model)
             train_step = make_train_step(get_loss)
             traced = minimal_fx_tracer(train_step, (model, tokens, labels))
-            apply_ac_remat_pass(traced)
+            traced.gm = apply_ac_remat_pass(traced.gm)
 
             def step(model):
                 result = traced(model, tokens, labels)
