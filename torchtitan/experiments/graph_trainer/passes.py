@@ -244,6 +244,47 @@ def apply_sac_pass(
     return gm
 
 
+def _strip_recompute_from_backward_nodes(gm: torch.fx.GraphModule) -> None:
+    """Remove recompute tags from backward nodes.
+
+    apply_sac_pass tags ALL call_function nodes, but backward nodes
+    (annotated with remat_pass_tag="is_backward" by _patch_engine_run_backward)
+    must not carry recompute tags.  If they do, the remat pass would try to
+    duplicate backward ops — duplicating gradient computations instead of
+    forward activations.
+    """
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        custom = node.meta.get("custom", {})
+        if custom.get("remat_pass_tag") == "is_backward":
+            node.meta.pop("recompute", None)
+            node.meta.pop("ac_graph_id", None)
+
+
+def apply_ac_remat_pass(traced: "TracedResult") -> None:
+    """Apply graph-based SAC to a traced fwd+loss+bwd graph.
+
+    Tags forward nodes with recompute policy and ac_graph_id via
+    apply_sac_pass, then strips those tags from backward nodes (which
+    apply_sac_pass incorrectly tags), and finally applies
+    remat_using_tags_for_fwd_loss_bwd_graph to duplicate PREFER_RECOMPUTE
+    forward ops before backward and DCE originals.
+
+    The model must have been annotated with annotate_ac_regions before
+    tracing so that nodes have custom["ac_region_id"] metadata.
+    Backward nodes must be tagged with remat_pass_tag (done by
+    _patch_engine_run_backward during tracing).
+    """
+    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
+        remat_using_tags_for_fwd_loss_bwd_graph,
+    )
+
+    apply_sac_pass(traced.gm)
+    _strip_recompute_from_backward_nodes(traced.gm)
+    traced.gm = remat_using_tags_for_fwd_loss_bwd_graph(traced.gm)
+
+
 # Apply activation checkpointing on joint graph before partitioner
 def fsdp_reshard_after_fwd_pass(
     gm: torch.fx.GraphModule, reshard_after_forward: bool

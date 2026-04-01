@@ -686,7 +686,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.common_utils import (
             annotate_ac_regions,
         )
-        from torchtitan.experiments.graph_trainer.trainer import apply_ac_remat_pass
+        from torchtitan.experiments.graph_trainer.passes import apply_ac_remat_pass
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
         config = llama3_configs["1B"]
