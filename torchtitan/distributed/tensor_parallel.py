@@ -74,19 +74,37 @@ class NoParallel(ParallelStyle):
         return (input_tensor, *inputs[1:])
 
     @staticmethod
+    def _prepare_single_output(
+        output: DTensor,
+        output_layout: Placement,
+        local_output_grad_placements: Sequence[Placement] | None,
+    ) -> torch.Tensor | DTensor:
+        if output.placements != (output_layout,):
+            output = output.redistribute(placements=(output_layout,), async_op=True)
+        if local_output_grad_placements is not None:
+            return output.to_local(grad_placements=local_output_grad_placements)
+        return output
+
+    @staticmethod
     def _prepare_output_fn(
         output_layout: Placement,
         local_output_grad_placements: Sequence[Placement] | None,
         mod: nn.Module,
-        outputs: DTensor,
+        outputs: DTensor | tuple,
         device_mesh: DeviceMesh,
-    ) -> torch.Tensor | DTensor:
-        if outputs.placements != (output_layout,):
-            outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        if local_output_grad_placements is not None:
-            return outputs.to_local(grad_placements=local_output_grad_placements)
-        else:
-            return outputs
+    ) -> torch.Tensor | DTensor | tuple:
+        if isinstance(outputs, tuple):
+            return tuple(
+                NoParallel._prepare_single_output(
+                    o, output_layout, local_output_grad_placements
+                )
+                if isinstance(o, DTensor)
+                else o
+                for o in outputs
+            )
+        return NoParallel._prepare_single_output(
+            outputs, output_layout, local_output_grad_placements
+        )
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

@@ -78,11 +78,9 @@ class DeepEPMoE(MoE):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
-        top_scores, selected_experts_indices, num_tokens_per_expert = self.router(
-            x, self.expert_bias
-        )
+        top_scores, selected_experts_indices, num_tokens_per_expert = self.router(x)
 
-        if self.load_balance_coeff is not None:
+        if self.router.load_balance_coeff is not None:
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 

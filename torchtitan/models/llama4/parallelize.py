@@ -552,10 +552,10 @@ def apply_moe_ep_tp(
                     output_layouts=(Partial(),),
                     desired_output_layouts=(Shard(1),),
                 ),
-                # replicate computation for the router
-                "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Partial(),),
-                ),
+                # Replicate router params (gate weight) and buffers (expert_bias)
+                # as DTensors so the router runs in DTensor.
+                # to_local happens after the router in MoE.forward.
+                "moe.router": NoParallel(),
             }
             if ep_mesh is not None and etp_mesh is None:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that

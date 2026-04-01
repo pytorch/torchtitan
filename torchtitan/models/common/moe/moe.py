@@ -11,12 +11,63 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 from .utils import indices_padding_wrapper
+
+
+def _gather_topk_scores(
+    scores: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Gather top-k scores from the full score tensor using expert indices.
+
+    Args:
+        scores: Full routing scores, shape (num_tokens, num_experts).
+        selected_experts_indices: Expert indices, shape (num_tokens, top_k).
+
+    Returns:
+        Top-k scores, shape (num_tokens, top_k).
+    """
+    return torch.gather(scores, -1, selected_experts_indices)
+
+
+def _generate_routing_map(
+    scores: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Build a boolean routing map from expert indices.
+
+    Takes scores as a tensor arg (instead of num_experts as an int) so
+    that ``local_map`` can specify DTensor placements for both inputs.
+
+    Args:
+        scores: Router scores, shape (num_tokens, num_experts).
+            Only used to derive num_experts from the last dimension.
+        selected_experts_indices: Expert indices for each token,
+            shape (num_tokens, top_k).
+
+    Returns:
+        routing_map: Boolean tensor of shape (num_tokens, num_experts),
+            where routing_map[i, j] is True if token i is routed to expert j.
+    """
+    num_tokens = selected_experts_indices.shape[0]
+    num_experts = scores.shape[-1]
+    routing_map = torch.scatter(
+        torch.zeros(
+            (num_tokens, num_experts),
+            dtype=torch.bool,
+            device=selected_experts_indices.device,
+        ),
+        -1,
+        selected_experts_indices,
+        True,
+    )
+    return routing_map
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -153,6 +204,7 @@ class TokenChoiceTopKRouter(Module):
     class Config(Module.Config):
         dim: int = field(init=False)
         num_experts: int = field(init=False)
+        load_balance_coeff: float | None = field(init=False)
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
@@ -175,6 +227,20 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm = config.route_norm
         self.route_scale = config.route_scale
         self._debug_force_load_balance = config._debug_force_load_balance
+
+        # Auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
+        # expert_bias lives on the router so that distribute_module in the
+        # parallelize plan automatically distributes it as a DTensor buffer,
+        # avoiding mixed Tensor/DTensor arithmetic with gate scores.
+        # expert_bias is updated outside the model in an optimizer step pre hook.
+        self.load_balance_coeff = config.load_balance_coeff
+        if self.load_balance_coeff is not None:
+            assert self.load_balance_coeff > 0.0
+            self.register_buffer(
+                "expert_bias",
+                torch.zeros(config.num_experts, dtype=torch.float32),
+                persistent=True,
+            )
 
     def _debug_force_load_balance_routing(
         self, scores: torch.Tensor
@@ -236,13 +302,11 @@ class TokenChoiceTopKRouter(Module):
         return scores_for_choice
 
     def forward(
-        self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
+        self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
-            expert_bias (torch.Tensor | None, optional): Optional bias tensor for experts with shape ``(num_experts,)``.
-                Used for load balancing. Defaults to None.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -253,6 +317,38 @@ class TokenChoiceTopKRouter(Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
+        # === DEBUG: Check gate weight consistency across ranks ===
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            rank = dist.get_rank()
+            gate_weight = self.gate.weight
+            if isinstance(gate_weight, DTensor):
+                gate_weight_local = gate_weight.to_local()
+            else:
+                gate_weight_local = gate_weight
+            # allgather gate weights from all ranks
+            gathered = [
+                torch.zeros_like(gate_weight_local)
+                for _ in range(dist.get_world_size())
+            ]
+            dist.all_gather(gathered, gate_weight_local.contiguous())
+            # check if all ranks have the same gate weight
+            for other_rank, other_weight in enumerate(gathered):
+                if other_rank != rank:
+                    if not torch.equal(gate_weight_local, other_weight):
+                        max_diff = (gate_weight_local - other_weight).abs().max().item()
+                        print(
+                            f"[DEBUG] GATE WEIGHT DIVERGED! rank {rank} vs rank {other_rank}, "
+                            f"max_diff={max_diff:.6e}, "
+                            f"rank_{rank}_norm={gate_weight_local.norm().item():.6f}, "
+                            f"rank_{other_rank}_norm={other_weight.norm().item():.6f}"
+                        )
+                    else:
+                        print(
+                            f"[DEBUG] GATE WEIGHT MATCH: rank {rank} == rank {other_rank}"
+                        )
+        # === END DEBUG ===
         # scores shape (bs*slen, num_experts)
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
@@ -267,6 +363,7 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
+        expert_bias = getattr(self, "expert_bias", None)
         scores_for_choice = scores if expert_bias is None else scores + expert_bias
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
@@ -278,7 +375,24 @@ class TokenChoiceTopKRouter(Module):
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
+        # gather is wrapped with local_map for DTensor support.
+        if isinstance(selected_experts_indices, DTensor):
+            assert isinstance(
+                scores, DTensor
+            ), "scores and selected_experts_indices should both be DTensors"
+            _local_gather_topk_scores = local_map(
+                _gather_topk_scores,
+                out_placements=(list(scores.placements),),
+                in_placements=(
+                    list(scores.placements),
+                    list(selected_experts_indices.placements),
+                ),
+                device_mesh=scores.device_mesh,
+            )
+        else:
+            _local_gather_topk_scores = _gather_topk_scores
+
+        top_scores = _local_gather_topk_scores(scores, selected_experts_indices)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
@@ -292,13 +406,27 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        # Build a boolean routing map via scatter, then sum to count tokens
+        # per expert. scatter is wrapped with local_map for DTensor support,
+        # while sum has native DTensor support.
+        if isinstance(selected_experts_indices, DTensor):
+            assert isinstance(
+                scores, DTensor
+            ), "scores and selected_experts_indices should both be DTensors"
+            _local_generate_routing_map = local_map(
+                _generate_routing_map,
+                out_placements=(list(selected_experts_indices.placements),),
+                in_placements=(
+                    list(scores.placements),
+                    list(selected_experts_indices.placements),
+                ),
+                device_mesh=selected_experts_indices.device_mesh,
+            )
+        else:
+            _local_generate_routing_map = _generate_routing_map
+
+        routing_map = _local_generate_routing_map(scores, selected_experts_indices)
+        num_tokens_per_expert = routing_map.sum(dim=0)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -306,6 +434,10 @@ class TokenChoiceTopKRouter(Module):
         init_std = kwargs.get("init_std")
         assert init_std is not None
         self.gate.init_weights(init_std=init_std)
+
+        expert_bias = getattr(self, "expert_bias", None)
+        if expert_bias is not None:
+            expert_bias.zero_()
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -340,13 +472,18 @@ class TokenReorderer(Module):
                 - token_indices_experts_sorted: Token indices reordered to match expert ordering
                 - num_tokens_per_expert: Number of tokens assigned to each expert
         """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+        num_tokens = selected_experts_indices.shape[0]
+        routing_map = torch.scatter(
+            torch.zeros(
+                (num_tokens, self.num_experts),
+                dtype=torch.bool,
+                device=selected_experts_indices.device,
+            ),
+            -1,
+            selected_experts_indices,
+            True,
         )
+        num_tokens_per_expert = routing_map.sum(dim=0)
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
@@ -385,7 +522,11 @@ class MoE(Module):
         self.experts = config.experts.build(
             dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.router = config.router.build(
+            dim=dim,
+            num_experts=num_experts,
+            load_balance_coeff=config.load_balance_coeff,
+        )
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
@@ -398,21 +539,8 @@ class MoE(Module):
         )
         self.score_before_experts = config.score_before_experts
 
-        # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
-        # NOTE: tokens_per_expert is accumulated in the model forward pass.
-        #       expert_bias is updated outside the model in an optimizer step pre hook
-        #       to work with gradient accumulation.
-        self.load_balance_coeff = config.load_balance_coeff
-        if self.load_balance_coeff is not None:
-            assert self.load_balance_coeff > 0.0
-            self.register_buffer(
-                "expert_bias",
-                torch.zeros(num_experts, dtype=torch.float32),
-                persistent=True,
-            )
-        else:
-            self.expert_bias = None
-        # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
+        # tokens_per_expert is accumulated in the model forward pass and used
+        # to update the expert bias for load balancing.
         self.register_buffer(
             "tokens_per_expert",
             torch.zeros(num_experts, dtype=torch.float32),
@@ -427,7 +555,21 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
+        bs, slen, dim = x.shape
+        x = x.view(-1, dim)
+
+        # Router runs in full DTensor (Replicate on TP mesh).
+        # top_scores and selected_experts_indices shape (bs*slen, top_k)
+        # num_tokens_per_expert shape (num_experts,)
+        (
+            top_scores,
+            selected_experts_indices,
+            num_tokens_per_expert,
+        ) = self.router(x)
+
+        # Convert DTensor to local tensor after the router for the
+        # reorderer, experts, and combine steps which use ops without
+        # DTensor support (argsort, index assignment, etc.).
         # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
         # in backward, so gradient reduction (reduce-scatter from Partial to
         # Shard(1)) happens once at the MoE boundary rather than being
@@ -440,7 +582,7 @@ class MoE(Module):
         #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
         #   each rank's token positions(Partial).
         #
-        # This holds for all MoE components (router.gate, routed experts, shared
+        # This holds for all MoE components (routed experts, shared
         # experts) and regardless of score_before_experts.
         if isinstance(x, DTensor):
             assert (
@@ -450,16 +592,9 @@ class MoE(Module):
                 "tp",
             ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
             x = x.to_local(grad_placements=(Partial(),))
-        bs, slen, dim = x.shape
-        x = x.view(-1, dim)
-
-        # top_scores and selected_experts_indices shape (bs*slen, top_k)
-        # num_tokens_per_expert shape (num_experts,)
-        (
-            top_scores,
-            selected_experts_indices,
-            num_tokens_per_expert,
-        ) = self.router(x, self.expert_bias)
+            top_scores = top_scores.to_local(grad_placements=(Partial(),))
+            selected_experts_indices = selected_experts_indices.to_local()
+            num_tokens_per_expert = num_tokens_per_expert.to_local()
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
         # and also to count the expert usage
@@ -541,7 +676,3 @@ class MoE(Module):
             self.tokens_per_expert = torch.zeros(
                 self.experts.num_experts, dtype=torch.float32
             )
-            if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
-                )
