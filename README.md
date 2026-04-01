@@ -65,7 +65,7 @@ We look forward to your contributions!
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
 7. [MXFP8 training for dense and MoE models](docs/mxfp8.md) on Blackwell GPUs.
-8. Supervised Fine-Tuning (SFT) with ChatDataset and ChatDataLoader
+8. Supervised Fine-Tuning (SFT) with chat-formatted datasets and multi-turn conversation support
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
 11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
