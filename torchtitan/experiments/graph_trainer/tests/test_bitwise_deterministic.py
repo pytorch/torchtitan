@@ -16,12 +16,13 @@ Requires a CUDA GPU. Run with:
 import contextlib
 import copy
 import unittest
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Callable
 
 import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
+
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
