@@ -295,9 +295,14 @@ def inductor_decomposition_pass(
         all_inputs.append(val)
 
     # The joint graph forward() takes (primals, tangents) as two list args.
-    # Split based on traced_tangents count from fw_metadata.
-    fw_metadata = joint_with_descriptors._aot_state.fw_metadata
-    num_tangents = len(fw_metadata.traced_tangents)
+    # Split based on the actual updated_flat_args from graph capture, which
+    # reflects post-subclass-unwrapping structure (e.g. DTensor flattened into
+    # local tensor + device mesh).
+    updated_flat_args = joint_with_descriptors._aot_graph_capture.updated_flat_args
+    assert isinstance(
+        updated_flat_args, tuple
+    ), f"Expected (primals, tangents) tuple, got {type(updated_flat_args)}"
+    num_tangents = len(updated_flat_args[1])
     primals_fake = all_inputs[: len(all_inputs) - num_tangents]
     tangents_fake = all_inputs[len(all_inputs) - num_tangents :]
 
