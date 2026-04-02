@@ -241,6 +241,7 @@ def _patch_engine_run_backward() -> Generator[None, None, None]:
         ]
         if roots:
             setup_stacktrace_preservation_hooks(roots)
+        # TODO: pytorch/pytorch#179105 will remove the need for this tagging
         with torch.fx.traceback.annotate({"remat_pass_tag": "is_backward"}):
             return _orig_fn(t_outputs, *args, **kwargs)
 
