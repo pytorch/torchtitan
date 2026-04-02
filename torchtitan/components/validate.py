@@ -187,14 +187,23 @@ class Validator(BaseValidator):
 
         # TODO: deduplicate with Trainer.post_dataloading_process which has
         # the same logic; extract a shared function to prevent further drift.
-        # For causal attention the whole packed sequence is one document,
-        # so sequential RoPE positions (positions=None) are correct.
+        # Resolve positions once: per-document positions for block_causal,
+        # sequential positions when CP needs them for shard indexing,
+        # or None (model uses sequential RoPE slice by default).
         model_config = getattr(model_parts[0], "config", None)
         layer = getattr(model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
-        attn_mask_type = getattr(attn_config, "attn_mask_type", "causal")
-        if attn_mask_type != "block_causal":
-            extra_inputs.pop("positions", None)
+        attn_mask_type = getattr(attn_config, "mask_type", "causal")
+
+        positions = extra_inputs.pop("positions", None)
+        if attn_mask_type == "block_causal":
+            # Per-document positions from the dataloader
+            extra_kwargs["positions"] = positions
+        elif self.parallel_dims.cp_enabled:
+            # Sequential positions needed for correct RoPE after CP sharding
+            extra_kwargs["positions"] = torch.arange(
+                0, inputs.shape[1], dtype=torch.int32, device=inputs.device
+            ).expand(inputs.shape)
 
         try:
             # pyrefly: ignore [not-callable]

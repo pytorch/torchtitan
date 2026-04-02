@@ -168,7 +168,19 @@ class TorchTitanVLLMModelWrapper(Module):
         )
         new_attn = dataclasses.replace(attn_config, inner_attention=vllm_backend)
         new_layer = dataclasses.replace(model_config.layer, attention=new_attn)
-        self.config = dataclasses.replace(model_config, layer=new_layer)
+        # Update both the template and the expanded per-layer configs
+        new_layers = [
+            dataclasses.replace(
+                layer_cfg,
+                attention=dataclasses.replace(
+                    layer_cfg.attention, inner_attention=vllm_backend
+                ),
+            )
+            for layer_cfg in model_config.layers
+        ]
+        self.config = dataclasses.replace(
+            model_config, layer=new_layer, layers=new_layers
+        )
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # TODO: Check if it's possible to apply meta init
