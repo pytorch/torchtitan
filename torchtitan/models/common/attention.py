@@ -30,6 +30,8 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.attention.varlen import varlen_attn
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
@@ -152,14 +154,8 @@ class LocalMapInnerAttention(Module):
 
 
 class VarlenAttention(LocalMapInnerAttention):
-    @dataclass(kw_only=True, slots=True)
-    class Config(LocalMapInnerAttention.Config):
-        batch_invariant: bool = False
-        """Enable batch-invariant mode for deterministic attention."""
-
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: LocalMapInnerAttention.Config) -> None:
         super().__init__(config)
-        self.batch_invariant = config.batch_invariant
 
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -207,21 +203,9 @@ class VarlenAttention(LocalMapInnerAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
-        varlen_kwargs = dict(
-            scale=scale,
-            # window_size=(left, right) controls the attention window relative to each
-            # query position. 'left' is how many tokens before the query to attend to,
-            # and 'right' is how many tokens after. A value of -1 means unlimited.
-            #
-            # This replaces the is_causal flag:
-            #   - (-1, 0): Causal attention - each token attends to all previous tokens
-            #              and itself, but no future tokens. Equivalent to is_causal=True.
-            #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
-            #               is_causal=False.
-            #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
-            window_size=(-1, 0),
-        )
-        if self.batch_invariant:
+        varlen_kwargs = dict()
+
+        if is_in_batch_invariant_mode():
             from torch.nn.attention import current_flash_attention_impl
 
             if current_flash_attention_impl() == "FA3":
@@ -238,6 +222,18 @@ class VarlenAttention(LocalMapInnerAttention):
             cu_seq_k,
             max_q,  # pyrefly: ignore [bad-argument-type]
             max_k,  # pyrefly: ignore [bad-argument-type]
+            scale=scale,
+            # window_size=(left, right) controls the attention window relative to each
+            # query position. 'left' is how many tokens before the query to attend to,
+            # and 'right' is how many tokens after. A value of -1 means unlimited.
+            #
+            # This replaces the is_causal flag:
+            #   - (-1, 0): Causal attention - each token attends to all previous tokens
+            #              and itself, but no future tokens. Equivalent to is_causal=True.
+            #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
+            #               is_causal=False.
+            #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
+            window_size=(-1, 0),
             **varlen_kwargs,
         )
         assert isinstance(out_packed, torch.Tensor)

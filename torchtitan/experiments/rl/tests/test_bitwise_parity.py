@@ -88,9 +88,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     gen_config = config.generator
 
     if config.debug.batch_invariant:
-        from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
+        from torchtitan.distributed.utils import set_batch_invariant
 
-        enable_batch_invariant()
+        set_batch_invariant()
 
     engine_kwargs = dict(
         model=config.hf_assets_path,
@@ -128,10 +128,9 @@ def build_trainer_model(
     hf_assets_path = config.hf_assets_path
 
     if config.debug.batch_invariant:
-        from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
+        from torchtitan.distributed.utils import set_batch_invariant
 
-        enable_batch_invariant()
-        model_spec.model.layer.attention.inner_attention.batch_invariant = True
+        set_batch_invariant()
 
     model_config = model_spec.model
 

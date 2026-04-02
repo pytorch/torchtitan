@@ -28,12 +28,12 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.utils import set_batch_invariant
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -101,7 +101,7 @@ class PolicyTrainer(Actor, Configurable):
         # Enable batch-invariant mode BEFORE init_distributed so NCCL env
         # vars are set before the first communicator is created.
         if config.debug.batch_invariant:
-            enable_batch_invariant()
+            set_batch_invariant()
 
         world_size = dist_utils.init_distributed(config.comm)
 
@@ -216,9 +216,6 @@ class PolicyTrainer(Actor, Configurable):
         assert isinstance(
             model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
-
-        if config.debug.batch_invariant:
-            model_spec.model.layer.attention.inner_attention.batch_invariant = True
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):

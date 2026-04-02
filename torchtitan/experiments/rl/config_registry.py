@@ -44,7 +44,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
@@ -55,7 +55,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,

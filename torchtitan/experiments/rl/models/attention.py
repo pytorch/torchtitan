@@ -13,7 +13,7 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.experiments.rl.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import LocalMapInnerAttention
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
