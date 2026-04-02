@@ -83,6 +83,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_registry: Callable
 
     def setUp(self):
+        if not hasattr(self, "model_registry"):
+            self.skipTest("Base class")
         _set_deterministic()
         model_spec = self.model_registry("debugmodel")
         self.model_config = model_spec.model
@@ -93,8 +95,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         with torch.no_grad():
             model.init_states(buffer_device=None)
         model.train()
-        self.model1 = model
-        self.model2 = copy.deepcopy(model)
+        self.model = model
         self.inputs = torch.randint(0, vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
         self.labels = torch.randint(0, vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
 
@@ -140,6 +141,13 @@ class BitwiseDeterministicBase(unittest.TestCase):
             grad_hash_a, grad_hash_b, f"{msg_prefix}gradient hash mismatch"
         )
 
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
 
 class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 debug model."""
@@ -151,7 +159,9 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         Run `EXPECTTEST_ACCEPT=1 pytest <this_file> ` to update the inline expected values.
         """
-        loss, model_hash, grad_hash = self._run_steps(self.model1, Trainer)
+        loss, model_hash, grad_hash = self._run_steps(
+            copy.deepcopy(self.model), Trainer
+        )
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
@@ -161,13 +171,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
             grad_hash,
             """66bbbbc98b4c1635e42a133ac1fbd499a2b8633ca879f4121cf206708c21dbdf""",
         )
-
-    def test_aot_fx_trace_vs_eager(self):
-        """aot_fx_trace and eager produce bitwise identical losses and grads."""
-        run_eager = self._run_steps(self.model1, Trainer)
-        run_traced = self._run_steps(self.model2, GraphTrainer)
-
-        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
@@ -180,7 +183,9 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
         Run `EXPECTTEST_ACCEPT=1 pytest <this_file> ` to update the inline expected values.
         """
-        loss, model_hash, grad_hash = self._run_steps(self.model1, Trainer)
+        loss, model_hash, grad_hash = self._run_steps(
+            copy.deepcopy(self.model), Trainer
+        )
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
@@ -190,13 +195,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
             grad_hash,
             """c163466b7c4ff0320836e66ce249a7e214c22977adc2e104d373e25470171aeb""",
         )
-
-    def test_aot_fx_trace_vs_eager(self):
-        """aot_fx_trace and eager produce bitwise identical losses and grads."""
-        run_eager = self._run_steps(self.model1, Trainer)
-        run_traced = self._run_steps(self.model2, GraphTrainer)
-
-        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
 if __name__ == "__main__":
