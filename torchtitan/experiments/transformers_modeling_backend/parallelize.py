@@ -270,12 +270,17 @@ def _make_moe_to_local_pre_hook(grad_placements):
 
 
 def _experts_to_local_pre_hook(module, args):
-    """Convert DTensor expert params to local for the HF forward.
+    """Convert DTensor expert params to local for the HF for-loop.
 
-    Uses __dict__ shadowing for params and saves/restores num_experts
-    to match the local expert count. Python checks instance __dict__
-    before nn.Module's __getattr__ (which accesses _parameters), so
-    self.gate_up_proj in the forward finds the local tensor.
+    FSDP (and EP via distribute_tensor) makes expert params DTensors.
+    The original HF Experts.forward uses these params in a for-loop
+    with F.linear and index_add_ which can't handle DTensors. Native
+    titan solves this with to_local() inside GroupedExperts.forward;
+    we use __dict__ shadowing since we don't modify the HF forward.
+
+    Python checks instance __dict__ before nn.Module's __getattr__
+    (which accesses _parameters), so self.gate_up_proj in the forward
+    finds the local tensor instead of the DTensor parameter.
     """
     gate_up = module.gate_up_proj
     down = module.down_proj
