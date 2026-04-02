@@ -42,12 +42,10 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
 ### Tests
 
 ```bash
-# Unit tests (CPU)
+# Unit tests (GPU)
 pytest torchtitan/experiments/graph_trainer/tests/test_passes.py -x
 pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -x
 pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -x
-
-# Numerics tests (GPU)
 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py -x
 
 # Integration tests (8 GPUs)
