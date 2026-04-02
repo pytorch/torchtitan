@@ -155,7 +155,7 @@ class Llama4Model(Decoder):
                         debug.moe_force_load_balance
                     )
                     if parallelism.expert_parallel_comm_backend == "deepep":
-                        from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
+                        from torchtitan.models.common.moe_deepep import DeepEPMoE
 
                         init_kwargs = {
                             f.name: getattr(layer_cfg.moe, f.name)
