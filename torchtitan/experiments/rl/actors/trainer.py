@@ -266,8 +266,10 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Training metrics
         """
-        # The default limit of 8
-        # is not enough; 16 accommodates without recompile storms.
+        # The policy and ref models share code objects, so dynamo's
+        # per-code-object cache must hold entries for both grad modes
+        # (grad for policy, no_grad for ref). The default limit of
+        # is not enough; 16 accommodates both without recompile storms.
         # TODO: @Lucaskabela fix recompiles in general as these increase startup
         torch._dynamo.config.recompile_limit = 16
 

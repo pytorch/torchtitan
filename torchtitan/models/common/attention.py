@@ -8,7 +8,7 @@ import os
 
 # TODO: Re-enable once we have closed
 # https://github.com/pytorch/torchtitan/issues/2722
-os.environ.setdefault("DISABLE_LLVM_OPT", "disable-slp-vectorization")
+os.environ.setdefault("DISABLE_LLVM_OPT", "1")
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
