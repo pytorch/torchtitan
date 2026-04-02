@@ -27,7 +27,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3.parallelize import apply_replicate
@@ -101,9 +100,9 @@ def parallelize_deepseekv3(
             )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(
-            parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
-        )
+        from torchtitan.components.quantization import find_pad_multiple
+
+        pad_multiple = find_pad_multiple(model_converters.converters)
 
         apply_moe_ep_tp(
             model,
@@ -111,9 +110,9 @@ def parallelize_deepseekv3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+            pad_multiple=pad_multiple,
         )
 
     if parallel_dims.cp_enabled:

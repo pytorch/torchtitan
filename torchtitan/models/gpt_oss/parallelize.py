@@ -30,14 +30,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.dual_pipe_v import (
-    DualPipeExpertParallel,
-    get_dual_pipe_v_flag,
-)
 from torchtitan.distributed.expert_parallel import (
-    BaseExpertParallel,
     ExpertParallel,
     ReordererSequenceParallel,
+    TorchAOExpertParallel,
 )
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.gpt_oss.model import GptOssModel
@@ -100,9 +96,9 @@ def parallelize_gptoss(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(
-            parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
-        )
+        from torchtitan.components.quantization import find_pad_multiple
+
+        pad_multiple = find_pad_multiple(model_converters.converters)
 
         apply_moe_ep_tp(
             model,
@@ -110,7 +106,7 @@ def parallelize_gptoss(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
-            dual_pipe_v=dual_pipe_v,
+            pad_multiple=pad_multiple,
         )
 
     if parallel_dims.cp_enabled:
@@ -266,7 +262,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
-    dual_pipe_v: bool = False,
+    pad_multiple: int | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -315,14 +311,19 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            if pad_multiple is not None:
+                experts_plan = TorchAOExpertParallel(pad_multiple)
+            else:
+                # input / output sharding on the batch / tokens dim
+                experts_plan = ExpertParallel()
         else:
+            if pad_multiple is not None:
+                raise NotImplementedError(
+                    "Quantized grouped GEMMs (FP8/MXFP8) with Expert Tensor "
+                    "Parallelism (ETP) is not yet supported."
+                )
             experts_mesh = ep_etp_mesh
             experts_plan = GptossExpertTensorParallel()
-
-        if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):
-            experts_plan = DualPipeExpertParallel(experts_plan)
 
         parallelize_module(
             # pyrefly: ignore [missing-attribute]

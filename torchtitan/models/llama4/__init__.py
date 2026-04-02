@@ -24,13 +24,11 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.attention import FlexAttention
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.moe.moe import GroupedExperts
+from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
-
 from .parallelize import parallelize_llama
 from .state_dict_adapter import Llama4StateDictAdapter
 
