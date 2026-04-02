@@ -244,7 +244,7 @@ class DeepSeekV3Model(Decoder):
                         "deepep",
                         "hybridep",
                     ):
-                        from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
+                        from torchtitan.models.common.moe_deepep import DeepEPMoE
 
                         init_kwargs = {
                             f.name: getattr(layer_cfg.moe, f.name)
