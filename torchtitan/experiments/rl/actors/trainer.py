@@ -162,39 +162,59 @@ class PolicyTrainer(Actor, Stateful, Configurable):
         )
 
     @endpoint
+    async def get_dp_info(self) -> dict:
+        """Return DP topology so the controller can collate correctly."""
+        return {
+            "dp_degree": self.dp_degree,
+            "dp_rank": self.dp_rank,
+        }
+
+    @endpoint
     async def forward_backward(
         self, batches: list[TrainBatch]
     ) -> ForwardBackwardResult:
-        """Compute loss and gradients.
+        """Run model forward, compute loss, and backpropagate.
+
+        Runs a standard [B, L] forward pass with causal SDPA attention,
+        extracts per-token logprobs, builds a response mask, and delegates
+        to the loss function.
 
         Args:
             batches: Pre-sharded list of TrainBatch, one per DP rank.
                 The controller's collate function is responsible for splitting
                 data across DP ranks. Each rank indexes by dp_rank.
-                For non-DP setups, pass a single-element list.
 
         Returns:
             ForwardBackwardResult with loss and metrics.
         """
+        from torchtitan.experiments.rl.actors.utils import (
+            build_response_mask,
+            extract_logprobs_batched,
+        )
+
         fwd_bwd_start = time.perf_counter()
+        self.optimizers.zero_grad()
 
         local_batch = batches[self.dp_rank]
-
-        # Build the loss input dict from the typed batch
-        loss_batch = {
-            "token_ids": local_batch.token_ids,
-            "prompt_token_ids": local_batch.prompt_token_ids,
-            "advantages": local_batch.advantages,
-            "ref_token_log_probs": local_batch.ref_token_log_probs,
-            "kl_coef": local_batch.kl_coef,
-            "ppo_clip_eps": local_batch.ppo_clip_eps,
-            "entropy_coef": local_batch.entropy_coef,
-        }
-
         device = next(self.model.parameters()).device
-        loss, loss_metrics, _ = self.loss_fn(self.model, loss_batch, device)
 
-        self.optimizers.zero_grad()
+        token_ids = local_batch.token_ids.to(device)  # [B, L]
+        logits = self.model(token_ids)  # [B, L, V]
+
+        policy_logprobs = extract_logprobs_batched(logits, token_ids)  # [B, L]
+        response_mask = build_response_mask(
+            local_batch.prompt_lens.to(device),
+            local_batch.response_lens.to(device),
+            token_ids.shape[1],
+            device,
+        )
+
+        loss, loss_metrics = self.loss_fn(
+            policy_logprobs=policy_logprobs,
+            response_mask=response_mask,
+            **vars(local_batch),
+        )
+
         loss.backward()
 
         logger.debug(

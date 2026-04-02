@@ -42,10 +42,80 @@ from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Episode, TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+class GRPOLoss:
+    """GRPO loss with DAPO-style token-level normalization and KL penalty.
+
+    Uses flat token averaging (every token weighted equally regardless of
+    sequence length) instead of GRPO's original per-sequence mean, which
+    biases toward shorter outputs. Clipping is applied per-token.
+
+    See: DAPO (arXiv:2503.14476), Dr. GRPO (arXiv:2503.20783)
+    """
+
+    def __init__(
+        self,
+        kl_coef: float = 0.1,
+        clip_eps: float = 0.2,
+    ):
+        self.kl_coef = kl_coef
+        self.clip_eps = clip_eps
+
+    def __call__(
+        self,
+        policy_logprobs: torch.Tensor,
+        response_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        ref_logprobs: torch.Tensor,
+        **_,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute GRPO clipped surrogate loss with KL penalty.
+
+        Args:
+            policy_logprobs: [B, L] per-token logprobs from the current policy.
+            response_mask: [B, L] binary mask, 1.0 for response tokens.
+            advantages: [B] per-sequence advantages.
+            ref_logprobs: [B, L] per-token logprobs from the reference policy.
+            **_: Absorbs extra TrainBatch fields passed via vars().
+        """
+        device = policy_logprobs.device
+        ref_logprobs = ref_logprobs.to(device).detach()
+        advantages = advantages.to(device)
+        response_mask = response_mask.to(device)
+
+        # Per-token log ratio and importance weight
+        log_ratio = policy_logprobs - ref_logprobs
+        ratio = torch.exp(log_ratio)
+
+        # Expand per-sequence advantages to per-token [B, L]
+        per_token_adv = advantages.unsqueeze(1).expand_as(policy_logprobs)
+
+        # Clipped surrogate objective
+        clipped = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        pg_loss = -torch.min(ratio * per_token_adv, clipped * per_token_adv)
+
+        # Average over response tokens only
+        num_response_tokens = response_mask.sum().clamp(min=1.0)
+        pg_loss = (pg_loss * response_mask).sum() / num_response_tokens
+
+        # KL penalty (Schulman approximation, flat token average)
+        kl_div = ((ratio - 1 - log_ratio) * response_mask).sum() / num_response_tokens
+
+        loss = pg_loss + self.kl_coef * kl_div
+
+        metrics = {
+            "pg_loss": pg_loss.item(),
+            "kl_div": kl_div.item(),
+            "ratio_mean": (ratio * response_mask).sum().item()
+            / num_response_tokens.item(),
+        }
+
+        return loss, metrics
 
 
 class Provisioner:
@@ -125,8 +195,8 @@ class RLTrainer(Configurable):
         """Enable batch-invariant mode for deterministic NCCL collective
         operations and bitwise-reproducible forward/backward passes."""
 
-        num_episodes_per_step: int = 5
-        """Number of episodes to create before every training step."""
+        group_size: int = 8
+        """Number of completions per prompt (GRPO group size)."""
 
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
@@ -140,11 +210,13 @@ class RLTrainer(Configurable):
     def __init__(self, config: Config):
         self.config = config
 
-        # Patch model_spec to use the RL-specific parallelize function.
-        # TODO: Switch to canonical Qwen3 parallel plan
-        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-
-        config.model_spec.parallelize_fn = parallelize_qwen3
+        # Propagate shared config to sub-configs.
+        # The trainer uses the model spec as-is (core Titan's parallelize_fn
+        # which includes FSDP). The generator overrides parallelize_fn with
+        # the RL-specific TP-only plan for vLLM compatibility.
+        config.trainer.model_spec = config.model_spec
+        config.trainer.hf_assets_path = config.hf_assets_path
+        config.generator.num_samples_per_prompt = config.group_size
 
         self.task = SumDigitsTask(seed=42)
 
@@ -160,6 +232,56 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
+    def _collate(
+        self,
+        episodes: list[Episode],
+        pad_token_id: int = 0,
+    ) -> list[TrainBatch]:
+        """Pre-shard episodes into per-DP-rank TrainBatches.
+
+        Pads all sequences to the same length within each rank's batch and
+        builds [B, L] tensors on CPU. Uses interleaved indexing so each DP
+        rank gets a unique slice.
+
+        Returns a list of TrainBatch with one element per DP rank.
+        """
+        dp_degree = self.trainer_dp_degree
+        batches = []
+        for rank in range(dp_degree):
+            idx = list(range(rank, len(episodes), dp_degree))
+            rank_episodes = [episodes[i] for i in idx]
+
+            prompt_lens = [len(ep.prompt_token_ids) for ep in rank_episodes]
+            response_lens = [len(ep.token_ids) for ep in rank_episodes]
+            max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
+
+            padded_ids = []
+            padded_ref_logprobs = []
+            for ep in rank_episodes:
+                seq = ep.prompt_token_ids + ep.token_ids
+                pad_len = max_len - len(seq)
+                padded_ids.append(seq + [pad_token_id] * pad_len)
+                # ref logprobs: 0 for prompt, ep.logprobs for response, 0 for padding
+                ref_lps = (
+                    [0.0] * len(ep.prompt_token_ids) + ep.logprobs + [0.0] * pad_len
+                )
+                padded_ref_logprobs.append(ref_lps)
+
+            batches.append(
+                TrainBatch(
+                    token_ids=torch.tensor(padded_ids, dtype=torch.long),
+                    prompt_lens=torch.tensor(prompt_lens, dtype=torch.long),
+                    response_lens=torch.tensor(response_lens, dtype=torch.long),
+                    advantages=torch.tensor(
+                        [ep.advantage for ep in rank_episodes],
+                        dtype=torch.float32,
+                    ),
+                    ref_logprobs=torch.tensor(padded_ref_logprobs, dtype=torch.float32),
+                    pad_token_id=pad_token_id,
+                )
+            )
+        return batches
+
     async def setup(self):
         """Spawn Monarch actors on separate meshes and initialize weights.
 
@@ -173,6 +295,11 @@ class RLTrainer(Configurable):
         self.generator_world_size = self._compute_world_size(
             config.generator.parallelism
         )
+
+        # DP degree for collating batches (pre-shard data for each DP rank)
+        tp = config.trainer.parallelism
+        dp_shard = max(tp.data_parallel_shard_degree, 1)
+        self.trainer_dp_degree = tp.data_parallel_replicate_degree * dp_shard
 
         total_gpus = self.trainer_world_size + self.generator_world_size
         logger.info(
@@ -204,10 +331,7 @@ class RLTrainer(Configurable):
             "trainer",
             PolicyTrainer,
             config.trainer,
-            model_spec=config.model_spec,
-            batch_invariant_mode=config.batch_invariant_mode,
-            hf_assets_path=config.hf_assets_path,
-            transfer_dtype=config.generator.model_dtype,
+            loss_fn=GRPOLoss(),
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -232,7 +356,7 @@ class RLTrainer(Configurable):
         await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
-        self.trainer.push_model_state_dict.call().get()
+        self.trainer.push_weights.call().get()
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
@@ -265,7 +389,7 @@ class RLTrainer(Configurable):
         # Score: check first episode per prompt (episodes are ordered by prompt)
         correct = 0
         format_ok = 0
-        samples_per_prompt = self.config.generator.num_samples_per_prompt
+        samples_per_prompt = self.config.group_size
         for i, (question, answer) in enumerate(zip(eval_questions, eval_answers)):
             ep = episodes[i * samples_per_prompt]
             extracted = extract_answer(ep.text)
@@ -305,16 +429,26 @@ class RLTrainer(Configurable):
         logger.info(f"Starting RL training for {num_steps} steps")
         logger.info("=" * 80)
 
+        # Derive number of prompts from batch dimensions:
+        # total_episodes = local_batch_size * dp_degree
+        # num_prompts = total_episodes / group_size
+        local_batch_size = self.config.trainer.training.local_batch_size
+        group_size = self.config.group_size
+        total_episodes = local_batch_size * self.trainer_dp_degree
+        assert total_episodes % group_size == 0, (
+            f"total_episodes ({total_episodes} = local_batch_size {local_batch_size} "
+            f"* dp_degree {self.trainer_dp_degree}) must be divisible by "
+            f"group_size ({group_size})"
+        )
+        num_prompts = total_episodes // group_size
+
         for step in range(num_steps):
-            # Generate data sample for this step
             train_prompts = []
             train_answers = []
-            train_questions = []
-            for _ in range(self.config.num_episodes_per_step):
+            for _ in range(num_prompts):
                 question, answer = self.task.create_question()
                 train_prompts.append(self.system_prompt + "\n\n" + question)
                 train_answers.append(answer)
-                train_questions.append(question)
 
             step_start: float = time.perf_counter()
 
@@ -344,13 +478,16 @@ class RLTrainer(Configurable):
                 _log_samples(episodes)
 
             # 4. Trainer updates policy using episodes with advantages
-            metrics = self.trainer.step.call(episodes).get().item(gpus=0)
+            # TODO: ref logprobs are zeros until ReferenceModel actor exists
+            batches = self._collate(episodes)
+            fb_result = self.trainer.forward_backward.call(batches).get().item(gpus=0)
+            optim_result = self.trainer.optim_step.call().get().item(gpus=0)
 
             # 5. Sync weights
             t0 = time.perf_counter()
-            self.trainer.push_model_state_dict.call().get()
+            self.trainer.push_weights.call().get()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            self.generator.pull_model_state_dict.call(optim_result.policy_version).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
@@ -360,21 +497,20 @@ class RLTrainer(Configurable):
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
             all_rewards = [ep.reward for ep in episodes]
+            reward_mean = sum(all_rewards) / len(all_rewards)
             correct_count = sum(1 for r in all_rewards if r > 0)
             total_count = len(all_rewards)
 
             logger.info(
-                f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
-                f"Reward: {metrics['reward_mean']:+.3f} | "
+                f"Step {step:2d} | Loss: {fb_result.loss:+.4f} | "
+                f"Reward: {reward_mean:+.3f} | "
                 f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
-                f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
-                f"max={metrics['logprob_diff_max']:.4e} | "
                 f"Time: {t_step:.1f}s"
             )
 
             # Check for divergence
-            if not torch.isfinite(torch.tensor(metrics["loss"])):
+            if not torch.isfinite(torch.tensor(fb_result.loss)):
                 logger.info("!" * 80)
                 logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
                 logger.info("!" * 80)

@@ -31,156 +31,49 @@ def build_varlen_metadata(
     )
 
 
-def compute_token_log_probs(
-    model: torch.nn.Module,
-    prompt_ids: list[int],
-    gen_ids: list[int],
+def extract_logprobs_batched(
+    logits: torch.Tensor, token_ids: torch.Tensor
+) -> torch.Tensor:
+    """Extract per-token logprobs from batched logits.
+
+    Uses the shifted-by-1 pattern: logits[t] predicts token_ids[t+1].
+    Position 0 is set to 0.0 since there is no prediction for the first token.
+
+    Args:
+        logits: [B, L, V] model output logits.
+        token_ids: [B, L] input token IDs.
+
+    Returns:
+        [B, L] per-token logprobs, aligned with input positions.
+    """
+    shift_logits = logits[:, :-1, :].float()
+    shift_targets = token_ids[:, 1:]
+    logprobs = F.log_softmax(shift_logits, dim=-1)
+    token_logprobs = logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
+    return F.pad(token_logprobs, (1, 0), value=0.0)
+
+
+def build_response_mask(
+    prompt_lens: torch.Tensor,
+    response_lens: torch.Tensor,
+    seq_len: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """
-    Compute per-token log probabilities for generated tokens.
-    TODO Only batch size 1 is supported for now.
+    """Build a binary mask selecting response tokens only.
 
     Args:
-        model: The model to use for computing logits
-        prompt_ids: Prompt token IDs
-        gen_ids: Generated token IDs
-        device: Device to run computation on
+        prompt_lens: [B] length of prompt per sequence.
+        response_lens: [B] length of response per sequence.
+        seq_len: total padded sequence length L.
+        device: target device.
 
     Returns:
-        Per-token log probabilities for the generated tokens
+        [B, L] float mask, 1.0 for response tokens, 0.0 for prompt/padding.
     """
-    token_ids = torch.tensor(prompt_ids + gen_ids, dtype=torch.long, device=device)
-    prompt_len = len(prompt_ids)
-    gen_len = len(gen_ids)
-    attention_masks = build_varlen_metadata([(token_ids, prompt_len, gen_len)], device)
-
-    full_tensor = token_ids.unsqueeze(0)
-
-    # NOTE: We should move towards batching to improve efficiency here
-    # See https://github.com/pytorch/torchtitan/issues/2674
-    # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
-    # which breaks torch.compile with symbolic shapes.
-    seq_len = full_tensor.shape[1]
-    positions = torch.arange(seq_len, device=device).unsqueeze(0)
-
-    logits = model(full_tensor, attention_masks=attention_masks, positions=positions)
-
-    # Convert to float32 for numerical stability
-    logits_f32 = logits[:, :-1, :].to(torch.float32)
-    log_probs = F.log_softmax(logits_f32, dim=-1)
-    target_tokens = full_tensor[:, 1:]
-
-    # Extract log probs for generated tokens only
-    gen_start_idx = prompt_len - 1
-    gen_end_idx = gen_start_idx + gen_len
-
-    gen_token_logprobs = log_probs[0, gen_start_idx:gen_end_idx, :]
-    gen_token_ids_tensor = target_tokens[0, gen_start_idx:gen_end_idx]
-    token_lps = gen_token_logprobs.gather(
-        1, gen_token_ids_tensor.unsqueeze(-1)
-    ).squeeze(-1)
-
-    return token_lps
-
-
-def compute_policy_gradient_loss(
-    model: torch.nn.Module,
-    vllm_token_ids: list[list[int]],
-    prompt_token_ids: list[list[int]],
-    advantages: torch.Tensor,
-    ref_token_log_probs: list[torch.Tensor],
-    kl_coef: float = 0.1,
-    ppo_clip_eps: float = 0.2,
-    entropy_coef: float = 0.01,
-) -> tuple[torch.Tensor, dict, list[torch.Tensor]]:
-    """
-    Compute GRPO/PPO policy gradient loss with per-token KL divergence.
-
-    Uses per-token log ratios (averaged across tokens) instead of per-sequence
-    sums to prevent ratio explosion when sequences are long.
-
-    Args:
-        model: Current policy model
-        vllm_token_ids: Generated token IDs for each completion
-        prompt_token_ids: Prompt token IDs for each completion
-        advantages: [batch] - Advantages for each sample
-        ref_token_log_probs: Per-token log probs from reference model (frozen)
-        kl_coef: KL divergence penalty coefficient
-        ppo_clip_eps: PPO clipping epsilon
-        entropy_coef: Entropy bonus coefficient
-
-    Returns:
-        loss: Total loss (PG + entropy + KL)
-        metrics: Training metrics dict
-        batch_token_log_probs: List of per-token log probs for each sample (for verification)
-    """
-    device = next(model.parameters()).device
-    advantages = advantages.to(device)
-
-    # Compute per-token log probs under current policy (WITH GRADIENTS)
-    batch_token_log_probs = []
-
-    for prompt_toks, gen_toks in zip(prompt_token_ids, vllm_token_ids):
-        token_lps = compute_token_log_probs(
-            model,
-            prompt_toks,
-            gen_toks,
-            device,
-        )
-        batch_token_log_probs.append(token_lps)
-
-    # Per-token log ratios and KL, averaged across tokens per sample
-    per_sample_mean_log_ratio = []
-    per_sample_mean_kl = []
-    all_token_log_probs = []
-
-    for policy_token_lps, ref_token_lps in zip(
-        batch_token_log_probs, ref_token_log_probs
-    ):
-        # Per-token log ratio: log(pi/pi_ref) for each token
-        token_log_ratio = policy_token_lps - ref_token_lps.detach()
-        # Average across tokens in this sequence
-        per_sample_mean_log_ratio.append(token_log_ratio.mean())
-        # Per-token KL: E[ratio - 1 - log_ratio] (Schulman approx)
-        token_ratio = torch.exp(token_log_ratio)
-        token_kl = token_ratio - 1 - token_log_ratio
-        per_sample_mean_kl.append(token_kl.mean())
-        all_token_log_probs.append(policy_token_lps)
-
-    mean_log_ratio = torch.stack(per_sample_mean_log_ratio)  # [batch]
-    mean_kl = torch.stack(per_sample_mean_kl)  # [batch]
-
-    # PPO clipped objective using per-token-averaged ratio
-    ratio = torch.exp(mean_log_ratio)
-    unclipped_loss = ratio * advantages
-    clipped_ratio = torch.clamp(ratio, 1 - ppo_clip_eps, 1 + ppo_clip_eps)
-    clipped_loss = clipped_ratio * advantages
-    pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
-
-    # Entropy bonus (averaged across all tokens)
-    all_token_lps = torch.cat(all_token_log_probs)
-    entropy = -all_token_lps.mean()
-    entropy_bonus = -entropy_coef * entropy
-
-    # KL divergence penalty (averaged across samples)
-    kl_div = mean_kl.mean()
-
-    # Total loss
-    total_loss = pg_loss + entropy_bonus + kl_coef * kl_div
-
-    metrics = {
-        "pg_loss": pg_loss.item(),
-        "entropy": entropy.item(),
-        "kl_div": kl_div.item(),
-        "ratio_mean": ratio.mean().item(),
-        "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
-        .float()
-        .mean()
-        .item(),
-    }
-
-    return total_loss, metrics, batch_token_log_probs
+    positions = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, L]
+    start = prompt_lens.unsqueeze(1)  # [B, 1]
+    end = start + response_lens.unsqueeze(1)  # [B, 1]
+    return ((positions >= start) & (positions < end)).float()
 
 
 def verify_logprob_identity(
