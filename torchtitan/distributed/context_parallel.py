@@ -84,19 +84,19 @@ def prepare_context_parallel_input(
     load_balancer_type: str | None = "headtail",
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
-    Prepare inputs, labels, and attention masks for Context Parallel forward pass.
+    Shard inputs, labels, positions, and attention masks for Context Parallel.
 
-    This function prepares tensors for context parallel by:
-    1. Creating position indices based on input sequence length
-    2. Sharding inputs, labels, and positions across the CP mesh
-    3. Sharding attention masks if present
+    The caller must provide ``extra_kwargs["positions"]`` before calling this
+    function.  Position resolution (per-document vs sequential) is handled
+    upstream in ``post_dataloading_process``.
 
     Args:
         inputs: Input tensor of shape [batch_size, seq_len]
         labels: Label tensor of shape [batch_size, seq_len]
-        extra_kwargs: Dictionary that may contain 'attention_masks' to be sharded
+        extra_kwargs: Dictionary containing 'positions' (required) and
+            optionally 'attention_masks' to be sharded.
         cp_mesh: Device mesh for context parallel dimension
-        device: Device to create position tensor on
+        device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
 
@@ -108,9 +108,7 @@ def prepare_context_parallel_input(
               sharded 'attention_masks'
     """
     attention_masks = extra_kwargs.get("attention_masks", None)
-    positions = torch.arange(
-        0, inputs.shape[1], dtype=torch.int32, device=device
-    ).expand(inputs.shape)
+    positions = extra_kwargs["positions"]
     (inputs, labels, positions), attention_masks = cp_shard(
         cp_mesh,
         (inputs, labels, positions),
