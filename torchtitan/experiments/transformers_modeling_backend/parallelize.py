@@ -386,7 +386,7 @@ def parallelize_hf_transformers(
     if model_compile_enabled:
         has_moe = any(getattr(b, "moe_enabled", False) for b in model.layers)
         if has_moe:
-            _apply_compile_moe(model, compile_config)
+            _apply_compile_sparse(model, compile_config)
         else:
             apply_compile_dense(model, compile_config)
 
@@ -713,8 +713,17 @@ def apply_moe_ep_tp(
 # ---------------------------------------------------------------------------
 
 
-def _apply_compile_moe(model: nn.Module, compile_config: CompileConfig):
-    """Apply torch.compile to each TransformerBlock in a MoE-aware manner.
+def _apply_compile_sparse(model: nn.Module, compile_config: CompileConfig):
+    """HF variant of torchtitan's ``apply_compile_sparse``.
+
+    Cannot reuse the core version because:
+    1. Core detects MoE via ``isinstance(submod, moe_module.MoE)``; HF uses
+       a different module hierarchy (``SparseMoeBlock`` / ``Experts``).
+    2. Core compiles self_attn/layernorms individually for MoE blocks; HF
+       can't — our hook-based to_local creates AsyncCollectiveTensor
+       boundary crossings that crash in backward with TP.
+    3. Core compiles ``_run_experts_grouped_mm``; HF uses the HF-native
+       ``grouped_mm`` via ``config._experts_implementation``.
 
     For non-MoE layers, compiles the whole block. For MoE layers, only
     compiles the gate (when it has no TP hooks). The experts module is
