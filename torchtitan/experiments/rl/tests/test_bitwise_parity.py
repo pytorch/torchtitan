@@ -105,6 +105,12 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
             backend=AttentionBackendEnum.CUSTOM,
         ),
     )
+    # FA2 requires block_size to be a multiple of 256
+    from torchtitan.tools.utils import has_cuda_capability
+
+    if not has_cuda_capability(9, 0):
+        engine_kwargs["block_size"] = 256
+
     vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

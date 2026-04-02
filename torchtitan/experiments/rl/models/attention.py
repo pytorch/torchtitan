@@ -69,9 +69,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 activate_flash_attention_impl("FA3")
         else:
             warn_once(
-                logger,
-                "FA3 not available (requires SM 9.0+), falling back to FA2. "
-                "vLLM block_size must be set to 256 for FA2 paged attention.",
+                logger, "FA3 not available (requires SM 9.0+), falling back to FA2. "
             )
 
     # Based on vLLM's FlashAttentionImpl.forward():
