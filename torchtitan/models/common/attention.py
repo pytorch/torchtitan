@@ -18,7 +18,12 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
+)
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -165,11 +170,6 @@ class VarlenAttention(LocalMapInnerAttention):
 
         # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
-            from torch.nn.attention import (
-                activate_flash_attention_impl,
-                current_flash_attention_impl,
-            )
-
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
 
@@ -210,8 +210,6 @@ class VarlenAttention(LocalMapInnerAttention):
         varlen_kwargs = dict()
 
         if is_in_batch_invariant_mode():
-            from torch.nn.attention import current_flash_attention_impl
-
             if current_flash_attention_impl() == "FA3":
                 # Fix split count to 1 to prevent non-deterministic split-k
                 # reductions that vary with batch composition.
