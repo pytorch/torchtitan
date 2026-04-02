@@ -168,6 +168,115 @@ def get_peak_flops(device_name: str) -> float:
         return 312e12
 
 
+def _hash_model_impl(
+    model: torch.nn.Module,
+    algo: str,
+    per_tensor: bool,
+    include_weights: bool,
+    include_gradients: bool,
+) -> str:
+    """Internal implementation for hashing model parameters, buffers, and/or gradients."""
+    import hashlib
+
+    from torch.distributed.tensor import DTensor
+
+    # Only compute hash on rank 0 in distributed settings.
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return ""
+
+    h = hashlib.new(algo)
+    hashes: dict[str, str] = {}
+
+    def hash_named_tensor(name: str, obj) -> None:
+        if isinstance(obj, torch.Tensor):
+            if isinstance(obj, DTensor):
+                t = obj.to_local().cpu().contiguous()
+            else:
+                t = obj.cpu().contiguous()
+            if per_tensor:
+                tensor_hash = hashlib.new(algo)
+                tensor_hash.update(t.numpy().tobytes())
+                hashes[name] = tensor_hash.hexdigest()
+            else:
+                h.update(name.encode("utf-8"))
+                h.update(bytes(t.numpy().tobytes()))
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if include_weights:
+                hash_named_tensor(name, param)
+            if include_gradients and param.grad is not None:
+                hash_named_tensor(f"{name}.grad", param.grad)
+        if include_weights:
+            for name, buffer in model.named_buffers():
+                hash_named_tensor(name, buffer)
+
+    if per_tensor:
+        return str(hashes)
+    return h.hexdigest()
+
+
+def hash_model(
+    model: torch.nn.Module,
+    algo: str = "sha256",
+    per_tensor: bool = False,
+) -> str:
+    """Computes a hash of model parameters and buffers.
+
+    Useful for verifying deterministic training by comparing model states
+    across runs. Handles DTensor by calling to_local() before hashing.
+    For distributed training, only rank 0 performs the hashing.
+
+    Args:
+        model: The model to hash.
+        algo: The hash algorithm to use (default: "sha256").
+        per_tensor: If True, returns a stringified dictionary mapping each tensor
+            name to its hex hash. If False, returns a single hash of all tensors.
+
+    Returns:
+        A hex string hash, or a stringified per-tensor hash dictionary.
+        Empty string for non-rank0 processes in distributed settings.
+    """
+    return _hash_model_impl(
+        model,
+        algo=algo,
+        per_tensor=per_tensor,
+        include_weights=True,
+        include_gradients=False,
+    )
+
+
+def hash_gradient(
+    model: torch.nn.Module,
+    algo: str = "sha256",
+    per_tensor: bool = False,
+) -> str:
+    """Computes a hash of model parameter gradients.
+
+    Useful for verifying deterministic training by comparing gradient states
+    across runs. Handles DTensor by calling to_local() before hashing.
+    For distributed training, only rank 0 performs the hashing.
+    Parameters without gradients are skipped.
+
+    Args:
+        model: The model to hash gradients for.
+        algo: The hash algorithm to use (default: "sha256").
+        per_tensor: If True, returns a stringified dictionary mapping each gradient
+            name to its hex hash. If False, returns a single hash of all gradients.
+
+    Returns:
+        A hex string hash, or a stringified per-tensor hash dictionary.
+        Empty string for non-rank0 processes in distributed settings.
+    """
+    return _hash_model_impl(
+        model,
+        algo=algo,
+        per_tensor=per_tensor,
+        include_weights=False,
+        include_gradients=True,
+    )
+
+
 @dataclass(frozen=True)
 class Color:
     black = "\033[30m"
