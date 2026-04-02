@@ -7,7 +7,6 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -35,7 +34,7 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
-# init_weights, ffn vs. moe naming and creation, rope vs. nope, etc.
+# ffn vs. moe naming and creation, rope vs. nope, etc.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
@@ -43,10 +42,9 @@ class TransformerBlock(Module):
     - Attention module (from ``attention.build(dim=dim)``)
     - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
     - Two RMSNorms (``attention_norm``, ``ffn_norm``)
-    - ``weight_init_std`` computed from ``layer_id``
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
 
-    Children implement ``__init__``, ``forward``, and ``init_weights``.
+    Children implement ``__init__`` and ``forward``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -61,7 +59,7 @@ class TransformerBlock(Module):
 class Decoder(BaseModel):
     """Base class for autoregressive decoder-only language models.
 
-    Provides shared ``__init__``, ``forward``, ``init_weights``, and
+    Provides shared ``__init__``, ``forward``, ``init_states``, and
     ``get_attention_masks`` (flex/varlen dispatch) used by most models.
     """
 
@@ -79,7 +77,8 @@ class Decoder(BaseModel):
         # and Attention. Also RoPE itself as a standalone module requires PP special
         # handling, see below.
         rope: RoPE.Config
-        layer: TransformerBlock.Config  # required, no default
+        layer: TransformerBlock.Config
+        layers: list | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -92,10 +91,14 @@ class Decoder(BaseModel):
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
+        assert config.layers is not None, (
+            "config.layers must be populated by expand_layer_configs() "
+            "in the model registry before build()."
+        )
         self.layers = ModuleDict()
-        for layer_id in range(config.n_layers):
-            self.layers[str(layer_id)] = config.layer.build(
-                layer_id=layer_id, dim=config.dim, n_layers=config.n_layers
+        for i, layer_config in enumerate(config.layers):
+            self.layers[str(i)] = layer_config.build(
+                layer_id=i, dim=config.dim, n_layers=config.n_layers
             )
 
         self.norm = config.norm.build(normalized_shape=config.dim)
@@ -103,42 +106,30 @@ class Decoder(BaseModel):
             in_features=config.dim, out_features=config.vocab_size
         )
 
-    def init_weights(
+    def init_states(
         self,
-        **kwargs,
-    ):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        buffer_device = buffer_device or self.freqs_cis.device
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
+        # Compute buffer_device before recursion so children (RoPE) get
+        # the correct device when buffer_device is not explicitly provided.
+        if buffer_device is None:
+            buffer_device = self.freqs_cis.device
+        super().init_states(buffer_device=buffer_device)
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        assert buffer_device is None or buffer_device.type != "meta", (
+            f"buffer_device must not be meta, got {buffer_device}. "
+            f"Buffers should be initialized on a real device after to_empty()."
+        )
         if self.rope is not None:
-            self.rope.init_weights(buffer_device=buffer_device)
+            # RoPE's _init_self_buffers was already called by auto-recursion
             self.freqs_cis = self.rope.cache
         else:
             # PP case: rope module was pruned, rebuild to get freqs_cis
             rope = self.config.rope.build()
-            rope.init_weights(buffer_device=buffer_device)
+            rope._init_self_buffers(buffer_device=buffer_device)
             self.freqs_cis = rope.cache
-        if self.tok_embeddings is not None:
-            self.tok_embeddings.init_weights()
-        for layer in self.layers.values():
-            # pyrefly: ignore [not-callable]
-            layer.init_weights(buffer_device=buffer_device)
-        if self.norm is not None:
-            self.norm.init_weights()
-
-        # TODO: this init_weights logic can be the same as others
-        # if we move final_out_std and cutoff_factor logic to
-        # decoder.__init__(). Refactor this logic when we refactor
-        # init_weights.
-        final_out_std = self.config.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
 
     def forward(
         self,

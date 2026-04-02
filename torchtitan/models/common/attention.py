@@ -552,11 +552,12 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        wqkv: Linear.Config
+        wo: Linear.Config
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        linear_bias: bool = False
         use_rope: bool = True
         inner_attention: LocalMapInnerAttention.Config = field(
             default_factory=ScaledDotProductAttention.Config
@@ -592,17 +593,16 @@ class GQAttention(BaseAttention):
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.wq = linear_config.build(
+        self.wq = config.wqkv.build(
             in_features=dim, out_features=self.n_heads * self.head_dim
         )
-        self.wk = linear_config.build(
+        self.wk = config.wqkv.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wv = linear_config.build(
+        self.wv = config.wqkv.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wo = linear_config.build(
+        self.wo = config.wo.build(
             in_features=self.n_heads * self.head_dim, out_features=dim
         )
 
@@ -655,12 +655,3 @@ class GQAttention(BaseAttention):
         ).contiguous()
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
-
-    def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
-        for linear in (self.wq, self.wk, self.wv):
-            linear.init_weights()
-        self.wo.init_weights(init_std=init_std)
-        if self.q_norm is not None:
-            self.q_norm.init_weights()
-        if self.k_norm is not None:
-            self.k_norm.init_weights()

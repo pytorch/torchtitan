@@ -42,26 +42,21 @@ class FeedForward(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hidden_dim: int
-        linear_bias: bool = False
+        w1: Linear.Config
+        w2w3: Linear.Config
         dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.w1 = linear_config.build(
+        self.w1 = config.w1.build(
             in_features=config.dim, out_features=config.hidden_dim
         )
-        self.w2 = linear_config.build(
+        self.w2 = config.w2w3.build(
             in_features=config.hidden_dim, out_features=config.dim
         )
-        self.w3 = linear_config.build(
+        self.w3 = config.w2w3.build(
             in_features=config.dim, out_features=config.hidden_dim
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02, **kwargs):
-        self.w1.init_weights()
-        self.w2.init_weights(init_std=init_std)
-        self.w3.init_weights(init_std=init_std)

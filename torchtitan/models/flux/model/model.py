@@ -45,60 +45,17 @@ class FluxModel(BaseModel):
         qkv_bias: bool = True
         autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
-        # Sub-component configs
-        pe_config: EmbedND.Config = field(
-            default_factory=lambda: EmbedND.Config(
-                dim=128,
-                theta=10_000,
-                axes_dim=(16, 56, 56),
-            )
-        )
-        time_in_config: MLPEmbedder.Config = field(
-            default_factory=lambda: MLPEmbedder.Config(
-                in_layer=Linear.Config(bias=True),
-                out_layer=Linear.Config(bias=True),
-                in_dim=256,
-                hidden_dim=3072,
-            )
-        )
-        vector_in_config: MLPEmbedder.Config = field(
-            default_factory=lambda: MLPEmbedder.Config(
-                in_layer=Linear.Config(bias=True),
-                out_layer=Linear.Config(bias=True),
-                in_dim=768,
-                hidden_dim=3072,
-            )
-        )
-        double_block_config: DoubleStreamBlock.Config = field(
-            default_factory=lambda: DoubleStreamBlock.Config(
-                img_mlp_in=Linear.Config(bias=True),
-                img_mlp_out=Linear.Config(bias=True),
-                txt_mlp_in=Linear.Config(bias=True),
-                txt_mlp_out=Linear.Config(bias=True),
-                hidden_size=3072,
-                num_heads=24,
-                mlp_ratio=4.0,
-                qkv_bias=True,
-            )
-        )
-        single_block_config: SingleStreamBlock.Config = field(
-            default_factory=lambda: SingleStreamBlock.Config(
-                linear1=Linear.Config(bias=True),
-                linear2=Linear.Config(bias=True),
-                hidden_size=3072,
-                num_heads=24,
-                mlp_ratio=4.0,
-            )
-        )
-        final_layer_config: LastLayer.Config = field(
-            default_factory=lambda: LastLayer.Config(
-                linear=Linear.Config(bias=True),
-                adaln_linear=Linear.Config(bias=True),
-                hidden_size=3072,
-                patch_size=1,
-                out_channels=64,
-            )
-        )
+        # Sub-component configs (all required — set by the model registry)
+        pe_config: EmbedND.Config
+        time_in_config: MLPEmbedder.Config
+        vector_in_config: MLPEmbedder.Config
+        double_block_config: DoubleStreamBlock.Config
+        single_block_config: SingleStreamBlock.Config
+        final_layer_config: LastLayer.Config
+
+        # Populated by expand_layer_configs() in the model registry; one config per block.
+        double_blocks_expanded: list = field(default_factory=list)
+        single_blocks_expanded: list = field(default_factory=list)
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass
@@ -183,41 +140,23 @@ class FluxModel(BaseModel):
             in_features=config.context_in_dim, out_features=self.hidden_size
         )
 
+        assert config.double_blocks_expanded, (
+            "config.double_blocks_expanded must be populated by expand_layer_configs() "
+            "in the model registry before build()."
+        )
         self.double_blocks = ModuleList(
-            [config.double_block_config.build() for _ in range(config.depth)]
+            [cfg.build() for cfg in config.double_blocks_expanded]
         )
 
+        assert config.single_blocks_expanded, (
+            "config.single_blocks_expanded must be populated by expand_layer_configs() "
+            "in the model registry before build()."
+        )
         self.single_blocks = ModuleList(
-            [
-                config.single_block_config.build()
-                for _ in range(config.depth_single_blocks)
-            ]
+            [cfg.build() for cfg in config.single_blocks_expanded]
         )
 
         self.final_layer = config.final_layer_config.build()
-
-    def init_weights(self, *, buffer_device=None, **kwargs):
-        # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
-        # initialize Linear Layers: img_in, txt_in
-        nn.init.xavier_uniform_(self.img_in.weight)
-        nn.init.constant_(self.img_in.bias, 0)
-        nn.init.xavier_uniform_(self.txt_in.weight)
-        nn.init.constant_(self.txt_in.bias, 0)
-
-        # Initialize time_in, vector_in (MLPEmbedder)
-        self.time_in.init_weights(init_std=0.02)
-        self.vector_in.init_weights(init_std=0.02)
-
-        # Initialize transformer blocks:
-        for block in self.single_blocks:
-            # pyrefly: ignore [not-callable]
-            block.init_weights()
-        for block in self.double_blocks:
-            # pyrefly: ignore [not-callable]
-            block.init_weights()
-
-        # Zero-out output layers:
-        self.final_layer.init_weights()
 
     def forward(
         self,

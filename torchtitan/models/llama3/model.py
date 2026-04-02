@@ -6,12 +6,13 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -30,7 +31,7 @@ class Llama3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
+        pass
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
@@ -39,11 +40,6 @@ class Llama3TransformerBlock(TransformerBlock):
         self.feed_forward = config.feed_forward.build(dim=dim)
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
     def forward(
         self,
@@ -57,12 +53,6 @@ class Llama3TransformerBlock(TransformerBlock):
         )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
-
-    def init_weights(self, **kwargs):
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Llama3Model(Decoder):
@@ -87,6 +77,7 @@ class Llama3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -95,14 +86,10 @@ class Llama3Model(Decoder):
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
             # Sync rope max_seq_len
-            import dataclasses as _dc
-
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
-
-            from torchtitan.models.common.attention import VarlenAttention
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layer.attention.inner_attention, VarlenAttention.Config
+                self.layers[0].attention.inner_attention, VarlenAttention.Config
             ):
                 raise NotImplementedError(
                     "Context Parallel only supports SDPA and FlexAttention. "
@@ -111,9 +98,9 @@ class Llama3Model(Decoder):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -131,11 +118,12 @@ class Llama3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
+            assert self.layers is not None
             return get_dense_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * (self.dim // self.layer.attention.n_heads),
+                self.layers[0].attention.n_heads,
+                2 * (self.dim // self.layers[0].attention.n_heads),
                 seq_len,
             )
 
@@ -146,17 +134,16 @@ class Llama3Model(Decoder):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.output.weight
 
-    def init_weights(
+    def init_states(
         self,
         *,
         buffer_device: torch.device | None = None,
-        **kwargs,
-    ):
+    ) -> None:
         if self.enable_weight_tying:
-            # since when the model is initialized on meta device,
-            # the tying in the __init__ may not have worked correctly
-            # we ensure the weights are tied here
+            # Re-tie weights before parameter init so that tok_embeddings.weight
+            # (skipped by skip_param_init) and output.weight point to the same
+            # tensor after output is initialized.
             assert self.tok_embeddings is not None and self.output is not None
             self.tok_embeddings.weight = self.output.weight
 
-        super().init_weights(buffer_device=buffer_device, **kwargs)
+        super().init_states(buffer_device=buffer_device)

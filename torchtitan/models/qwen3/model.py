@@ -6,12 +6,17 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
-from torch import nn
+import torch.nn as nn
 
-from torchtitan.models.common.attention import AttentionMasksType, GQAttention
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    GQAttention,
+    VarlenAttention,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -38,7 +43,7 @@ class Qwen3TransformerBlock(TransformerBlock):
 
         self.attention = config.attention.build(dim=dim)
 
-        self.moe_enabled = config.moe_enabled
+        self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
             self.moe = config.moe.build(dim=dim)
@@ -48,11 +53,6 @@ class Qwen3TransformerBlock(TransformerBlock):
 
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
     def forward(
         self,
@@ -70,18 +70,6 @@ class Qwen3TransformerBlock(TransformerBlock):
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
-
-    def init_weights(self, **kwargs):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        if self.moe_enabled:
-            self.moe.init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Qwen3Model(Decoder):
@@ -106,6 +94,7 @@ class Qwen3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -115,19 +104,16 @@ class Qwen3Model(Decoder):
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
             # Sync rope max_seq_len
-            import dataclasses as _dc
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
-
-            if self.layer.moe is not None:
-                self.layer.moe.router._debug_force_load_balance = (
-                    debug.moe_force_load_balance
-                )
-
-            from torchtitan.models.common.attention import VarlenAttention
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    layer_cfg.moe.router._debug_force_load_balance = (
+                        debug.moe_force_load_balance
+                    )
 
             if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layer.attention.inner_attention, VarlenAttention.Config
+                self.layers[0].attention.inner_attention, VarlenAttention.Config
             ):
                 raise NotImplementedError(
                     "Context Parallel only supports SDPA and FlexAttention. "
@@ -141,9 +127,9 @@ class Qwen3Model(Decoder):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads or n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -156,13 +142,14 @@ class Qwen3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layer.attention, GQAttention.Config)
-            assert self.layer.attention.head_dim is not None
+            assert self.layers is not None
+            assert isinstance(self.layers[0].attention, GQAttention.Config)
+            assert self.layers[0].attention.head_dim is not None
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * self.layer.attention.head_dim,
+                self.layers[0].attention.n_heads,
+                2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
 
@@ -173,21 +160,15 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.output.weight
 
-    def init_weights(
+    def init_states(
         self,
         *,
         buffer_device: torch.device | None = None,
-        **kwargs,
-    ):
-        # The token embedding initialization produces weights with too large
-        # standard deviation for the output layer. Under weight_tying, both should
-        # use the output weights with a smaller, truncated normal distribution to
-        # improve training stability.
+    ) -> None:
         if self.enable_weight_tying:
-            # since when the model is initialized on meta device,
-            # the tying in the __init__ may not have worked correctly
-            # we ensure the weights are tied here
+            # Re-tie before init: on meta device the __init__ tying may
+            # not have worked correctly.
             assert self.tok_embeddings is not None and self.output is not None
             self.tok_embeddings.weight = self.output.weight
 
-        super().init_weights(buffer_device=buffer_device, **kwargs)
+        super().init_states(buffer_device=buffer_device)
