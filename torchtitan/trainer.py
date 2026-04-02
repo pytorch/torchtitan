@@ -250,6 +250,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.model_config = model_config
 
+        # Fill sharding specs based on parallelism settings (before build)
+        if model_spec.set_sharding_spec_fn is not None:
+            model_spec.set_sharding_spec_fn(
+                model_config,
+                parallel_dims,
+                loss_parallel=not config.parallelism.disable_loss_parallel,
+            )
+
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
