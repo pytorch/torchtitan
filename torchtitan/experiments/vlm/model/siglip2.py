@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass, field
+
 import einops as E
 import torch
 import torch.nn.functional as F
@@ -21,8 +23,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
-
-from .args import Siglip2Config
 
 LayerNorm = Module.from_nn_module(nn.LayerNorm)
 
@@ -77,20 +77,23 @@ def resize_positional_embeddings(
 
 
 class VisionEmbeddings(Module):
-    def __init__(self, args: Siglip2Config):
-        super().__init__()
-        self.patch_embedding = Linear.Config(bias=True).build(
-            in_features=args.n_channels * args.patch_size * args.patch_size,
-            out_features=args.dim,
-        )
-        self.position_embedding = Embedding.Config().build(
-            num_embeddings=args.n_pos_embs**2, embedding_dim=args.dim
-        )
-        self.n_pos_embs = args.n_pos_embs
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        patch_embedding: Linear.Config
+        position_embedding: Embedding.Config
+        n_pos_embs: int
+        patch_in_features: int = field(init=False)  # n_channels * patch_size^2
+        dim: int = field(init=False)
 
-    def init_weights(self, **kwargs) -> None:
-        self.patch_embedding.init_weights()
-        self.position_embedding.init_weights()
+    def __init__(self, config: Config):
+        super().__init__()
+        self.patch_embedding = config.patch_embedding.build(
+            in_features=config.patch_in_features, out_features=config.dim
+        )
+        self.position_embedding = config.position_embedding.build(
+            num_embeddings=config.n_pos_embs**2, embedding_dim=config.dim
+        )
+        self.n_pos_embs = config.n_pos_embs
 
     def forward(self, pixels_NLD: torch.Tensor, grid_hw: torch.Tensor) -> torch.Tensor:
         # Apply patch embeddings to already patchified pixel values
@@ -114,32 +117,26 @@ class VisionEmbeddings(Module):
 
 
 class Attention(Module):
-    """
-    Multi-head attention module.
+    """Multi-head attention module for vision transformer."""
 
-    Args:
-        model_args (Transformer.Config): Model configuration arguments.
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        qkv: Linear.Config  # shared config for q, k, v projections
+        out_proj: Linear.Config
+        n_heads: int
+        dim: int = field(init=False)
 
-    Attributes:
-        n_heads (int): Number of query heads.
-        head_dim (int): Dimension size of each attention head.
-        wq (Linear): Linear transformation for queries.
-        wk (Linear): Linear transformation for keys.
-        wv (Linear): Linear transformation for values.
-        wo (Linear): Linear transformation for output.
-
-    """
-
-    def __init__(self, args: Siglip2Config):
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = args.dim
-        self.head_dim = args.dim // args.n_heads
+        self.dim = config.dim
+        self.head_dim = config.dim // config.n_heads
 
-        linear_config = Linear.Config(bias=True)
-        self.q_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
-        self.k_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
-        self.v_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
-        self.out_proj = linear_config.build(in_features=self.dim, out_features=self.dim)
+        self.q_proj = config.qkv.build(in_features=self.dim, out_features=self.dim)
+        self.k_proj = config.qkv.build(in_features=self.dim, out_features=self.dim)
+        self.v_proj = config.qkv.build(in_features=self.dim, out_features=self.dim)
+        self.out_proj = config.out_proj.build(
+            in_features=self.dim, out_features=self.dim
+        )
 
         self.inner_attention = FlexAttention.Config().build()
 
@@ -159,17 +156,19 @@ class Attention(Module):
 
         return self.out_proj(output)
 
-    def init_weights(self, **kwargs) -> None:
-        for linear in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            linear.init_weights()
-
 
 class FeedForward(Module):
-    def __init__(self, args: Siglip2Config):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        fc1: Linear.Config
+        fc2: Linear.Config
+        ffn_dim: int
+        dim: int = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        linear_config = Linear.Config(bias=True)
-        self.fc1 = linear_config.build(in_features=args.dim, out_features=args.ffn_dim)
-        self.fc2 = linear_config.build(in_features=args.ffn_dim, out_features=args.dim)
+        self.fc1 = config.fc1.build(in_features=config.dim, out_features=config.ffn_dim)
+        self.fc2 = config.fc2.build(in_features=config.ffn_dim, out_features=config.dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
@@ -177,18 +176,21 @@ class FeedForward(Module):
         x = self.fc2(x)
         return x
 
-    def init_weights(self, **kwargs) -> None:
-        self.fc1.init_weights()
-        self.fc2.init_weights()
-
 
 class TransformerLayer(Module):
-    def __init__(self, args: Siglip2Config):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        self_attn: Attention.Config
+        mlp: FeedForward.Config
+        layer_norm_eps: float = 1e-6
+        dim: int = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.layer_norm1 = LayerNorm(args.dim, eps=args.layer_norm_eps)
-        self.self_attn = Attention(args)
-        self.layer_norm2 = LayerNorm(args.dim, eps=args.layer_norm_eps)
-        self.mlp = FeedForward(args)
+        self.layer_norm1 = LayerNorm(config.dim, eps=config.layer_norm_eps)
+        self.self_attn = Attention(config.self_attn)
+        self.layer_norm2 = LayerNorm(config.dim, eps=config.layer_norm_eps)
+        self.mlp = FeedForward(config.mlp)
 
     def forward(
         self, x: torch.Tensor, attention_masks: AttentionMasksType
@@ -197,24 +199,36 @@ class TransformerLayer(Module):
         x = x + self.mlp(self.layer_norm2(x))
         return x
 
-    def init_weights(self, **kwargs) -> None:
-        self.layer_norm1.init_weights()
-        self.layer_norm2.init_weights()
-        self.self_attn.init_weights()
-        self.mlp.init_weights()
-
 
 class VisionTransformer(Module):
-    def __init__(self, args: Siglip2Config):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        n_layers: int
+        embeddings: VisionEmbeddings.Config
+        layer: TransformerLayer.Config  # template
+        layers: list | None = None  # populated by expand_layer_configs
+        n_channels: int = 3
+        patch_size: int = 16
+        layer_norm_eps: float = 1e-6
+        attn_mask_type: str = "causal"
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.args = args
+        self.attn_mask_type = config.attn_mask_type
         self.eos_id = 11
 
-        self.embeddings = VisionEmbeddings(args)
-        self.layers = ModuleDict(
-            {str(idx): TransformerLayer(args) for idx in range(args.n_layers)}
+        self.embeddings = VisionEmbeddings(config.embeddings)
+
+        assert config.layers is not None, (
+            "config.layers must be populated by expand_layer_configs() "
+            "before constructing VisionTransformer."
         )
-        self.post_layernorm = LayerNorm(args.dim, eps=args.layer_norm_eps)
+        self.layers = ModuleDict()
+        for i, layer_config in enumerate(config.layers):
+            self.layers[str(i)] = TransformerLayer(layer_config)
+
+        self.post_layernorm = LayerNorm(config.dim, eps=config.layer_norm_eps)
 
     def get_attention_masks(
         self,
@@ -231,16 +245,14 @@ class VisionTransformer(Module):
         pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
 
         mask_mods = [get_causal_mask_mod()]
-        match self.args.attn_mask_type:
+        match self.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
                 B = pixel_masks.shape[0]
                 mask_mods.append(get_document_mask_mod(pixel_masks, tokenizer.eos_id))
             case _:
-                raise ValueError(
-                    f"Unknown attention mask type: {self.args.attn_mask_type}"
-                )
+                raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
         return create_attention_mask(
             and_masks(*mask_mods), B, None, pixel_masks.shape[1], pixel_masks.shape[1]
         )
@@ -259,9 +271,3 @@ class VisionTransformer(Module):
         h = self.post_layernorm(h)
 
         return h
-
-    def init_weights(self, **kwargs) -> None:
-        self.embeddings.init_weights()
-        for layer in self.layers.values():
-            layer.init_weights()
-        self.post_layernorm.init_weights()

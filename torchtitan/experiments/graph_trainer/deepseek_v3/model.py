@@ -6,6 +6,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 
 from ..simple_fsdp import disable_active_parametrization
@@ -19,6 +21,10 @@ class GraphTrainerDeepSeekV3Model(DeepSeekV3Model):
     def __init__(self, config: Config):
         super().__init__(config)
 
-    def init_weights(self, *args, **kwargs):
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
         with disable_active_parametrization():
-            super().init_weights(*args, **kwargs)
+            super().init_states(buffer_device=buffer_device)

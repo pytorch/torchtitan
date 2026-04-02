@@ -41,7 +41,8 @@ class Attention(BaseAttention):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
-        linear_bias: bool = False
+        wqkv: Linear.Config
+        wo: Linear.Config
         inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
@@ -60,17 +61,16 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.wq = linear_config.build(
+        self.wq = config.wqkv.build(
             in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = linear_config.build(
+        self.wk = config.wqkv.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = linear_config.build(
+        self.wv = config.wqkv.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = linear_config.build(
+        self.wo = config.wo.build(
             in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
@@ -78,13 +78,6 @@ class Attention(BaseAttention):
             config.inner_attention, FlexAttention.Config
         ), "gpt-oss only supports FlexAttention"
         self.inner_attention = config.inner_attention.build()
-
-    def init_weights(self, **kwargs):
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in (self.wq, self.wk, self.wv, self.wo):
-            linear.init_weights(init_std=init_std)
 
     def forward(
         self,
@@ -147,11 +140,11 @@ class GptOssTransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        pass
+        use_sliding_attention: bool = False
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
-        self.use_sliding_attention = layer_id % 2 == 0
+        self.use_sliding_attention = config.use_sliding_attention
         self.attention = config.attention.build(dim=dim)
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
@@ -160,7 +153,6 @@ class GptOssTransformerBlock(TransformerBlock):
         self.moe = config.moe.build(dim=dim)
         self.moe_enabled = True  # for composability with load balancing
 
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def forward(
@@ -195,15 +187,6 @@ class GptOssTransformerBlock(TransformerBlock):
         x = x + self.moe(self.ffn_norm(x))
         return x
 
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        self.moe.init_weights(
-            init_std=self.weight_init_std, buffer_device=buffer_device
-        )
-
 
 class GptOssModel(Decoder):
     """
@@ -225,6 +208,7 @@ class GptOssModel(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -236,18 +220,22 @@ class GptOssModel(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            assert self.layer.moe is not None
-            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
-                logger.warning(
-                    "Failed to use grouped mm, which is only supported on SM90 or later",
-                )
-                self.layer.moe.experts.use_grouped_mm = False
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    if (
+                        layer_cfg.moe.experts.use_grouped_mm
+                        and not has_cuda_capability(9, 0)
+                    ):
+                        logger.warning(
+                            "Failed to use grouped mm, which is only supported on SM90 or later",
+                        )
+                        layer_cfg.moe.experts.use_grouped_mm = False
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -261,12 +249,13 @@ class GptOssModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, float]:
-            assert isinstance(self.layer.attention, Attention.Config)
+            assert self.layers is not None
+            assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * self.layer.attention.head_dim,
+                self.layers[0].attention.n_heads,
+                2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
 
