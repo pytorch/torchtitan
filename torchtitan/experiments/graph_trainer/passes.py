@@ -192,13 +192,6 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
-        # Skip backward nodes — only forward nodes should be tagged.
-        # Backward nodes are annotated with remat_pass_tag="is_backward"
-        # by _patch_engine_run_backward during make_fx tracing.
-        custom_meta = node.meta.get("custom", {})
-        if custom_meta.get("remat_pass_tag") == "is_backward":
-            continue
-
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -251,13 +244,14 @@ def apply_sac_pass(
     return gm
 
 
-def apply_ac_remat_pass(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
 
-    Tags forward nodes with recompute policy and ac_graph_id via
-    apply_sac_pass (which skips backward-tagged nodes), then applies
-    remat_using_tags_for_fwd_loss_bwd_graph to duplicate PREFER_RECOMPUTE
-    forward ops before backward and DCE originals.
+    Tags nodes with recompute policy via apply_sac_pass, then strips
+    those tags from backward nodes (apply_sac_pass doesn't know about
+    backward regions), and applies remat_using_tags_for_fwd_loss_bwd_graph
+    to duplicate PREFER_RECOMPUTE forward ops before backward and DCE
+    originals.
 
     The model must have been annotated with annotate_ac_regions before
     tracing so that nodes have custom["ac_region_id"] metadata.
@@ -269,39 +263,19 @@ def apply_ac_remat_pass(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     )
 
     apply_sac_pass(gm)
+
+    # Strip recompute tags from backward nodes. apply_sac_pass tags ALL
+    # call_function nodes, but backward nodes must not carry recompute
+    # tags — otherwise the remat pass would try to duplicate backward ops.
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        custom = node.meta.get("custom", {})
+        if custom.get("remat_pass_tag") == "is_backward":
+            node.meta.pop("recompute", None)
+            node.meta.pop("ac_graph_id", None)
+
     return remat_using_tags_for_fwd_loss_bwd_graph(gm)
-
-
-def apply_regional_inductor(traced: "TracedResult") -> None:
-    """Compile annotated HOP regions (e.g. flex_attention) via Inductor.
-
-    flex_attention has no fused CUDA kernel — its only non-Inductor path is
-    the CompositeExplicitAutograd math fallback (sdpa_dense), which
-    materializes the full O(seq_len^2) score matrix and OOMs on large inputs.
-    This pass selectively compiles annotated subgraphs through Inductor's
-    standalone_compile, producing fused Triton kernels.
-
-    The model must have been traced under annotate_flex_attention_for_regional_inductor()
-    so that flex_attention nodes carry compile_with_inductor metadata.
-    """
-    import torch._guards
-    from torch.fx.graph import CodeGen
-    from torch.fx.passes.regional_inductor import regional_inductor
-
-    fake_mode = None
-    for node in traced.gm.graph.nodes:
-        if node.op == "placeholder" and "val" in node.meta:
-            val = node.meta["val"]
-            if isinstance(val, torch.Tensor) and hasattr(val, "fake_mode"):
-                fake_mode = val.fake_mode
-                break
-
-    context = torch._guards.TracingContext(fake_mode)
-    with torch._guards.tracing(context):
-        traced.gm = regional_inductor(traced.gm)
-
-    traced.gm.graph.set_codegen(CodeGen())
-    traced.gm.recompile()
 
 
 # Apply activation checkpointing on joint graph before partitioner

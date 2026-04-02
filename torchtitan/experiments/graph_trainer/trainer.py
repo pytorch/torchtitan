@@ -16,20 +16,16 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
-
-register_blockmask_pytree_node()
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_ac_remat_pass,
-    apply_regional_inductor,
-)
-from torchtitan.models.common.attention import (
-    annotate_flex_attention_for_regional_inductor,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_ac_on_fwd_bwd_graph
 from torchtitan.trainer import Trainer
+
+# BlockMask must be registered as a pytree node so its tensor children
+# are properly traced as graph inputs instead of opaque leaves.
+register_blockmask_pytree_node()
 
 
 def make_fwd_bwd_step(loss_fn):
@@ -112,12 +108,9 @@ class GraphTrainer(Trainer):
     ) -> torch.Tensor:
         if self._traced_step is None:
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-            annotate_ac_regions(model)
-            with (
-                self.train_context(),
-                self.maybe_enable_amp,
-                annotate_flex_attention_for_regional_inductor(),
-            ):
+            if self.config.activation_checkpoint.mode != "none":
+                annotate_ac_regions(model)
+            with self.train_context(), self.maybe_enable_amp:
                 self._traced_step = minimal_fx_tracer(
                     fwd_bwd_fn,
                     (
@@ -129,8 +122,8 @@ class GraphTrainer(Trainer):
                         extra_kwargs,
                     ),
                 )
-            self._traced_step.gm = apply_ac_remat_pass(self._traced_step.gm)
-            apply_regional_inductor(self._traced_step)
+            if self.config.activation_checkpoint.mode != "none":
+                self._traced_step.gm = apply_ac_on_fwd_bwd_graph(self._traced_step.gm)
 
         with self.train_context(), self.maybe_enable_amp:
             outputs = self._traced_step(

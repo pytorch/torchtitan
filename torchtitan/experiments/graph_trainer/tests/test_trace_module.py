@@ -266,8 +266,7 @@ class TestTraceDTensor(unittest.TestCase):
 
         traced = minimal_fx_tracer(forward, (model, tokens_dt))
         has_subclass = any(
-            layout.meta is not None
-            for layout in traced.input_subclass_layouts.values()
+            layout.meta is not None for layout in traced.input_subclass_layouts.values()
         )
         self.assertTrue(has_subclass)
 
@@ -686,7 +685,9 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.common_utils import (
             annotate_ac_regions,
         )
-        from torchtitan.experiments.graph_trainer.passes import apply_ac_remat_pass
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
         config = llama3_configs["1B"]
@@ -735,7 +736,7 @@ class TestGraphBasedSAC(unittest.TestCase):
             annotate_ac_regions(model)
             train_step = make_train_step(get_loss)
             traced = minimal_fx_tracer(train_step, (model, tokens, labels))
-            traced.gm = apply_ac_remat_pass(traced.gm)
+            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
 
             def step(model):
                 result = traced(model, tokens, labels)
@@ -764,9 +765,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         torch.cuda.empty_cache()
 
         # Verify bitwise-identical loss across all steps.
-        for step, (el, tl) in enumerate(
-            zip(eager_losses, traced_losses, strict=True)
-        ):
+        for step, (el, tl) in enumerate(zip(eager_losses, traced_losses, strict=True)):
             self.assertTrue(
                 torch.equal(el, tl),
                 f"Step {step}: eager loss={el.item():.6f} "
