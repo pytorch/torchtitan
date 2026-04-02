@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import einops as E
 import torch
@@ -43,15 +43,11 @@ class Projector(Module):
     class Config(Module.Config):
         w1: Linear.Config
         w2: Linear.Config
-        in_dim: int = field(init=False)
-        out_dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w1 = config.w1.build(in_features=config.in_dim, out_features=config.in_dim)
-        self.w2 = config.w2.build(
-            in_features=config.in_dim, out_features=config.out_dim
-        )
+        self.w1 = config.w1.build()
+        self.w2 = config.w2.build()
 
     def forward(self, x_NLD: torch.Tensor):
         x_NLD = self.w1(x_NLD)

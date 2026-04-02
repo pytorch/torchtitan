@@ -35,13 +35,14 @@ class ToyModel(Module):
 
     def __init__(self, dim=16, n_layers=3):
         super().__init__()
-        linear_config = Linear.Config(bias=True)
-        self.layers = ModuleList(
-            [
-                linear_config.build(in_features=dim, out_features=dim)
-                for _ in range(n_layers)
-            ]
-        )
+
+        def _make_linear():
+            cfg = Linear.Config(bias=True)
+            cfg.in_features = dim
+            cfg.out_features = dim
+            return cfg.build()
+
+        self.layers = ModuleList([_make_linear() for _ in range(n_layers)])
 
     def forward(self, x):
         for layer in self.layers:

@@ -552,16 +552,16 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wqkv: Linear.Config
-        wo: Linear.Config
+        dim: int
+        wq: Linear.Config  # query projection
+        wkv: Linear.Config  # shared config for key + value (build() copies)
+        wo: Linear.Config  # output projection
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
-        inner_attention: LocalMapInnerAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
-        )
+        inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
 
@@ -570,14 +570,16 @@ class GQAttention(BaseAttention):
             if (self.q_norm is None) != (self.k_norm is None):
                 raise ValueError("q_norm and k_norm must be both None or both set")
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
         self.n_kv_heads = (
             config.n_heads if config.n_kv_heads is None else config.n_kv_heads
         )
         self.head_dim = (
-            config.head_dim if config.head_dim is not None else dim // config.n_heads
+            config.head_dim
+            if config.head_dim is not None
+            else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
         self.use_rope = config.use_rope
@@ -587,24 +589,16 @@ class GQAttention(BaseAttention):
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
         if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
-            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
+            self.q_norm = config.q_norm.build()
+            self.k_norm = config.k_norm.build()
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        self.wq = config.wqkv.build(
-            in_features=dim, out_features=self.n_heads * self.head_dim
-        )
-        self.wk = config.wqkv.build(
-            in_features=dim, out_features=self.n_kv_heads * self.head_dim
-        )
-        self.wv = config.wqkv.build(
-            in_features=dim, out_features=self.n_kv_heads * self.head_dim
-        )
-        self.wo = config.wo.build(
-            in_features=self.n_heads * self.head_dim, out_features=dim
-        )
+        self.wq = config.wq.build()
+        self.wk = config.wkv.build()  # build() copies — independent module
+        self.wv = config.wkv.build()  # build() copies — independent module
+        self.wo = config.wo.build()
 
         self.inner_attention = config.inner_attention.build()
 

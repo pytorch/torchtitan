@@ -39,7 +39,7 @@ class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
     All language model TransformerBlocks share:
-    - Attention module (from ``attention.build(dim=dim)``)
+    - Attention module (from ``attention.build()``)
     - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
     - Two RMSNorms (``attention_norm``, ``ffn_norm``)
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
@@ -66,7 +66,6 @@ class Decoder(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
         dim: int
-        n_layers: int
         vocab_size: int
         output: Linear.Config
         tok_embeddings: Embedding.Config
@@ -77,34 +76,22 @@ class Decoder(BaseModel):
         # and Attention. Also RoPE itself as a standalone module requires PP special
         # handling, see below.
         rope: RoPE.Config
-        layer: TransformerBlock.Config
-        layers: list | None = None
+        layers: list  # list[TransformerBlock.Config] or subclass configs
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
 
-        self.tok_embeddings = config.tok_embeddings.build(
-            num_embeddings=config.vocab_size, embedding_dim=config.dim
-        )
-
+        self.tok_embeddings = config.tok_embeddings.build()
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
-        assert config.layers is not None, (
-            "config.layers must be populated by expand_layer_configs() "
-            "in the model registry before build()."
-        )
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
-            self.layers[str(i)] = layer_config.build(
-                layer_id=i, dim=config.dim, n_layers=config.n_layers
-            )
+            self.layers[str(i)] = layer_config.build()
 
-        self.norm = config.norm.build(normalized_shape=config.dim)
-        self.output = config.output.build(
-            in_features=config.dim, out_features=config.vocab_size
-        )
+        self.norm = config.norm.build()
+        self.output = config.output.build()
 
     def init_states(
         self,
@@ -202,5 +189,5 @@ class Decoder(BaseModel):
 
     @property
     def attn_config(self):
-        """Convenience accessor for the attention config from layer."""
-        return self.config.layer.attention
+        """Convenience accessor for the attention config from the first layer."""
+        return self.config.layers[0].attention

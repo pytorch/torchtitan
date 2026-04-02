@@ -33,13 +33,13 @@ class Llama3TransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         pass
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.attention = config.attention.build(dim=dim)
+        self.attention = config.attention.build()
         assert config.feed_forward is not None
-        self.feed_forward = config.feed_forward.build(dim=dim)
-        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
-        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
+        self.feed_forward = config.feed_forward.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
     def forward(
         self,
@@ -66,10 +66,8 @@ class Llama3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 4096
-        n_layers: int = 32
         vocab_size: int = 128256
         enable_weight_tying: bool = False
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -77,7 +75,6 @@ class Llama3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -118,7 +115,6 @@ class Llama3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
             return get_dense_model_nparams_and_flops(
                 self,
                 model,

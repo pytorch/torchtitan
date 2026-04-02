@@ -68,11 +68,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
-        n_heads = self.model_config.layer.attention.n_heads
+        n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
-            self.model_config.layer.attention.n_kv_heads
+            self.model_config.layers[0].attention.n_kv_heads
             # pyrefly: ignore [missing-attribute]
-            if self.model_config.layer.attention.n_kv_heads is not None
+            if self.model_config.layers[0].attention.n_kv_heads is not None
             else n_heads
         )
         dim = self.model_config.dim
@@ -114,11 +114,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
             assert "model.embed_tokens.weight" in hf_state_dict
             hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
 
-        n_heads = self.model_config.layer.attention.n_heads
+        n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
-            self.model_config.layer.attention.n_kv_heads
+            self.model_config.layers[0].attention.n_kv_heads
             # pyrefly: ignore [missing-attribute]
-            if self.model_config.layer.attention.n_kv_heads is not None
+            if self.model_config.layers[0].attention.n_kv_heads is not None
             else n_heads
         )
         dim = self.model_config.dim

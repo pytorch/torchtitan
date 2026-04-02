@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
-from torchtitan.protocols.model import BaseModel
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from torchtitan.tools.logging import logger
@@ -28,7 +28,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
     def __init__(
         self,
-        model_config: BaseModel.Config,
+        model_config: Decoder.Config,
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
@@ -387,7 +387,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
 
 def get_dense_model_nparams_and_flops(
-    model_config: BaseModel.Config,
+    model_config: Decoder.Config,
     model: nn.Module,
     n_heads: int,
     head_dims: int,
@@ -395,7 +395,7 @@ def get_dense_model_nparams_and_flops(
 ) -> tuple[int, int]:
     """
     Args:
-        model_config: BaseModel.Config object containing model configuration parameters.
+        model_config: Decoder.Config object containing model configuration parameters.
         model: nn.Module representing the model.
         n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
@@ -423,8 +423,7 @@ def get_dense_model_nparams_and_flops(
     # 4. we follow the convention and do not account for sparsity in causal attention
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
-        # pyrefly: ignore [missing-attribute]
-        + 6 * model_config.n_layers * n_heads * head_dims * seq_len
+        + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
@@ -438,7 +437,7 @@ def get_dense_model_nparams_and_flops(
 
 
 def get_moe_model_nparams_and_flops(
-    model_config: BaseModel.Config,
+    model_config: Decoder.Config,
     model: nn.Module,
     n_heads: int,
     head_dims: int,
@@ -448,7 +447,7 @@ def get_moe_model_nparams_and_flops(
     Calculate nparams and nflops for MoE models.
 
     Args:
-        model_config: BaseModel.Config object containing model configuration parameters including MoE settings.
+        model_config: Decoder.Config object containing model configuration parameters including MoE settings.
         model: nn.Module representing the MoE model.
         n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
@@ -482,8 +481,7 @@ def get_moe_model_nparams_and_flops(
     nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
     nparams = nparams_dense + nparams_sparse
 
-    # pyrefly: ignore [missing-attribute]
-    moe_config = model_config.layer.moe
+    moe_config = next((l.moe for l in model_config.layers if l.moe is not None), None)
     if moe_config is not None:
         nparams_sparse_active = (
             nparams_moe_router
@@ -500,8 +498,7 @@ def get_moe_model_nparams_and_flops(
 
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-        # pyrefly: ignore [missing-attribute]
-        + 6 * model_config.n_layers * n_heads * head_dims * seq_len
+        + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count

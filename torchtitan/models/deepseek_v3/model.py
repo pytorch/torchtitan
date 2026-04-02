@@ -36,6 +36,7 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        dim: int
         wq: Linear.Config | None = None
         wq_a: Linear.Config | None = None
         wq_b: Linear.Config | None = None
@@ -58,9 +59,9 @@ class Attention(BaseAttention):
         rope_max_seq_len: int = 4096
         rope_original_seq_len: int = 4096
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = dim
+        self.dim = config.dim
         self.n_heads = config.n_heads
         self.q_lora_rank = config.q_lora_rank
         self.kv_lora_rank = config.kv_lora_rank
@@ -71,33 +72,18 @@ class Attention(BaseAttention):
 
         if self.q_lora_rank == 0:
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
-            self.wq = config.wq.build(
-                in_features=self.dim, out_features=self.n_heads * self.qk_head_dim
-            )
+            self.wq = config.wq.build()
         else:
             assert (
                 config.wq_a is not None and config.wq_b is not None
             ), "wq_a and wq_b are required when q_lora_rank > 0"
-            self.wq_a = config.wq_a.build(
-                in_features=self.dim, out_features=self.q_lora_rank
-            )
-            self.q_norm = config.q_norm.build(normalized_shape=self.q_lora_rank)
-            self.wq_b = config.wq_b.build(
-                in_features=self.q_lora_rank,
-                out_features=self.n_heads * self.qk_head_dim,
-            )
-        self.wkv_a = config.wkv_a.build(
-            in_features=self.dim,
-            out_features=self.kv_lora_rank + self.qk_rope_head_dim,
-        )
-        self.kv_norm = config.kv_norm.build(normalized_shape=self.kv_lora_rank)
-        self.wkv_b = config.wkv_b.build(
-            in_features=self.kv_lora_rank,
-            out_features=self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        )
-        self.wo = config.wo.build(
-            in_features=self.n_heads * self.v_head_dim, out_features=self.dim
-        )
+            self.wq_a = config.wq_a.build()
+            self.q_norm = config.q_norm.build()
+            self.wq_b = config.wq_b.build()
+        self.wkv_a = config.wkv_a.build()
+        self.kv_norm = config.kv_norm.build()
+        self.wkv_b = config.wkv_b.build()
+        self.wo = config.wo.build()
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if config.rope_max_seq_len > config.rope_original_seq_len:
@@ -153,23 +139,21 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        n_dense_layers: int = 1
+        pass
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.attention = config.attention.build(dim=dim)
-        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
-        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
+        self.attention = config.attention.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            self.moe = config.moe.build()
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
-
-        self.layer_id = layer_id
+            self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -196,9 +180,7 @@ class DeepSeekV3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 2048
-        n_layers: int = 27
         vocab_size: int = 102400
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -206,7 +188,7 @@ class DeepSeekV3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -217,15 +199,13 @@ class DeepSeekV3Model(Decoder):
                 )
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            # Sync rope fields to attention for all layers
+            # Sync rope fields to attention for all layers.
+            # Mutate in-place — simpler than replacing each config in the list.
             for layer_cfg in self.layers:
                 assert isinstance(layer_cfg.attention, Attention.Config)
-                layer_cfg.attention = dataclasses.replace(
-                    layer_cfg.attention,
-                    rope_max_seq_len=seq_len,
-                    rope_factor=self.rope.rope_factor,
-                    rope_original_seq_len=self.rope.original_seq_len,
-                )
+                layer_cfg.attention.rope_max_seq_len = seq_len
+                layer_cfg.attention.rope_factor = self.rope.rope_factor
+                layer_cfg.attention.rope_original_seq_len = self.rope.original_seq_len
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
@@ -266,7 +246,7 @@ class DeepSeekV3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
+
             assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
