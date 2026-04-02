@@ -13,7 +13,7 @@ from torchtitan.config.configurable import Configurable
 R = TypeVar("R")
 
 
-class DeferredCallable(Generic[R], Configurable):
+class Function(Generic[R], Configurable):
     """A Configurable wrapper around any callable.
 
     Wraps a callable in a ``Config`` with ``.build()`` support, fitting into
@@ -22,7 +22,7 @@ class DeferredCallable(Generic[R], Configurable):
     Use for config fields whose values are computed lazily — e.g., per-layer
     parameter initialization that varies by depth::
 
-        DeferredCallable.Config(
+        Function.Config(
             fn=lambda layer_id: {
                 "weight": partial(trunc_normal_, std=0.02 / (2 * (layer_id + 1)) ** 0.5),
             }
