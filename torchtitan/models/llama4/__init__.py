@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config import DeferredCallable
+from torchtitan.config import Function
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -89,7 +89,7 @@ _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
 }
-_LINEAR_DEPTH_INIT = DeferredCallable.Config(
+_LINEAR_DEPTH_INIT = Function.Config(
     fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
         "bias": nn.init.zeros_,
@@ -97,7 +97,7 @@ _LINEAR_DEPTH_INIT = DeferredCallable.Config(
 )
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
-_EXPERTS_DEPTH_INIT = DeferredCallable.Config(
+_EXPERTS_DEPTH_INIT = Function.Config(
     fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "w1": partial(nn.init.trunc_normal_, std=0.02),
         "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),

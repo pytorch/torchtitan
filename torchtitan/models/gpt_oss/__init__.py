@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config import DeferredCallable
+from torchtitan.config import Function
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.common.config_expand import fill_decoder_fields, fill_moe_fields
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -79,7 +79,7 @@ def expand_layer_configs(config) -> None:
     config.layers = layers
 
 
-_LINEAR_DEPTH_INIT = DeferredCallable.Config(
+_LINEAR_DEPTH_INIT = Function.Config(
     fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
         "bias": nn.init.zeros_,
@@ -98,13 +98,13 @@ def _output_linear_init(dim: int):
     }
 
 
-_SINKS_INIT = DeferredCallable.Config(
+_SINKS_INIT = Function.Config(
     fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
     }
 )
 
-_GPTOSS_EXPERT_INIT = DeferredCallable.Config(
+_GPTOSS_EXPERT_INIT = Function.Config(
     fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
         "mlp1_weight": partial(
             nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)
