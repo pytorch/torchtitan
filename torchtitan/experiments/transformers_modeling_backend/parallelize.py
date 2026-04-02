@@ -72,8 +72,37 @@ from torchtitan.tools.logging import logger
 
 
 # ---------------------------------------------------------------------------
-# HFExpertParallel: ParallelStyle for HF MoE experts
+# ParallelStyle classes for HF MoE
 # ---------------------------------------------------------------------------
+
+
+class TupleNoParallel(NoParallel):
+    """NoParallel that handles tuple returns (e.g., HF MoE routers).
+
+    HF MoE routers return (logits, scores, indices) tuples. The base
+    NoParallel output hook expects a single DTensor and crashes on tuples.
+    This subclass processes each tuple element individually.
+
+    Safe for topk on DTensor because the topk gather patch (at module
+    level) routes topk backward through gather instead of scatter.
+    """
+
+    @staticmethod
+    def _prepare_output_fn(
+        output_layout, local_output_grad_placements, mod, outputs, device_mesh
+    ):
+        def _process(t):
+            if t is None or not isinstance(t, DTensor):
+                return t
+            if t.placements != (output_layout,):
+                t = t.redistribute(placements=(output_layout,), async_op=True)
+            if local_output_grad_placements is not None:
+                return t.to_local(grad_placements=local_output_grad_placements)
+            return t
+
+        if isinstance(outputs, tuple):
+            return tuple(_process(o) for o in outputs)
+        return _process(outputs)
 
 
 class HFExpertParallel(BaseExpertParallel):
@@ -219,52 +248,6 @@ class HFExpertParallel(BaseExpertParallel):
 # ---------------------------------------------------------------------------
 # Gate and expert hooks for DTensor → local conversion
 # ---------------------------------------------------------------------------
-
-
-def _replicate_gate_params(moe_block: nn.Module, tp_mesh: DeviceMesh):
-    """Replicate MoE router gate parameters on the TP mesh.
-
-    Ensures gate params become DTensors with Replicate placement on the
-    TP mesh, so that after FSDP wrapping they end up on the same
-    (fsdp, tp) mesh as other non-EP params.
-    """
-    if not hasattr(moe_block, "gate"):
-        return
-    for submod in moe_block.gate.modules():
-        for param_name, param in list(submod.named_parameters(recurse=False)):
-            submod.register_parameter(
-                param_name,
-                nn.Parameter(distribute_tensor(param, tp_mesh, [Replicate()])),
-            )
-
-
-def _gate_input_to_dtensor_pre_hook(module, args):
-    """Wrap plain tensor gate input as Replicate DTensor if needed.
-
-    When the gate weight is a Replicate DTensor (from _replicate_gate_params)
-    but the input is a plain tensor (from _moe_to_local_pre_hook), F.linear
-    needs both operands as DTensors.
-    """
-    hidden_states = args[0]
-    if not isinstance(hidden_states, DTensor):
-        weight = module.weight
-        if isinstance(weight, DTensor):
-            hidden_states = DTensor.from_local(
-                hidden_states, weight.device_mesh, (Replicate(),), run_check=False
-            )
-            return (hidden_states,) + args[1:]
-    return None
-
-
-def _gate_output_to_local_hook(module, args, output):
-    """Convert DTensor gate outputs to local for downstream plain-tensor computation.
-
-    The gate runs on DTensors (Replicate weight from _replicate_gate_params).
-    topk backward is safe thanks to _topk_with_gather, but downstream code
-    (experts for-loop, index_add_) needs plain tensors. This hook converts
-    all DTensor elements in the gate's tuple output to local.
-    """
-    return tuple(o.to_local() if isinstance(o, DTensor) else o for o in output)
 
 
 def _make_moe_to_local_pre_hook(grad_placements):
@@ -660,14 +643,14 @@ def apply_moe_ep_tp(
                     distribute_tensor(experts.down_proj, tp_mesh, [Shard(2)])
                 )
 
-            # Replicate gate params on TP mesh (FSDP mesh alignment)
-            _replicate_gate_params(moe_block, tp_mesh)
-
-            # Wrap plain input as DTensor for F.linear compatibility,
-            # then convert DTensor outputs to local for downstream
-            # plain-tensor computation (experts for-loop, index_add_)
-            moe_block.gate.register_forward_pre_hook(_gate_input_to_dtensor_pre_hook)
-            moe_block.gate.register_forward_hook(_gate_output_to_local_hook)
+            # Replicate gate params on TP mesh and handle DTensor
+            # input/output via TupleNoParallel. Same as native titan's
+            # NoParallel on moe.router.gate, with tuple return support.
+            parallelize_module(
+                moe_block.gate,
+                tp_mesh,
+                TupleNoParallel(local_output_grad_placements=(Partial(),)),
+            )
 
             # MoE block TP boundary (TP-only): all-gather input, reduce-
             # scatter output. Must be registered BEFORE to_local hook so
