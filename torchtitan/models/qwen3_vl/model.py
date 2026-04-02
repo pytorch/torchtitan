@@ -57,7 +57,6 @@ class Qwen3VLModel(Qwen3Model):
             **kwargs,
         ) -> None:
             training = trainer_config.training
-            parallelism = trainer_config.parallelism
             debug = trainer_config.debug
             seq_len = training.seq_len
             if seq_len > self.rope.max_seq_len:
@@ -323,18 +322,6 @@ class Qwen3VLModel(Qwen3Model):
         # Concatenate and add n_heads dimension: (batch, seq_len, 1, head_dim*2)
         # pyrefly: ignore [bad-return]
         return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
-
-    def init_weights(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-        **kwargs,
-    ):
-        """Initialize all weights."""
-        super().init_weights(buffer_device=buffer_device, **kwargs)
-
-        if self.vision_encoder is not None:
-            self.vision_encoder.init_weights()
 
     def _get_vision_embeds(
         self,

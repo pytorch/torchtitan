@@ -5,7 +5,7 @@
   "added_tokens": [
     {
       "id": 2002,
-      "content": "<|endoftext|>",
+      "content": "<|begin_of_text|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": false,
@@ -14,7 +14,7 @@
     },
     {
       "id": 2003,
-      "content": "<|vision_start|>",
+      "content": "<|end_of_text|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": false,
@@ -23,7 +23,7 @@
     },
     {
       "id": 2004,
-      "content": "<|vision_end|>",
+      "content": "<|endoftext|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": false,
@@ -32,7 +32,7 @@
     },
     {
       "id": 2005,
-      "content": "<|image_pad|>",
+      "content": "<|vision_start|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": false,
@@ -41,6 +41,24 @@
     },
     {
       "id": 2006,
+      "content": "<|vision_end|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2007,
+      "content": "<|image_pad|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2008,
       "content": "<|video_pad|>",
       "single_word": false,
       "lstrip": false,
@@ -2080,11 +2098,13 @@
       "<|begin_of_image|>": 1999,
       "<|end_of_image|>": 2000,
       "<|pad|>": 2001,
-      "<|endoftext|>": 2002,
-      "<|vision_start|>": 2003,
-      "<|vision_end|>": 2004,
-      "<|image_pad|>": 2005,
-      "<|video_pad|>": 2006
+      "<|begin_of_text|>": 2002,
+      "<|end_of_text|>": 2003,
+      "<|endoftext|>": 2004,
+      "<|vision_start|>": 2005,
+      "<|vision_end|>": 2006,
+      "<|image_pad|>": 2007,
+      "<|video_pad|>": 2008
     },
     "merges": []
   }

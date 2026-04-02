@@ -49,7 +49,7 @@
       "special": true
     },
     "2002": {
-      "content": "<|endoftext|>",
+      "content": "<|begin_of_text|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": false,
@@ -57,7 +57,7 @@
       "special": true
     },
     "2003": {
-      "content": "<|vision_start|>",
+      "content": "<|end_of_text|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": false,
@@ -65,7 +65,7 @@
       "special": true
     },
     "2004": {
-      "content": "<|vision_end|>",
+      "content": "<|endoftext|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": false,
@@ -73,7 +73,7 @@
       "special": true
     },
     "2005": {
-      "content": "<|image_pad|>",
+      "content": "<|vision_start|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": false,
@@ -81,6 +81,22 @@
       "special": true
     },
     "2006": {
+      "content": "<|vision_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2007": {
+      "content": "<|image_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2008": {
       "content": "<|video_pad|>",
       "lstrip": false,
       "normalized": false,

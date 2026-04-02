@@ -114,7 +114,7 @@ def qwen3_vl_2b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=2,
+            tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             enable=False,

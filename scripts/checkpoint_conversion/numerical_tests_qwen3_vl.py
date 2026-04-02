@@ -75,10 +75,6 @@ def top_k_match(logits_a, logits_b, k=5):
 def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     """Build paired HF / TT inputs from random images.
 
-    HF inputs use the HF processor; TT inputs use torchtitan's own
-    process_image + vision_to_patches pipeline. This validates both
-    preprocessing paths end-to-end.
-
     Returns:
         hf_inputs: list of dicts (processor output, ready for HF model)
         tt_inputs: list of (input_ids, pixel_values, grid_thw)
@@ -146,7 +142,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         )
 
         # --- Compare pixel values in image space ---
-        # Reshape both HF and TT patches back to (T, H, W, C) for comparison.
+        # Reshape patches back to image space for pixel-level comparison.
         # Only compare frame 0 (actual image); frame 1 is temporal padding.
         hf_pv = hf_in["pixel_values"]
         t_p, h_p, w_p = grid_thw.tolist()
@@ -170,7 +166,6 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
 
 
 def _compare_images(hf_img, tt_img, sample_idx):
-    """Compare two (T, H, W, C) images and return diff stats."""
     diff = (hf_img.float() - tt_img.float()).abs()
     return {
         "sample": sample_idx,
@@ -181,7 +176,6 @@ def _compare_images(hf_img, tt_img, sample_idx):
 
 
 def print_pixel_comparisons(comparisons):
-    """Print pixel-level comparison summary."""
     print(f"\n{'=' * 60}")
     print("Pixel Value Comparison (reconstructed to image space)")
     print(f"{'=' * 60}")
@@ -212,7 +206,7 @@ def print_pixel_comparisons(comparisons):
 
 @torch.no_grad()
 def run_hf(model_path, hf_inputs, device):
-    """Run HF model on all inputs, return last-token logits per sample."""
+    """Run HF model, return last-token logits per sample."""
     from transformers import AutoModelForImageTextToText
 
     print(f"Loading HuggingFace model on {device} ...")
@@ -247,14 +241,14 @@ def run_hf(model_path, hf_inputs, device):
 
 @torch.no_grad()
 def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
-    """Run TT model on all inputs, return last-token logits per sample."""
+    """Run TT model, return last-token logits per sample."""
     print(f"Loading TorchTitan model on {device} ...")
 
     model_config = model_registry(model_flavor).model
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")
-    model.init_weights(buffer_device="cpu")
+    model.init_weights(buffer_device=torch.device("cpu"))
     model.half()
 
     state_dict = ModelWrapper(model)._get_state_dict()
@@ -262,14 +256,23 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     model.to(device)
 
-    # Replace flex attention with SDPA for single-process inference.
+    # Replace FlexAttention with SDPA for single-process inference
+    # (unfused FlexAttention without torch.compile has poor fp16 numerics).
     from torchtitan.models.common.attention import (
-        ScaledDotProductAttentionWrapper,  # pyrefly: ignore [missing-module-attribute]
+        ScaledDotProductAttention,  # pyrefly: ignore [missing-module-attribute]
     )
 
     for layer in model.layers.values():
         layer.attention.attn_backend = "sdpa"
-        layer.attention.inner_attention = ScaledDotProductAttentionWrapper()
+        layer.attention.inner_attention = ScaledDotProductAttention.Config().build()
+
+    class _BidirectionalSDPA(torch.nn.Module):
+        def forward(self, q, k, v, **kwargs):
+            return F.scaled_dot_product_attention(q, k, v, is_causal=False)
+
+    for blk in model.vision_encoder.layers.values():
+        blk.attn.flex_attention = _BidirectionalSDPA()
+
     model.eval()
 
     special_tokens = Qwen3VLSpecialTokens(
