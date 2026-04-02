@@ -552,23 +552,18 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wqkv: Linear.Config  # template for wq, wk, wv (expand_layer_configs creates wq/wk/wv)
-        wo: Linear.Config  # separate config for wo (depth-scaled init)
+        dim: int
+        wq: Linear.Config  # query projection
+        wkv: Linear.Config  # shared config for key + value (build() copies)
+        wo: Linear.Config  # output projection
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
-        inner_attention: LocalMapInnerAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
-        )
+        inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
-        # Expanded fields, populated by expand_layer_configs()
-        dim: int = field(init=False)
-        wq: Linear.Config = field(init=False)
-        wk: Linear.Config = field(init=False)
-        wv: Linear.Config = field(init=False)
 
         def __post_init__(self):
             BaseAttention.Config.__post_init__(self)
@@ -601,8 +596,8 @@ class GQAttention(BaseAttention):
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
         self.wq = config.wq.build()
-        self.wk = config.wk.build()
-        self.wv = config.wv.build()
+        self.wk = config.wkv.build()  # build() copies — independent module
+        self.wv = config.wkv.build()  # build() copies — independent module
         self.wo = config.wo.build()
 
         self.inner_attention = config.inner_attention.build()

@@ -43,154 +43,114 @@ _NORMAL_02 = {"weight": partial(nn.init.normal_, std=0.02), "bias": nn.init.zero
 _NORM_INIT = {"weight": nn.init.ones_}
 
 
-def _fill_modulation_fields(mod, *, dim: int, double: bool) -> None:
-    """Fill expanded fields on a Modulation.Config."""
-    mod.dim = dim
-    mod.double = double
-    multiplier = 6 if double else 3
-    mod.lin.in_features = dim
-    mod.lin.out_features = multiplier * dim
-
-
-def _fill_self_attn_fields(attn, *, dim: int) -> None:
-    """Fill expanded fields on a flux SelfAttention.Config."""
-    attn.dim = dim
-    head_dim = dim // attn.num_heads
-    attn.qkv.in_features = dim
-    attn.qkv.out_features = dim * 3
-    attn.proj.in_features = dim
-    attn.proj.out_features = dim
-    attn.norm.dim = head_dim
-    attn.norm.query_norm.normalized_shape = head_dim
-    attn.norm.key_norm.normalized_shape = head_dim
-
-
-def _fill_double_block_fields(cfg) -> None:
-    """Fill expanded fields on a DoubleStreamBlock.Config."""
-    hs = cfg.hidden_size
-    mlp_hidden_dim = int(hs * cfg.mlp_ratio)
-    _fill_modulation_fields(cfg.img_mod, dim=hs, double=True)
-    _fill_self_attn_fields(cfg.img_attn, dim=hs)
-    cfg.img_mlp_in.in_features = hs
-    cfg.img_mlp_in.out_features = mlp_hidden_dim
-    cfg.img_mlp_out.in_features = mlp_hidden_dim
-    cfg.img_mlp_out.out_features = hs
-    _fill_modulation_fields(cfg.txt_mod, dim=hs, double=True)
-    _fill_self_attn_fields(cfg.txt_attn, dim=hs)
-    cfg.txt_mlp_in.in_features = hs
-    cfg.txt_mlp_in.out_features = mlp_hidden_dim
-    cfg.txt_mlp_out.in_features = mlp_hidden_dim
-    cfg.txt_mlp_out.out_features = hs
-
-
-def _fill_single_block_fields(cfg) -> None:
-    """Fill expanded fields on a SingleStreamBlock.Config."""
-    hs = cfg.hidden_size
-    head_dim = hs // cfg.num_heads
-    mlp_hidden_dim = int(hs * cfg.mlp_ratio)
-    cfg.linear1.in_features = hs
-    cfg.linear1.out_features = hs * 3 + mlp_hidden_dim
-    cfg.linear2.in_features = hs + mlp_hidden_dim
-    cfg.linear2.out_features = hs
-    cfg.norm.dim = head_dim
-    cfg.norm.query_norm.normalized_shape = head_dim
-    cfg.norm.key_norm.normalized_shape = head_dim
-    _fill_modulation_fields(cfg.modulation, dim=hs, double=False)
-
-
-def _fill_mlp_embedder_fields(cfg) -> None:
-    """Fill Linear sub-config fields on a MLPEmbedder.Config."""
-    cfg.in_layer.in_features = cfg.in_dim
-    cfg.in_layer.out_features = cfg.hidden_dim
-    cfg.out_layer.in_features = cfg.hidden_dim
-    cfg.out_layer.out_features = cfg.hidden_dim
-
-
-def _fill_last_layer_fields(cfg) -> None:
-    """Fill Linear sub-config fields on a LastLayer.Config."""
-    hs = cfg.hidden_size
-    cfg.linear.in_features = hs
-    cfg.linear.out_features = cfg.patch_size * cfg.patch_size * cfg.out_channels
-    cfg.adaln_linear.in_features = hs
-    cfg.adaln_linear.out_features = 2 * hs
-
-
-def expand_layer_configs(config) -> None:
-    """Expand block templates into per-block configs via deepcopy.
-
-    Also fills all field(init=False) fields on the config tree.
-    Mutates config in place.
-    """
-    hs = config.hidden_size
-
-    # Top-level Linears
-    config.img_in.in_features = config.in_channels
-    config.img_in.out_features = hs
-    config.txt_in.in_features = config.context_in_dim
-    config.txt_in.out_features = hs
-
-    # MLPEmbedders
-    _fill_mlp_embedder_fields(config.time_in_config)
-    _fill_mlp_embedder_fields(config.vector_in_config)
-
-    # LastLayer
-    _fill_last_layer_fields(config.final_layer_config)
-
-    # Expand double and single blocks
-    config.double_blocks_expanded = []
-    for _ in range(config.depth):
-        cfg = deepcopy(config.double_block_config)
-        _fill_double_block_fields(cfg)
-        config.double_blocks_expanded.append(cfg)
-
-    config.single_blocks_expanded = []
-    for _ in range(config.depth_single_blocks):
-        cfg = deepcopy(config.single_block_config)
-        _fill_single_block_fields(cfg)
-        config.single_blocks_expanded.append(cfg)
-
-
 def _make_double_block_config(
     hidden_size: int,
     num_heads: int,
     mlp_ratio: float,
     qkv_bias: bool,
 ) -> DoubleStreamBlock.Config:
+    hs = hidden_size
+    head_dim = hs // num_heads
+    mlp_hidden_dim = int(hs * mlp_ratio)
     return DoubleStreamBlock.Config(
-        hidden_size=hidden_size,
+        hidden_size=hs,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         qkv_bias=qkv_bias,
         img_mod=Modulation.Config(
-            lin=Linear.Config(bias=True, param_init=_ZERO_LINEAR)
+            double=True,
+            lin=Linear.Config(
+                in_features=hs,
+                out_features=6 * hs,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
         ),
         txt_mod=Modulation.Config(
-            lin=Linear.Config(bias=True, param_init=_ZERO_LINEAR)
+            double=True,
+            lin=Linear.Config(
+                in_features=hs,
+                out_features=6 * hs,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
         ),
         img_attn=SelfAttention.Config(
-            qkv=Linear.Config(bias=qkv_bias, param_init=_XAVIER_LINEAR),
-            proj=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-            norm=QKNorm.Config(
-                query_norm=RMSNorm.Config(param_init=_NORM_INIT),
-                key_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ),
             num_heads=num_heads,
             qkv_bias=qkv_bias,
+            qkv=Linear.Config(
+                in_features=hs,
+                out_features=hs * 3,
+                bias=qkv_bias,
+                param_init=_XAVIER_LINEAR,
+            ),
+            proj=Linear.Config(
+                in_features=hs,
+                out_features=hs,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+            norm=QKNorm.Config(
+                query_norm=RMSNorm.Config(
+                    normalized_shape=head_dim,
+                    param_init=_NORM_INIT,
+                ),
+                key_norm=RMSNorm.Config(
+                    normalized_shape=head_dim,
+                    param_init=_NORM_INIT,
+                ),
+            ),
         ),
         txt_attn=SelfAttention.Config(
-            qkv=Linear.Config(bias=qkv_bias, param_init=_XAVIER_LINEAR),
-            proj=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-            norm=QKNorm.Config(
-                query_norm=RMSNorm.Config(param_init=_NORM_INIT),
-                key_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ),
             num_heads=num_heads,
             qkv_bias=qkv_bias,
+            qkv=Linear.Config(
+                in_features=hs,
+                out_features=hs * 3,
+                bias=qkv_bias,
+                param_init=_XAVIER_LINEAR,
+            ),
+            proj=Linear.Config(
+                in_features=hs,
+                out_features=hs,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+            norm=QKNorm.Config(
+                query_norm=RMSNorm.Config(
+                    normalized_shape=head_dim,
+                    param_init=_NORM_INIT,
+                ),
+                key_norm=RMSNorm.Config(
+                    normalized_shape=head_dim,
+                    param_init=_NORM_INIT,
+                ),
+            ),
         ),
-        img_mlp_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        img_mlp_out=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        txt_mlp_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        txt_mlp_out=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        img_mlp_in=Linear.Config(
+            in_features=hs,
+            out_features=mlp_hidden_dim,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        img_mlp_out=Linear.Config(
+            in_features=mlp_hidden_dim,
+            out_features=hs,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        txt_mlp_in=Linear.Config(
+            in_features=hs,
+            out_features=mlp_hidden_dim,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        txt_mlp_out=Linear.Config(
+            in_features=mlp_hidden_dim,
+            out_features=hs,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
     )
 
 
@@ -199,18 +159,43 @@ def _make_single_block_config(
     num_heads: int,
     mlp_ratio: float,
 ) -> SingleStreamBlock.Config:
+    hs = hidden_size
+    head_dim = hs // num_heads
+    mlp_hidden_dim = int(hs * mlp_ratio)
     return SingleStreamBlock.Config(
-        hidden_size=hidden_size,
+        hidden_size=hs,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
-        linear1=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        linear2=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        linear1=Linear.Config(
+            in_features=hs,
+            out_features=hs * 3 + mlp_hidden_dim,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        linear2=Linear.Config(
+            in_features=hs + mlp_hidden_dim,
+            out_features=hs,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
         modulation=Modulation.Config(
-            lin=Linear.Config(bias=True, param_init=_ZERO_LINEAR)
+            double=False,
+            lin=Linear.Config(
+                in_features=hs,
+                out_features=3 * hs,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
         ),
         norm=QKNorm.Config(
-            query_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            key_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            query_norm=RMSNorm.Config(
+                normalized_shape=head_dim,
+                param_init=_NORM_INIT,
+            ),
+            key_norm=RMSNorm.Config(
+                normalized_shape=head_dim,
+                param_init=_NORM_INIT,
+            ),
         ),
     )
 
@@ -221,21 +206,46 @@ def _flux_dev() -> FluxModel.Config:
     mlp_ratio = 4.0
     qkv_bias = True
     vec_in_dim = 768
+    in_channels = 64
+    context_in_dim = 4096
+    depth = 19
+    depth_single_blocks = 38
+    double_tmpl = _make_double_block_config(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+        qkv_bias=qkv_bias,
+    )
+    single_tmpl = _make_single_block_config(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+    )
     return FluxModel.Config(
-        in_channels=64,
+        in_channels=in_channels,
         out_channels=64,
         vec_in_dim=vec_in_dim,
-        context_in_dim=4096,
+        context_in_dim=context_in_dim,
         hidden_size=hidden_size,
         mlp_ratio=mlp_ratio,
         num_heads=num_heads,
-        depth=19,
-        depth_single_blocks=38,
+        depth=depth,
+        depth_single_blocks=depth_single_blocks,
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=qkv_bias,
-        img_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        txt_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        img_in=Linear.Config(
+            in_features=in_channels,
+            out_features=hidden_size,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        txt_in=Linear.Config(
+            in_features=context_in_dim,
+            out_features=hidden_size,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -251,32 +261,53 @@ def _flux_dev() -> FluxModel.Config:
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
             hidden_dim=hidden_size,
-            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
-            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            in_layer=Linear.Config(
+                in_features=256,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
+            out_layer=Linear.Config(
+                in_features=hidden_size,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
         ),
         vector_in_config=MLPEmbedder.Config(
             in_dim=vec_in_dim,
             hidden_dim=hidden_size,
-            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
-            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            in_layer=Linear.Config(
+                in_features=vec_in_dim,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
+            out_layer=Linear.Config(
+                in_features=hidden_size,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
         ),
-        double_block_config=_make_double_block_config(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            qkv_bias=qkv_bias,
-        ),
-        single_block_config=_make_single_block_config(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-        ),
+        double_blocks=[deepcopy(double_tmpl) for _ in range(depth)],
+        single_blocks=[deepcopy(single_tmpl) for _ in range(depth_single_blocks)],
         final_layer_config=LastLayer.Config(
             hidden_size=hidden_size,
             patch_size=1,
             out_channels=64,
-            linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
-            adaln_linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
+            linear=Linear.Config(
+                in_features=hidden_size,
+                out_features=1 * 1 * 64,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
+            adaln_linear=Linear.Config(
+                in_features=hidden_size,
+                out_features=2 * hidden_size,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
         ),
     )
 
@@ -287,21 +318,46 @@ def _flux_schnell() -> FluxModel.Config:
     mlp_ratio = 4.0
     qkv_bias = True
     vec_in_dim = 768
+    in_channels = 64
+    context_in_dim = 4096
+    depth = 19
+    depth_single_blocks = 38
+    double_tmpl = _make_double_block_config(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+        qkv_bias=qkv_bias,
+    )
+    single_tmpl = _make_single_block_config(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+    )
     return FluxModel.Config(
-        in_channels=64,
+        in_channels=in_channels,
         out_channels=64,
         vec_in_dim=vec_in_dim,
-        context_in_dim=4096,
+        context_in_dim=context_in_dim,
         hidden_size=hidden_size,
         mlp_ratio=mlp_ratio,
         num_heads=num_heads,
-        depth=19,
-        depth_single_blocks=38,
+        depth=depth,
+        depth_single_blocks=depth_single_blocks,
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=qkv_bias,
-        img_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        txt_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        img_in=Linear.Config(
+            in_features=in_channels,
+            out_features=hidden_size,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        txt_in=Linear.Config(
+            in_features=context_in_dim,
+            out_features=hidden_size,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -317,32 +373,53 @@ def _flux_schnell() -> FluxModel.Config:
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
             hidden_dim=hidden_size,
-            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
-            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            in_layer=Linear.Config(
+                in_features=256,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
+            out_layer=Linear.Config(
+                in_features=hidden_size,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
         ),
         vector_in_config=MLPEmbedder.Config(
             in_dim=vec_in_dim,
             hidden_dim=hidden_size,
-            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
-            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            in_layer=Linear.Config(
+                in_features=vec_in_dim,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
+            out_layer=Linear.Config(
+                in_features=hidden_size,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
         ),
-        double_block_config=_make_double_block_config(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            qkv_bias=qkv_bias,
-        ),
-        single_block_config=_make_single_block_config(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-        ),
+        double_blocks=[deepcopy(double_tmpl) for _ in range(depth)],
+        single_blocks=[deepcopy(single_tmpl) for _ in range(depth_single_blocks)],
         final_layer_config=LastLayer.Config(
             hidden_size=hidden_size,
             patch_size=1,
             out_channels=64,
-            linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
-            adaln_linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
+            linear=Linear.Config(
+                in_features=hidden_size,
+                out_features=1 * 1 * 64,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
+            adaln_linear=Linear.Config(
+                in_features=hidden_size,
+                out_features=2 * hidden_size,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
         ),
     )
 
@@ -353,21 +430,46 @@ def _flux_debug() -> FluxModel.Config:
     mlp_ratio = 4.0
     qkv_bias = True
     vec_in_dim = 768
+    in_channels = 64
+    context_in_dim = 4096
+    depth = 2
+    depth_single_blocks = 2
+    double_tmpl = _make_double_block_config(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+        qkv_bias=qkv_bias,
+    )
+    single_tmpl = _make_single_block_config(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+    )
     return FluxModel.Config(
-        in_channels=64,
+        in_channels=in_channels,
         out_channels=64,
         vec_in_dim=vec_in_dim,
-        context_in_dim=4096,
+        context_in_dim=context_in_dim,
         hidden_size=hidden_size,
         mlp_ratio=mlp_ratio,
         num_heads=num_heads,
-        depth=2,
-        depth_single_blocks=2,
+        depth=depth,
+        depth_single_blocks=depth_single_blocks,
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=qkv_bias,
-        img_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-        txt_in=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+        img_in=Linear.Config(
+            in_features=in_channels,
+            out_features=hidden_size,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
+        txt_in=Linear.Config(
+            in_features=context_in_dim,
+            out_features=hidden_size,
+            bias=True,
+            param_init=_XAVIER_LINEAR,
+        ),
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -383,32 +485,53 @@ def _flux_debug() -> FluxModel.Config:
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
             hidden_dim=hidden_size,
-            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
-            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            in_layer=Linear.Config(
+                in_features=256,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
+            out_layer=Linear.Config(
+                in_features=hidden_size,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
         ),
         vector_in_config=MLPEmbedder.Config(
             in_dim=vec_in_dim,
             hidden_dim=hidden_size,
-            in_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
-            out_layer=Linear.Config(bias=True, param_init=_NORMAL_02),
+            in_layer=Linear.Config(
+                in_features=vec_in_dim,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
+            out_layer=Linear.Config(
+                in_features=hidden_size,
+                out_features=hidden_size,
+                bias=True,
+                param_init=_NORMAL_02,
+            ),
         ),
-        double_block_config=_make_double_block_config(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            qkv_bias=qkv_bias,
-        ),
-        single_block_config=_make_single_block_config(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-        ),
+        double_blocks=[deepcopy(double_tmpl) for _ in range(depth)],
+        single_blocks=[deepcopy(single_tmpl) for _ in range(depth_single_blocks)],
         final_layer_config=LastLayer.Config(
             hidden_size=hidden_size,
             patch_size=1,
             out_channels=64,
-            linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
-            adaln_linear=Linear.Config(bias=True, param_init=_ZERO_LINEAR),
+            linear=Linear.Config(
+                in_features=hidden_size,
+                out_features=1 * 1 * 64,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
+            adaln_linear=Linear.Config(
+                in_features=hidden_size,
+                out_features=2 * hidden_size,
+                bias=True,
+                param_init=_ZERO_LINEAR,
+            ),
         ),
     )
 
@@ -422,7 +545,6 @@ flux_configs = {
 
 def model_registry(flavor: str) -> ModelSpec:
     config = flux_configs[flavor]()
-    expand_layer_configs(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,

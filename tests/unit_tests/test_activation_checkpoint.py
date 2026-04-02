@@ -27,9 +27,7 @@ class ToyModule(Module):
 class TransformerBlock(Module):
     def __init__(self):
         super().__init__()
-        linear_config = Linear.Config(bias=False)
-        linear_config.in_features = 512
-        linear_config.out_features = 512
+        linear_config = Linear.Config(in_features=512, out_features=512, bias=False)
         self.moe = Module()
         self.moe.router = Module()
         self.moe.router.gate = linear_config.build()

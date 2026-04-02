@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -36,19 +36,13 @@ class FeedForward(Module):
 
     Config takes the **final** hidden_dim (no internal 2/3 scaling).
     Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
-    ``dim`` and per-linear configs (``w1``, ``w2``, ``w3``) are populated
-    by ``expand_layer_configs()`` before ``build()`` is called.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        hidden_dim: int
-        w1: Linear.Config  # template for w1 (base init)
-        w2w3: Linear.Config  # template for w2, w3 (depth-scaled init)
-        # Expanded fields, populated by expand_layer_configs()
-        dim: int = field(init=False)
-        w2: Linear.Config = field(init=False)
-        w3: Linear.Config = field(init=False)
+        w1: Linear.Config
+        w2: Linear.Config
+        w3: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__()

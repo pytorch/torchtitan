@@ -545,8 +545,8 @@ class FaultTolerantTrainer(Trainer):
                 ft_manager=self.ft_manager,
                 model=self.model_parts[0],
                 n_layers=(
-                    self.model_config.n_layers
-                    if hasattr(self.model_config, "n_layers")
+                    len(self.model_config.layers)
+                    if hasattr(self.model_config, "layers")
                     else 0
                 ),
                 optimizer=self.optimizers,

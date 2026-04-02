@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from copy import deepcopy
 from functools import partial
 
 import torch
@@ -25,9 +24,7 @@ class TestLinear(unittest.TestCase):
 
     def test_config_build(self):
         """Linear.Config.build() creates a working linear."""
-        config = Linear.Config()
-        config.in_features = 32
-        config.out_features = 16
+        config = Linear.Config(in_features=32, out_features=16)
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertIsInstance(linear, nn.Linear)
@@ -36,29 +33,26 @@ class TestLinear(unittest.TestCase):
 
     def test_config_build_with_bias(self):
         """Linear.Config(bias=True).build() creates a linear with bias."""
-        config = Linear.Config(bias=True)
-        config.in_features = 32
-        config.out_features = 16
+        config = Linear.Config(in_features=32, out_features=16, bias=True)
         linear = config.build()
         self.assertIsNotNone(linear.bias)
         self.assertEqual(linear.bias.shape, torch.Size([16]))
 
     def test_config_build_without_fields_raises(self):
-        """Linear.Config.build() raises when features are not passed."""
-        config = Linear.Config()
+        """Linear.Config() raises TypeError when required features are not provided."""
         with self.assertRaises(TypeError):
-            config.build()
+            Linear.Config()
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
         config = Linear.Config(
+            in_features=16,
+            out_features=8,
             param_init={
                 "weight": partial(nn.init.trunc_normal_, std=0.02),
                 "bias": nn.init.zeros_,
-            }
+            },
         )
-        config.in_features = 16
-        config.out_features = 8
         linear = config.build()
 
         with torch.no_grad():
@@ -70,13 +64,13 @@ class TestLinear(unittest.TestCase):
     def test_custom_init_std(self):
         """Linear respects custom mean and std."""
         config = Linear.Config(
+            in_features=1000,
+            out_features=500,
             param_init={
                 "weight": partial(nn.init.normal_, mean=0.1, std=0.02),
                 "bias": nn.init.zeros_,
-            }
+            },
         )
-        config.in_features = 1000
-        config.out_features = 500
         linear = config.build()
 
         torch.manual_seed(42)
@@ -90,9 +84,7 @@ class TestLinear(unittest.TestCase):
 
     def test_forward(self):
         """Forward pass works through nn.Linear's implementation."""
-        config = Linear.Config()
-        config.in_features = 32
-        config.out_features = 16
+        config = Linear.Config(in_features=32, out_features=16)
         linear = config.build()
         x = torch.randn(2, 10, 32)
         out = linear(x)
@@ -100,14 +92,9 @@ class TestLinear(unittest.TestCase):
 
     def test_shared_config_builds_independent_instances(self):
         """A single Linear.Config can build multiple independent linears."""
-        config = Linear.Config()
-        cfg1 = deepcopy(config)
-        cfg1.in_features = 32
-        cfg1.out_features = 16
+        cfg1 = Linear.Config(in_features=32, out_features=16)
         l1 = cfg1.build()
-        cfg2 = deepcopy(config)
-        cfg2.in_features = 64
-        cfg2.out_features = 8
+        cfg2 = Linear.Config(in_features=64, out_features=8)
         l2 = cfg2.build()
         self.assertIsNot(l1, l2)
         self.assertEqual(l1.weight.shape, torch.Size([16, 32]))
@@ -115,43 +102,33 @@ class TestLinear(unittest.TestCase):
 
     def test_isinstance_checks(self):
         """Linear is instance of nn.Linear, and Module."""
-        config = Linear.Config()
-        config.in_features = 8
-        config.out_features = 4
+        config = Linear.Config(in_features=8, out_features=4)
         linear = config.build()
         self.assertIsInstance(linear, nn.Linear)
         self.assertIsInstance(linear, Module)
 
     def test_default_bias_false(self):
         """Linear.Config defaults to bias=False."""
-        config = Linear.Config()
+        config = Linear.Config(in_features=4, out_features=4)
         self.assertFalse(config.bias)
 
     def test_direct_construction(self):
         """Linear can be constructed directly (Flux-style, non-Configurable parents)."""
-        config = Linear.Config(bias=True)
-        with self.assertRaises(TypeError):
-            linear = Linear(config)
-        config.in_features = 32
-        config.out_features = 16
+        config = Linear.Config(in_features=32, out_features=16, bias=True)
         linear = Linear(config)
         self.assertIsInstance(linear, Linear)
         self.assertIsNotNone(linear.bias)
 
     def test_config_pre_specified_build(self):
         """Linear.Config with both fields pre-specified builds with no kwargs."""
-        config = Linear.Config()
-        config.in_features = 32
-        config.out_features = 16
+        config = Linear.Config(in_features=32, out_features=16)
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
     def test_config_partial_pre_specified(self):
-        """Linear.Config with one field pre-specified, other via build()."""
-        config = Linear.Config()
-        config.in_features = 32
-        config.out_features = 16
+        """Linear.Config with fields specified at construction builds correctly."""
+        config = Linear.Config(in_features=32, out_features=16)
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
@@ -178,9 +155,7 @@ class TestModuleInjection(unittest.TestCase):
     def test_no_inject_on_our_linear(self):
         """Our Linear (already Module) is not patched."""
         model = nn.Module()
-        config = Linear.Config()
-        config.in_features = 8
-        config.out_features = 4
+        config = Linear.Config(in_features=8, out_features=4)
         model.fc = config.build()
         orig_cls = type(model.fc)
 
@@ -226,9 +201,7 @@ class TestModuleInjection(unittest.TestCase):
 
         # Build model with our Linear
         model = nn.Module()
-        config = Linear.Config(bias=True)
-        config.in_features = 8
-        config.out_features = 4
+        config = Linear.Config(in_features=8, out_features=4, bias=True)
         model.fc = config.build()
 
         # Capture attrs
@@ -269,9 +242,7 @@ class TestModuleInjection(unittest.TestCase):
             pass
 
         model = nn.Module()
-        config = Linear.Config()
-        config.in_features = 8
-        config.out_features = 4
+        config = Linear.Config(in_features=8, out_features=4)
         model.fc = config.build()
 
         model.fc.__class__ = FakeQuantLinear
@@ -303,15 +274,8 @@ class TestVerifyModuleProtocol(unittest.TestCase):
     def test_passes_when_all_satisfy(self):
         """No error when all nn.Linear modules are Linear."""
         model = nn.Module()
-        config = Linear.Config()
-        cfg1 = deepcopy(config)
-        cfg1.in_features = 8
-        cfg1.out_features = 4
-        model.fc1 = cfg1.build()
-        cfg2 = deepcopy(config)
-        cfg2.in_features = 4
-        cfg2.out_features = 2
-        model.fc2 = cfg2.build()
+        model.fc1 = Linear.Config(in_features=8, out_features=4).build()
+        model.fc2 = Linear.Config(in_features=4, out_features=2).build()
 
         # Should not raise
         verify_module_protocol(model, nn.Linear, Linear)
@@ -332,10 +296,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
             pass
 
         model = nn.Module()
-        config = Linear.Config()
-        config.in_features = 8
-        config.out_features = 4
-        model.fc1 = config.build()
+        model.fc1 = Linear.Config(in_features=8, out_features=4).build()
         model.fc2 = FakeQuantLinear(16, 8)
 
         inject_module_protocol(model, Linear)

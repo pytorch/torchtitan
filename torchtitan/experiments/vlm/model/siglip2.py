@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import einops as E
 import torch
@@ -82,8 +82,6 @@ class VisionEmbeddings(Module):
         patch_embedding: Linear.Config
         position_embedding: Embedding.Config
         n_pos_embs: int
-        patch_in_features: int = field(init=False)  # n_channels * patch_size^2
-        dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -117,23 +115,19 @@ class Attention(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        qkv: Linear.Config  # template for q, k, v projections
+        qkv_proj: Linear.Config  # shared config for q/k/v (build() copies)
         out_proj: Linear.Config
         n_heads: int
-        dim: int = field(init=False)
-        # Expanded fields, populated by _expand_vlm_layer_configs()
-        q_proj: Linear.Config = field(init=False)
-        k_proj: Linear.Config = field(init=False)
-        v_proj: Linear.Config = field(init=False)
+        dim: int
 
     def __init__(self, config: Config):
         super().__init__()
         self.dim = config.dim
         self.head_dim = config.dim // config.n_heads
 
-        self.q_proj = config.q_proj.build()
-        self.k_proj = config.k_proj.build()
-        self.v_proj = config.v_proj.build()
+        self.q_proj = config.qkv_proj.build()  # build() copies
+        self.k_proj = config.qkv_proj.build()  # build() copies
+        self.v_proj = config.qkv_proj.build()  # build() copies
         self.out_proj = config.out_proj.build()
 
         self.inner_attention = FlexAttention.Config().build()
@@ -160,8 +154,6 @@ class FeedForward(Module):
     class Config(Module.Config):
         fc1: Linear.Config
         fc2: Linear.Config
-        ffn_dim: int
-        dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -181,7 +173,7 @@ class TransformerLayer(Module):
         self_attn: Attention.Config
         mlp: FeedForward.Config
         layer_norm_eps: float = 1e-6
-        dim: int = field(init=False)
+        dim: int
 
     def __init__(self, config: Config):
         super().__init__()
@@ -202,10 +194,8 @@ class VisionTransformer(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
-        n_layers: int
         embeddings: VisionEmbeddings.Config
-        layer: TransformerLayer.Config  # template
-        layers: list | None = None  # populated by expand_layer_configs
+        layers: list[TransformerLayer.Config]
         n_channels: int = 3
         patch_size: int = 16
         layer_norm_eps: float = 1e-6
@@ -218,10 +208,6 @@ class VisionTransformer(Module):
 
         self.embeddings = VisionEmbeddings(config.embeddings)
 
-        assert config.layers is not None, (
-            "config.layers must be populated by expand_layer_configs() "
-            "before constructing VisionTransformer."
-        )
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
             self.layers[str(i)] = TransformerLayer(layer_config)

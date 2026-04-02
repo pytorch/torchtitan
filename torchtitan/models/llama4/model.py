@@ -71,9 +71,6 @@ class Llama4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
-        every_n_layers_nope: int | None = None
-        interleave_moe_layer_step: int = 2
         fixed_attn_block_size: int = 8192
 
     def __init__(self, config: Config):
@@ -119,9 +116,7 @@ class Llama4Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 4096
-        n_layers: int = 32
         vocab_size: int = 202048
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -129,7 +124,7 @@ class Llama4Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -155,7 +150,7 @@ class Llama4Model(Decoder):
                         debug.moe_force_load_balance
                     )
                     if parallelism.expert_parallel_comm_backend == "deepep":
-                        from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
+                        from torchtitan.models.common.moe_deepep import DeepEPMoE
 
                         init_kwargs = {
                             f.name: getattr(layer_cfg.moe, f.name)
@@ -187,7 +182,7 @@ class Llama4Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
+
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
@@ -203,7 +198,7 @@ class Llama4Model(Decoder):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-        match self.config.layer.attention.mask_type:
+        match self.attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -212,13 +207,14 @@ class Llama4Model(Decoder):
                 B = input_batch.shape[0]
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.layer.attention.mask_type}"
+                    f"Unknown attention mask type: {self.attn_config.mask_type}"
                 )
 
-        assert isinstance(self.config.layer, Llama4TransformerBlock.Config)
+        layer0 = self.config.layers[0]
+        assert isinstance(layer0, Llama4TransformerBlock.Config)
         rope_mask_mod = and_masks(
             *mask_mods,
-            get_fixed_block_mask_mod(self.config.layer.fixed_attn_block_size),
+            get_fixed_block_mask_mod(layer0.fixed_attn_block_size),
         )
         nope_mask_mod = and_masks(*mask_mods)
 

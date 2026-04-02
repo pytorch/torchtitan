@@ -35,8 +35,7 @@ class Qwen3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
-        moe_enabled: bool = False
+        pass
 
     def __init__(self, config: Config):
         super().__init__()
@@ -83,10 +82,8 @@ class Qwen3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 1024
-        n_layers: int = 28
         vocab_size: int = 151936
         enable_weight_tying: bool = False
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -94,7 +91,7 @@ class Qwen3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -142,7 +139,7 @@ class Qwen3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
+
             assert isinstance(self.layers[0].attention, GQAttention.Config)
             assert self.layers[0].attention.head_dim is not None
             return get_moe_model_nparams_and_flops(

@@ -6,7 +6,7 @@
 
 import dataclasses
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -41,18 +41,15 @@ class Attention(BaseAttention):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
-        dim: int = field(init=False)
-        wqkv: Linear.Config  # template for wq, wk, wv
-        wo: Linear.Config
+        dim: int
+        wq: Linear.Config  # query projection
+        wkv: Linear.Config  # shared config for key + value (build() copies)
+        wo: Linear.Config  # output projection
         inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
         mask_type: str = "causal"
         sliding_window_size: int = 128
-        # Expanded fields, populated by expand_layer_configs()
-        wq: Linear.Config = field(init=False)
-        wk: Linear.Config = field(init=False)
-        wv: Linear.Config = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -67,8 +64,8 @@ class Attention(BaseAttention):
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
         self.wq = config.wq.build()
-        self.wk = config.wk.build()
-        self.wv = config.wv.build()
+        self.wk = config.wkv.build()  # build() copies — independent module
+        self.wv = config.wkv.build()  # build() copies — independent module
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert isinstance(
@@ -191,11 +188,7 @@ class GptOssModel(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 2880
-        n_layers: int = 24
         vocab_size: int = 201088
-
-        # Sub-component configs
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -203,7 +196,6 @@ class GptOssModel(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -244,7 +236,6 @@ class GptOssModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, float]:
-            assert self.layers is not None
             assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
@@ -264,11 +255,12 @@ class GptOssModel(Decoder):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         basic_mask_mods = []
-        assert isinstance(self.config.layer.attention, Attention.Config)
+        attn_cfg = self.attn_config
+        assert isinstance(attn_cfg, Attention.Config)
         sliding_window_mask_mods = [
-            get_sliding_window_mask_mod(self.config.layer.attention.sliding_window_size)
+            get_sliding_window_mask_mod(attn_cfg.sliding_window_size)
         ]
-        match self.config.layer.attention.mask_type:
+        match attn_cfg.mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
@@ -279,9 +271,7 @@ class GptOssModel(Decoder):
                     get_document_mask_mod(input_batch, tokenizer.eos_id)
                 )
             case _:
-                raise ValueError(
-                    f"Unknown attention mask type: {self.config.layer.attention.mask_type}"
-                )
+                raise ValueError(f"Unknown attention mask type: {attn_cfg.mask_type}")
 
         # create basic attention mask: causal or block_causal
         basic_mask = create_attention_mask(

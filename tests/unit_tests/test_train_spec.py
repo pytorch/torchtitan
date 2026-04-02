@@ -31,9 +31,9 @@ class FakeModel(BaseModel):
 
     def __init__(self, config: Config):
         super().__init__()
-        linear_cfg = Linear.Config()
-        linear_cfg.in_features = config.hidden
-        linear_cfg.out_features = config.hidden
+        linear_cfg = Linear.Config(
+            in_features=config.hidden, out_features=config.hidden
+        )
         self.linear = linear_cfg.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

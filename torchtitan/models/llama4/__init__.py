@@ -4,39 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from copy import deepcopy
-from dataclasses import replace
 from functools import partial
 
 import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config import Function
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
     Embedding,
-    FeedForward,
-    GQAttention,
     Linear,
     RMSNorm,
     RoPE,
+    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexAttention
-from torchtitan.models.common.config_expand import (
-    fill_decoder_fields,
-    fill_ffn_fields,
-    fill_gqa_fields,
-    fill_moe_fields,
+from torchtitan.models.common.config_utils import (
+    make_experts_config,
+    make_ffn_config,
+    make_gqa_config,
+    make_moe_config,
+    make_router_config,
 )
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.moe.moe import GroupedExperts
-from torchtitan.models.common.param_init import depth_scaled_std, resolve_deferred
+from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
-
 from .parallelize import parallelize_llama
 from .state_dict_adapter import Llama4StateDictAdapter
 
@@ -46,64 +40,12 @@ __all__ = [
 ]
 
 
-def expand_layer_configs(config) -> None:
-    """Expand the layer template into per-layer configs for a single model config.
-
-    Handles iRoPE (NoPE on every N layers) and MoE interleaving.
-    Mutates config in place.
-    """
-    dim = config.dim
-    fill_decoder_fields(config)
-    assert isinstance(config.layer, Llama4TransformerBlock.Config)
-    if (
-        config.layer.every_n_layers_nope is not None
-        and config.layer.every_n_layers_nope <= 1
-    ):
-        raise ValueError("every_n_layers_nope must be greater than 1")
-    config.layer.attention_norm.normalized_shape = dim
-    config.layer.ffn_norm.normalized_shape = dim
-    layers = []
-    for layer_id in range(config.n_layers):
-        cfg = deepcopy(config.layer)
-        # iRoPE: override use_rope=False on certain layers
-        if cfg.every_n_layers_nope is not None:
-            if layer_id % cfg.every_n_layers_nope == 0:
-                cfg = replace(cfg, attention=replace(cfg.attention, use_rope=False))
-        # MoE interleaving: keep only the appropriate FFN type per layer
-        moe_enabled = (layer_id + 1) % cfg.interleave_moe_layer_step == 0
-        if moe_enabled:
-            cfg = replace(cfg, feed_forward=None)
-        else:
-            cfg = replace(cfg, moe=None)
-        resolve_deferred(cfg, layer_id)
-        fill_gqa_fields(cfg.attention, dim)  # pyrefly: ignore [bad-argument-type]
-        if cfg.feed_forward is not None:
-            fill_ffn_fields(cfg.feed_forward, dim)
-        if cfg.moe is not None:
-            fill_moe_fields(cfg.moe, dim)
-        layers.append(cfg)
-    config.layers = layers
-
-
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
 }
-_LINEAR_DEPTH_INIT = Function.Config(
-    fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "bias": nn.init.zeros_,
-    }
-)
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
-_EXPERTS_DEPTH_INIT = Function.Config(
-    fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
-        "w1": partial(nn.init.trunc_normal_, std=0.02),
-        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-    }
-)
 
 
 def _output_linear_init(dim: int):
@@ -114,46 +56,148 @@ def _output_linear_init(dim: int):
     }
 
 
+def _depth_init(layer_id: int) -> dict:
+    return {
+        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "bias": nn.init.zeros_,
+    }
+
+
+def _depth_experts_init(layer_id: int) -> dict:
+    return {
+        "w1": partial(nn.init.trunc_normal_, std=0.02),
+        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+    }
+
+
+def _build_llama4_layers(
+    *,
+    n_layers: int,
+    dim: int,
+    n_heads: int,
+    hidden_dim: int,
+    moe_hidden_dim: int,
+    num_experts: int,
+    n_kv_heads: int | None = None,
+    every_n_layers_nope: int = 4,
+    interleave_moe_layer_step: int = 1,
+    fixed_attn_block_size: int = 8192,
+    mask_type: str = "block_causal",
+    shared_experts_hidden_dim: int | None = None,
+) -> list[TransformerBlock.Config]:
+    """Build per-layer configs for a Llama4 model.
+
+    Handles iRoPE (NoPE on every N layers) and MoE interleaving. For each
+    layer, depth-scaled inits are computed using the layer index.
+    """
+    if every_n_layers_nope <= 1:
+        raise ValueError("every_n_layers_nope must be greater than 1")
+
+    _shared_experts_hidden_dim = (
+        shared_experts_hidden_dim
+        if shared_experts_hidden_dim is not None
+        else moe_hidden_dim
+    )
+
+    layers = []
+    for layer_id in range(n_layers):
+        use_rope = (layer_id % every_n_layers_nope) != 0
+        moe_enabled = (layer_id + 1) % interleave_moe_layer_step == 0
+
+        attn = make_gqa_config(
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            wqkv_param_init=_LINEAR_INIT,
+            wo_param_init=_depth_init(layer_id),
+            use_rope=use_rope,
+            inner_attention=FlexAttention.Config(),
+            mask_type=mask_type,
+            rope_backend="complex",
+        )
+
+        if moe_enabled:
+            router = make_router_config(
+                dim=dim,
+                num_experts=num_experts,
+                gate_param_init=_depth_init(layer_id),
+            )
+            experts = make_experts_config(
+                dim=dim,
+                hidden_dim=moe_hidden_dim,
+                num_experts=num_experts,
+                param_init=_depth_experts_init(layer_id),
+            )
+            shared_experts = make_ffn_config(
+                dim=dim,
+                hidden_dim=_shared_experts_hidden_dim,
+                w1_param_init=_LINEAR_INIT,
+                w2w3_param_init=_depth_init(layer_id),
+            )
+            moe_cfg = make_moe_config(
+                num_experts=num_experts,
+                router=router,
+                experts=experts,
+                shared_experts=shared_experts,
+            )
+            ffn_cfg = None
+        else:
+            ffn_cfg = make_ffn_config(
+                dim=dim,
+                hidden_dim=hidden_dim,
+                w1_param_init=_LINEAR_INIT,
+                w2w3_param_init=_depth_init(layer_id),
+            )
+            moe_cfg = None
+
+        layer = Llama4TransformerBlock.Config(
+            attention=attn,
+            attention_norm=RMSNorm.Config(
+                normalized_shape=dim,
+                param_init=_NORM_INIT,
+            ),
+            ffn_norm=RMSNorm.Config(
+                normalized_shape=dim,
+                param_init=_NORM_INIT,
+            ),
+            fixed_attn_block_size=fixed_attn_block_size,
+            moe=moe_cfg,
+            feed_forward=ffn_cfg,
+        )
+        layers.append(layer)
+
+    return layers
+
+
 def _debugmodel() -> Llama4Model.Config:
     dim = 256
     n_heads = 16
+    n_layers = 6
     return Llama4Model.Config(
         dim=dim,
-        n_layers=6,
         vocab_size=2048,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama4TransformerBlock.Config(
+        tok_embeddings=Embedding.Config(
+            num_embeddings=2048,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=2048,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_llama4_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            moe_hidden_dim=compute_moe_hidden_dim(dim),
+            num_experts=8,
             every_n_layers_nope=4,
+            interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
-            moe=MoE.Config(
-                hidden_dim=compute_moe_hidden_dim(dim),
-                router=TokenChoiceTopKRouter.Config(
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-                shared_experts=FeedForward.Config(
-                    hidden_dim=compute_moe_hidden_dim(dim),
-                    w1=Linear.Config(param_init=_LINEAR_INIT),
-                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-            ),
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -171,6 +215,8 @@ def _17bx16e() -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
     n_kv_heads = 8
+    n_layers = 48
+    vocab_size = 202048
     moe_hidden_dim = compute_moe_hidden_dim(
         dim,
         multiple_of=2048,
@@ -180,44 +226,30 @@ def _17bx16e() -> Llama4Model.Config:
     )
     return Llama4Model.Config(
         dim=dim,
-        n_layers=48,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama4TransformerBlock.Config(
+        vocab_size=vocab_size,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_llama4_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=compute_ffn_hidden_dim(
+                dim, multiple_of=2048, ffn_dim_multiplier=1.2
+            ),
+            moe_hidden_dim=moe_hidden_dim,
+            num_experts=16,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            moe=MoE.Config(
-                num_experts=16,
-                hidden_dim=moe_hidden_dim,
-                router=TokenChoiceTopKRouter.Config(
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-                shared_experts=FeedForward.Config(
-                    hidden_dim=moe_hidden_dim,
-                    w1=Linear.Config(param_init=_LINEAR_INIT),
-                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-            ),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(
-                    dim, multiple_of=2048, ffn_dim_multiplier=1.2
-                ),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -235,6 +267,8 @@ def _17bx128e() -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
     n_kv_heads = 8
+    n_layers = 48
+    vocab_size = 202048
     moe_hidden_dim = compute_moe_hidden_dim(
         dim,
         multiple_of=2048,
@@ -244,43 +278,30 @@ def _17bx128e() -> Llama4Model.Config:
     )
     return Llama4Model.Config(
         dim=dim,
-        n_layers=48,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        norm=RMSNorm.Config(param_init=_NORM_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Llama4TransformerBlock.Config(
+        vocab_size=vocab_size,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_llama4_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=compute_ffn_hidden_dim(
+                dim, multiple_of=2048, ffn_dim_multiplier=1.2
+            ),
+            moe_hidden_dim=moe_hidden_dim,
+            num_experts=128,
             every_n_layers_nope=4,
-            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
-            moe=MoE.Config(
-                num_experts=128,
-                hidden_dim=moe_hidden_dim,
-                router=TokenChoiceTopKRouter.Config(
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-                shared_experts=FeedForward.Config(
-                    hidden_dim=moe_hidden_dim,
-                    w1=Linear.Config(param_init=_LINEAR_INIT),
-                    w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-            ),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(
-                    dim, multiple_of=2048, ffn_dim_multiplier=1.2
-                ),
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                inner_attention=FlexAttention.Config(),
-                mask_type="block_causal",
-                rope_backend="complex",
-            ),
+            interleave_moe_layer_step=1,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -301,7 +322,6 @@ llama4_configs = {
 
 def model_registry(flavor: str) -> ModelSpec:
     config = llama4_configs[flavor]()
-    expand_layer_configs(config)
     return ModelSpec(
         name="llama4",
         flavor=flavor,

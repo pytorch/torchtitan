@@ -112,9 +112,9 @@ class TestDiamondInheritance(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.embed = TestDiamondInheritance.TestEmbedding(100, 32)
-                linear_config = Linear.Config(bias=True)
-                linear_config.in_features = 32
-                linear_config.out_features = 16
+                linear_config = Linear.Config(
+                    in_features=32, out_features=16, bias=True
+                )
                 self.linear = linear_config.build()
 
         model = Model()
@@ -240,18 +240,14 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
     def test_param_init_on_instance(self):
         """build() sets _param_init on the constructed instance."""
         param_init = {"weight": nn.init.zeros_}
-        config = Linear.Config(param_init=param_init)
-        config.in_features = 4
-        config.out_features = 4
+        config = Linear.Config(in_features=4, out_features=4, param_init=param_init)
         linear = config.build()
         self.assertTrue(hasattr(linear, "_param_init"))
         self.assertIs(linear._param_init, param_init)
 
     def test_no_param_init_by_default(self):
         """build() without param_init leaves it as None."""
-        config = Linear.Config()
-        config.in_features = 4
-        config.out_features = 4
+        config = Linear.Config(in_features=4, out_features=4)
         linear = config.build()
         self.assertIsNone(linear._param_init)
 
@@ -261,9 +257,9 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
         class Parent(Module):
             def __init__(self):
                 super().__init__()
-                linear_config = Linear.Config(param_init={"weight": nn.init.ones_})
-                linear_config.in_features = 4
-                linear_config.out_features = 4
+                linear_config = Linear.Config(
+                    in_features=4, out_features=4, param_init={"weight": nn.init.ones_}
+                )
                 self.linear = linear_config.build()
 
         m = Parent()
@@ -290,9 +286,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
 
             def __init__(self):
                 super().__init__()
-                linear_config = Linear.Config()
-                linear_config.in_features = 4
-                linear_config.out_features = 4
+                linear_config = Linear.Config(in_features=4, out_features=4)
                 self.linear = linear_config.build()
 
         model = GoodModel()

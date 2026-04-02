@@ -23,7 +23,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe.moe import MoE
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
@@ -66,7 +66,6 @@ class Decoder(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
         dim: int
-        n_layers: int
         vocab_size: int
         output: Linear.Config
         tok_embeddings: Embedding.Config
@@ -77,8 +76,7 @@ class Decoder(BaseModel):
         # and Attention. Also RoPE itself as a standalone module requires PP special
         # handling, see below.
         rope: RoPE.Config
-        layer: TransformerBlock.Config
-        layers: list | None = None
+        layers: list  # list[TransformerBlock.Config] or subclass configs
 
     def __init__(self, config: Config):
         super().__init__()
@@ -88,10 +86,6 @@ class Decoder(BaseModel):
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
-        assert config.layers is not None, (
-            "config.layers must be populated by expand_layer_configs() "
-            "in the model registry before build()."
-        )
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
             self.layers[str(i)] = layer_config.build()
@@ -195,5 +189,5 @@ class Decoder(BaseModel):
 
     @property
     def attn_config(self):
-        """Convenience accessor for the attention config from layer."""
-        return self.config.layer.attention
+        """Convenience accessor for the attention config from the first layer."""
+        return self.config.layers[0].attention

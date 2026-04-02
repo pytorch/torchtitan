@@ -36,7 +36,7 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        dim: int = field(init=False)
+        dim: int
         wq: Linear.Config | None = None
         wq_a: Linear.Config | None = None
         wq_b: Linear.Config | None = None
@@ -139,7 +139,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        n_dense_layers: int = 1
+        pass
 
     def __init__(self, config: Config):
         super().__init__()
@@ -180,9 +180,7 @@ class DeepSeekV3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 2048
-        n_layers: int = 27
         vocab_size: int = 102400
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -190,7 +188,7 @@ class DeepSeekV3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -227,7 +225,7 @@ class DeepSeekV3Model(Decoder):
                         "deepep",
                         "hybridep",
                     ):
-                        from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
+                        from torchtitan.models.common.moe_deepep import DeepEPMoE
 
                         init_kwargs = {
                             f.name: getattr(layer_cfg.moe, f.name)
@@ -249,7 +247,7 @@ class DeepSeekV3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
+
             assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,

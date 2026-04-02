@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from copy import deepcopy
 from dataclasses import fields
 from functools import partial
 from typing import Any
@@ -44,108 +43,87 @@ def _get_dict(obj) -> dict[str, Any]:
     return {field.name: getattr(obj, field.name) for field in fields(obj)}
 
 
-def _fill_vision_attn_fields(attn, dim: int) -> None:
-    """Fill expanded fields on a siglip2 Attention.Config."""
-    from copy import deepcopy as _dc
-
-    attn.dim = dim
-    attn.q_proj = _dc(attn.qkv)
-    attn.q_proj.in_features = dim
-    attn.q_proj.out_features = dim
-    attn.k_proj = _dc(attn.qkv)
-    attn.k_proj.in_features = dim
-    attn.k_proj.out_features = dim
-    attn.v_proj = _dc(attn.qkv)
-    attn.v_proj.in_features = dim
-    attn.v_proj.out_features = dim
-    attn.out_proj.in_features = dim
-    attn.out_proj.out_features = dim
-
-
-def _fill_vision_ffn_fields(ffn, dim: int) -> None:
-    """Fill expanded fields on a siglip2 FeedForward.Config."""
-    ffn.dim = dim
-    ffn.fc1.in_features = dim
-    ffn.fc1.out_features = ffn.ffn_dim
-    ffn.fc2.in_features = ffn.ffn_dim
-    ffn.fc2.out_features = dim
-
-
-def _expand_vlm_layer_configs(config) -> None:
-    """Expand encoder layer template into per-layer configs via deepcopy.
-
-    Also sets computed init=False fields (dim, patch_in_features) on the
-    encoder, projector, and all leaf Linear/Embedding sub-configs.
-    Mutates config in place.
-    """
-    encoder = config.encoder
-    dim = encoder.dim
-
-    # Set computed fields on embeddings
-    encoder.embeddings.dim = dim
-    encoder.embeddings.patch_in_features = (
-        encoder.n_channels * encoder.patch_size * encoder.patch_size
-    )
-    encoder.embeddings.patch_embedding.in_features = (
-        encoder.embeddings.patch_in_features
-    )
-    encoder.embeddings.patch_embedding.out_features = dim
-    encoder.embeddings.position_embedding.num_embeddings = (
-        encoder.embeddings.n_pos_embs**2
-    )
-    encoder.embeddings.position_embedding.embedding_dim = dim
-
-    # Set computed fields on layer template
-    encoder.layer.dim = dim
-    _fill_vision_attn_fields(encoder.layer.self_attn, dim)
-    _fill_vision_ffn_fields(encoder.layer.mlp, dim)
-
-    # Expand layers
-    encoder.layers = [deepcopy(encoder.layer) for _ in range(encoder.n_layers)]
-
-    # Set computed fields on projector
-    config.projector.in_dim = encoder.dim
-    config.projector.out_dim = config.dim
-    config.projector.w1.in_features = encoder.dim
-    config.projector.w1.out_features = encoder.dim
-    config.projector.w2.in_features = encoder.dim
-    config.projector.w2.out_features = config.dim
-
-
 def _debugmodel() -> Llama3Siglip2Transformer.Config:
-    from torchtitan.models.llama3 import expand_layer_configs as _expand_llama3
-
     base = llama3_configs["debugmodel_flex_attn"]()
-    _expand_llama3(base)
+    dim = 128
+    ffn_dim = 256
+    n_layers = 4
+    n_channels = 3
+    patch_size = 16
+    n_pos_embs = 16
+    patch_in_features = n_channels * patch_size * patch_size
+
+    layer_config = VisionTransformerLayer.Config(
+        dim=dim,
+        layer_norm_eps=1e-6,
+        self_attn=VisionAttention.Config(
+            dim=dim,
+            n_heads=2,
+            qkv_proj=Linear.Config(
+                in_features=dim,
+                out_features=dim,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+            out_proj=Linear.Config(
+                in_features=dim,
+                out_features=dim,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+        ),
+        mlp=VisionFeedForward.Config(
+            fc1=Linear.Config(
+                in_features=dim,
+                out_features=ffn_dim,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+            fc2=Linear.Config(
+                in_features=ffn_dim,
+                out_features=dim,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+        ),
+    )
+
+    llm_dim = base.dim
     return Llama3Siglip2Transformer.Config(
         **_get_dict(base),
         encoder=VisionTransformer.Config(
-            dim=128,
-            n_layers=4,
+            dim=dim,
             layer_norm_eps=1e-6,
             attn_mask_type="causal",
             embeddings=VisionEmbeddings.Config(
-                n_pos_embs=16,
-                patch_embedding=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-                position_embedding=Embedding.Config(param_init=_EMBEDDING_INIT),
-            ),
-            layer=VisionTransformerLayer.Config(
-                layer_norm_eps=1e-6,
-                self_attn=VisionAttention.Config(
-                    n_heads=2,
-                    qkv=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-                    out_proj=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+                n_pos_embs=n_pos_embs,
+                patch_embedding=Linear.Config(
+                    in_features=patch_in_features,
+                    out_features=dim,
+                    bias=True,
+                    param_init=_XAVIER_LINEAR,
                 ),
-                mlp=VisionFeedForward.Config(
-                    ffn_dim=256,
-                    fc1=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-                    fc2=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+                position_embedding=Embedding.Config(
+                    num_embeddings=n_pos_embs**2,
+                    embedding_dim=dim,
+                    param_init=_EMBEDDING_INIT,
                 ),
             ),
+            layers=[layer_config] * n_layers,
         ),
         projector=Projector.Config(
-            w1=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
-            w2=Linear.Config(bias=True, param_init=_XAVIER_LINEAR),
+            w1=Linear.Config(
+                in_features=dim,
+                out_features=dim,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
+            w2=Linear.Config(
+                in_features=dim,
+                out_features=llm_dim,
+                bias=True,
+                param_init=_XAVIER_LINEAR,
+            ),
         ),
     )
 
@@ -155,7 +133,6 @@ llama3_siglip2_configs = {"debugmodel": _debugmodel}
 
 def model_registry(flavor: str) -> ModelSpec:
     config = llama3_siglip2_configs[flavor]()
-    _expand_vlm_layer_configs(config)
     return ModelSpec(
         name="vlm",
         flavor=flavor,

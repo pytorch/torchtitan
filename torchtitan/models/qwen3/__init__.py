@@ -6,28 +6,26 @@
 
 
 from copy import deepcopy
-from dataclasses import replace
 from functools import partial
 
 import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.config import Function
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, FeedForward, GQAttention, Linear, RoPE
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
-from torchtitan.models.common.config_expand import (
-    fill_decoder_fields,
-    fill_ffn_fields,
-    fill_gqa_fields,
-    fill_moe_fields,
+from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    ScaledDotProductAttention,
+    VarlenAttention,
 )
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.param_init import (
-    depth_scaled_std,
-    resolve_deferred,
-    skip_param_init,
+from torchtitan.models.common.config_utils import (
+    make_experts_config,
+    make_ffn_config,
+    make_gqa_config,
+    make_moe_config,
+    make_router_config,
 )
+from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -42,57 +40,19 @@ __all__ = [
 ]
 
 
-def expand_layer_configs(config) -> None:
-    """Expand the layer template into per-layer configs for a single model config.
-
-    Handles MoE vs. dense feed-forward selection based on moe_enabled flag.
-    Mutates config in place.
-    """
-    dim = config.dim
-    fill_decoder_fields(config)
-    assert isinstance(config.layer, Qwen3TransformerBlock.Config)
-    config.layer.attention_norm.normalized_shape = dim
-    config.layer.ffn_norm.normalized_shape = dim
-    layers = []
-    for layer_id in range(config.n_layers):
-        cfg = deepcopy(config.layer)
-        if cfg.moe_enabled:
-            cfg = replace(cfg, feed_forward=None)
-        else:
-            cfg = replace(cfg, moe=None)
-        resolve_deferred(cfg, layer_id)
-        fill_gqa_fields(cfg.attention, dim)  # pyrefly: ignore [bad-argument-type]
-        if cfg.feed_forward is not None:
-            fill_ffn_fields(cfg.feed_forward, dim)
-        if cfg.moe is not None:
-            fill_moe_fields(cfg.moe, dim)
-        layers.append(cfg)
-    config.layers = layers
-
-
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
 }
-_LINEAR_DEPTH_INIT = Function.Config(
-    fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "bias": nn.init.zeros_,
-    }
-)
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
-_EXPERTS_DEPTH_INIT = Function.Config(
-    fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
-        "w1": partial(nn.init.trunc_normal_, std=0.02),
-        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-    }
-)
+
+_HEAD_DIM = 128
+_EPS = 1e-6
 
 
-def _output_linear_init(dim: int):
+def _output_linear_init(dim: int) -> dict:
     s = dim**-0.5
     return {
         "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
@@ -100,49 +60,171 @@ def _output_linear_init(dim: int):
     }
 
 
+def _depth_init(layer_id: int) -> dict:
+    return {
+        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "bias": nn.init.zeros_,
+    }
+
+
+def _depth_experts_init(layer_id: int) -> dict:
+    return {
+        "w1": partial(nn.init.trunc_normal_, std=0.02),
+        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+    }
+
+
+def _qwen3_norm(dim: int) -> RMSNorm.Config:
+    return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
+
+
+def _qwen3_q_norm() -> RMSNorm.Config:
+    return RMSNorm.Config(normalized_shape=_HEAD_DIM, eps=_EPS, param_init=_NORM_INIT)
+
+
+def _build_qwen3_layers(
+    *,
+    n_layers: int,
+    dim: int,
+    n_heads: int,
+    n_kv_heads: int,
+    hidden_dim: int,
+    inner_attention=None,
+    mask_type: str = "causal",
+) -> list[TransformerBlock.Config]:
+    """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
+    layers = []
+    for layer_id in range(n_layers):
+        layers.append(
+            Qwen3TransformerBlock.Config(
+                attention_norm=_qwen3_norm(dim),
+                ffn_norm=_qwen3_norm(dim),
+                attention=make_gqa_config(
+                    dim=dim,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv_heads,
+                    head_dim=_HEAD_DIM,
+                    wqkv_param_init=_LINEAR_INIT,
+                    wo_param_init=_depth_init(layer_id),
+                    inner_attention=(
+                        inner_attention
+                        if inner_attention is not None
+                        else ScaledDotProductAttention.Config()
+                    ),
+                    mask_type=mask_type,
+                    rope_backend="cos_sin",
+                    q_norm=_qwen3_q_norm(),
+                    k_norm=_qwen3_q_norm(),
+                ),
+                feed_forward=make_ffn_config(
+                    dim=dim,
+                    hidden_dim=hidden_dim,
+                    w1_param_init=_LINEAR_INIT,
+                    w2w3_param_init=_depth_init(layer_id),
+                ),
+            )
+        )
+    return layers
+
+
+def _build_qwen3_moe_layers(
+    *,
+    n_layers: int,
+    dim: int,
+    n_heads: int,
+    n_kv_heads: int,
+    moe_hidden_dim: int,
+    num_experts: int,
+    top_k: int,
+) -> list[TransformerBlock.Config]:
+    """Build per-layer configs for MoE Qwen3 models with depth-scaled inits."""
+    layers = []
+    for layer_id in range(n_layers):
+        layers.append(
+            Qwen3TransformerBlock.Config(
+                attention_norm=_qwen3_norm(dim),
+                ffn_norm=_qwen3_norm(dim),
+                attention=make_gqa_config(
+                    dim=dim,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv_heads,
+                    head_dim=_HEAD_DIM,
+                    wqkv_param_init=_LINEAR_INIT,
+                    wo_param_init=_depth_init(layer_id),
+                    inner_attention=ScaledDotProductAttention.Config(),
+                    rope_backend="cos_sin",
+                    q_norm=_qwen3_q_norm(),
+                    k_norm=_qwen3_q_norm(),
+                ),
+                moe=make_moe_config(
+                    num_experts=num_experts,
+                    score_before_experts=False,
+                    router=make_router_config(
+                        dim=dim,
+                        num_experts=num_experts,
+                        gate_param_init=_depth_init(layer_id),
+                        top_k=top_k,
+                        score_func="softmax",
+                        route_norm=True,
+                    ),
+                    experts=make_experts_config(
+                        dim=dim,
+                        hidden_dim=moe_hidden_dim,
+                        num_experts=num_experts,
+                        param_init=_depth_experts_init(layer_id),
+                    ),
+                ),
+            )
+        )
+    return layers
+
+
 def _debugmodel() -> Qwen3Model.Config:
     dim = 256
-    head_dim = 128
+    n_layers = 8
+    vocab_size = 2048
     return Qwen3Model.Config(
-        vocab_size=2048,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=8,
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
+        norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_SKIP_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=3072,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=16,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            hidden_dim=3072,
         ),
     )
 
 
 def _debugmodel_flex() -> Qwen3Model.Config:
     config = _debugmodel()
-    config.layer.attention.inner_attention = FlexAttention.Config()
-    config.layer.attention.mask_type = "block_causal"
+    flex_cfg = FlexAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = flex_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
     return config
 
 
@@ -160,268 +242,268 @@ def _debugmodel_flex_flash() -> Qwen3Model.Config:
             "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
         )
     config = _debugmodel()
-    config.layer.attention.inner_attention = FlexAttention.Config(
+    flex_cfg = FlexAttention.Config(
         block_size=block_size, kernel_options={"BACKEND": "FLASH"}
     )
-    config.layer.attention.mask_type = "block_causal"
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = flex_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
     return config
 
 
 def _debugmodel_varlen() -> Qwen3Model.Config:
     config = _debugmodel()
-    config.layer.attention.inner_attention = VarlenAttention.Config()
-    config.layer.attention.mask_type = "block_causal"
+    varlen_cfg = VarlenAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = varlen_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
     return config
 
 
 def _0_6b() -> Qwen3Model.Config:
     dim = 1024
-    head_dim = 128
+    n_layers = 28
+    vocab_size = 151936
     return Qwen3Model.Config(
-        vocab_size=151936,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=28,
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
+        norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_SKIP_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=3072,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=16,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
         ),
-    )
-
-
-def _1_7b() -> Qwen3Model.Config:
-    dim = 2048
-    head_dim = 128
-    return Qwen3Model.Config(
-        vocab_size=151936,
-        dim=dim,
-        n_layers=28,
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_SKIP_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=6144,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=16,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
-    )
-
-
-def _4b() -> Qwen3Model.Config:
-    dim = 2560
-    head_dim = 128
-    return Qwen3Model.Config(
-        vocab_size=151936,
-        dim=dim,
-        n_layers=36,
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_SKIP_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=9728,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=32,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            hidden_dim=3072,
         ),
     )
 
 
 def _0_6b_varlen() -> Qwen3Model.Config:
     config = _0_6b()
-    config.layer.attention.inner_attention = VarlenAttention.Config()
-    config.layer.attention.mask_type = "block_causal"
+    varlen_cfg = VarlenAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = varlen_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
     return config
+
+
+def _1_7b() -> Qwen3Model.Config:
+    dim = 2048
+    n_layers = 28
+    vocab_size = 151936
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=_HEAD_DIM,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            hidden_dim=6144,
+        ),
+    )
 
 
 def _1_7b_varlen() -> Qwen3Model.Config:
     config = _1_7b()
-    config.layer.attention.inner_attention = VarlenAttention.Config()
-    config.layer.attention.mask_type = "block_causal"
+    varlen_cfg = VarlenAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = varlen_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
     return config
+
+
+def _4b() -> Qwen3Model.Config:
+    dim = 2560
+    n_layers = 36
+    vocab_size = 151936
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=_HEAD_DIM,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=32,
+            n_kv_heads=8,
+            hidden_dim=9728,
+        ),
+    )
 
 
 def _8b() -> Qwen3Model.Config:
     dim = 4096
-    head_dim = 128
+    n_layers = 36
+    vocab_size = 151936
     return Qwen3Model.Config(
-        vocab_size=151936,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=36,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=12288,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=32,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=32,
+            n_kv_heads=8,
+            hidden_dim=12288,
         ),
     )
 
 
 def _8b_varlen() -> Qwen3Model.Config:
     config = _8b()
-    config.layer.attention.inner_attention = VarlenAttention.Config()
-    config.layer.attention.mask_type = "block_causal"
+    varlen_cfg = VarlenAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = varlen_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
     return config
 
 
 def _14b() -> Qwen3Model.Config:
     dim = 5120
-    head_dim = 128
+    n_layers = 40
+    vocab_size = 151936
     return Qwen3Model.Config(
-        vocab_size=151936,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=40,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=17408,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=40,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=40,
+            n_kv_heads=8,
+            hidden_dim=17408,
         ),
     )
 
 
 def _32b() -> Qwen3Model.Config:
     dim = 5120
-    head_dim = 128
+    n_layers = 64
+    vocab_size = 151936
     return Qwen3Model.Config(
-        vocab_size=151936,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=64,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            feed_forward=FeedForward.Config(
-                hidden_dim=25600,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=64,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=64,
+            n_kv_heads=8,
+            hidden_dim=25600,
         ),
     )
 
@@ -431,153 +513,102 @@ def _32b() -> Qwen3Model.Config:
 
 def _debugmodel_moe() -> Qwen3Model.Config:
     dim = 256
-    head_dim = 128
+    n_layers = 8
+    vocab_size = 2048
     return Qwen3Model.Config(
-        vocab_size=2048,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=8,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            moe_enabled=True,
-            moe=MoE.Config(
-                hidden_dim=768,
-                num_experts=64,
-                score_before_experts=False,
-                router=TokenChoiceTopKRouter.Config(
-                    top_k=8,
-                    score_func="softmax",
-                    route_norm=True,
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-            ),
-            feed_forward=FeedForward.Config(
-                hidden_dim=3072,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=16,
-                n_kv_heads=8,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_moe_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            moe_hidden_dim=768,
+            num_experts=64,
+            top_k=8,
         ),
     )
 
 
 def _30b_a3b() -> Qwen3Model.Config:
     dim = 2048
-    head_dim = 128
+    n_layers = 48
+    vocab_size = 151936
     return Qwen3Model.Config(
-        vocab_size=151936,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=48,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            moe_enabled=True,
-            moe=MoE.Config(
-                hidden_dim=768,
-                num_experts=128,
-                score_before_experts=False,
-                router=TokenChoiceTopKRouter.Config(
-                    top_k=8,
-                    score_func="softmax",
-                    route_norm=True,
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-            ),
-            feed_forward=FeedForward.Config(
-                hidden_dim=6144,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=32,
-                n_kv_heads=4,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=262144,
             theta=1000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_moe_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=32,
+            n_kv_heads=4,
+            moe_hidden_dim=768,
+            num_experts=128,
+            top_k=8,
         ),
     )
 
 
 def _235b_a22b() -> Qwen3Model.Config:
     dim = 4096
-    head_dim = 128
+    n_layers = 94
+    vocab_size = 151936
     return Qwen3Model.Config(
-        vocab_size=151936,
+        vocab_size=vocab_size,
         dim=dim,
-        n_layers=94,
-        tok_embeddings=Embedding.Config(param_init=_EMBEDDING_INIT),
-        output=Linear.Config(param_init=_output_linear_init(dim)),
-        norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-        layer=Qwen3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            ffn_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-            moe_enabled=True,
-            moe=MoE.Config(
-                hidden_dim=1536,
-                num_experts=128,
-                score_before_experts=False,
-                router=TokenChoiceTopKRouter.Config(
-                    top_k=8,
-                    score_func="softmax",
-                    route_norm=True,
-                    gate=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                ),
-                experts=GroupedExperts.Config(param_init=_EXPERTS_DEPTH_INIT),
-            ),
-            feed_forward=FeedForward.Config(
-                hidden_dim=12288,
-                w1=Linear.Config(param_init=_LINEAR_INIT),
-                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-            ),
-            attention=GQAttention.Config(
-                n_heads=64,
-                n_kv_heads=4,
-                head_dim=head_dim,
-                wqkv=Linear.Config(param_init=_LINEAR_INIT),
-                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
-                q_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                k_norm=RMSNorm.Config(eps=1e-6, param_init=_NORM_INIT),
-                rope_backend="cos_sin",
-            ),
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=head_dim,
+            dim=_HEAD_DIM,
             max_seq_len=4096,
             theta=5000000.0,
             backend="cos_sin",
+        ),
+        layers=_build_qwen3_moe_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=64,
+            n_kv_heads=4,
+            moe_hidden_dim=1536,
+            num_experts=128,
+            top_k=8,
         ),
     )
 
@@ -604,7 +635,6 @@ qwen3_configs = {
 
 def model_registry(flavor: str) -> ModelSpec:
     config = qwen3_configs[flavor]()
-    expand_layer_configs(config)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,

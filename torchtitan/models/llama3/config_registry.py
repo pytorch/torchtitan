@@ -23,6 +23,7 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.profiling import ProfilingConfig
 from torchtitan.trainer import Trainer
@@ -229,11 +230,11 @@ def sft_debugmodel() -> Trainer.Config:
     from torchtitan.models.common import FlexAttention
 
     model_spec = model_registry("debugmodel")
+    assert isinstance(model_spec.model, Decoder.Config)
 
-    # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.inner_attention = FlexAttention.Config()
-    # pyrefly: ignore [missing-attribute]
-    model_spec.model.layer.attention.mask_type = "block_causal"
+    for layer_cfg in model_spec.model.layers:
+        layer_cfg.attention.inner_attention = FlexAttention.Config()
+        layer_cfg.attention.mask_type = "block_causal"
 
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",

@@ -6,7 +6,7 @@
 
 # imported from black-forest-labs/FLUX
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from einops import rearrange
@@ -118,7 +118,6 @@ class QKNorm(Module):
     class Config(Module.Config):
         query_norm: RMSNorm.Config
         key_norm: RMSNorm.Config
-        dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -139,7 +138,6 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -171,8 +169,7 @@ class Modulation(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         lin: Linear.Config
-        dim: int = field(init=False)
-        double: bool = field(init=False)
+        double: bool
 
     def __init__(self, config: Config):
         super().__init__()

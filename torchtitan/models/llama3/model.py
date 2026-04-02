@@ -66,10 +66,8 @@ class Llama3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 4096
-        n_layers: int = 32
         vocab_size: int = 128256
         enable_weight_tying: bool = False
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -77,7 +75,6 @@ class Llama3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -118,7 +115,6 @@ class Llama3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
             return get_dense_model_nparams_and_flops(
                 self,
                 model,

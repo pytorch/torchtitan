@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import einops as E
 import torch
@@ -43,8 +43,6 @@ class Projector(Module):
     class Config(Module.Config):
         w1: Linear.Config
         w2: Linear.Config
-        in_dim: int = field(init=False)
-        out_dim: int = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()

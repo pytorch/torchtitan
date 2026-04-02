@@ -19,27 +19,24 @@ class TestEmbedding(unittest.TestCase):
 
     def test_config_build(self):
         """Embedding.Config.build() creates a working embedding."""
-        config = Embedding.Config()
-        config.num_embeddings = 100
-        config.embedding_dim = 32
+        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_build_without_fields_raises(self):
-        """Embedding.Config.build() raises when fields are not passed."""
-        config = Embedding.Config()
+        """Embedding.Config() raises TypeError when required fields are not provided."""
         with self.assertRaises(TypeError):
-            config.build()
+            Embedding.Config()
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
         config = Embedding.Config(
-            param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)}
+            num_embeddings=50,
+            embedding_dim=16,
+            param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)},
         )
-        config.num_embeddings = 50
-        config.embedding_dim = 16
         emb = config.build()
 
         nn.init.zeros_(emb.weight)
@@ -50,10 +47,10 @@ class TestEmbedding(unittest.TestCase):
     def test_custom_init_std(self):
         """Embedding respects custom mean and std."""
         config = Embedding.Config(
-            param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)}
+            num_embeddings=1000,
+            embedding_dim=160,
+            param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)},
         )
-        config.num_embeddings = 1000
-        config.embedding_dim = 160
         emb = config.build()
 
         torch.manual_seed(42)
@@ -66,18 +63,14 @@ class TestEmbedding(unittest.TestCase):
 
     def test_config_pre_specified_build(self):
         """Embedding.Config with both fields pre-specified builds with no kwargs."""
-        config = Embedding.Config()
-        config.num_embeddings = 100
-        config.embedding_dim = 32
+        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_partial_pre_specified(self):
-        """Embedding.Config with one field pre-specified, other via build()."""
-        config = Embedding.Config()
-        config.num_embeddings = 100
-        config.embedding_dim = 32
+        """Embedding.Config with fields specified at construction builds correctly."""
+        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
