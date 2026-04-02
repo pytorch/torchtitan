@@ -12,7 +12,7 @@ from torchtitan.config.configurable import Configurable
 
 class TestConfigurable(unittest.TestCase):
     class OldStyleComponent(Configurable):
-        """__init__ takes extra kwargs (not config fields). To be deprecated."""
+        """__init__ takes extra runtime kwargs (not config fields)."""
 
         @dataclass(kw_only=True, slots=True)
         class Config(Configurable.Config):
@@ -21,18 +21,6 @@ class TestConfigurable(unittest.TestCase):
         def __init__(self, config: Config, *, dim: int):
             self.config = config
             self.dim = dim
-
-    class NewStyleComponent(Configurable):
-        """Config fields filled via build() using field(init=False)."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(Configurable.Config):
-            x: int = 5
-            dim: int = field(init=False)
-            hidden: int = field(init=False)
-
-        def __init__(self, config: Config):
-            self.config = config
 
     class NoKwargsComponent(Configurable):
         """Takes only config, no extra kwargs."""
@@ -101,32 +89,12 @@ class TestConfigurable(unittest.TestCase):
         self.assertEqual(obj.config.x, 10)
         self.assertEqual(obj.dim, 64)
 
-    def test_new_style_absorption(self):
-        """Pre-set fields on config, then build() with no kwargs."""
-        cfg = self.NewStyleComponent.Config(x=10)
-        cfg.dim = 64
-        cfg.hidden = 128
-        obj = cfg.build()
-        self.assertIsInstance(obj, self.NewStyleComponent)
-        self.assertEqual(obj.config.x, 10)
-        self.assertEqual(obj.config.dim, 64)
-        self.assertEqual(obj.config.hidden, 128)
-
     def test_clone_isolation_old_style(self):
         """Original config is not mutated in old-style path."""
         cfg = self.OldStyleComponent.Config(x=10)
         obj = cfg.build(dim=64)
         obj.config.x = 999
         self.assertEqual(cfg.x, 10)
-
-    def test_clone_isolation_new_style(self):
-        """Original config is not mutated in new-style path."""
-        cfg = self.NewStyleComponent.Config(x=10)
-        cfg.dim = 64
-        cfg.hidden = 128
-        obj = cfg.build()
-        obj.config.dim = 999
-        self.assertEqual(cfg.dim, 64)
 
     def test_no_kwargs(self):
         """build() with no kwargs clones config and constructs."""
@@ -149,7 +117,7 @@ class TestConfigurable(unittest.TestCase):
             @dataclass(kw_only=True, slots=True)
             class Config(Configurable.Config):
                 a: int = 1
-                b: int = field(init=False)
+                b: int = 2
 
             def __init__(self, config: Config):
                 self.config = config
@@ -159,79 +127,30 @@ class TestConfigurable(unittest.TestCase):
             class Config(Configurable.Config):
                 x: int = 10
                 inner: Inner.Config = field(default_factory=Inner.Config)
-                dim: int = field(init=False)
 
             def __init__(self, config: Config):
                 self.config = config
 
-        # Before build: unset field(init=False) slots are skipped
         cfg = Outer.Config(x=42)
         d = cfg.to_dict()
         self.assertEqual(d["x"], 42)
-        self.assertNotIn("dim", d)
         # Inner config is serialised via its own to_dict
         self.assertIn("inner", d)
         self.assertEqual(d["inner"]["a"], 1)
-        self.assertNotIn("b", d["inner"])
+        self.assertEqual(d["inner"]["b"], 2)
 
         # After build: all fields present
-        cfg.dim = 128
         obj = cfg.build()
-        obj.config.inner.b = 256
         d2 = obj.config.to_dict()
         self.assertEqual(d2["x"], 42)
-        self.assertEqual(d2["dim"], 128)
         self.assertEqual(d2["inner"]["a"], 1)
-        self.assertEqual(d2["inner"]["b"], 256)
+        self.assertEqual(d2["inner"]["b"], 2)
 
-    def test_repr_with_unset_init_false(self):
-        """repr() must not crash when field(init=False) slots are unset."""
-        cfg = self.NewStyleComponent.Config(x=10)
-        # Before build: dim and hidden are unset
-        r = repr(cfg)
-        self.assertIn("x=10", r)
-        self.assertIn("dim=<UNSET>", r)
-        self.assertIn("hidden=<UNSET>", r)
-
-        # After build: all fields set
-        cfg.dim = 64
-        cfg.hidden = 128
-        obj = cfg.build()
-        r2 = repr(obj.config)
-        self.assertIn("x=10", r2)
-        self.assertIn("dim=64", r2)
-        self.assertIn("hidden=128", r2)
-        self.assertNotIn("UNSET", r2)
-
-    def test_repr_no_init_false_fields(self):
-        """repr() works normally when there are no field(init=False) fields."""
+    def test_repr(self):
+        """repr() works for configs."""
         cfg = self.NoKwargsComponent.Config(x=42)
         r = repr(cfg)
         self.assertIn("x=42", r)
-        self.assertNotIn("UNSET", r)
-
-    def test_init_false_with_inheritance(self):
-        """Child config can redeclare field with default."""
-
-        class ChildComponent(self.NewStyleComponent):
-            @dataclass(kw_only=True, slots=True)
-            class Config(TestConfigurable.NewStyleComponent.Config):
-                dim: int = 64
-                hidden: int = 128
-
-            def __init__(self, config: Config):
-                self.config = config
-
-        cfg = ChildComponent.Config()
-        obj = cfg.build()
-        self.assertEqual(obj.config.dim, 64)
-        self.assertEqual(obj.config.hidden, 128)
-
-        # Can also override via __init__
-        cfg2 = ChildComponent.Config(dim=256, hidden=512)
-        obj2 = cfg2.build()
-        self.assertEqual(obj2.config.dim, 256)
-        self.assertEqual(obj2.config.hidden, 512)
 
 
 if __name__ == "__main__":

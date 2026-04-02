@@ -200,8 +200,7 @@ class DeepSeekV3Model(Decoder):
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             # Sync rope fields to attention for all layers.
-            # Mutate in-place rather than dataclasses.replace(), because
-            # replace() drops field(init=False) slots (dim, Linear configs).
+            # Mutate in-place — simpler than replacing each config in the list.
             for layer_cfg in self.layers:
                 assert isinstance(layer_cfg.attention, Attention.Config)
                 layer_cfg.attention.rope_max_seq_len = seq_len
