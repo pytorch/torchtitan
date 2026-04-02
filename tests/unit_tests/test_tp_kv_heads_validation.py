@@ -27,8 +27,6 @@ try:
     from torchtitan.models.common import (
         compute_ffn_hidden_dim,
         Embedding,
-        FeedForward,
-        GQAttention,
         Linear,
         RMSNorm,
         RoPE,
@@ -57,42 +55,53 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
     """Build a minimal Llama3Model.Config with the given head counts."""
-    from torchtitan.models.llama3 import expand_layer_configs
+    from torchtitan.models.common.attention import ScaledDotProductAttention
+    from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
 
-    rope_cfg = RoPE.Config(
-        dim=_DIM // n_heads,
-        max_seq_len=4096,
-        theta=500000,
-        backend="complex",
-        scaling="llama",
-    )
-    config = Llama3Model.Config(
+    _LINEAR_INIT = {"weight": lambda t: t}
+    _NORM_INIT = {"weight": lambda t: t}
+
+    layers = []
+    for layer_id in range(_N_LAYERS):
+        layers.append(
+            Llama3TransformerBlock.Config(
+                attention_norm=RMSNorm.Config(
+                    normalized_shape=_DIM, param_init=_NORM_INIT
+                ),
+                ffn_norm=RMSNorm.Config(normalized_shape=_DIM, param_init=_NORM_INIT),
+                attention=make_gqa_config(
+                    dim=_DIM,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv_heads,
+                    wqkv_param_init=_LINEAR_INIT,
+                    wo_param_init=_LINEAR_INIT,
+                    inner_attention=ScaledDotProductAttention.Config(),
+                    rope_backend="complex",
+                ),
+                feed_forward=make_ffn_config(
+                    dim=_DIM,
+                    hidden_dim=compute_ffn_hidden_dim(_DIM, multiple_of=256),
+                    w1_param_init=_LINEAR_INIT,
+                    w2w3_param_init=_LINEAR_INIT,
+                ),
+            )
+        )
+
+    return Llama3Model.Config(
         dim=_DIM,
-        n_layers=_N_LAYERS,
         vocab_size=_VOCAB_SIZE,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
-        rope=rope_cfg,
-        layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(_DIM, multiple_of=256),
-                w1=Linear.Config(),
-                w2w3=Linear.Config(),
-            ),
-            attention=GQAttention.Config(
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                wqkv=Linear.Config(),
-                wo=Linear.Config(),
-                rope_backend="complex",
-            ),
+        tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
+        norm=RMSNorm.Config(normalized_shape=_DIM),
+        output=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
+        rope=RoPE.Config(
+            dim=_DIM // n_heads,
+            max_seq_len=4096,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
         ),
+        layers=layers,
     )
-    expand_layer_configs(config)
-    return config
 
 
 @unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")

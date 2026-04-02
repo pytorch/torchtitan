@@ -35,24 +35,23 @@ class Qwen3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
-        moe_enabled: bool = False
+        pass
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
 
-        self.attention = config.attention.build(dim=dim)
+        self.attention = config.attention.build()
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            self.moe = config.moe.build()
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
+            self.feed_forward = config.feed_forward.build()
 
-        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
-        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
     def forward(
         self,
@@ -83,10 +82,8 @@ class Qwen3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 1024
-        n_layers: int = 28
         vocab_size: int = 151936
         enable_weight_tying: bool = False
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -94,7 +91,7 @@ class Qwen3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            assert self.layers is not None
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -142,7 +139,7 @@ class Qwen3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert self.layers is not None
+
             assert isinstance(self.layers[0].attention, GQAttention.Config)
             assert self.layers[0].attention.head_dim is not None
             return get_moe_model_nparams_and_flops(

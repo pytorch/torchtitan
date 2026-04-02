@@ -16,10 +16,7 @@ from torchtitan.protocols.model_spec import FaultTolerantModelSpec
 
 
 def model_registry(flavor: str) -> FaultTolerantModelSpec:
-    from torchtitan.models.llama3 import expand_layer_configs
-
     config = llama3_configs[flavor]()
-    expand_layer_configs(config)
     return FaultTolerantModelSpec(
         name="ft/llama3",
         flavor=flavor,

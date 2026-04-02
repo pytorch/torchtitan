@@ -18,10 +18,7 @@ from .parallelize import parallelize_deepseekv3
 
 
 def model_registry(flavor: str) -> ModelSpec:
-    from torchtitan.models.deepseek_v3 import expand_layer_configs
-
     base = deepseekv3_configs[flavor]()
-    expand_layer_configs(base)
     config = GraphTrainerDeepSeekV3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
