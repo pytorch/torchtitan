@@ -235,7 +235,7 @@ def set_batch_invariant() -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import enable_batch_invariant as _upstream_enable
+    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
 

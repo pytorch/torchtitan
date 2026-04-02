@@ -154,7 +154,11 @@ class LocalMapInnerAttention(Module):
 
 
 class VarlenAttention(LocalMapInnerAttention):
-    def __init__(self, config: LocalMapInnerAttention.Config) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalMapInnerAttention.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
         super().__init__(config)
 
         from torchtitan.tools.utils import has_cuda_capability
