@@ -108,7 +108,7 @@ If you want to run true on-policy mode in TorchTitan RL and debug generator/trai
 Now we only support logprob bitwise parity when trainer and generator are under the same parallelism.
 Example:
 ```bash
-python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config  rl_grpo_qwen3_0_6b_on_policy
+python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config  rl_grpo_qwen3_0_6b_batch_invariant
 ```
 
-This config sets `DebugConfig(batch_invariant_mode=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).
+This config sets `DebugConfig(batch_invariant=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).

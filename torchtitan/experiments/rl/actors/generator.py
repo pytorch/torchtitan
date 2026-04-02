@@ -14,7 +14,7 @@ import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import DebugConfig, ParallelismConfig
-from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
+from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
 from torchtitan.experiments.rl.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
@@ -170,21 +170,10 @@ class VLLMGenerator(Actor, Configurable):
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
-        if config.debug.batch_invariant_mode:
-            enable_batch_invariant_mode()
+        if config.debug.batch_invariant:
+            enable_batch_invariant()
 
-        # The generator doesn't use torchtitan's ParallelDims, so we apply
-        # the deterministic flags directly in generator
-        if config.debug.deterministic:
-            torch.use_deterministic_algorithms(
-                True, warn_only=config.debug.deterministic_warn_only
-            )
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
-        if config.debug.seed is not None:
-            torch.manual_seed(config.debug.seed)
+        self._set_determinism(config.debug)
 
         # Extract needed fields from configs
         self.model_path = model_path
@@ -227,6 +216,24 @@ class VLLMGenerator(Actor, Configurable):
         self.policy_version = 0
 
         logger.info("Generator initialized with vLLM engine")
+
+    @staticmethod
+    def _set_determinism(debug: DebugConfig) -> None:
+        """Apply deterministic flags for the generator.
+
+        The generator doesn't use torchtitan's ParallelDims, so we apply
+        the deterministic flags directly instead of using set_determinism().
+        """
+        if debug.deterministic:
+            torch.use_deterministic_algorithms(
+                True, warn_only=debug.deterministic_warn_only
+            )
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+        if debug.seed is not None:
+            torch.manual_seed(debug.seed)
 
     def _get_model(self):
         """Access the model from the vLLM engine.

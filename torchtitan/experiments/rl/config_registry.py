@@ -145,7 +145,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_on_policy() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
     """On-policy GRPO config for Qwen3-0.6B under same parallelism (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
@@ -156,7 +156,7 @@ def rl_grpo_qwen3_0_6b_on_policy() -> RLTrainer.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         debug=DebugConfig(
-            batch_invariant_mode=True,
+            batch_invariant=True,
             deterministic=True,
         ),
         trainer=PolicyTrainer.Config(

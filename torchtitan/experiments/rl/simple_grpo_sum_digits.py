@@ -145,17 +145,17 @@ class RLTrainer(Configurable):
             # Batch-invariant mode requires bf16 on both trainer and generator
             # so that attention kernels (FA3) run identically on both sides
             # without any dtype casting that could break bitwise identity.
-            if self.debug.batch_invariant_mode:
+            if self.debug.batch_invariant:
                 if not self.debug.deterministic:
-                    raise ValueError("batch_invariant_mode requires deterministic=True")
+                    raise ValueError("batch_invariant requires deterministic=True")
                 if self.trainer.training.dtype != "bfloat16":
                     raise ValueError(
-                        f"batch_invariant_mode requires bfloat16 training dtype, "
+                        f"batch_invariant requires bfloat16 training dtype, "
                         f"got {self.trainer.training.dtype!r}"
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(
-                        f"batch_invariant_mode requires bfloat16 generator dtype, "
+                        f"batch_invariant requires bfloat16 generator dtype, "
                         f"got {self.generator.model_dtype!r}"
                     )
 

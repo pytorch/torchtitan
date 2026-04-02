@@ -60,7 +60,7 @@ from torchtitan.experiments.rl.actors.utils import (
     build_varlen_metadata,
     compute_token_log_probs,
 )
-from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_on_policy
+from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
 from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 from torchtitan.experiments.rl.plugin import (
     register_model_to_vllm_model_registry,
@@ -87,12 +87,10 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    if config.debug.batch_invariant_mode:
-        from torchtitan.experiments.rl.batch_invariant import (
-            enable_batch_invariant_mode,
-        )
+    if config.debug.batch_invariant:
+        from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
 
-        enable_batch_invariant_mode()
+        enable_batch_invariant()
 
     engine_kwargs = dict(
         model=config.hf_assets_path,
@@ -129,12 +127,10 @@ def build_trainer_model(
     model_spec = config.model_spec
     hf_assets_path = config.hf_assets_path
 
-    if config.debug.batch_invariant_mode:
-        from torchtitan.experiments.rl.batch_invariant import (
-            enable_batch_invariant_mode,
-        )
+    if config.debug.batch_invariant:
+        from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
 
-        enable_batch_invariant_mode()
+        enable_batch_invariant()
         model_spec.model.layer.attention.inner_attention.batch_invariant = True
 
     model_config = model_spec.model
@@ -460,7 +456,7 @@ def main():
     )
     args, _ = parser.parse_known_args()
 
-    config = rl_grpo_qwen3_0_6b_on_policy()
+    config = rl_grpo_qwen3_0_6b_batch_invariant()
     # CLI overrides for test flexibility
     config.hf_assets_path = args.hf_assets_path
     config.trainer.parallelism.tensor_parallel_degree = args.tp

@@ -13,7 +13,7 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.experiments.rl.batch_invariant import is_batch_invariant_mode_enabled
+from torchtitan.experiments.rl.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import LocalMapInnerAttention
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
-class PyTorchFlashAttentionBackend(FlashAttentionBackend):
+class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -50,10 +50,10 @@ class PyTorchFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        return PyTorchFlashAttentionImpl
+        return PyTorchVarlenAttentionImpl
 
 
-class PyTorchFlashAttentionImpl(FlashAttentionImpl):
+class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
     """
     Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
     Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel
@@ -63,13 +63,14 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
+        # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
         else:
             warn_once(
                 logger,
-                "Using FA2 attention. "
+                "FA3 not available (requires SM 9.0+), falling back to FA2. "
                 "vLLM block_size must be set to 256 for FA2 paged attention.",
             )
 
@@ -169,10 +170,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
         # split-k reductions. FA2 is automatically batch-invariant and does
         # not accept num_splits.
         extra_kwargs = {}
-        if (
-            is_batch_invariant_mode_enabled()
-            and current_flash_attention_impl() == "FA3"
-        ):
+        if is_in_batch_invariant_mode() and current_flash_attention_impl() == "FA3":
             extra_kwargs["num_splits"] = 1
 
         return torch.nn.attention.varlen.varlen_attn_out(

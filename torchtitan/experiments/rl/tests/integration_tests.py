@@ -37,7 +37,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--generator.num_samples_per_prompt 2",
-                    "--debug.no_batch_invariant_mode",
+                    "--debug.no_batch_invariant",
                     "--trainer.compile.no-enable",
                     "--generator.compile.backend none",
                     "--generator.compile.cudagraph_mode none",
@@ -55,7 +55,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--generator.num_samples_per_prompt 2",
-                    "--debug.no_batch_invariant_mode",
+                    "--debug.no_batch_invariant",
                 ],
             ],
             "RL GRPO TP=2 compile",
@@ -66,7 +66,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b_on_policy",
+                    "--config rl_grpo_qwen3_0_6b_batch_invariant",
                 ],
             ],
             "RL GRPO TP=2 on-policy (batch-invariant + deterministic)",

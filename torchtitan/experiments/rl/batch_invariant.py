@@ -20,8 +20,8 @@ definition.
 
 
 Usage:
-    from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
-    enable_batch_invariant_mode()
+    from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
+    enable_batch_invariant()
 """
 
 import logging
@@ -38,12 +38,12 @@ logger = logging.getLogger(__name__)
 _enabled: bool = False
 
 
-def is_batch_invariant_mode_enabled() -> bool:
+def is_in_batch_invariant_mode() -> bool:
     """Return whether batch-invariant mode is active."""
     return _enabled
 
 
-def enable_batch_invariant_mode() -> None:
+def enable_batch_invariant() -> None:
     """Enable batch-invariant mode for reproducible RL training.
 
     Delegates ATen operator overrides (``mm``, ``addmm``, ``_log_softmax``,
@@ -65,7 +65,7 @@ def enable_batch_invariant_mode() -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
+    from batch_invariant_ops import enable_batch_invariant as _upstream_enable
 
     _upstream_enable()
 

@@ -26,7 +26,7 @@ import torch.distributed as dist
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.configs import DebugConfig
 from torchtitan.experiments.rl.actors.utils import build_varlen_metadata
-from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
+from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant
 from torchtitan.tools.utils import set_default_dtype
 
 _SEQ_LEN = 256
@@ -48,7 +48,7 @@ def _build_debug_model(
 
     model_spec = model_registry("debugmodel", attn_backend_override="varlen")
 
-    if debug.batch_invariant_mode:
+    if debug.batch_invariant:
         assert isinstance(
             model_spec.model.layer.attention.inner_attention,
             VarlenAttention.Config,
@@ -71,8 +71,8 @@ class TestBatchInvariant(unittest.TestCase):
     """Test batch invariance on Qwen3 debugmodel."""
 
     def setUp(self):
-        enable_batch_invariant_mode()
-        self.debug = DebugConfig(batch_invariant_mode=True, deterministic=True)
+        enable_batch_invariant()
+        self.debug = DebugConfig(batch_invariant=True, deterministic=True)
 
     def test_forward_invariance(self):
         """The same sequence produces bit-identical logits regardless of
@@ -81,7 +81,7 @@ class TestBatchInvariant(unittest.TestCase):
         Runs the full Qwen3 debugmodel forward on 5 sequences individually,
         then as a batch of 5, and checks that outputs match bitwise.
         """
-        enable_batch_invariant_mode()
+        enable_batch_invariant()
 
         model, vocab_size = _build_debug_model(self.debug)
         model.eval()
@@ -136,8 +136,8 @@ class TestBatchInvariant(unittest.TestCase):
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
 
-        debug = DebugConfig(batch_invariant_mode=True, deterministic=True)
-        enable_batch_invariant_mode()
+        debug = DebugConfig(batch_invariant=True, deterministic=True)
+        enable_batch_invariant()
 
         model, vocab_size = _build_debug_model(debug)
 
