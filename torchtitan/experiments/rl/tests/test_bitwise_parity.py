@@ -159,7 +159,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     from torchtitan.tools.utils import has_cuda_capability
 
     if not has_cuda_capability(9, 0):
-        engine_kwargs["block_size"] = 256
+        engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
     if vllm_compilation_config is not None:
@@ -213,7 +213,11 @@ def compute_trainer_prefill_logprobs(model, token_ids, device):
 
     attention_masks = _build_padded_varlen_metadata(len(seqs), max_len, device)
 
-    logits = model(padded, attention_masks=attention_masks)
+    # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
+    # which can break torch.compile with symbolic shapes.
+    positions = torch.arange(max_len, device=device).unsqueeze(0).expand(len(seqs), -1)
+
+    logits = model(padded, attention_masks=attention_masks, positions=positions)
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
 
     results = []
