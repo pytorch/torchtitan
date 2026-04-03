@@ -27,6 +27,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -74,8 +75,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
         )
-        # TODO: remove the optional flag once Flux tokenizer is modeled properly
-        tokenizer: BaseTokenizer.Config | None = field(
+        tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
@@ -123,11 +123,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "flavor": self.model_spec.flavor,
                     }
                 else:
-                    d[f.name] = (
-                        asdict(getattr(self, f.name))
-                        if dataclasses.is_dataclass(getattr(self, f.name))
-                        else getattr(self, f.name)
-                    )
+                    val = getattr(self, f.name)
+                    if hasattr(val, "to_dict"):
+                        d[f.name] = val.to_dict()
+                    elif dataclasses.is_dataclass(val):
+                        d[f.name] = asdict(val)
+                    else:
+                        d[f.name] = val
             return d
 
         def maybe_log(self) -> None:
@@ -156,7 +158,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     parallel_dims: ParallelDims
 
     # swappable training components
-    tokenizer: BaseTokenizer | None
+    tokenizer: BaseTokenizer
     dataloader: BaseDataLoader
     model_config: BaseModel.Config
     # TODO: we should make this list[BaseModel / Decoder] but this will affect many components.
@@ -225,11 +227,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build tokenizer
-        self.tokenizer = (
-            config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-            if config.tokenizer is not None
-            else None
-        )
+        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
         self.dataloader = config.dataloader.build(
@@ -250,7 +248,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(dataclasses.asdict(model_config), indent=2, ensure_ascii=False)}"
+            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
@@ -268,12 +266,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         model_converters.convert(model)
 
+        # Verify all submodules satisfy the Module protocol
+        # TODO: move this to module validate().
+        # This is current put here to verify module build and
+        # converter, which should guanrantee Module protocol.
+        # On the other hand, some parallelism wrappers don't
+        # have this guanrantee, e.g., fully_shard.
+        model.verify_module_protocol()
+
+        # Check if any converter uses quantization (FP8, MX, etc.)
+        has_quantization = any(
+            isinstance(cc, QuantizationConverter.Config)
+            for cc in config.model_converters.converters
+        )
+
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
+            has_quantization=has_quantization,
         )
         color = self.metrics_processor.color
 
@@ -360,7 +373,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(Decoder, m).init_weights(buffer_device=buffer_device)
+                    # TODO: Change this back to init_weights once
+                    # autoparallel contains the wrap_init_states
+                    cast(BaseModel, m).init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -384,6 +399,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
+                # TODO: Change this back to init_weights once
+                # autoparallel contains the wrap_init_states
                 cast(BaseModel, model).init_weights(buffer_device=buffer_device)
             model.train()
 
@@ -563,39 +580,63 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (unchanged from input parameter).
-                - extra_inputs: Dict of auxiliary input tensors (all keys except
-                    "input" from input_dict). These are passed to the model forward
-                    but are NOT forwarded across pipeline parallel stages.
-                - extra_kwargs: Dict of additional keyword arguments for model forward.
-                    These ARE forwarded across pipeline parallel stages. Contains
-                    attention_masks if flex attention is enabled.
+                - extra_inputs: Dict of auxiliary input tensors from input_dict
+                    (excluding "input" and "positions"). These are passed to the
+                    model forward but are NOT forwarded across pipeline parallel
+                    stages.
+                - extra_kwargs: Dict of additional keyword arguments for model
+                    forward (positions, attention_masks). These ARE forwarded
+                    across all pipeline parallel stages.
 
         Note:
             The distinction between extra_inputs and extra_kwargs is important for
             pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
-            while extra_inputs are only available to the first stage.
+            while extra_inputs are only available to the first stage. Positions
+            always go into extra_kwargs so every stage can apply RoPE correctly.
         """
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_kwargs are.
+        # extra_kwargs are forwarded to all PP stages; extra_inputs are only
+        # available to the first stage.  Positions go into extra_kwargs so
+        # every stage can apply RoPE correctly.
         extra_kwargs: dict[str, Any] = {}
 
-        # TODO: improve the logic on obtaining attention masks
+        # Resolve positions once: per-document positions for block_causal,
+        # sequential positions when CP needs them for shard indexing,
+        # or None (model uses sequential RoPE slice by default).
         layer = getattr(self.model_config, "layer", None)
         attn_config = getattr(layer, "attention", None) if layer else None
-        attn_backend = getattr(attn_config, "attn_backend", "sdpa")
-        if attn_backend in ["flex", "varlen"]:
-            assert (
-                self.tokenizer is not None
-            ), "tokenizer is required for flex/varlen attention"
-            model = cast(Decoder, self.model_parts[0])
-            extra_kwargs["attention_masks"] = model.get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
+        mask_type = getattr(attn_config, "mask_type", "causal")
+
+        positions = extra_inputs.pop("positions", None)
+        if mask_type == "block_causal":
+            # Per-document positions from the dataloader
+            extra_kwargs["positions"] = positions
+        elif self.parallel_dims.cp_enabled:
+            # Sequential positions needed for correct RoPE after CP sharding
+            extra_kwargs["positions"] = torch.arange(
+                0, inputs.shape[1], dtype=torch.int32, device=self.device
+            ).expand(inputs.shape)
+
+        inner_attention = getattr(attn_config, "inner_attention", None)
+        if inner_attention is not None:
+            from torchtitan.models.common.attention import (
+                FlexAttention,
+                VarlenAttention,
             )
+
+            if isinstance(
+                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+            ):
+                assert (
+                    self.tokenizer is not None
+                ), "tokenizer is required for flex/varlen attention"
+                model = cast(Decoder, self.model_parts[0])
+                extra_kwargs["attention_masks"] = model.get_attention_masks(
+                    input_batch=inputs,
+                    tokenizer=self.tokenizer,
+                    extra_inputs=extra_inputs,
+                )
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
@@ -763,7 +804,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ),
             )
         else:
-            global_avg_loss = global_max_loss = loss.detach().item()
+            global_avg_loss = global_max_loss = float(loss.detach().item())
             global_ntokens_seen = self.ntokens_seen
 
         extra_metrics = {
@@ -774,7 +815,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.step,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            float(grad_norm.item()),
             extra_metrics=extra_metrics,
         )
 

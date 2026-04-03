@@ -47,6 +47,5 @@ def autoparallel_local_map_deepseek_v3_debugmodel() -> AutoParallelConfig:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )

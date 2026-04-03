@@ -4,15 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .utils import trunc_normal_
+__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
@@ -42,18 +42,21 @@ class FeedForward(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hidden_dim: int
-        bias: bool = False
+        w1: Linear.Config
+        w2w3: Linear.Config
+        dim: int = field(init=False)
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.w1 = nn.Linear(dim, config.hidden_dim, bias=config.bias)
-        self.w2 = nn.Linear(config.hidden_dim, dim, bias=config.bias)
-        self.w3 = nn.Linear(dim, config.hidden_dim, bias=config.bias)
+        self.w1 = config.w1.build(
+            in_features=config.dim, out_features=config.hidden_dim
+        )
+        self.w2 = config.w2w3.build(
+            in_features=config.hidden_dim, out_features=config.dim
+        )
+        self.w3 = config.w2w3.build(
+            in_features=config.dim, out_features=config.hidden_dim
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02, **kwargs):
-        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            trunc_normal_(linear.weight, mean=0.0, std=init_std)

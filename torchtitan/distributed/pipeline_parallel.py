@@ -16,7 +16,6 @@ from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
     get_schedule_class,
-    OVERLAP_F_B,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
     ScheduleDualPipeV,
@@ -31,10 +30,10 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.dual_pipe_v import overlap_callback
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ParallelizeFunction
+from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -239,11 +238,6 @@ def build_pipeline_schedule(
         f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
 
-    if parallelism.pipeline_parallel_expert_parallel_overlap and isinstance(
-        schedule, ScheduleDualPipeV
-    ):
-        schedule.register_custom_function(OVERLAP_F_B, overlap_callback)
-
     if pp_schedule_csv:
         assert schedule_class in [
             PipelineScheduleSingle,
@@ -437,7 +431,7 @@ def pipeline_module_split(
                         indices_to_keep = {
                             int(idx) for idx in layers_to_keep if idx.isdigit()
                         }
-                        new_layers = nn.ModuleList(
+                        new_layers = ModuleList(
                             [
                                 layer
                                 for i, layer in enumerate(module_value)
@@ -448,9 +442,9 @@ def pipeline_module_split(
                 else:
                     # No layers from this structure needed, set to empty structure
                     if isinstance(module_value, nn.ModuleDict):
-                        setattr(model, module_name, nn.ModuleDict())
+                        setattr(model, module_name, ModuleDict())
                     elif isinstance(module_value, nn.ModuleList):
-                        setattr(model, module_name, nn.ModuleList())
+                        setattr(model, module_name, ModuleList())
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
                 # Replace with None

@@ -14,7 +14,6 @@ from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
-
 from torchtitan.tools.logging import logger
 
 
@@ -113,6 +112,12 @@ def get_peak_flops(device_name: str) -> float:
         # Ref: https://www.tomshardware.com/news/
         # nvidias-latest-regulation-compliant-gpu-for-china-has-been-delayed-to-early-next-year
         return 148e12
+    elif "GB200" in device_name or "GB300" in device_name:
+        # Grace Blackwell Superchips (Grace CPU + Blackwell GPU)
+        # BF16 dense per GPU: 2,500 TFLOPS (half of 5,000 TFLOPS with sparsity)
+        # GB200 data from https://www.nvidia.com/en-us/data-center/dgx-gb200
+        # GB300 data from https://www.nvidia.com/en-us/data-center/dgx-gb300
+        return 2.5e15
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
         return 2.25e15
@@ -242,9 +247,3 @@ def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
         yield
     finally:
         torch.set_default_dtype(old_dtype)
-
-
-def _round_up(x: int, y: int) -> int:
-    """Round up x to the nearest multiple of y."""
-    x_ceil_div_y = (x + y - 1) // y
-    return x_ceil_div_y * y

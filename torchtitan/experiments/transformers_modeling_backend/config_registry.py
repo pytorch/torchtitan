@@ -51,7 +51,6 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )
 
@@ -83,6 +82,5 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )

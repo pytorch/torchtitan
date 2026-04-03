@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import json
 import os
 import time
@@ -23,7 +22,6 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.manager import FTManager, maybe_semi_sync_training
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -108,7 +106,7 @@ class FaultTolerantTrainer(Trainer):
 
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(dataclasses.asdict(model_config), indent=2, ensure_ascii=False)}"
+            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
@@ -125,6 +123,9 @@ class FaultTolerantTrainer(Trainer):
             model_compile_enabled=model_compile_enabled,
         )
         model_converters.convert(model)
+
+        # Verify all submodules satisfy the Module protocol
+        model.verify_module_protocol()
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
@@ -223,7 +224,7 @@ class FaultTolerantTrainer(Trainer):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(Decoder, m).init_weights(buffer_device=buffer_device)
+                    cast(BaseModel, m).init_states(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -247,7 +248,7 @@ class FaultTolerantTrainer(Trainer):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                cast(BaseModel, model).init_states(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]

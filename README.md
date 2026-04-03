@@ -59,7 +59,7 @@ We look forward to your contributions!
    - [Pipeline Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-training-with-zero-bubble-pipeline-parallelism/214420)
    - [Context Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-breaking-barriers-training-long-context-llms-with-1m-sequence-length-in-pytorch-using-context-parallel/215082)
 2. [Meta device](https://pytorch.org/docs/stable/meta.html) initialization
-3. Selective (layer or operator) and full activation checkpointing
+3. Per-op selective and full activation checkpointing
 4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
@@ -85,9 +85,9 @@ We report [performance](benchmarks/llama3_h100_202412_torchtitan.md) on up to 51
 
 You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
 * [torchtitan/train.py](torchtitan/train.py) - the main training loop and high-level setup code
-* [torchtitan/models/llama3/model/model.py](torchtitan/models/llama3/model/model.py) - the Llama 3.1 model definition
-* [torchtitan/models/llama3/infra/parallelize.py](torchtitan/models/llama3/infra/parallelize.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
-* [torchtitan/models/llama3/infra/pipeline.py](torchtitan/models/llama3/infra/pipeline.py) - helpers for applying Pipeline Parallel to the model
+* [torchtitan/models/llama3/model.py](torchtitan/models/llama3/model.py) - the Llama 3.1 model definition
+* [torchtitan/models/llama3/parallelize.py](torchtitan/models/llama3/parallelize.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
+* [torchtitan/distributed/pipeline_parallel.py](torchtitan/distributed/pipeline_parallel.py) - helpers for applying Pipeline Parallel to the model
 * [torchtitan/components/checkpoint.py](torchtitan/components/checkpoint.py) - utils for saving/loading distributed checkpoints
 * [torchtitan/components/quantization/float8.py](torchtitan/components/quantization/float8.py) - utils for applying Float8 techniques
 
@@ -104,15 +104,18 @@ This method requires the nightly build of PyTorch, or the latest PyTorch built [
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
+pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/cpu
 ```
+
+> **Note:** The nightly build of `torchdata` is required when using a PyTorch nightly. Install it from the nightly index as shown above.
 
 ### Nightly builds
 
-This method requires the nightly build of PyTorch. You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
+This method requires the nightly build of PyTorch. You can replace `cu128` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).
 
 ```sh
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu128
 ```
 
 ### Stable releases

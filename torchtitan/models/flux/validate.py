@@ -21,12 +21,12 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
 
+from .configs import SamplingConfig
 from .flux_datasets import FluxDataLoader
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
-from .tokenizer import build_flux_tokenizer
-from .trainer import FluxTrainer
+from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
 
@@ -66,7 +66,8 @@ class FluxValidator(Validator):
         save_img_folder: str = "validation_images"
         """Folder to save validation images"""
 
-    validation_dataloader: BaseDataLoader
+        sampling: SamplingConfig = field(default_factory=SamplingConfig)
+        """Sampling configuration for validation image generation"""
 
     def __init__(
         self,
@@ -95,21 +96,16 @@ class FluxValidator(Validator):
         self.all_timesteps = config.all_timesteps
 
         assert isinstance(config.dataloader, FluxDataLoader.Config)
-        self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(
-            config.dataloader.encoder, config.dataloader.hf_assets_path
-        )
-        dl_config = replace(
+        assert isinstance(tokenizer, FluxTokenizerContainer)
+
+        self.dl_config = replace(
             config.dataloader,
             infinite=config.steps != -1,
             generate_timesteps=not config.all_timesteps,
         )
-        self.validation_dataloader = dl_config.build(
-            dp_world_size=dp_world_size,
-            dp_rank=dp_rank,
-            t5_tokenizer=self.t5_tokenizer,
-            clip_tokenizer=self.clip_tokenizer,
-            local_batch_size=local_batch_size,
-        )
+        self.dp_world_size = dp_world_size
+        self.dp_rank = dp_rank
+        self.local_batch_size = local_batch_size
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         # pyrefly: ignore [bad-assignment]
@@ -128,7 +124,7 @@ class FluxValidator(Validator):
         autoencoder: AutoEncoder,
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
-        trainer_config: FluxTrainer.Config,  # TODO: remove this dependency
+        dump_folder: str,
     ):
         # pyrefly: ignore [read-only]
         self.device = device
@@ -136,9 +132,7 @@ class FluxValidator(Validator):
         self.autoencoder = autoencoder
         self.t5_encoder = t5_encoder
         self.clip_encoder = clip_encoder
-        # Store job_config for Flux-specific runtime accesses
-        # (generate_image, classifier_free_guidance_prob, etc.)
-        self.trainer_config = trainer_config
+        self.dump_folder = dump_folder
 
     @torch.no_grad()
     def validate(
@@ -160,7 +154,14 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
+        validation_dataloader = self.dl_config.build(
+            dp_world_size=self.dp_world_size,
+            dp_rank=self.dp_rank,
+            local_batch_size=self.local_batch_size,
+            tokenizer=self.tokenizer,
+        )
+
+        for input_dict, labels in validation_dataloader:
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
@@ -171,16 +172,23 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
+                img_size = (
+                    self.config.dataloader.img_size  # pyrefly: ignore [missing-attribute]
+                )
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
-                    job_config=self.trainer_config,
+                    img_height=16 * (img_size // 16),
+                    img_width=16 * (img_size // 16),
+                    enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
+                    denoising_steps=self.config.sampling.denoising_steps,
+                    classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
                     # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
-                    t5_tokenizer=self.t5_tokenizer,
-                    clip_tokenizer=self.clip_tokenizer,
+                    # pyrefly: ignore [bad-argument-type]
+                    tokenizer=self.tokenizer,
                     t5_encoder=self.t5_encoder,
                     clip_encoder=self.clip_encoder,
                 )
@@ -188,7 +196,7 @@ class FluxValidator(Validator):
                 save_image(
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
-                        self.trainer_config.dump_folder,
+                        self.dump_folder,
                         self.config.save_img_folder,
                     ),
                     x=image,
@@ -294,7 +302,7 @@ class FluxValidator(Validator):
                 loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
-            global_avg_loss = loss.item()
+            global_avg_loss = float(loss.item())
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 

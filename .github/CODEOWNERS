@@ -10,4 +10,7 @@
 /torchtitan/experiments/
 
 # codeowners for experiments/forge
-/torchtitan/experiments/forge/* @ebsmothers @pbontrager @joecummings @allenwang28 @tianyu-l @wwwjn @fegin
+/torchtitan/experiments/forge/* @joecummings @felipemello1 @daniellepintz @allenwang28 @tianyu-l @wwwjn @fegin
+
+#codeowners for experiments/graph_trainer
+/torchtitan/experiments/graph_trainer/* @yiming0416 @tianyu-l @SherlockNoMad @xmfan @aditvenk

@@ -13,9 +13,11 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model as Llama3
+from torchtitan.protocols.module import Module
 
-from .args import Siglip2Config, SpecialTokens
+from .args import SpecialTokens
 from .siglip2 import VisionTransformer
 
 
@@ -34,14 +36,22 @@ def _scatter_img_tokens(h_BSD, tokens_BS, i_NLD, i_mask_NL, img_id):
     return h_BSD
 
 
-class Projector(nn.Module):
+class Projector(Module):
     """Project the Encoder embedding to the LLM embedding."""
 
-    def __init__(self, in_dim: int, out_dim: int) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        w1: Linear.Config
+        w2: Linear.Config
+        in_dim: int = field(init=False)
+        out_dim: int = field(init=False)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.w1 = nn.Linear(in_dim, in_dim)
-        self.w2 = nn.Linear(in_dim, out_dim)
-        self.init_weights()
+        self.w1 = config.w1.build(in_features=config.in_dim, out_features=config.in_dim)
+        self.w2 = config.w2.build(
+            in_features=config.in_dim, out_features=config.out_dim
+        )
 
     def forward(self, x_NLD: torch.Tensor):
         x_NLD = self.w1(x_NLD)
@@ -49,32 +59,18 @@ class Projector(nn.Module):
         x_NLD = self.w2(x_NLD)
         return x_NLD
 
-    def init_weights(self):
-        nn.init.xavier_uniform_(self.w1.weight)
-        if self.w1.bias is not None:
-            nn.init.zeros_(self.w1.bias)
-        nn.init.xavier_uniform_(self.w2.weight)
-        if self.w2.bias is not None:
-            nn.init.zeros_(self.w2.bias)
-
 
 class Llama3Siglip2Transformer(Llama3):
     @dataclass(kw_only=True, slots=True)
     class Config(Llama3.Config):
-        encoder: Siglip2Config = field(default_factory=Siglip2Config)
+        encoder: VisionTransformer.Config
+        projector: Projector.Config
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.config = config
         self.encoder = VisionTransformer(config.encoder)
-        self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
-
-    def init_weights(self, buffer_device=None):
-        super().init_weights(buffer_device=buffer_device)
-        if self.encoder is not None:
-            self.encoder.init_weights()
-        if self.projector is not None:
-            self.projector.init_weights()
+        self.projector = Projector(config.projector)
 
     def get_attention_masks(
         self,
