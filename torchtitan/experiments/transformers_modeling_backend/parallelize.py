@@ -647,8 +647,22 @@ def apply_moe_ep_tp(
 ):
     """Apply Expert Parallelism and/or Tensor Parallelism to MoE layers.
 
-    Mirrors native torchtitan's apply_moe_ep_tp pattern. Handles all
-    combinations: EP-only, TP-only, EP+TP.
+    Mirrors native torchtitan's ``apply_moe_ep_tp`` (llama4/parallelize.py).
+    Handles all combinations: EP-only, TP-only, EP+TP.
+
+    Key differences from native:
+
+    - **EP dispatch/combine:** Uses ``HFExpertParallel`` which adapts the
+      HF experts interface (unsorted tokens) instead of native's
+      ``ExpertParallel`` (pre-sorted tokens).
+    - **Gate TP:** Uses ``TupleNoParallel`` instead of ``NoParallel``
+      because HF routers return tuples (logits, scores, indices) while
+      native's ``moe.router.gate`` is an ``nn.Linear`` returning a
+      single tensor. Relies on the topk gather patch for DTensor safety.
+    - **Expert params to_local:** Done via ``__dict__`` shadowing hooks
+      (registered here, re-registered in ``apply_fsdp`` for correct
+      ordering) instead of ``to_local()`` inside the forward — we don't
+      modify the HF forward.
 
     Args:
         model: The model with MoE layers.
