@@ -231,7 +231,7 @@ class ParallelismConfig:
 @dataclass(kw_only=True, slots=True)
 class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
-    """Type of activation checkpointing to use"""
+    """Type of activation checkpointing to use."""
 
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]

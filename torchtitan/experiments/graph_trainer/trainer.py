@@ -15,7 +15,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerActivationCheckpointConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced_train_step,
@@ -64,6 +67,9 @@ class GraphTrainer(Trainer):
     class Config(Trainer.Config):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
+        )
+        activation_checkpoint: GraphTrainerActivationCheckpointConfig = field(
+            default_factory=GraphTrainerActivationCheckpointConfig
         )
 
     def __init__(self, config):

@@ -16,6 +16,21 @@ from torchtitan.trainer import Trainer
 
 
 @dataclass(kw_only=True, slots=True)
+class GraphTrainerActivationCheckpointConfig(ActivationCheckpointConfig):
+    mode: Literal[
+        "selective", "full", "memory_budget", "fsdp2_sac", "none"
+    ] = "selective"
+    """Extends base AC config with graph-trainer-specific modes.
+
+    "fsdp2_sac": closely matches FSDP2's eager per-op selective AC policy --
+    same save ops, per-AC-region mm counters, and MUST_SAVE / MUST_RECOMPUTE
+    annotations. Use for direct memory comparison between graph_trainer and
+    FSDP2 eager trainer. Note: does not yet support
+    per_op_sac_force_recompute_mm_shapes_by_fqns.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
     mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
     """
@@ -112,11 +127,14 @@ def to_graph_trainer_config(
     )
     d.pop("compile")
 
-    # graph_trainer uses graph-based SAC instead of eager AC. Override any
-    # non-"none" AC mode to "selective" so callers don't need per-config fixups.
-    ac = d.get("activation_checkpoint")
-    if ac is not None and ac.mode != "none":
-        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+    # Convert base AC config to graph-trainer AC config. Override any
+    # unsupported AC mode to "selective" so callers don't need per-config fixups.
+    ac = d.pop("activation_checkpoint", None)
+    if ac is not None:
+        ac_fields = {f.name: getattr(ac, f.name) for f in fields(ac)}
+        if ac_fields["mode"] not in ("none", "selective", "fsdp2_sac"):
+            ac_fields["mode"] = "selective"
+        d["activation_checkpoint"] = GraphTrainerActivationCheckpointConfig(**ac_fields)
 
     # TODO: graph_trainer doesn't yet support ChunkedCELoss
     if isinstance(d.get("loss"), ChunkedCELoss.Config):

@@ -34,6 +34,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     _make_default_memory_policy,
     apply_sac_pass,
+    fsdp2_sac_pass,
     insert_kernel_annotations_pass,
     overlap_fsdp_ag_rs_pass,
     remove_detach_pass,
@@ -1399,6 +1400,84 @@ class TestAsyncTensorParallelPass(FSDPTest):
 
         fused = torch.ops.symm_mem.fused_matmul_reduce_scatter.default
         self.assertTrue(any(n.target == fused for n in gm.graph.nodes))
+
+
+class TestFSDP2SACPass(TestCase):
+    """Unit tests for the fsdp2_sac_pass joint graph pass."""
+
+    def _build_gm(self, op_targets, ac_region_ids=None):
+        """Build a GraphModule with call_function nodes, optionally annotated
+        with AC region IDs.
+
+        ac_region_ids: list parallel to op_targets. None entries leave the node
+        unannotated; int entries set _AC_REGION_ID in custom metadata.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        y = graph.placeholder("y")
+        last = x
+        for i, target in enumerate(op_targets):
+            if target is operator.getitem:
+                last = graph.call_function(target, args=(last, 0))
+            else:
+                last = graph.call_function(target, args=(last, y))
+        graph.output(last)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        if ac_region_ids is not None:
+            call_fn_nodes = [n for n in gm.graph.nodes if n.op == "call_function"]
+            for node, rid in zip(call_fn_nodes, ac_region_ids, strict=True):
+                if rid is not None:
+                    node.meta["custom"] = {_AC_REGION_ID: rid}
+
+        return gm
+
+    def test_only_ac_region_nodes_annotated(self):
+        """Nodes outside AC regions are skipped; nodes inside get MUST_* policies."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.mm.default,
+                torch.ops.aten.relu.default,
+            ],
+            ac_region_ids=[None, 0, 0],
+        )
+        fsdp2_sac_pass(gm)
+        nodes = [n for n in gm.graph.nodes if n.op == "call_function"]
+        # Outside AC region — no annotation
+        self.assertNotIn("recompute", nodes[0].meta)
+        # Inside AC region — MUST_* policies only
+        for node in nodes[1:]:
+            self.assertIn(
+                node.meta["recompute"],
+                {
+                    CheckpointPolicy.MUST_SAVE,
+                    CheckpointPolicy.MUST_RECOMPUTE,
+                },
+            )
+
+    def test_per_region_mm_counters(self):
+        """Each AC region has an independent mm counter (odd=save, even=recompute),
+        and aten.linear participates in the counter alongside aten.mm."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,  # region 0, mm #1 -> MUST_SAVE
+                torch.ops.aten.linear.default,  # region 1, mm #1 -> MUST_SAVE
+                torch.ops.aten.mm.default,  # region 0, mm #2 -> MUST_RECOMPUTE
+                torch.ops.aten.linear.default,  # region 1, mm #2 -> MUST_RECOMPUTE
+            ],
+            ac_region_ids=[0, 1, 0, 1],
+        )
+        fsdp2_sac_pass(gm)
+        nodes = [n for n in gm.graph.nodes if n.op == "call_function"]
+        expected = [
+            CheckpointPolicy.MUST_SAVE,
+            CheckpointPolicy.MUST_SAVE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+        ]
+        for node, policy in zip(nodes, expected, strict=True):
+            self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
 
 
 if __name__ == "__main__":

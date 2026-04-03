@@ -232,3 +232,33 @@ def apply_simple_fsdp(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
     )
     return model
+
+
+def apply_graph_ac(
+    compile_config: CompileConfig,
+    ac_config: "ActivationCheckpointConfig",
+) -> None:
+    """Add the appropriate SAC joint pass based on ac_config.mode.
+
+    Must be called only when ac_config.mode != "none".
+    Supported modes: "selective" (graph-level PREFER annotations) and
+    "fsdp2_sac" (MUST annotations matching FSDP2 eager policy).
+    """
+    mode_to_pass = {
+        "selective": "apply_sac",
+        "fsdp2_sac": "fsdp2_sac",
+    }
+    pass_name = mode_to_pass.get(ac_config.mode)
+    if pass_name is None:
+        raise ValueError(
+            f"graph_trainer only supports activation_checkpoint.mode "
+            f"'selective', 'fsdp2_sac', or 'none', got {ac_config.mode!r}."
+        )
+
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
+    if pass_name not in joint_pass_names:
+        compile_config.joint_passes = list(joint_pass_names) + [pass_name]
+        logger.info(
+            f"activation_checkpoint.mode is {ac_config.mode!r}, "
+            f"added {pass_name} to compile.joint_passes"
+        )
