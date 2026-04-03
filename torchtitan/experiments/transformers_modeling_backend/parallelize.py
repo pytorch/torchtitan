@@ -76,35 +76,6 @@ from torchtitan.tools.logging import logger
 # ---------------------------------------------------------------------------
 
 
-class TupleNoParallel(NoParallel):
-    """NoParallel that handles tuple returns (e.g., HF MoE routers).
-
-    HF MoE routers return (logits, scores, indices) tuples. The base
-    NoParallel output hook expects a single DTensor and crashes on tuples.
-    This subclass processes each tuple element individually.
-
-    Safe for topk on DTensor because the topk gather patch (at module
-    level) routes topk backward through gather instead of scatter.
-    """
-
-    @staticmethod
-    def _prepare_output_fn(
-        output_layout, local_output_grad_placements, mod, outputs, device_mesh
-    ):
-        def _process(t):
-            if t is None or not isinstance(t, DTensor):
-                return t
-            if t.placements != (output_layout,):
-                t = t.redistribute(placements=(output_layout,), async_op=True)
-            if local_output_grad_placements is not None:
-                return t.to_local(grad_placements=local_output_grad_placements)
-            return t
-
-        if isinstance(outputs, tuple):
-            return tuple(_process(o) for o in outputs)
-        return _process(outputs)
-
-
 class HFExpertParallel(BaseExpertParallel):
     """Expert Parallelism for HF Transformers MoE models.
 
@@ -659,10 +630,10 @@ def apply_moe_ep_tp(
     - **EP dispatch/combine:** Uses ``HFExpertParallel`` which adapts the
       HF experts interface (unsorted tokens) instead of native's
       ``ExpertParallel`` (pre-sorted tokens).
-    - **Gate TP:** Uses ``TupleNoParallel`` instead of ``NoParallel``
-      because HF routers return tuples (logits, scores, indices) while
-      native's ``moe.router.gate`` is an ``nn.Linear`` returning a
-      single tensor. Relies on the topk gather patch for DTensor safety.
+    - **Gate TP:** Uses ``NoParallel`` (same as native) with tuple
+      return support. HF routers return tuples (logits, scores, indices)
+      while native's ``moe.router.gate`` is an ``nn.Linear`` returning
+      a single tensor. Relies on the topk gather patch for DTensor safety.
     - **Expert params to_local:** Done via ``__dict__`` shadowing hooks
       (registered here, re-registered in ``apply_fsdp`` for correct
       ordering) instead of ``to_local()`` inside the forward — we don't
@@ -702,12 +673,12 @@ def apply_moe_ep_tp(
                 )
 
             # Replicate gate params on TP mesh and handle DTensor
-            # input/output via TupleNoParallel. Same as native titan's
-            # NoParallel on moe.router.gate, with tuple return support.
+            # input/output via NoParallel. Same as native titan's
+            # NoParallel on moe.router.gate.
             parallelize_module(
                 moe_block.gate,
                 tp_mesh,
-                TupleNoParallel(local_output_grad_placements=(Partial(),)),
+                NoParallel(local_output_grad_placements=(Partial(),)),
             )
 
             # MoE block TP boundary (TP-only): all-gather input, reduce-
