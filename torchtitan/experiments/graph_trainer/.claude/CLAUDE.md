@@ -39,6 +39,45 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --parallelism.expert_tensor_parallel_degree=1
 ```
 
+### Benchmark (8×H100)
+
+```bash
+# Llama3 8B with FSDP + TP
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --training.steps 10
+
+# DeepSeek-v3 16B with FSDP + TP + EP
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --parallelism.expert_parallel_degree=2 \
+    --training.steps 10
+```
+
+
+### Profiling
+
+Add `--profiling.enable_profiling` and/or `--profiling.enable_memory_snapshot`
+to any run command. For example:
+
+```bash
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --profiling.enable_profiling \
+    --profiling.enable_memory_snapshot
+```
+
+Traces go to `outputs/profile_traces/`, memory snapshots to `outputs/memory_snapshot/`.
+
+
+
+
 ### Tests
 
 ```bash
