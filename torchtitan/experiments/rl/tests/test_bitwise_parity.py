@@ -38,16 +38,22 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
-from torchtitan.config import CommConfig
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
-from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
 from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -247,7 +253,7 @@ class TestBitwiseParity(unittest.TestCase):
     MAX_GEN_TOKENS = 50
 
     # Shared across all tests in the class (built once in setUpClass)
-    trainer: PolicyTrainer
+    model: torch.nn.Module
     generator: VLLMGenerator
     prompt_ids: list[list[int]]
 
@@ -270,24 +276,85 @@ class TestBitwiseParity(unittest.TestCase):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
 
+        trainer_config = config.trainer
+
+        # Enable batch-invariant mode BEFORE init_distributed
+        set_batch_invariance(trainer_config.debug.batch_invariant)
+
         if not dist.is_initialized():
-            dist_utils.init_distributed(CommConfig())
+            world_size = dist_utils.init_distributed(CommConfig())
+        else:
+            world_size = dist.get_world_size()
+
+        device_type = utils.device_type
+        cls.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        utils.device_module.set_device(cls.device)
+
+        # Build parallel dims
+        parallelism_config = trainer_config.parallelism
+        parallel_dims = ParallelDims(
+            dp_shard=parallelism_config.data_parallel_shard_degree,
+            dp_replicate=parallelism_config.data_parallel_replicate_degree,
+            cp=parallelism_config.context_parallel_degree,
+            tp=parallelism_config.tensor_parallel_degree,
+            pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
+            etp=parallelism_config.expert_tensor_parallel_degree,
+            world_size=world_size,
+        )
+
+        dist_utils.set_determinism(
+            parallel_dims,
+            cls.device,
+            trainer_config.debug,
+            distinct_seed_mesh_dims=["pp"],
+        )
 
         # Patch model_spec to use the RL-specific parallelize function
-        # (same as RLTrainer.__init__)
         from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 
-        config.model_spec.parallelize_fn = parallelize_qwen3
+        model_spec = config.model_spec
+        model_spec.parallelize_fn = parallelize_qwen3
 
-        # Instantiate actors directly (Actor.__init__ is a no-op)
-        cls.trainer = PolicyTrainer(
-            config.trainer,
-            model_spec=config.model_spec,
-            hf_assets_path=config.hf_assets_path,
+        # Build only the policy model (no ref model or optimizer) to save memory
+        with torch.device("meta"):
+            with utils.set_default_dtype(
+                TORCH_DTYPE_MAP[trainer_config.training.dtype]
+            ):
+                model = model_spec.model.build()
+
+        model = model_spec.parallelize_fn(
+            model,
+            parallel_dims=parallel_dims,
+            parallelism=trainer_config.parallelism,
+            compile_config=trainer_config.compile,
         )
+
+        model.to_empty(device=device_type)
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
+
+        # Load HF checkpoint weights
+        if model_spec.state_dict_adapter is not None:
+            sd_adapter = model_spec.state_dict_adapter(
+                model_spec.model, config.hf_assets_path
+            )
+            storage_reader = sd_adapter.get_hf_storage_reader(config.hf_assets_path)
+            hf_state_dict = sd_adapter.to_hf(model.state_dict())
+            dcp.load(hf_state_dict, storage_reader=storage_reader)
+            torchtitan_state_dict = sd_adapter.from_hf(hf_state_dict)
+            set_model_state_dict(
+                model=model,
+                model_state_dict=torchtitan_state_dict,
+                options=StateDictOptions(strict=True),
+            )
+
+        model.eval()
+        cls.model = model
+
         cls.generator = VLLMGenerator(
             config.generator,
-            model_spec=config.model_spec,
+            model_spec=model_spec,
             model_path=config.hf_assets_path,
         )
 
@@ -295,7 +362,6 @@ class TestBitwiseParity(unittest.TestCase):
         cls.prompt_ids = _make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
         )
-        cls.device = cls.trainer.device
 
     def _assert_logprobs_equal(self, name, a, b, label_a="A", label_b="B"):
         """Assert two logprob sequences are bitwise identical."""
@@ -325,7 +391,7 @@ class TestBitwiseParity(unittest.TestCase):
         produce bit-identical logits regardless of what other sequences are
         in the batch.
         """
-        model = self.trainer.model
+        model = self.model
         n = len(self.prompt_ids)
         mid = max(1, n // 2)
 
@@ -354,7 +420,7 @@ class TestBitwiseParity(unittest.TestCase):
         Ensures the trainer model forward and generator model forward produce
         bitwise identical logprobs.
         """
-        model = self.trainer.model
+        model = self.model
         engine = self.generator._engine
 
         with torch.no_grad():
