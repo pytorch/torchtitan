@@ -39,6 +39,7 @@ import warnings
 
 import torch
 import torch.distributed as dist
+
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import utils as dist_utils
@@ -148,9 +149,12 @@ def _run_step(trainer: Trainer, microbatches, global_valid_tokens) -> None:
 def run_benchmark() -> None:
     init_logger()
 
-    warmup_steps, benchmark_steps, torch_profiler, remaining_args = (
-        _extract_benchmark_args(sys.argv[1:])
-    )
+    (
+        warmup_steps,
+        benchmark_steps,
+        torch_profiler,
+        remaining_args,
+    ) = _extract_benchmark_args(sys.argv[1:])
 
     config_manager = ConfigManager()
     config = config_manager.parse_args(remaining_args)
