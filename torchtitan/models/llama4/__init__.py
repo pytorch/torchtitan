@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
@@ -56,14 +57,14 @@ def _output_linear_init(dim: int):
     }
 
 
-def _depth_init(layer_id: int) -> dict:
+def _depth_init(layer_id: int) -> dict[str, Callable]:
     return {
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
         "bias": nn.init.zeros_,
     }
 
 
-def _depth_experts_init(layer_id: int) -> dict:
+def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1": partial(nn.init.trunc_normal_, std=0.02),
         "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),

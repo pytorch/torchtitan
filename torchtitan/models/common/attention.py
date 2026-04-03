@@ -553,9 +553,9 @@ class GQAttention(BaseAttention):
     class Config(BaseAttention.Config):
         n_heads: int
         dim: int
-        wq: Linear.Config  # query projection
-        wkv: Linear.Config  # shared config for key + value (build() copies)
-        wo: Linear.Config  # output projection
+        wq: Linear.Config
+        wkv: Linear.Config
+        wo: Linear.Config
         q_norm: RMSNorm.Config | None = None
         k_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
@@ -596,8 +596,8 @@ class GQAttention(BaseAttention):
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
         self.wq = config.wq.build()
-        self.wk = config.wkv.build()  # build() copies — independent module
-        self.wv = config.wkv.build()  # build() copies — independent module
+        self.wk = config.wkv.build()
+        self.wv = config.wkv.build()
         self.wo = config.wo.build()
 
         self.inner_attention = config.inner_attention.build()

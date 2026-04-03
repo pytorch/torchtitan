@@ -115,7 +115,7 @@ class Attention(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        qkv_proj: Linear.Config  # shared config for q/k/v (build() copies)
+        qkv_proj: Linear.Config
         out_proj: Linear.Config
         n_heads: int
         dim: int
@@ -125,9 +125,9 @@ class Attention(Module):
         self.dim = config.dim
         self.head_dim = config.dim // config.n_heads
 
-        self.q_proj = config.qkv_proj.build()  # build() copies
-        self.k_proj = config.qkv_proj.build()  # build() copies
-        self.v_proj = config.qkv_proj.build()  # build() copies
+        self.q_proj = config.qkv_proj.build()
+        self.k_proj = config.qkv_proj.build()
+        self.v_proj = config.qkv_proj.build()
         self.out_proj = config.out_proj.build()
 
         self.inner_attention = FlexAttention.Config().build()

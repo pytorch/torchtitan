@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from copy import deepcopy
 from functools import partial
 
@@ -48,7 +49,7 @@ _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 
 
-def _output_linear_init(dim: int) -> dict:
+def _output_linear_init(dim: int) -> dict[str, Callable]:
     s = dim**-0.5
     return {
         "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
@@ -56,7 +57,7 @@ def _output_linear_init(dim: int) -> dict:
     }
 
 
-def _depth_init(layer_id: int) -> dict:
+def _depth_init(layer_id: int) -> dict[str, Callable]:
     return {
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
         "bias": nn.init.zeros_,

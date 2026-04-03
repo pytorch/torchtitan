@@ -271,8 +271,8 @@ class HFTransformerModel(BaseModel):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_dense_model_nparams_and_flops(
-                self,
                 model,
+                n_layers=self.n_layers,
                 n_heads=self.n_heads,
                 head_dims=self.head_dim,
                 seq_len=seq_len,

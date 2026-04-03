@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from collections.abc import Callable
 from copy import deepcopy
 from functools import partial
 
@@ -48,11 +49,10 @@ _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 
-_HEAD_DIM = 128
 _EPS = 1e-6
 
 
-def _output_linear_init(dim: int) -> dict:
+def _output_linear_init(dim: int) -> dict[str, Callable]:
     s = dim**-0.5
     return {
         "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
@@ -60,14 +60,14 @@ def _output_linear_init(dim: int) -> dict:
     }
 
 
-def _depth_init(layer_id: int) -> dict:
+def _depth_init(layer_id: int) -> dict[str, Callable]:
     return {
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
         "bias": nn.init.zeros_,
     }
 
 
-def _depth_experts_init(layer_id: int) -> dict:
+def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1": partial(nn.init.trunc_normal_, std=0.02),
         "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
@@ -79,8 +79,8 @@ def _qwen3_norm(dim: int) -> RMSNorm.Config:
     return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
 
 
-def _qwen3_q_norm() -> RMSNorm.Config:
-    return RMSNorm.Config(normalized_shape=_HEAD_DIM, eps=_EPS, param_init=_NORM_INIT)
+def _qwen3_q_norm(dim: int) -> RMSNorm.Config:
+    return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
 
 
 def _build_qwen3_layers(
@@ -89,6 +89,7 @@ def _build_qwen3_layers(
     dim: int,
     n_heads: int,
     n_kv_heads: int,
+    head_dim: int,
     hidden_dim: int,
     inner_attention=None,
     mask_type: str = "causal",
@@ -104,7 +105,7 @@ def _build_qwen3_layers(
                     dim=dim,
                     n_heads=n_heads,
                     n_kv_heads=n_kv_heads,
-                    head_dim=_HEAD_DIM,
+                    head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=(
@@ -114,8 +115,8 @@ def _build_qwen3_layers(
                     ),
                     mask_type=mask_type,
                     rope_backend="cos_sin",
-                    q_norm=_qwen3_q_norm(),
-                    k_norm=_qwen3_q_norm(),
+                    q_norm=_qwen3_q_norm(head_dim),
+                    k_norm=_qwen3_q_norm(head_dim),
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
@@ -134,6 +135,7 @@ def _build_qwen3_moe_layers(
     dim: int,
     n_heads: int,
     n_kv_heads: int,
+    head_dim: int,
     moe_hidden_dim: int,
     num_experts: int,
     top_k: int,
@@ -149,13 +151,13 @@ def _build_qwen3_moe_layers(
                     dim=dim,
                     n_heads=n_heads,
                     n_kv_heads=n_kv_heads,
-                    head_dim=_HEAD_DIM,
+                    head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=ScaledDotProductAttention.Config(),
                     rope_backend="cos_sin",
-                    q_norm=_qwen3_q_norm(),
-                    k_norm=_qwen3_q_norm(),
+                    q_norm=_qwen3_q_norm(head_dim),
+                    k_norm=_qwen3_q_norm(head_dim),
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,
@@ -182,6 +184,7 @@ def _build_qwen3_moe_layers(
 
 def _debugmodel() -> Qwen3Model.Config:
     dim = 256
+    head_dim = 128
     n_layers = 8
     vocab_size = 2048
     return Qwen3Model.Config(
@@ -200,7 +203,7 @@ def _debugmodel() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -210,6 +213,7 @@ def _debugmodel() -> Qwen3Model.Config:
             dim=dim,
             n_heads=16,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=3072,
         ),
     )
@@ -270,6 +274,7 @@ def _debugmodel_varlen() -> Qwen3Model.Config:
 
 def _0_6b() -> Qwen3Model.Config:
     dim = 1024
+    head_dim = 128
     n_layers = 28
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -288,7 +293,7 @@ def _0_6b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -298,6 +303,7 @@ def _0_6b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=16,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=3072,
         ),
     )
@@ -318,6 +324,7 @@ def _0_6b_varlen() -> Qwen3Model.Config:
 
 def _1_7b() -> Qwen3Model.Config:
     dim = 2048
+    head_dim = 128
     n_layers = 28
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -336,7 +343,7 @@ def _1_7b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -346,6 +353,7 @@ def _1_7b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=16,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=6144,
         ),
     )
@@ -366,6 +374,7 @@ def _1_7b_varlen() -> Qwen3Model.Config:
 
 def _4b() -> Qwen3Model.Config:
     dim = 2560
+    head_dim = 128
     n_layers = 36
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -384,7 +393,7 @@ def _4b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -394,6 +403,7 @@ def _4b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=32,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=9728,
         ),
     )
@@ -401,6 +411,7 @@ def _4b() -> Qwen3Model.Config:
 
 def _8b() -> Qwen3Model.Config:
     dim = 4096
+    head_dim = 128
     n_layers = 36
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -416,7 +427,7 @@ def _8b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -426,6 +437,7 @@ def _8b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=32,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=12288,
         ),
     )
@@ -446,6 +458,7 @@ def _8b_varlen() -> Qwen3Model.Config:
 
 def _14b() -> Qwen3Model.Config:
     dim = 5120
+    head_dim = 128
     n_layers = 40
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -461,7 +474,7 @@ def _14b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -471,6 +484,7 @@ def _14b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=40,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=17408,
         ),
     )
@@ -478,6 +492,7 @@ def _14b() -> Qwen3Model.Config:
 
 def _32b() -> Qwen3Model.Config:
     dim = 5120
+    head_dim = 128
     n_layers = 64
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -493,7 +508,7 @@ def _32b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -503,6 +518,7 @@ def _32b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=64,
             n_kv_heads=8,
+            head_dim=head_dim,
             hidden_dim=25600,
         ),
     )
@@ -513,6 +529,7 @@ def _32b() -> Qwen3Model.Config:
 
 def _debugmodel_moe() -> Qwen3Model.Config:
     dim = 256
+    head_dim = 128
     n_layers = 8
     vocab_size = 2048
     return Qwen3Model.Config(
@@ -528,7 +545,7 @@ def _debugmodel_moe() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=1000000.0,
             backend="cos_sin",
@@ -538,6 +555,7 @@ def _debugmodel_moe() -> Qwen3Model.Config:
             dim=dim,
             n_heads=16,
             n_kv_heads=8,
+            head_dim=head_dim,
             moe_hidden_dim=768,
             num_experts=64,
             top_k=8,
@@ -547,6 +565,7 @@ def _debugmodel_moe() -> Qwen3Model.Config:
 
 def _30b_a3b() -> Qwen3Model.Config:
     dim = 2048
+    head_dim = 128
     n_layers = 48
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -562,7 +581,7 @@ def _30b_a3b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=262144,
             theta=1000000.0,
             backend="cos_sin",
@@ -572,6 +591,7 @@ def _30b_a3b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=32,
             n_kv_heads=4,
+            head_dim=head_dim,
             moe_hidden_dim=768,
             num_experts=128,
             top_k=8,
@@ -581,6 +601,7 @@ def _30b_a3b() -> Qwen3Model.Config:
 
 def _235b_a22b() -> Qwen3Model.Config:
     dim = 4096
+    head_dim = 128
     n_layers = 94
     vocab_size = 151936
     return Qwen3Model.Config(
@@ -596,7 +617,7 @@ def _235b_a22b() -> Qwen3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         rope=RoPE.Config(
-            dim=_HEAD_DIM,
+            dim=head_dim,
             max_seq_len=4096,
             theta=5000000.0,
             backend="cos_sin",
@@ -606,6 +627,7 @@ def _235b_a22b() -> Qwen3Model.Config:
             dim=dim,
             n_heads=64,
             n_kv_heads=4,
+            head_dim=head_dim,
             moe_hidden_dim=1536,
             num_experts=128,
             top_k=8,

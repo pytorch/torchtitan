@@ -116,11 +116,12 @@ class Llama3Model(Decoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_dense_model_nparams_and_flops(
-                self,
                 model,
-                self.layers[0].attention.n_heads,
-                2 * (self.dim // self.layers[0].attention.n_heads),
-                seq_len,
+                n_layers=len(self.layers),
+                n_heads=self.layers[0].attention.n_heads,
+                head_dims=2 * (self.dim // self.layers[0].attention.n_heads),
+                seq_len=seq_len,
+                enable_weight_tying=self.enable_weight_tying,
             )
 
     def __init__(self, config: Config):

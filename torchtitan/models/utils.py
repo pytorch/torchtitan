@@ -387,19 +387,21 @@ class MoEStateDictAdapter(StateDictAdapter):
 
 
 def get_dense_model_nparams_and_flops(
-    model_config: Decoder.Config,
     model: nn.Module,
+    n_layers: int,
     n_heads: int,
     head_dims: int,
     seq_len: int,
+    enable_weight_tying: bool = False,
 ) -> tuple[int, int]:
     """
     Args:
-        model_config: Decoder.Config object containing model configuration parameters.
         model: nn.Module representing the model.
+        n_layers: The number of transformer layers.
         n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
         seq_len: The sequence length in training configs.
+        enable_weight_tying: Whether weight tying is enabled.
 
     Returns:
         Tuple of (nparams, num_flops_per_token):
@@ -422,15 +424,11 @@ def get_dense_model_nparams_and_flops(
     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
     # 4. we follow the convention and do not account for sparsity in causal attention
     num_flops_per_token = (
-        6 * (nparams - nparams_embedding)
-        + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
+        6 * (nparams - nparams_embedding) + 6 * n_layers * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if (
-        hasattr(model_config, "enable_weight_tying")
-        and model_config.enable_weight_tying
-    ):
+    if enable_weight_tying:
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token

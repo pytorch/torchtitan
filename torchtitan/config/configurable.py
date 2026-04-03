@@ -83,6 +83,13 @@ class Configurable:
             if not kwargs:
                 return self._owner(config=replace(self))
 
+            config_fields = {f.name for f in fields(self)}
+            overlap = config_fields & kwargs.keys()
+            if overlap:
+                raise ValueError(
+                    f"build() kwargs {overlap} overlap with config fields. "
+                    "Put these values in the Config, not in build() kwargs."
+                )
             return self._owner(config=replace(self), **kwargs)
 
     def __init_subclass__(cls, **kwargs):
