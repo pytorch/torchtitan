@@ -23,7 +23,6 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.train import main
 from torchtitan.trainer import Trainer as TitanTrainer
 
 from .engine import ForgeEngine
