@@ -17,10 +17,11 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_attention_mask,
-    FlexAttentionWrapper,
+    FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
+    LocalMapInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -40,9 +41,12 @@ class Attention(BaseAttention):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
-        linear_bias: bool = False
-        attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
-        attn_mask_type: str = "causal"
+        wqkv: Linear.Config
+        wo: Linear.Config
+        inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
+            default_factory=FlexAttention.Config
+        )
+        mask_type: str = "causal"
         sliding_window_size: int = 128
 
     def __init__(self, config: Config, *, dim: int):
@@ -57,29 +61,23 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.wq = linear_config.build(
+        self.wq = config.wqkv.build(
             in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = linear_config.build(
+        self.wk = config.wqkv.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = linear_config.build(
+        self.wv = config.wqkv.build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = linear_config.build(
+        self.wo = config.wo.build(
             in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
-        assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
-        self.inner_attention = FlexAttentionWrapper()
-
-    def init_weights(self, **kwargs):
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in (self.wq, self.wk, self.wv, self.wo):
-            linear.init_weights(init_std=init_std)
+        assert isinstance(
+            config.inner_attention, FlexAttention.Config
+        ), "gpt-oss only supports FlexAttention"
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -109,27 +107,23 @@ class Attention(BaseAttention):
 
         q, k = apply_rotary_emb_cos_sin(q, k, freqs_cis, positions)
 
-        xq = q.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = k.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
-        xv = v.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
-
         assert isinstance(attention_masks, BlockMask), attention_masks
+        # FlexAttention handles transpose internally; returns (bs, seq, heads, dim)
+        # and lse as (bs, seq, heads)
         output, lse = self.inner_attention(
-            xq,
-            xk,
-            xv,
-            block_mask=attention_masks,
+            q,
+            k,
+            v,
+            attention_masks=attention_masks,
             scale=self.softmax_scale,
             return_lse=True,
             enable_gqa=self.enable_gqa,
         )
 
         # Apply attention sink rescaling: rescale by sigma(lse - w[h])
-        # This is mathematically equivalent to concatenating learnable sink weights
-        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
+        # output: (bs, seq, heads, dim), lse: (bs, seq, heads)
+        sink_scale = torch.sigmoid(lse - self.sinks.view(1, 1, -1)).unsqueeze(-1)
         output = output * sink_scale.to(output.dtype)
-
-        output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
         # Reshape and project output
         output = output.reshape(
@@ -146,11 +140,11 @@ class GptOssTransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        pass
+        use_sliding_attention: bool = False
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
-        self.use_sliding_attention = layer_id % 2 == 0
+        self.use_sliding_attention = config.use_sliding_attention
         self.attention = config.attention.build(dim=dim)
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
@@ -159,7 +153,6 @@ class GptOssTransformerBlock(TransformerBlock):
         self.moe = config.moe.build(dim=dim)
         self.moe_enabled = True  # for composability with load balancing
 
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def forward(
@@ -194,15 +187,6 @@ class GptOssTransformerBlock(TransformerBlock):
         x = x + self.moe(self.ffn_norm(x))
         return x
 
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        self.moe.init_weights(
-            init_std=self.weight_init_std, buffer_device=buffer_device
-        )
-
 
 class GptOssModel(Decoder):
     """
@@ -224,6 +208,7 @@ class GptOssModel(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            assert self.layers is not None
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             seq_len = training.seq_len
@@ -235,23 +220,22 @@ class GptOssModel(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            assert self.layer.moe is not None
-            if self.layer.moe.experts.use_grouped_mm and not has_cuda_capability(9, 0):
-                logger.warning(
-                    "Failed to use grouped mm, which is only supported on SM90 or later",
-                )
-                self.layer.moe.experts.use_grouped_mm = False
-
-            if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "CP support for gpt-oss model is still in progress."
-                )
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    if (
+                        layer_cfg.moe.experts.use_grouped_mm
+                        and not has_cuda_capability(9, 0)
+                    ):
+                        logger.warning(
+                            "Failed to use grouped mm, which is only supported on SM90 or later",
+                        )
+                        layer_cfg.moe.experts.use_grouped_mm = False
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layer.attention.n_heads
+                n_heads = self.layers[0].attention.n_heads
                 # pyrefly: ignore [missing-attribute]
-                n_kv_heads = self.layer.attention.n_kv_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
@@ -265,12 +249,13 @@ class GptOssModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, float]:
-            assert isinstance(self.layer.attention, Attention.Config)
+            assert self.layers is not None
+            assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * self.layer.attention.head_dim,
+                self.layers[0].attention.n_heads,
+                2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
 
@@ -288,7 +273,7 @@ class GptOssModel(Decoder):
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(self.config.layer.attention.sliding_window_size)
         ]
-        match self.config.layer.attention.attn_mask_type:
+        match self.config.layer.attention.mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
@@ -300,7 +285,7 @@ class GptOssModel(Decoder):
                 )
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.layer.attention.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.layer.attention.mask_type}"
                 )
 
         # create basic attention mask: causal or block_causal

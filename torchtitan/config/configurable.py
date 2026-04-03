@@ -90,12 +90,14 @@ class Configurable:
                     return {k: _convert(v) for k, v in val.items()}
                 elif isinstance(val, (str, int, float, bool, type(None))):
                     return val
+                elif callable(val):
+                    return repr(val)
                 else:
                     logger.warning(
                         f"Config field value of type {type(val).__name__} "
                         f"may not be JSON serializable"
                     )
-                    return val
+                    return repr(val)
 
             result = {}
             for f in fields(self):

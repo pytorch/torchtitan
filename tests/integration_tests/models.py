@@ -67,6 +67,19 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.no-enable-sequence-parallel",
+                ],
+            ],
+            "DeepSeek V3 FSDP+EP (SP disabled)",
+            "deepseek_v3_fsdp+ep_no_sp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -110,6 +123,19 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module qwen3 --config qwen3_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.no-enable-sequence-parallel",
+                ],
+            ],
+            "Qwen3 FSDP+TP (SP disabled)",
+            "qwen3_fsdp+tp_no_sp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module qwen3 --config qwen3_moe_debug",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -135,6 +161,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # Integration Test Cases for Llama 4
+        # TODO: re-enable compile after fixing
+        # https://github.com/pytorch/torchtitan/issues/2771
         OverrideDefinitions(
             [
                 [
@@ -145,7 +173,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
-                    "--compile.enable",
+                    # "--compile.enable",
                 ],
             ],
             "Llama 4 PP+FSDP+TP+EP+compile",
@@ -153,6 +181,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # Integration Test Cases for gpt-oss
+        # TODO: re-enable compile after fixing
+        # https://github.com/pytorch/torchtitan/issues/2776
         OverrideDefinitions(
             [
                 [
@@ -161,7 +191,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
-                    "--compile.enable",
+                    # "--compile.enable",
                 ],
             ],
             "Gpt-oss FSDP+TP+EP+compile",

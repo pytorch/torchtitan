@@ -51,7 +51,7 @@ class SliceableModuleDict(ModuleDict):
     def __len__(self):
         return len(self._modules)
 
-    def init_weights(self, **kwargs) -> None:
+    def init_states(self, **_kwargs) -> None:
         """No-op: HFTransformerModel handles initialization via HF mechanisms."""
         pass
 
@@ -102,6 +102,12 @@ class HFTransformerModel(BaseModel):
             # Configurable.Config's generated __init__ doesn't chain to it)
             PretrainedConfig.__init__(
                 self, attn_implementation=attn_implementation, **kwargs
+            )
+            # Set param_init before Module.Config.build() accesses it.
+            # PretrainedConfig.__getattribute__ doesn't recognize the
+            # param_init slot inherited from Module.Config.
+            self.param_init = (
+                None  # noqa: this sets Config.param_init, not Module._param_init
             )
             assert model_config is not None, "model_config is required"
 
@@ -696,7 +702,11 @@ class HFTransformerModel(BaseModel):
         """
         pass
 
-    def init_weights(self, *args, **kwargs):
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
 

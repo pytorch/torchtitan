@@ -200,6 +200,14 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Initialized model with weights loaded from checkpoint.
         """
+
+        # TODO Also support flex attention backend later.
+        from torchtitan.models.common.attention import VarlenAttention
+
+        assert isinstance(
+            model_spec.model.layer.attention.inner_attention, VarlenAttention.Config
+        ), "Only varlen attention backend is allowed."
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
@@ -258,6 +266,13 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Training metrics
         """
+        # The policy and ref models share code objects, so dynamo's
+        # per-code-object cache must hold entries for both grad modes
+        # (grad for policy, no_grad for ref). The default limit of
+        # is not enough; 16 accommodates both without recompile storms.
+        # TODO: @Lucaskabela fix recompiles in general as these increase startup
+        torch._dynamo.config.recompile_limit = 16
+
         logger.debug(
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
@@ -285,7 +300,10 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
                 token_lps = compute_token_log_probs(
-                    self.ref_model, prompt_toks, gen_toks, device
+                    self.ref_model,
+                    prompt_toks,
+                    gen_toks,
+                    device,
                 )
                 ref_token_log_probs.append(token_lps)
 

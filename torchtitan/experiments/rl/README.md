@@ -15,6 +15,7 @@ The integration consists of the following components:
 
 0. Create and activate environment with uv:
 ```bash
+pip install uv
 uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
@@ -26,11 +27,13 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 uv pip install pygtrie portpicker
 ```
 
-2. Install Flash Attention v3 kernels:
-```
-# CUDA 12
+2. Install Flash Attention 3 kernels:
+```bash
+# Flash Attention v3 (recommended for H100/H200 and newer GPUs)
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
 ```
+
+**NOTE:** FA2 is bundled with PyTorch and will be used automatically on older GPUs (e.g. A100) that don't support FA3.
 
 3. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
 ```bash

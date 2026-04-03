@@ -24,7 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.experiments.rl.models.attention import replace_with_vllm_attention
+from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile
@@ -150,8 +150,37 @@ class TorchTitanVLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Use TorchTitan model config directly (no HF config mapping)
-        self.config = model_spec.model
+        # Replace inner_attention with VLLMAttentionWrapper in config
+        model_config = model_spec.model
+        attn_config = model_config.layer.attention
+        n_heads = attn_config.n_heads
+        n_kv_heads = attn_config.n_kv_heads or n_heads
+        head_dim = (
+            attn_config.head_dim
+            if attn_config.head_dim is not None
+            else model_config.dim // n_heads
+        )
+        vllm_backend = VLLMAttentionWrapper.Config(
+            hidden_size=model_config.dim,
+            num_heads=n_heads,
+            num_kv_heads=n_kv_heads,
+            head_dim=head_dim,
+        )
+        new_attn = dataclasses.replace(attn_config, inner_attention=vllm_backend)
+        new_layer = dataclasses.replace(model_config.layer, attention=new_attn)
+        # Update both the template and the expanded per-layer configs
+        new_layers = [
+            dataclasses.replace(
+                layer_cfg,
+                attention=dataclasses.replace(
+                    layer_cfg.attention, inner_attention=vllm_backend
+                ),
+            )
+            for layer_cfg in model_config.layers
+        ]
+        self.config = dataclasses.replace(
+            model_config, layer=new_layer, layers=new_layers
+        )
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # TODO: Check if it's possible to apply meta init
@@ -166,10 +195,6 @@ class TorchTitanVLLMModelWrapper(Module):
         self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
             vllm_config
         )
-
-        # Replace attention with vLLM compatible flash attention
-        # TODO: Use config system to replace with vllm Attention
-        replace_with_vllm_attention(self.model, tp_degree=self.parallel_dims.tp)
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
