@@ -218,6 +218,27 @@ else
     done
 fi
 
+# ── Model sweep (EP-only, verifies different MoE architectures) ──
+# These require network access to download HF model configs.
+# Set SKIP_MODEL_SWEEP=1 to skip in offline environments.
+if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
+    SWEEP_STEPS=${3:-10}
+    SWEEP_MODELS=(
+        "Qwen/Qwen3-30B-A3B"                     # qwen3_moe (reference)
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"   # mixtral (no shared experts)
+        # deepseek-ai/DeepSeek-V3 requires extra config attrs (qk_head_dim)
+        # not in TitanModelConfig. Needs model-specific config support.
+    )
+
+    for hf_model in "${SWEEP_MODELS[@]}"; do
+        run_half "EP=2 $hf_model" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 2 \
+            --training.steps "$SWEEP_STEPS" \
+            --hf_model "$hf_model"
+    done
+fi
+
 # ── Summary ──
 PASSED=$(find "$RESULTS_DIR" -name "*.status" -exec grep -l PASSED {} \; | wc -l)
 FAILED=$(find "$RESULTS_DIR" -name "*.status" -exec grep -l FAILED {} \; | wc -l)

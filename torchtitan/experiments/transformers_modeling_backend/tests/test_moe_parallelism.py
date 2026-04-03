@@ -175,8 +175,22 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         # Create EP mesh (4 ranks, ep=4)
         ep_mesh = self.build_device_mesh()
 
+        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
+            _experts_restore_post_hook,
+            _experts_to_local_pre_hook,
+        )
+
         # Apply EP
         apply_moe_ep_tp(model.model, ep_mesh=ep_mesh)
+
+        # Register experts to_local hooks (normally done in
+        # parallelize_hf_transformers after apply_fsdp)
+        for layer in model.model.layers.values():
+            if layer.moe_enabled:
+                layer.mlp.experts.register_forward_pre_hook(_experts_to_local_pre_hook)
+                layer.mlp.experts.register_forward_hook(
+                    _experts_restore_post_hook, prepend=True
+                )
 
         # Forward
         torch.manual_seed(42)
@@ -225,8 +239,24 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         ep_mesh = mesh_2d["ep"]
         tp_mesh = mesh_2d["tp"]
 
+        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
+            _experts_restore_post_hook,
+            _experts_to_local_pre_hook,
+        )
+
         # Apply EP+TP (shards params, registers all hooks)
         apply_moe_ep_tp(model.model, tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+
+        # Register experts to_local hooks (normally done in
+        # parallelize_hf_transformers after apply_fsdp)
+        for layer_val in model.model.layers.values():
+            if layer_val.moe_enabled:
+                layer_val.mlp.experts.register_forward_pre_hook(
+                    _experts_to_local_pre_hook
+                )
+                layer_val.mlp.experts.register_forward_hook(
+                    _experts_restore_post_hook, prepend=True
+                )
 
         # Create Shard(1) DTensor input (simulating SP output)
         torch.manual_seed(42)
@@ -289,8 +319,24 @@ class TestTPOnlyMoeForwardBackward(DTensorTestBase):
         # Build 1D TP mesh
         tp_mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("tp",))
 
-        # Apply TP-only MoE (shards expert weights, patches forwards)
+        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
+            _experts_restore_post_hook,
+            _experts_to_local_pre_hook,
+        )
+
+        # Apply TP-only MoE (shards expert weights, registers hooks)
         apply_moe_ep_tp(model.model, tp_mesh=tp_mesh)
+
+        # Register experts to_local hooks (normally done in
+        # parallelize_hf_transformers after apply_fsdp)
+        for layer_val in model.model.layers.values():
+            if layer_val.moe_enabled:
+                layer_val.mlp.experts.register_forward_pre_hook(
+                    _experts_to_local_pre_hook
+                )
+                layer_val.mlp.experts.register_forward_hook(
+                    _experts_restore_post_hook, prepend=True
+                )
 
         # Forward with Shard(1) DTensor input (simulating SP output).
         # PrepareModuleInputOutput all-gathers to Replicate, then
@@ -354,9 +400,25 @@ class TestMixedMoeDenseLayers(DTensorTestBase):
                 layer.mlp, "experts"
             )
 
+        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
+            _experts_restore_post_hook,
+            _experts_to_local_pre_hook,
+        )
+
         # Apply EP (only affects MoE layers)
         ep_mesh = self.build_device_mesh()
         apply_moe_ep_tp(model.model, ep_mesh=ep_mesh)
+
+        # Register experts to_local hooks (normally done in
+        # parallelize_hf_transformers after apply_fsdp)
+        for layer_val in model.model.layers.values():
+            if layer_val.moe_enabled:
+                layer_val.mlp.experts.register_forward_pre_hook(
+                    _experts_to_local_pre_hook
+                )
+                layer_val.mlp.experts.register_forward_hook(
+                    _experts_restore_post_hook, prepend=True
+                )
 
         # Forward through all layers sequentially
         torch.manual_seed(42)

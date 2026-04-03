@@ -57,12 +57,12 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_dense
-from torchtitan.experiments.transformers_modeling_backend.compile import (
-    apply_compile_sparse,
-)
 from torchtitan.distributed.expert_parallel import BaseExpertParallel
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.experiments.transformers_modeling_backend.compile import (
+    apply_compile_sparse,
+)
 from torchtitan.models.llama3.parallelize import (
     apply_replicate,
     disable_fsdp_gradient_division,
@@ -441,9 +441,7 @@ def parallelize_hf_transformers(
             if getattr(transformer_block, "moe_enabled", False):
                 experts = transformer_block.mlp.experts
                 experts.register_forward_pre_hook(_experts_to_local_pre_hook)
-                experts.register_forward_hook(
-                    _experts_restore_post_hook, prepend=True
-                )
+                experts.register_forward_hook(_experts_restore_post_hook, prepend=True)
 
     return model
 
@@ -693,6 +691,13 @@ def apply_moe_ep_tp(
                 NoParallel(local_output_grad_placements=(Partial(),)),
             )
 
+            # Warn about shared experts with TP
+            if hasattr(moe_block, "shared_expert"):
+                logger.warning(
+                    "Shared experts are not TP-sharded. Use EP-only for "
+                    "models with shared experts (e.g., Qwen3.5, DeepSeek V3)."
+                )
+
             # MoE block TP boundary (TP-only): all-gather input, reduce-
             # scatter output. Must be registered BEFORE to_local hook so
             # hook order is: PrepareModuleInputOutput → to_local.
@@ -728,7 +733,6 @@ def apply_moe_ep_tp(
         # fire after FSDP unshard. See _experts_to_local_pre_hook docstring.
 
     logger.info("Applied MoE parallelism to the model")
-
 
 
 # ---------------------------------------------------------------------------
