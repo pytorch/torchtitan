@@ -89,13 +89,6 @@ class PolicyTrainer(Actor, Configurable):
         requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
         self._transfer_dtype = requested if requested != training_dtype else None
 
-        # The policy and ref models share code objects, so dynamo's
-        # per-code-object cache must hold entries for both grad modes
-        # (grad for policy, no_grad for ref). The default limit of 8
-        # is not enough; 16 accommodates both without recompile storms.
-        # TODO: @Lucaskabela fix recompiles in general as these increase startup
-        torch._dynamo.config.cache_size_limit = 16
-
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -134,7 +127,11 @@ class PolicyTrainer(Actor, Configurable):
         # TODO: @joecummings remove ref entirely, this is hacky and we don't need it
         if getattr(config.loss, "kl_coef", 0) > 0:
             ref_model = self._build_model(
-                model_spec, config, device_type, hf_assets_path
+                model_spec,
+                config,
+                device_type,
+                hf_assets_path,
+                isolate_code_objects=True,
             )
             ref_model.eval()
             ref_model.requires_grad_(False)
@@ -207,6 +204,7 @@ class PolicyTrainer(Actor, Configurable):
         config: Config,
         device_type: str,
         hf_assets_path: str,
+        isolate_code_objects: bool = False,
     ):
         """Build, parallelize, and initialize a model from checkpoint.
         Will be used to build trainer's policy model and reference model.
@@ -232,12 +230,48 @@ class PolicyTrainer(Actor, Configurable):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
 
+        if isolate_code_objects:
+            # Give each TransformerBlock a distinct closure so dynamo's
+            # per-code-object cache partitions by ID_MATCH on the closure
+            # cell, keeping this model's compilations independent from other
+            # models of the same class (e.g. policy vs ref — different
+            # grad_mode would otherwise recompile into a shared cache).
+            # Must run BEFORE parallelize_fn: apply_compile (inside
+            # parallelize_fn) wraps block._call_impl, which dispatches to
+            # whatever block.forward is at that moment. Isolation afterwards
+            # would be invisible to the compile wrapper.
+            for block in model.layers.values():  # pyrefly: ignore [not-callable]
+                orig_forward = block.forward.__func__
+
+                def _make_isolated(fn):
+                    def forward(self, *args, **kwargs):
+                        return fn(self, *args, **kwargs)
+
+                    return forward
+
+                wrapped = _make_isolated(orig_forward)
+                # Sentinel so we can assert post-parallelize_fn that isolation
+                # was not silently undone (e.g. by a future TP/compile helper
+                # replacing block.forward).
+                wrapped.__isolated_for__ = id(block)
+                block.forward = wrapped.__get__(block)
+
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
             parallelism=config.parallelism,
             compile_config=config.compile,
         )
+
+        if isolate_code_objects:
+            for block in model.layers.values():  # pyrefly: ignore [not-callable]
+                marker = getattr(block.forward.__func__, "__isolated_for__", None)
+                if marker != id(block):
+                    raise RuntimeError(
+                        "isolate_code_objects was undone by parallelize_fn — "
+                        "the ref model will share a dynamo cache with the "
+                        "policy and recompile under grad_mode changes."
+                    )
 
         model.to_empty(device=device_type)
         with torch.no_grad():
@@ -282,19 +316,19 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             dict: Training metrics (loss, policy version, etc.).
         """
-        # The policy and ref models share code objects, so dynamo's
-        # per-code-object cache must hold entries for both grad modes
-        # (grad for policy, no_grad for ref). The default limit of
-        # is not enough; 16 accommodates both without recompile storms.
-        # TODO: @Lucaskabela fix recompiles in general as these increase startup
-        torch._dynamo.config.recompile_limit = 16
-
         logger.debug(
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
-
         local_batch = train_data[self.dp_rank]
         device = self.device
+        # TP collectives cause one expected recompile per code object: layer 0
+        # receives a plain DTensor from embeddings, but layers 1+ receive a
+        # DTensor with AsyncCollectiveTensor from the prior layer's collective.
+        # After step 0 both variants are cached; lock down to catch regressions.
+        # NOTE: torch._dynamo.config is process-global; this is safe because
+        # the trainer and generator run in separate monarch actor processes.
+        if self.policy_version > 0:
+            torch._dynamo.config.recompile_limit = 1
 
         token_ids = local_batch.token_ids.to(device)
         seq_lens = local_batch.seq_lens

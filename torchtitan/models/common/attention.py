@@ -10,6 +10,7 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -60,12 +61,17 @@ class VarlenMetadata(NamedTuple):
     """
     Cumulative sequence positions for queries and keys/values.
 
+    ``max_q``/``max_k`` are 0-dim int32 tensors (not Python ints) so that dynamo
+    does not specialize on their exact value. Inside the compiled region they
+    are converted to unbacked SymInts via ``.item()`` before being passed to
+    the varlen attention op, avoiding per-seq-length recompiles in RL-style
+    workloads where the longest sequence varies each step.
     """
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
-    max_q: int
-    max_k: int
+    max_q: torch.Tensor
+    max_k: torch.Tensor
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -90,6 +96,36 @@ class LocalMapInnerAttention(Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._local_map_fn: Callable | None = None
+
+    def init_local_map(
+        self,
+        placements: tuple,
+        device_mesh: DeviceMesh,
+        return_lse: bool = False,
+    ) -> None:
+        """Eagerly initialize ``_local_map_fn`` so that ``__call__`` never
+        takes the lazy-init branch.  Call this after TP is applied and before
+        ``torch.compile`` so dynamo never sees ``_local_map_fn is None``,
+        eliminating the resulting recompile.
+
+        All entries in *placements* must be ``Shard``; this mirrors the
+        assertion in ``__call__``.  Callers that use ``return_lse=True``
+        (e.g. GPT-OSS attention sinks) must pass it here so that
+        ``out_placements`` has the correct arity.
+        """
+        for p in placements:
+            if not isinstance(p, Shard):
+                raise ValueError(
+                    f"init_local_map requires all Shard placements, got {placements}"
+                )
+        out_placements = (placements, placements) if return_lse else (placements,)
+        self._local_map_fn = local_map(
+            super().__call__,
+            in_placements=(placements, placements, placements),
+            out_placements=out_placements,
+            in_grad_placements=(placements, placements, placements),
+            device_mesh=device_mesh,
+        )
 
     def __call__(
         self,
@@ -124,18 +160,24 @@ class LocalMapInnerAttention(Module):
                 f"All Shard placements must shard on the same dim, "
                 f"but got dims {shard_dims}"
             )
-            # return_lse=True (e.g. gpt_oss attention sinks) produces
-            # 2 outputs instead of 1, requiring different out_placements.
-            return_lse = kwargs.get("return_lse", False)
-            out_placements = (
-                (q.placements, q.placements) if return_lse else (q.placements,)
-            )
             if self._local_map_fn is None:
+                # Fallback lazy init for callers that didn't call
+                # init_local_map (e.g. non-compiled paths).
+                # return_lse=True (e.g. gpt_oss attention sinks) produces
+                # 2 outputs instead of 1, requiring different out_placements.
+                return_lse = kwargs.get("return_lse", False)
+                out_placements = (
+                    (q.placements, q.placements) if return_lse else (q.placements,)
+                )
                 self._local_map_fn = local_map(
                     super().__call__,
                     in_placements=(q.placements, k.placements, v.placements),
                     out_placements=out_placements,
-                    in_grad_placements=(q.placements, k.placements, v.placements),
+                    in_grad_placements=(
+                        q.placements,
+                        k.placements,
+                        v.placements,
+                    ),
                     device_mesh=q.device_mesh,
                 )
             # pyrefly: ignore [bad-argument-count]
@@ -184,8 +226,12 @@ class VarlenAttention(LocalMapInnerAttention):
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
-        max_q = attention_masks.max_q
-        max_k = attention_masks.max_k
+        # ``.item()`` on a 0-dim tensor under ``capture_scalar_outputs=True``
+        # yields an unbacked SymInt inside torch.compile, so dynamo does not
+        # install an equality guard on the value. The underlying custom op
+        # ``torch.ops.torch_attn._varlen_attn`` accepts SymInt for these args.
+        max_q = attention_masks.max_q.item()
+        max_k = attention_masks.max_k.item()
 
         batch_size, seq_len, _, head_dim = xq.shape
 
@@ -502,7 +548,6 @@ def create_varlen_metadata_for_document(
     device = input_batch.device
     cu_seqlens_list, all_seq_lengths = [], []
     offset = 0
-    max_seqlen = 0
 
     for b in range(batch_size):
         tokens = input_batch[b]
@@ -528,12 +573,14 @@ def create_varlen_metadata_for_document(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
 
-    max_seqlen: int = 0
     if len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
-        # device to host sync but only done once per model forward
-        # pyrefly: ignore[bad-assignment]
-        max_seqlen = all_seq_lengths.max().item()
+        # Keep as a 0-dim tensor (no ``.item()`` sync): ``VarlenAttention``
+        # unwraps via ``.item()`` inside the compiled region, which produces
+        # an unbacked SymInt rather than a value-specialized int.
+        max_seqlen = all_seq_lengths.max()
+    else:
+        max_seqlen = torch.zeros((), dtype=torch.int32, device=device)
 
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,

@@ -19,11 +19,15 @@ def create_varlen_metadata(seq_lens: list[int], device: torch.device) -> VarlenM
     Example:
         seq_lens = [3, 5, 2]
         -> cu_seqs = [0, 3, 8, 10], max_len = 5
+
+    ``max_q``/``max_k`` are wrapped as 0-dim tensors (rather than Python ints)
+    so that dynamo does not specialize on the exact value, which would force a
+    recompile every time the longest rollout length changes in RL.
     """
     cu_seqs = torch.tensor(
         [0] + list(itertools.accumulate(seq_lens)), dtype=torch.int32, device=device
     )
-    max_len = max(seq_lens)
+    max_len = torch.tensor(max(seq_lens), dtype=torch.int32, device=device)
     return VarlenMetadata(
         cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
     )
