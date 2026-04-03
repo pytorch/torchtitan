@@ -251,6 +251,8 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 FSDP+TP+FlexAttn autobucketing regional_inductor",
             "aot_llama3_fsdp_tp_flexattn_autobucketing_regional_inductor",
             ngpu=8,
+            # TODO: skip for now, re-enable when https://github.com/pytorch/pytorch/pull/179209 is in torch nightly
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -282,6 +284,8 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 FSDP+TP+FlexAttn manualbucketing regional_inductor",
             "aot_llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=8,
+            # TODO: skip for now, re-enable when https://github.com/pytorch/pytorch/pull/179209 is in torch nightly
+            disabled=True,
         ),
         # === aot_fx_trace mode tests ===
         OverrideDefinitions(
