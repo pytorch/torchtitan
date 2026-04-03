@@ -236,7 +236,7 @@ class VarlenAttention(LocalMapInnerAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-            **varlen_kwargs,
+            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
