@@ -9,8 +9,9 @@ This experiment demonstrates graph-based distributed training in torchtitan thro
 - Provenance-tracking infrastructure as the user annotation backbone
 - Graph optimization via FX graph passes
 
-The goal is to give users more explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. Two compilation modes are currently supported:
+The goal is to give users more explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. Three compilation modes are currently supported:
 - **AOT mode** (`--compile.mode aot`): Explicit joint graph export with a custom graph pass pipeline.
+- **AOT FX trace mode** (`--compile.mode aot_fx_trace`): Non-strict tracing of the full forward + loss + backward via `make_fx`, producing a single end-to-end graph without AOTAutograd partitioning.
 - **JIT mode** (`--compile.mode jit`): Standard `torch.compile()` with graph passes registered to custom backends.
 
 ### Prerequisites
@@ -48,7 +49,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
 
 ### Compiler Optimizations
 
-By default, the graph is captured with the AOT mode (you can switch to JIT mode via `--compile.mode jit`) and compiled with the `aot_eager` backend.
+By default, the graph is captured with the AOT mode (switch to JIT mode via `--compile.mode jit` or AOT FX trace mode via `--compile.mode aot_fx_trace`) and compiled with the `aot_eager` backend.
 
 Graph passes can be applied to further optimize the graph by using the `--compile.joint_passes` and `--compile.passes` flags.
 
