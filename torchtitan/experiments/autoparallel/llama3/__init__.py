@@ -17,10 +17,14 @@ from .parallelize_llama import parallelize_llama
 
 
 def model_registry(flavor: str) -> ModelSpec:
+    from torchtitan.models.llama3 import expand_layer_configs
+
+    config = llama3_configs[flavor]()
+    expand_layer_configs(config)
     return ModelSpec(
         name="autoparallel/llama3",
         flavor=flavor,
-        model=llama3_configs[flavor],
+        model=config,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,

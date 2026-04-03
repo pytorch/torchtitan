@@ -14,7 +14,7 @@ __all__ = ["Embedding"]
 
 
 class Embedding(nn.Embedding, Module):
-    """Configurable nn.Embedding with init_weights support.
+    """Configurable nn.Embedding.
 
     Uses diamond inheritance (nn.Embedding + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
@@ -31,8 +31,6 @@ class Embedding(nn.Embedding, Module):
     class Config(Module.Config):
         num_embeddings: int = field(init=False)
         embedding_dim: int = field(init=False)
-        init_mean: float = 0.0
-        init_std: float = 1.0
 
     def __init__(self, config: Config):
         if not hasattr(config, "num_embeddings") or not hasattr(
@@ -44,9 +42,3 @@ class Embedding(nn.Embedding, Module):
                 "on the Config instance before constructing Embedding directly."
             )
         super().__init__(config.num_embeddings, config.embedding_dim)
-        self.config = config
-
-    def init_weights(self, **kwargs) -> None:
-        nn.init.normal_(
-            self.weight, mean=self.config.init_mean, std=self.config.init_std
-        )

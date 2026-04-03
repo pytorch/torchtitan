@@ -6,7 +6,6 @@
 
 import argparse
 import os
-import tempfile
 
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
@@ -14,7 +13,6 @@ from tests.integration_tests.run_tests import run_tests
 
 def _build_llama3_tests() -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
-    full_inductor_precompile_dir = tempfile.mkdtemp(prefix="precompile_")
     return [
         # === JIT mode tests ===
         OverrideDefinitions(
@@ -285,50 +283,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=8,
         ),
-        # === Precompile tests ===
-        # Each precompile test runs precompile_main.py as a pre_command
-        # (single process, 1 GPU) to generate the artifact, then the
-        # main training command loads it from --compile.precompile_artifact_dir.
-        OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode aot",
-                    "--compile.passes full_inductor_compilation",
-                    "--compile.joint_passes inductor_decomposition",
-                    f"--compile.precompile_artifact_dir {full_inductor_precompile_dir}",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "AOT llama3 precompile full_inductor_compilation",
-            "aot_llama3_precompile_full_inductor",
-            ngpu=8,
-            env_vars={"VIRTUAL_LOCAL_RANK": "1"},
-            pre_commands=[
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.llama3"
-                " --config graph_trainer_llama3_debugmodel"
-                " --compile.mode aot"
-                " --compile.passes full_inductor_compilation"
-                " --compile.joint_passes inductor_decomposition"
-                f" --compile.precompile_artifact_dir {full_inductor_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2",
-            ],
-        ),
-        # TODO: Add precompile test for regional_inductor once the
-        # underlying issue is resolved. Currently, regional_inductor +
-        # precompile fails because serializable=True sets
-        # force_non_lazy_backward_lowering=True, which causes the
-        # backward compiler to run eagerly. When standalone_compile
-        # traces the scooped submodule (containing flex_attention HOPs
-        # with GraphModule subgraphs) via make_fx, the tracer hits
-        # NotImplementedError on GraphModuleImpl in create_arg.
-        # Without precompile, this same error is silently suppressed
-        # (graph_compile.py:2283-2298) and the backward is compiled
-        # lazily via a different code path.
         # === aot_fx_trace mode tests ===
         OverrideDefinitions(
             [

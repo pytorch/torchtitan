@@ -253,13 +253,16 @@ class CompiledModule(Module):
         else:
             super().__delattr__(name)
 
-    def init_weights(self, **kwargs) -> None:
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
         # Explicitly delegate to inner model. Without this override,
-        # Module.init_weights (a no-op) would be found via MRO before
-        # the overwritten __getattr__ is triggered, silently skipping
-        # weight initialization.
+        # Module.init_states would be found via MRO before the overwritten
+        # __getattr__ is triggered, silently skipping weight initialization.
         # This is similar to state_dict, load_state_dict, ...
-        self.inner.init_weights(**kwargs)
+        self.inner.init_states(buffer_device=buffer_device)
 
     def state_dict(self, *args, **kwargs) -> Any:
         return self.inner.state_dict(*args, **kwargs)

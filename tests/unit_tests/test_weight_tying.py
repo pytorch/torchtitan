@@ -5,34 +5,58 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from functools import partial
 
+import torch.nn as nn
+
+from torchtitan.config import Function
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import compute_ffn_hidden_dim, FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.models.llama3 import expand_layer_configs
 from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
+
+_DUMMY_LINEAR_INIT = {
+    "weight": nn.init.zeros_,
+    "bias": nn.init.zeros_,
+}
+_LINEAR_DEPTH_INIT = Function.Config(
+    fn=lambda layer_id: {  # pyrefly: ignore [bad-argument-type]
+        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "bias": nn.init.zeros_,
+    }
+)
+_NORM_INIT = {"weight": nn.init.ones_}
+_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+_EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 
 
 def _make_config(enable_weight_tying: bool = False):
-    return Llama3Model.Config(
+    tok_init = _EMBEDDING_SKIP_INIT if enable_weight_tying else _EMBEDDING_INIT
+    config = Llama3Model.Config(
         dim=64,
         n_layers=2,
         vocab_size=256,
         enable_weight_tying=enable_weight_tying,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        tok_embeddings=Embedding.Config(param_init=tok_init),
+        norm=RMSNorm.Config(param_init=_NORM_INIT),
+        output=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
         layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=RMSNorm.Config(param_init=_NORM_INIT),
+            ffn_norm=RMSNorm.Config(param_init=_NORM_INIT),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(64, multiple_of=64),
+                w1=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
+                w2w3=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
             ),
             attention=GQAttention.Config(
                 n_heads=4,
-                attn_backend="sdpa",
+                wqkv=Linear.Config(param_init=_DUMMY_LINEAR_INIT),
+                wo=Linear.Config(param_init=_LINEAR_DEPTH_INIT),
                 rope_backend="complex",
             ),
         ),
@@ -44,6 +68,8 @@ def _make_config(enable_weight_tying: bool = False):
             scaling="llama",
         ),
     )
+    expand_layer_configs(config)
+    return config
 
 
 class TestLlama3WeightTying(unittest.TestCase):
@@ -65,14 +91,15 @@ class TestLlama3WeightTying(unittest.TestCase):
             "tok_embeddings.weight and output.weight must be distinct tensor objects",
         )
 
-    def test_weights_remain_tied_after_init_weights(self):
-        """Weights must still be shared after calling init_weights."""
-        model = Llama3Model(_make_config(enable_weight_tying=True))
-        model.init_weights()
+    def test_weights_remain_tied_after_init_states(self):
+        """Weights must still be shared after calling init_states."""
+        config = _make_config(enable_weight_tying=True)
+        model = Llama3Model(config)
+        model.init_states()
         self.assertIs(
             model.tok_embeddings.weight,
             model.output.weight,
-            "tok_embeddings.weight and output.weight must remain tied after init_weights",
+            "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
 
     def test_pp_guard_raises_when_weight_tying_and_pp_enabled(self):
