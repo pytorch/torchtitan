@@ -17,19 +17,32 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
-def _deterministic_scatter_add(
-    out: torch.Tensor,
-    index: torch.Tensor,
-    src: torch.Tensor,
-) -> torch.Tensor:
-    prev = torch.are_deterministic_algorithms_enabled()
-    prev_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    torch.use_deterministic_algorithms(True, warn_only=False)
-    try:
-        out = out.scatter_add(dim=0, index=index, src=src)
-    finally:
-        torch.use_deterministic_algorithms(prev, warn_only=prev_warn_only)
-    return out
+class _DeterministicScatterAdd(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        out: torch.Tensor,
+        index: torch.Tensor,
+        src: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(index)
+        prev = torch.are_deterministic_algorithms_enabled()
+        prev_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        torch.use_deterministic_algorithms(True, warn_only=False)
+        try:
+            out = out.scatter_add(dim=0, index=index, src=src)
+        finally:
+            torch.use_deterministic_algorithms(prev, warn_only=prev_warn_only)
+        return out
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, torch.Tensor]:
+        (index,) = ctx.saved_tensors
+        grad_input = torch.gather(grad_output, dim=0, index=index)
+        return grad_output, None, grad_input
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -493,7 +506,7 @@ class MoE(Module):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        out = _deterministic_scatter_add(
+        out = _DeterministicScatterAdd.apply(
             out,
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
             routed_output,
