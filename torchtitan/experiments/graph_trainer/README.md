@@ -95,16 +95,24 @@ python -m torchtitan.experiments.graph_trainer.precompile_main \
     --parallelism.tensor_parallel_degree 2
 
 # Step 2: load and train with torchrun (uses all GPUs)
-torchrun --nproc_per_node=8 --virtual-local-rank \
-    -m torchtitan.train \
-    --module graph_trainer.llama3 \
-    --config graph_trainer_llama3_debugmodel \
+# Uses the dedicated graph_trainer run_train.sh which passes
+# --virtual-local-rank to torchrun.
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
+    ./torchtitan/experiments/graph_trainer/run_train.sh \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2
 ```
+
+**`--virtual-local-rank`:** This torchrun flag makes every worker process see
+`LOCAL_RANK=0` and target `cuda:0`. torchrun isolates each worker's GPU via
+`CUDA_VISIBLE_DEVICES`, so `cuda:0` maps to a different physical GPU per
+worker. This is required for CooR because the precompiled artifact was
+compiled on a single process targeting `cuda:0`, and CooR handles
+rank-specific computation dynamically at runtime via
+`_runtime_compute_coordinate_on_dim`.
 
 Pre-compile works with any compiler pass that produces serializable output,
 including `full_inductor_compilation` and `regional_inductor`. Use a shared

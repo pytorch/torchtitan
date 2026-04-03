@@ -89,6 +89,8 @@ def materialize_model(
         else contextlib.nullcontext()
     ):
         with torch.no_grad():
-            model.init_weights(buffer_device=buffer_device)
+            # TODO: Change this back to init_weights once
+            # autoparallel contains the wrap_init_states
+            cast(BaseModel, model).init_weights(buffer_device=buffer_device)
     model.train()
     return model

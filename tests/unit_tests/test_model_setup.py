@@ -55,7 +55,6 @@ class DummyModel(BaseModel):
     def init_weights(self, buffer_device: torch.device | None = None, **kwargs) -> None:
         self.saw_init_weights_context = bool(getattr(self, "_context_active", False))
         self.init_buffer_device = buffer_device
-        self.linear.init_weights()
 
 
 @dataclass(kw_only=True, slots=True)

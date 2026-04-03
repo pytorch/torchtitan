@@ -4,16 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import logging
+from dataclasses import dataclass
 
 import torch
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.models.common.attention import LocalMapAttention
+from torchtitan.models.common.attention import LocalMapInnerAttention
 from torchtitan.tools.utils import has_cuda_capability
-
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import (
@@ -184,59 +185,85 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 logger = logging.getLogger(__name__)
 
 
-class VLLMAttention(LocalMapAttention):
+class VLLMAttentionWrapper(LocalMapInnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
-    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.  This
-    wrapper handles the transpose/reshape from TorchTitan's
-    ``(batch, num_heads, seq_len, head_dim)`` layout and back.
+    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
 
-    DTensor handling uses :class:`LocalMapAttention`'s ``local_map`` to strip
-    TP DTensors before ``forward`` and re-wrap the output as DTensor after.
+    Receives ``(bs, seq, heads, dim)`` layout from GQAttention. DTensor with
+    ``Shard(2)`` placements is handled by the base class
+    ``LocalMapInnerAttention.__call__``.
 
-    Used by the **generator** (via :func:`replace_with_vllm_attention`).
+    Used as ``inner_attention`` in GQAttention via Config-based construction.
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        layer_name: str,
-        scale: float | None = None,
-    ) -> None:
-        super().__init__()
+    # vLLM requires a unique prefix per Attention layer for
+    # static_forward_context registration.
+    # TODO: Pass layer_id through the build chain instead of using a
+    # global counter. The counter breaks with pipeline parallelism
+    # where layers are built on different ranks.
+    _layer_counter: itertools.count = itertools.count()
 
-        self.hidden_size = hidden_size
-        self.layer_name = layer_name
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalMapInnerAttention.Config):
+        hidden_size: int
+        num_heads: int
+        num_kv_heads: int
+        head_dim: int
+        scale: float | None = None
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
 
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        tp_degree = vllm_config.parallel_config.tensor_parallel_size
 
+        num_heads = config.num_heads
+        num_kv_heads = config.num_kv_heads
+
+        if num_kv_heads < tp_degree:
+            raise ValueError(
+                f"num_kv_heads ({num_kv_heads}) must be >= "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        if num_kv_heads % tp_degree != 0:
+            raise ValueError(
+                f"num_kv_heads ({num_kv_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        if num_heads % tp_degree != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+
+        num_heads = num_heads // tp_degree
+        num_kv_heads = num_kv_heads // tp_degree
+        head_dim = config.head_dim
+        scale = config.scale if config.scale is not None else head_dim**-0.5
+
+        self.hidden_size = config.hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-
-        if scale is None:
-            self.scale = head_dim**-0.5
-        else:
-            self.scale = scale
+        self.scale = scale
 
         cache_config = (
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
-            scale=self.scale,
+            scale=scale,
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
-            prefix=f"model.layers.{layer_name}.attention.inner_attention",
+            prefix=f"model.layers.{layer_id}.attention.inner_attention",
         )
 
     def forward(
@@ -244,109 +271,35 @@ class VLLMAttention(LocalMapAttention):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        *,
-        scale: float | None = None,
-        enable_gqa: bool = False,
-        attention_masks: None = None,  # Unused but needed for GQA varlen inference.
+        **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
-            q: ``(batch, num_heads, seq_len, head_dim)``
-            k: ``(batch, num_kv_heads, seq_len, head_dim)``
-            v: ``(batch, num_kv_heads, seq_len, head_dim)``
-            scale: Ignored — vLLM uses its own internal scale.
-            enable_gqa: Ignored — vLLM handles GQA internally.
+            q: ``(batch, seq_len, num_heads, head_dim)``
+            k: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, num_heads, seq_len, head_dim)``
+            ``(batch, seq_len, num_heads * head_dim)`` — ready for
+            ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
-        # This seq_len captured here is wrong probably due to some symbolic shape propagation error wrt to to_local.
-        # Therefore it is breaking compile. We need to fix this in pytorch.
-        # See more details in https://github.com/pytorch/pytorch/issues/175690
-        # TODO(@Lucaskabela): remove this once the issue is fixed in pytorch
-        batch_size, _, seq_len, head_dim = q.shape
+        batch_size, seq_len, _, head_dim = q.shape
 
-        # TODO: may be good to use einops in future as we can explicitly reshape
-        # with dimension names - see https://github.com/arogozhnikov/einops
-        # Convert from (batch, num_heads, seq_len, head_dim)
-        #   to (batch*seq_len, num_heads (or num_kv_heads), head_dim) for vLLM Attn
-        q = q.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        k = k.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        v = v.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
+        # vllm attention expects (bs*seqlen, n_heads, head_dim)
+        # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
+        q = q.reshape(batch_size * seq_len, -1, head_dim)
+        k = k.reshape(batch_size * seq_len, -1, head_dim)
+        v = v.reshape(batch_size * seq_len, -1, head_dim)
 
-        # vLLM attention returns (num_tokens, num_heads/num_kv_heads * head_dim)
         output_flat = self.vllm_attn(q, k, v)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
-        # shape under torch.compile.  Narrow to trim this padding
-        # NOTE: this error only happens when batch_size and seq_len are 1
-        # which happens with cudagraph capture for dummy input
+        # shape under torch.compile.  Narrow to trim this padding.
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
         # Reshape back to the format expected by GQAttention.forward()
-        # varlen path expects (bs*seqlen, n_heads, head_dim)
-        output = output_flat.view(batch_size * seq_len, -1, head_dim)
+        output = output_flat.view(batch_size, seq_len, -1, head_dim)
 
         return output
-
-
-def replace_with_vllm_attention(model, tp_degree=1):
-    """Replace ``inner_attention`` with :class:`VLLMAttention`.
-
-    **Generator side.** Used by ``TorchTitanVLLMModelWrapper`` because:
-
-    1. ``vllm.Attention`` manages KV-cache and paged attention for inference.
-    2. Head counts are divided by *tp_degree* so each TP rank holds the
-       correct shard of Q / KV heads.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-        tp_degree: Tensor-parallel world size.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    model_args = model.config
-
-    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3.py#L80
-    # Calculate num_kv_heads based on TP size
-    total_num_kv_heads = model_args.layer.attention.n_kv_heads
-    if total_num_kv_heads >= tp_degree:
-        # Number of KV heads is greater than TP size, so we partition
-        # the KV heads across multiple tensor parallel GPUs.
-        assert total_num_kv_heads % tp_degree == 0
-        num_kv_heads = total_num_kv_heads // tp_degree
-    else:
-        # TODO: Handle this branch correctly
-        raise ValueError("num_kv_heads are smaller than tp_degree")
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        # GQA
-        head_dim = model_args.layer.attention.head_dim
-
-        # TODO Support flex attention backend later as well.
-        assert (
-            layer.attention.attn_backend == "varlen"
-        ), "Only varlen attention backend is allowed."
-        vllm_attn = VLLMAttention(
-            hidden_size=model_args.dim,
-            num_heads=model_args.layer.attention.n_heads // tp_degree,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            layer_name=layer_name,
-            scale=head_dim**-0.5,
-        )
-
-        layer.attention.inner_attention = vllm_attn
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMAttention "
-        f"({len(model.layers)} layers)"
-    )
