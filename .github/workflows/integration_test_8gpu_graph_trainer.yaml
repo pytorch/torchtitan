@@ -75,4 +75,7 @@ jobs:
         # Run precompile unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
 
+        # Run bitwise deterministic guardrail test
+        pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
