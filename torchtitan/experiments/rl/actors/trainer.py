@@ -80,13 +80,6 @@ class PolicyTrainer(Actor, Configurable):
         requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
         self._transfer_dtype = requested if requested != training_dtype else None
 
-        # The policy and ref models share code objects, so dynamo's
-        # per-code-object cache must hold entries for both grad modes
-        # (grad for policy, no_grad for ref). The default limit of 8
-        # is not enough; 16 accommodates both without recompile storms.
-        # TODO: @Lucaskabela fix recompiles in general as these increase startup
-        torch._dynamo.config.cache_size_limit = 16
-
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -273,6 +266,13 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Training metrics
         """
+        # The policy and ref models share code objects, so dynamo's
+        # per-code-object cache must hold entries for both grad modes
+        # (grad for policy, no_grad for ref). The default limit of
+        # is not enough; 16 accommodates both without recompile storms.
+        # TODO: @Lucaskabela fix recompiles in general as these increase startup
+        torch._dynamo.config.recompile_limit = 16
+
         logger.debug(
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
