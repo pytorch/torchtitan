@@ -17,6 +17,26 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
+def _deterministic_scatter_add(
+    out: torch.Tensor,
+    token_indices: torch.Tensor,
+    dim: int,
+    src: torch.Tensor,
+) -> torch.Tensor:
+    prev = torch.are_deterministic_algorithms_enabled()
+    prev_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    try:
+        out = out.scatter_add(
+            dim=0,
+            index=token_indices.reshape(-1, 1).expand(-1, dim),
+            src=src,
+        )
+    finally:
+        torch.use_deterministic_algorithms(prev, warn_only=prev_warn_only)
+    return out
+
+
 # NOTE: keeping this for-loop implementation for comparison
 #       and readability, may remove later
 def _run_experts_for_loop(
@@ -478,10 +498,8 @@ class MoE(Module):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        out = out.scatter_add(
-            dim=0,
-            index=token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
-            src=routed_output,
+        out = _deterministic_scatter_add(
+            out, token_indices_experts_sorted, dim, routed_output
         )
         out = out.reshape(bs, slen, dim)
         return out

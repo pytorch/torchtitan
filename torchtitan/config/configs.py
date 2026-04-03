@@ -404,7 +404,7 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
-    deterministic: bool = True
+    deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
 
     deterministic_warn_only: bool = False
