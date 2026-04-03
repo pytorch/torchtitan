@@ -37,9 +37,7 @@ class ToyModel(Module):
         super().__init__()
 
         def _make_linear():
-            cfg = Linear.Config(bias=True)
-            cfg.in_features = dim
-            cfg.out_features = dim
+            cfg = Linear.Config(in_features=dim, out_features=dim, bias=True)
             return cfg.build()
 
         self.layers = ModuleList([_make_linear() for _ in range(n_layers)])
