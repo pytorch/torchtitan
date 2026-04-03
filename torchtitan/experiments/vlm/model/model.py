@@ -90,6 +90,7 @@ class Llama3Siglip2Transformer(Llama3):
         grid_thw: torch.Tensor,
         special_tokens: SpecialTokens,
         attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
@@ -109,7 +110,9 @@ class Llama3Siglip2Transformer(Llama3):
             )
 
         for layer in self.layers.values():
-            h_BSD = layer(h_BSD, self.freqs_cis, attention_masks["llama3_masks"])
+            h_BSD = layer(
+                h_BSD, self.freqs_cis, attention_masks["llama3_masks"], positions
+            )
 
         h_BSD = self.norm(h_BSD) if self.norm else h_BSD
         output = self.output(h_BSD) if self.output else h_BSD
