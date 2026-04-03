@@ -161,16 +161,21 @@ class HFExpertParallel(BaseExpertParallel):
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Sort tokens by expert, all-to-all dispatch, build local routing.
 
-        Unlike native ``ExpertParallel`` which receives pre-sorted tokens,
-        this receives the raw HF interface ``(hidden_states, top_k_index,
-        top_k_weights)`` and performs sorting internally. Routing weights
-        are transported alongside tokens via a second all-to-all (native
-        titan applies weights in ``MoE.forward``, not in dispatch).
+        Unlike native ``ExpertParallel`` which receives pre-sorted
+        ``(routed_input, num_tokens_per_expert)``, this receives the HF
+        interface and performs sorting internally.
 
-        Returns ``(dispatched_tokens, local_top_k_index, local_top_k_weights)``
-        — the same interface the HF ``Experts.forward`` expects, but with
-        tokens dispatched to the correct EP rank and indices remapped to
-        local experts.
+        Args:
+            inputs: ``(hidden_states, top_k_index, top_k_weights)``
+                - hidden_states: ``(num_tokens, hidden_dim)``
+                - top_k_index: ``(num_tokens, top_k)`` global expert indices
+                - top_k_weights: ``(num_tokens, top_k)`` routing weights
+
+        Returns:
+            ``(dispatched_tokens, local_top_k_index, local_top_k_weights)``
+                - dispatched_tokens: ``(num_received, hidden_dim)``
+                - local_top_k_index: ``(num_received, 1)`` local expert indices
+                - local_top_k_weights: ``(num_received, 1)`` routing weights
         """
         hidden_states, top_k_index, top_k_weights = inputs
         ep_size = self._ep_size
@@ -257,9 +262,8 @@ class HFExpertParallel(BaseExpertParallel):
         """All-to-all combine, unsort, sum across top_k.
 
         Unlike native ``ExpertParallel`` which returns sorted output
-        (unsorting and weight application happen in ``MoE.forward``),
-        this returns the final accumulated result because HF's
-        ``SparseMoeBlock`` expects experts to return the finished output.
+        (``MoE.forward`` handles unsorting), this returns the final
+        accumulated result — shape ``(num_tokens, hidden_dim)``.
         """
         combined = all_to_all_single_autograd(
             output,
