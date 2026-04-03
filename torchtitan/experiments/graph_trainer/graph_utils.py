@@ -34,6 +34,35 @@ from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
 
+def _build_named_tensor_map(
+    model: torch.nn.Module,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Build name→tensor maps that include duplicates
+    NOTE: this is especially important for weight-tied parameters in RL.
+
+    ``model.parameters()`` deduplicates by tensor identity, which drops the
+    second name in tied pairs (e.g. ``tok_embeddings.weight`` /
+    ``output.weight``).  The AOT joint graph's ``params_spec`` may list both
+    names, so we walk ``named_modules`` and read ``_parameters`` /
+    ``_buffers`` directly to preserve every name→tensor mapping.
+
+    Returns:
+        (param_map, buffer_map) dicts keyed by fully-qualified name.
+    """
+    param_map: dict[str, torch.Tensor] = {}
+    buffer_map: dict[str, torch.Tensor] = {}
+    for mod_name, mod in model.named_modules():
+        for p_name, p in mod._parameters.items():
+            if p is not None:
+                fqn = f"{mod_name}.{p_name}" if mod_name else p_name
+                param_map[fqn] = p
+        for b_name, b in mod._buffers.items():
+            if b is not None:
+                fqn = f"{mod_name}.{b_name}" if mod_name else b_name
+                buffer_map[fqn] = b
+    return param_map, buffer_map
+
+
 def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> None:
     # TODO: make the dump rank configurable
     if not dump_folder or torch.distributed.get_rank() != 0:
@@ -160,6 +189,10 @@ def joint_graph_builder(
         precompile=serializable,
     )
 
+    _param_map, _buffer_map = _build_named_tensor_map(model)
+    params_spec = joint_with_descriptors.params_spec
+    buffers_spec = joint_with_descriptors.buffers_spec
+
     # Check if inductor_decomposition is configured and create the pass with proper context
     if compile_config is not None:
         joint_pass_names = getattr(compile_config, "joint_passes", [])
@@ -198,11 +231,9 @@ def joint_graph_builder(
         on_compile(fn, joint_with_descriptors.out_spec)
 
     def wrapper_fn(args, kwargs):
-        inputs = [
-            *model.parameters(),
-            *model.buffers(),
-            *args,
-        ]
+        params = [_param_map[name] for name in params_spec]
+        buffers = [_buffer_map[name] for name in buffers_spec]
+        inputs = [*params, *buffers, *args]
         return fn(*inputs, **kwargs)
 
     return wrapper_fn

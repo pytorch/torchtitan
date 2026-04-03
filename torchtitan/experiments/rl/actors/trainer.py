@@ -23,6 +23,7 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
@@ -62,6 +63,7 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
         compile: CompileConfig = field(default_factory=CompileConfig)
+        graph_trainer_compile: GraphTrainerCompileConfig | None = None
 
     def __init__(
         self,
@@ -101,6 +103,16 @@ class PolicyTrainer(Actor, Configurable):
         model = self._build_model(
             model_spec, config, device_type, batch_invariant_mode, hf_assets_path
         )
+        if config.graph_trainer_compile is not None:
+            from torchtitan.experiments.graph_trainer.compile import apply_compile
+
+            model = apply_compile(
+                model,
+                compile_config=config.graph_trainer_compile,
+                parallelism=config.parallelism,
+                parallel_dims=self.parallel_dims,
+                dump_folder="",
+            )
         model.train()
         self.model = model
         self.model_parts = [model]
@@ -124,6 +136,8 @@ class PolicyTrainer(Actor, Configurable):
 
         self.policy_version = 0
         self.generator: Any | None = None
+        # Running max sequence length for static-shape padding (AOT compile).
+        self._aot_max_seq_len: int | None = None
 
         # Data parallelism: determine this rank's shard of the batch.
         self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
@@ -201,11 +215,17 @@ class PolicyTrainer(Actor, Configurable):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
 
+        # When graph_trainer_compile is set, skip the default per-layer
+        # compile inside parallelize_fn — apply_compile is called separately
+        # on the policy model only (not the ref model).
+        compile_cfg = (
+            None if config.graph_trainer_compile is not None else config.compile
+        )
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
             parallelism=config.parallelism,
-            compile_config=config.compile,
+            compile_config=compile_cfg,
         )
 
         model.to_empty(device=device_type)
@@ -283,9 +303,23 @@ class PolicyTrainer(Actor, Configurable):
         my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
         my_advantages = advantages[my_indices]
 
+        device = next(self.model.parameters()).device
+
+        # When using AOT compile, all forward passes must use the same tensor
+        # shapes. Track the running max sequence length and pad to it.
+        max_seq_len: int | None = None
+        if self.config.graph_trainer_compile is not None:
+            batch_max = max(
+                len(p) + len(g) for p, g in zip(my_prompt_token_ids, my_token_ids)
+            )
+            if self._aot_max_seq_len is None:
+                self._aot_max_seq_len = batch_max
+            else:
+                self._aot_max_seq_len = max(self._aot_max_seq_len, batch_max)
+            max_seq_len = self._aot_max_seq_len
+
         # Compute reference log probs using frozen ref_model (local shard only)
         ref_token_log_probs = []
-        device = next(self.model.parameters()).device
         with torch.no_grad():
             for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
                 token_lps = compute_token_log_probs(
@@ -293,6 +327,7 @@ class PolicyTrainer(Actor, Configurable):
                     prompt_toks,
                     gen_toks,
                     device,
+                    max_seq_len=max_seq_len,
                 )
                 ref_token_log_probs.append(token_lps)
 
@@ -304,6 +339,7 @@ class PolicyTrainer(Actor, Configurable):
             my_advantages,
             ref_token_log_probs,
             kl_coef=0.1,
+            max_seq_len=max_seq_len,
         )
 
         # Verify logprob identity (local shard)

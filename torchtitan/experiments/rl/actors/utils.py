@@ -36,6 +36,7 @@ def compute_token_log_probs(
     prompt_ids: list[int],
     gen_ids: list[int],
     device: torch.device,
+    max_seq_len: int | None = None,
 ) -> torch.Tensor:
     """
     Compute per-token log probabilities for generated tokens.
@@ -46,6 +47,7 @@ def compute_token_log_probs(
         prompt_ids: Prompt token IDs
         gen_ids: Generated token IDs
         device: Device to run computation on
+        max_seq_len: If set, pad to this length for static shapes (AOT compile).
 
     Returns:
         Per-token log probabilities for the generated tokens
@@ -53,12 +55,14 @@ def compute_token_log_probs(
     token_ids = torch.tensor(prompt_ids + gen_ids, dtype=torch.long, device=device)
     prompt_len = len(prompt_ids)
     gen_len = len(gen_ids)
+    actual_len = token_ids.shape[0]
+    padded_len = max_seq_len if max_seq_len is not None else actual_len
+    if actual_len < padded_len:
+        token_ids = F.pad(token_ids, (0, padded_len - actual_len), value=0)
     attention_masks = build_varlen_metadata([(token_ids, prompt_len, gen_len)], device)
 
     full_tensor = token_ids.unsqueeze(0)
 
-    # NOTE: We should move towards batching to improve efficiency here
-    # See https://github.com/pytorch/torchtitan/issues/2674
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which breaks torch.compile with symbolic shapes.
     seq_len = full_tensor.shape[1]
@@ -66,10 +70,10 @@ def compute_token_log_probs(
 
     logits = model(full_tensor, attention_masks=attention_masks, positions=positions)
 
-    # Convert to float32 for numerical stability
-    logits_f32 = logits[:, :-1, :].to(torch.float32)
+    # Convert to float32 for numerical stability — only use actual (unpadded) tokens
+    logits_f32 = logits[:, : actual_len - 1, :].to(torch.float32)
     log_probs = F.log_softmax(logits_f32, dim=-1)
-    target_tokens = full_tensor[:, 1:]
+    target_tokens = full_tensor[:, 1:actual_len]
 
     # Extract log probs for generated tokens only
     gen_start_idx = prompt_len - 1
@@ -93,6 +97,7 @@ def compute_policy_gradient_loss(
     kl_coef: float = 0.1,
     ppo_clip_eps: float = 0.2,
     entropy_coef: float = 0.01,
+    max_seq_len: int | None = None,
 ) -> tuple[torch.Tensor, dict, list[torch.Tensor]]:
     """
     Compute GRPO/PPO policy gradient loss with per-token KL divergence.
@@ -109,6 +114,7 @@ def compute_policy_gradient_loss(
         kl_coef: KL divergence penalty coefficient
         ppo_clip_eps: PPO clipping epsilon
         entropy_coef: Entropy bonus coefficient
+        max_seq_len: If set, pad to this length for static shapes (AOT compile).
 
     Returns:
         loss: Total loss (PG + entropy + KL)
@@ -127,6 +133,7 @@ def compute_policy_gradient_loss(
             prompt_toks,
             gen_toks,
             device,
+            max_seq_len=max_seq_len,
         )
         batch_token_log_probs.append(token_lps)
 

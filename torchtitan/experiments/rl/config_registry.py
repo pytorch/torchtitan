@@ -14,6 +14,9 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
+
+# TODO: Comment this in once tested with cudagraphs.
+# from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
@@ -43,6 +46,9 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            # graph_trainer_compile=GraphTrainerCompileConfig(
+            #     enable=True, backend="aot_eager", mode="aot", passes=[]
+            # ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
