@@ -92,8 +92,6 @@ class Validator(BaseValidator):
                 self.steps > 0 or self.steps == -1
             ), "validation steps must be positive or -1"
 
-    validation_dataloader: BaseDataLoader
-
     # TODO: improve the constructor signature
     def __init__(
         self,
@@ -121,14 +119,11 @@ class Validator(BaseValidator):
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         # pyrefly: ignore [unexpected-keyword]
-        dl_config = replace(config.dataloader, infinite=config.steps != -1)
-        self.validation_dataloader = dl_config.build(
-            dp_world_size=dp_world_size,
-            dp_rank=dp_rank,
-            tokenizer=tokenizer,
-            seq_len=seq_len,
-            local_batch_size=local_batch_size,
-        )
+        self.dl_config = replace(config.dataloader, infinite=config.steps != -1)
+        self.dp_world_size = dp_world_size
+        self.dp_rank = dp_rank
+        self.seq_len = seq_len
+        self.local_batch_size = local_batch_size
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
@@ -245,7 +240,15 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
+        validation_dataloader = self.dl_config.build(
+            dp_world_size=self.dp_world_size,
+            dp_rank=self.dp_rank,
+            tokenizer=self.tokenizer,
+            seq_len=self.seq_len,
+            local_batch_size=self.local_batch_size,
+        )
+
+        for input_dict, labels in validation_dataloader:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
