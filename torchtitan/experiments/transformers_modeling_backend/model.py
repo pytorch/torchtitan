@@ -117,6 +117,18 @@ class HFTransformerModel(BaseModel):
 
             self._initialize_dense_attributes(titan_dense_config)
 
+        def build(self, **kwargs):
+            """Override build() to use _replace() instead of dataclasses.replace().
+
+            dataclasses.replace() re-invokes __init__, which is incompatible
+            with the custom __init__ here (expects titan_dense_config).
+            """
+            clone = self._replace()
+            instance = self._owner(config=clone, **kwargs)
+            if self.param_init is not None:
+                instance._param_init = self.param_init
+            return instance
+
         def _replace(self, **overrides):
             """Override to use ``copy.copy()`` instead of ``dataclasses.replace()``.
 
