@@ -35,6 +35,45 @@ from vllm.utils import torch_utils as _torch_utils
 
 logger = init_logger(__name__)
 
+# Model-agnostic name used for vLLM model registration.
+# Must match the hf_overrides["architectures"] value passed to EngineArgs.
+VLLM_MODEL_NAME = "TorchTitanCausalLM"
+
+
+def register_model_to_vllm_model_registry(
+    model_spec: ModelSpec,
+) -> None:
+    """
+    Register a TorchTitan model with vLLM's ModelRegistry.
+
+    Must be called before creating a vLLM engine that uses this model.
+
+    Args:
+        model_spec: TorchTitan ModelSpec containing model config and components
+    """
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    # Create dynamic model class capturing ModelSpec in the closure
+    class TorchTitanVLLMModelFromSpec(TorchTitanVLLMModelWrapper):
+        def __init__(self, *, vllm_config, prefix=""):
+            super().__init__(
+                model_spec=model_spec,
+                vllm_config=vllm_config,
+                prefix=prefix,
+            )
+
+    # Set the class name so vLLM can identify it
+    TorchTitanVLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
+    TorchTitanVLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
+
+    # Register with vLLM
+    ModelRegistry.register_model(VLLM_MODEL_NAME, TorchTitanVLLMModelFromSpec)
+
+    logger.info(
+        f"Registered {VLLM_MODEL_NAME} with vLLM "
+        f"(model={model_spec.name}, flavor={model_spec.flavor})"
+    )
+
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
 # on every subgraphoutput (see vllm/compilation/cuda_graph.py).

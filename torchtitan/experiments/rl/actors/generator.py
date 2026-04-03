@@ -14,11 +14,11 @@ import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.experiments.rl.plugin import (
+from torchtitan.experiments.rl.models.vllm_wrapper import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Completion
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -104,25 +104,24 @@ class SamplingConfig:
 
 
 class VLLMGenerator(Actor, Configurable):
-    """
-    Generates rollouts using vLLM engine.
+    """Generates completions using a vLLM engine.
 
-    Maintains a vLLM engine that is synchronized with the Trainer
-    via weight sync. Generates completions for given prompts and
-    computes rewards/advantages.
-
-    Args:
-        config: Generator-specific configuration.
-        model_path: Path to the HF model checkpoint.
-        batch_invariant_mode: Enable batch-invariant mode for deterministic ops.
-        prompt_texts: List of prompt strings.
-        TODO: refine `prompt_texts` according to input type (eg, a list of token sequences, or conversion)
+    Maintains a vLLM engine synchronized with the Trainer via weight sync.
+    Given prompts, returns Completion objects with token IDs and logprobs.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Generator actor configuration.
-        TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
+        """Generator actor configuration."""
+
+        model_spec: ModelSpec | None = None
+        """Model specification. Set programmatically by the orchestrator."""
+
+        hf_assets_path: str = ""
+        """Path to HF model checkpoint. Set programmatically by the orchestrator."""
+
+        batch_invariant_mode: bool = True
+        """Enable batch-invariant mode for deterministic NCCL ops."""
 
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         """Parallelism configuration for the vLLM engine."""
@@ -131,7 +130,7 @@ class VLLMGenerator(Actor, Configurable):
         """Default sampling parameters for generation."""
 
         model_dtype: str = "bfloat16"
-        """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
+        """Data type for model weights (auto, float16, bfloat16, float32)."""
 
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
@@ -155,37 +154,41 @@ class VLLMGenerator(Actor, Configurable):
                 f"got dp_replicate={self.parallelism.data_parallel_replicate_degree}"
             )
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        model_spec: ModelSpec,
-        model_path: str,
-        batch_invariant_mode: bool,
-    ):
+    def __init__(self, config: Config):
         self.config = config
-        self.model_spec = model_spec
+
+        assert (
+            config.model_spec is not None
+        ), "model_spec must be set before creating VLLMGenerator"
+        model_spec = config.model_spec
+
+        # The generator uses the RL-specific TP-only parallelize plan for
+        # vLLM compatibility. Override on a copy so the shared model_spec
+        # (used by the trainer with core Titan's parallelize) is untouched.
+        from dataclasses import replace as dataclass_replace
+
+        from torchtitan.experiments.rl.models.parallelize import (
+            parallelize_qwen3 as rl_parallelize_qwen3,
+        )
+
+        generator_model_spec = dataclass_replace(
+            model_spec, parallelize_fn=rl_parallelize_qwen3
+        )
+        self.model_spec = generator_model_spec
 
         # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(model_spec)
+        register_model_to_vllm_model_registry(generator_model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
-        if batch_invariant_mode:
+        if config.batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
             init_batch_invariance(AttentionBackendEnum.CUSTOM)
 
-        # Extract needed fields from configs
-        self.model_path = model_path
-        self.max_new_tokens = config.sampling.max_tokens
-        self.temperature = config.sampling.temperature
-        self.top_p = config.sampling.top_p
-        self.num_samples_per_prompt = config.num_samples_per_prompt
-
         # Build vLLM engine
         engine_kwargs = dict(
-            model=model_path,
+            model=config.hf_assets_path,
             trust_remote_code=True,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
@@ -225,95 +228,80 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(
-        self,
-        prompt_texts: list[str],
-        expected_answers: list[str],
-    ) -> list[Episode]:
-        """Generate completions and return a flat list of Episodes.
+    async def generate(self, prompts: list[str]) -> list[Completion]:
+        """Generate completions for the given prompts.
 
-        Each prompt produces ``num_samples_per_prompt`` Episodes. Episodes
-        from the same prompt share a ``group_id`` so the controller can
-        compute group-level advantages later.
+        Each prompt produces ``num_samples_per_prompt`` completions. Completions from the
+        same prompt share a ``group_id`` so the controller can compute
+        group-level advantages later.
 
         Args:
-            prompt_texts: List of prompt strings for which to generate completions.
-            expected_answers: List of expected answers, one per prompt.
-                They are copied into each Episode so downstream graders can use them
-                for reward computation and generator doesn't use this field.
+            prompts: List of prompt strings to generate completions for.
+
+        Returns:
+            Flat list of Completions (len = len(prompts) * num_samples_per_prompt).
         """
         logger.debug(
-            f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
+            f"{os.getpid()=} generate start (policy v{self.policy_version})..."
         )
 
         with torch.no_grad():
-            # Generate samples using vLLM
             sampling_params = SamplingParams(
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_tokens=self.max_new_tokens,
-                n=self.num_samples_per_prompt,
+                temperature=self.config.sampling.temperature,
+                top_p=self.config.sampling.top_p,
+                max_tokens=self.config.sampling.max_tokens,
+                n=self.config.num_samples_per_prompt,
                 seed=self.config.seed,
                 logprobs=1,
-                prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
-                output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
+                prompt_logprobs=1,
+                output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            for request_id, prompt in enumerate(prompt_texts):
+            for request_id, prompt in enumerate(prompts):
                 self._engine.add_request(str(request_id), prompt, sampling_params)
 
-            # Step through engine until all requests are finished
             all_outputs = []
             while self._engine.has_unfinished_requests():
                 request_outputs = self._engine.step()
                 all_outputs.extend(request_outputs)
 
-            # Sort outputs by request_id to guarantee prompt ordering,
+            # Sort by request_id to guarantee prompt ordering,
             # since vLLM may return completed requests out of order.
             all_outputs.sort(key=lambda o: int(o.request_id))
 
-            # Build flat list of Episodes; assign a group_id per prompt.
-            # TODO: Assigning group_id here is GRPO-specific and should be
-            # decoupled from the generator in the future.
-            episodes: list[Episode] = []
+            completions: list[Completion] = []
             for idx, output in enumerate(all_outputs):
-                prompt_token_ids = output.prompt_token_ids
                 gid = f"{os.getpid()}_{self.policy_version}_{idx}"
 
                 for sample in output.outputs:
-                    per_token_log_probs = [
-                        list(logprob_dict.values())[0].logprob
+                    per_token_logprobs = [
+                        next(iter(logprob_dict.values())).logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    episodes.append(
-                        Episode(
-                            policy_version=self.policy_version,
-                            prompt_token_ids=prompt_token_ids,
-                            text=sample.text,
-                            token_ids=sample.token_ids,
-                            token_log_probs=per_token_log_probs,
-                            expected_answer=expected_answers[idx]
-                            if expected_answers
-                            else "",
+                    completions.append(
+                        Completion(
+                            prompt_tokens=output.prompt_token_ids,
+                            response_tokens=sample.token_ids,
+                            logprobs=per_token_logprobs,
                             group_id=gid,
+                            text=sample.text,
+                            policy_version=self.policy_version,
                         )
                     )
 
         logger.debug(
-            f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
+            f"{os.getpid()=} generate finish (policy v{self.policy_version})..."
         )
-        return episodes
+        return completions
 
     @endpoint
-    async def pull_model_state_dict(self, version: int) -> None:
+    async def pull_weights(self, version: int) -> None:
         """Pull latest weights from TorchStore.
 
         When ``direct_rdma=True``, weights are read directly from the
         trainer's GPU memory via one-sided RDMA, bypassing StorageVolumes.
         When ``False``, data is fetched through StorageVolumes (which may
         themselves use RDMA as their transport internally).
-
-        See ``push_model_state_dict`` for more details on the distinction.
 
         Args:
             version: New policy version number.

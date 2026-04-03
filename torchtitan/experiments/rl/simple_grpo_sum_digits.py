@@ -42,7 +42,12 @@ from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Episode, TrainBatch
+from torchtitan.experiments.rl.types import (
+    Completion,
+    Episode,
+    ScoredCompletion,
+    TrainBatch,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -145,6 +150,9 @@ class RLTrainer(Configurable):
         from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 
         config.model_spec.parallelize_fn = parallelize_qwen3
+        config.generator.model_spec = config.model_spec
+        config.generator.hf_assets_path = config.hf_assets_path
+        config.generator.batch_invariant_mode = config.batch_invariant_mode
 
         self.task = SumDigitsTask(seed=42)
         self._proc_meshes = []
@@ -360,9 +368,6 @@ class RLTrainer(Configurable):
             "generator",
             VLLMGenerator,
             config.generator,
-            model_spec=config.model_spec,
-            model_path=config.hf_assets_path,
-            batch_invariant_mode=config.batch_invariant_mode,
         )
         self.grader = grader_mesh.spawn(
             "grader",
@@ -381,7 +386,7 @@ class RLTrainer(Configurable):
         # push weights from trainer
         self.trainer.push_model_state_dict.call().get()
         # pull weights for policy version 0 (initial weights)
-        self.generator.pull_model_state_dict.call(0).get()
+        self.generator.pull_weights.call(0).get()
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -405,23 +410,43 @@ class RLTrainer(Configurable):
             eval_questions.append(question)
 
         # Generate on eval prompts
-        episodes = self._get_rank_0_value(
-            self.generator.generate.call(eval_prompts, eval_answers).get()
+        completions: list[Completion] = self._get_rank_0_value(
+            self.generator.generate.call(eval_prompts).get()
+        )
+        samples_per_prompt = self.config.generator.num_samples_per_prompt
+        answers_per_completion = [
+            answer for answer in eval_answers for _ in range(samples_per_prompt)
+        ]
+        scored: list[ScoredCompletion] = self._get_rank_0_value(
+            self.grader.score.call(completions, answers_per_completion).get(),
+            has_gpus=False,
         )
 
         # Score: check first episode per prompt (episodes are ordered by prompt)
         correct = 0
         format_ok = 0
-        samples_per_prompt = self.config.generator.num_samples_per_prompt
         for i, (question, answer) in enumerate(zip(eval_questions, eval_answers)):
-            ep = episodes[i * samples_per_prompt]
-            extracted = extract_answer(ep.text)
+            scored_completion = scored[i * samples_per_prompt]
+            extracted = extract_answer(scored_completion.completion.text)
             is_correct = extracted == int(answer)
-            has_tag = bool(re.search(r"\[ANSWER\]", ep.text))
+            has_tag = bool(re.search(r"\[ANSWER\]", scored_completion.completion.text))
             correct += int(is_correct)
             format_ok += int(has_tag)
 
         if self.config.log_samples:
+            episodes = [
+                Episode(
+                    policy_version=sc.completion.policy_version,
+                    prompt_token_ids=sc.completion.prompt_tokens,
+                    text=sc.completion.text,
+                    token_ids=sc.completion.response_tokens,
+                    token_log_probs=sc.completion.logprobs,
+                    expected_answer=answer,
+                    reward=sc.reward,
+                    group_id=sc.completion.group_id,
+                )
+                for sc, answer in zip(scored, answers_per_completion)
+            ]
             _log_samples(episodes)
 
         result = {
@@ -468,14 +493,34 @@ class RLTrainer(Configurable):
             # Fully sync RL loop (GRPO)
             # 1. Generator produces flat list of Episodes with group_id
             # TODO: Create a queue to use all episodes from all GPUs
-            episodes = self._get_rank_0_value(
-                self.generator.generate.call(train_prompts, train_answers).get()
+            completions: list[Completion] = self._get_rank_0_value(
+                self.generator.generate.call(train_prompts).get()
             )
 
             # 2. Grader computes rewards per episode
-            episodes = self._get_rank_0_value(
-                self.grader.score.call(episodes).get(), has_gpus=False
+            answers_per_completion = [
+                answer
+                for answer in train_answers
+                for _ in range(self.config.generator.num_samples_per_prompt)
+            ]
+            scored: list[ScoredCompletion] = self._get_rank_0_value(
+                self.grader.score.call(completions, answers_per_completion).get(),
+                has_gpus=False,
             )
+
+            episodes = [
+                Episode(
+                    policy_version=sc.completion.policy_version,
+                    prompt_token_ids=sc.completion.prompt_tokens,
+                    text=sc.completion.text,
+                    token_ids=sc.completion.response_tokens,
+                    token_log_probs=sc.completion.logprobs,
+                    expected_answer=answer,
+                    reward=sc.reward,
+                    group_id=sc.completion.group_id,
+                )
+                for sc, answer in zip(scored, answers_per_completion)
+            ]
 
             # 3. Controller computes GRPO advantages (normalize within group)
             groups: dict[str, list[int]] = defaultdict(list)
@@ -503,7 +548,7 @@ class RLTrainer(Configurable):
             t0 = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(optim_result.policy_version).get()
+            self.generator.pull_weights.call(optim_result.policy_version).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
