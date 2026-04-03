@@ -475,6 +475,59 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_deepseekv3_inductor_decomposition",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.passes auto_bucketing",
+                ],
+            ],
+            "AOT deepseek_v3 FSDP+TP+EP autobucketing",
+            "aot_deepseekv3_fsdp_tp_ep_autobucketing",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.passes cudagraph",
+                ],
+            ],
+            "AOT deepseek_v3 FSDP+TP+EP+cudagraph",
+            "aot_deepseekv3_fsdp_tp_ep_cudagraph",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.joint_passes inductor_decomposition",
+                    "--compile.passes auto_bucketing,full_inductor_compilation",
+                ],
+            ],
+            "AOT deepseek_v3 auto_bucketing+full_inductor_compilation",
+            "aot_deepseekv3_auto_bucketing_full_inductor_compilation",
+            ngpu=8,
+        ),
         # === aot_fx_trace mode tests ===
         OverrideDefinitions(
             [
