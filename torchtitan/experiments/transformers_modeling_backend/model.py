@@ -149,8 +149,28 @@ class HFTransformerModel(BaseModel):
             return clone
 
         def _initialize_attributes(self, model_config):
-            """Initialize all model attributes from the config."""
-            # Set mapped attributes (TorchTitan <-> HuggingFace)
+            """Initialize all model attributes from the config.
+
+            Only stores explicitly-set (non-default) fields in
+            ``_titan_injected_model_args`` so that ``update_from_config``
+            only overrides HF config values the user intentionally set
+            in the flavor, preserving model-specific HF attrs like
+            ``qk_head_dim`` or ``n_routed_experts``.
+            """
+            import dataclasses
+
+            # Determine which fields were explicitly set (not defaults)
+            explicit_overrides = {}
+            for field in dataclasses.fields(model_config):
+                value = getattr(model_config, field.name)
+                default = field.default
+                if default is dataclasses.MISSING:
+                    # No default — always explicit
+                    explicit_overrides[field.name] = value
+                elif value != default:
+                    explicit_overrides[field.name] = value
+
+            # Set mapped attributes (TorchTitan -> HuggingFace)
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
                 if hasattr(model_config, titan_name):
                     setattr(self, hf_name, getattr(model_config, titan_name))
@@ -163,7 +183,16 @@ class HFTransformerModel(BaseModel):
                 ):
                     setattr(self, attr_name, value)
 
-            self._titan_injected_model_args.update(model_config.__dict__)
+            # Store only EXPLICIT overrides for re-application after HF
+            # config load. Mapped attrs use HF names; others use titan names.
+            for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
+                if titan_name in explicit_overrides:
+                    self._titan_injected_model_args[hf_name] = explicit_overrides[
+                        titan_name
+                    ]
+            for attr_name, value in explicit_overrides.items():
+                if attr_name not in self._tt_to_hf_attribute_map:
+                    self._titan_injected_model_args[attr_name] = value
 
         def _configure_hf_attention(self, attn_implementation: str):
             """Configure HuggingFace attention settings."""
@@ -223,7 +252,6 @@ class HFTransformerModel(BaseModel):
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
-                trust_remote_code=True,
             )
 
             # Explicitly update attributes based on mappings
@@ -231,14 +259,25 @@ class HFTransformerModel(BaseModel):
                 if hasattr(hf_model_config, hf_name):
                     setattr(self, titan_name, getattr(hf_model_config, hf_name))
 
-            # Copy any other attributes that might not be in the mapping
-            for key, value in hf_model_config.to_dict().items():
-                setattr(self, key, value)
-
-            # Update our attributes with the passed args from flavors
-            for key, value in self._titan_injected_model_args.items():
-                if hasattr(self, key) and value is not None:
+            # Copy all HF config attributes including computed ones.
+            # to_dict() misses attrs computed in __init__ (e.g., DeepSeek V3's
+            # qk_head_dim), so we copy from vars() which has them.
+            for key, value in vars(hf_model_config).items():
+                if not key.startswith("_"):
                     setattr(self, key, value)
+
+            # Copy attribute_map for models that alias config names
+            # (e.g., DeepSeek V3 maps num_local_experts → n_routed_experts)
+            if hf_model_config.attribute_map:
+                self.attribute_map.update(hf_model_config.attribute_map)
+
+            # Re-apply explicitly-set flavor overrides (not defaults)
+            for key, value in self._titan_injected_model_args.items():
+                setattr(self, key, value)
+                # Sync expert count aliases for models that use different naming
+                # (e.g., DeepSeek V3 uses n_routed_experts, GLM uses num_local_experts)
+                if key == "num_experts" and hasattr(self, "n_routed_experts"):
+                    self.n_routed_experts = value
 
             self.max_seq_len = training.seq_len
 
@@ -448,8 +487,11 @@ class HFTransformerModel(BaseModel):
 
             if isinstance(module, attention_cls):
                 # Initialize weights and biases for q, k, v projections
+                # (some models use q_a_proj/q_b_proj instead of q_proj)
                 for proj_name in ["q_proj", "k_proj", "v_proj"]:
-                    proj = getattr(module, proj_name)
+                    proj = getattr(module, proj_name, None)
+                    if proj is None:
+                        continue
                     nn.init.trunc_normal_(proj.weight, mean=0.0, std=0.02)
                     if proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(proj.weight)

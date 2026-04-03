@@ -80,7 +80,7 @@ class NoParallel(ParallelStyle):
         mod: nn.Module,
         outputs: DTensor | tuple,
         device_mesh: DeviceMesh,
-    ) -> torch.Tensor | DTensor | tuple:
+    ) -> torch.Tensor | DTensor | tuple | None:
         def _process(t):
             if t is None or not isinstance(t, DTensor):
                 return t

@@ -28,6 +28,7 @@ class TitanModelConfig:
     vocab_size: int | None = None
     multiple_of: int = 256
     ffn_dim_multiplier: float | None = None
+    intermediate_size: int | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
     max_seq_len: int = 2048
@@ -56,12 +57,16 @@ flavors = {
             n_kv_heads=16,
         ),
     ),
+    # NOTE: dim=2048 is the minimum required for models with LoRA attention
+    # (DeepSeek V3 needs q_lora_rank=1536, GLM-5 needs q_lora_rank=2048).
+    # n_heads must be divisible by TP degree and n_kv_heads.
     "debugmodel_moe": HFTransformerModel.Config(
         model_config=TitanMoeModelConfig(
-            dim=256,
-            n_layers=8,
+            dim=2048,
+            n_layers=4,
             n_heads=16,
             n_kv_heads=8,
+            intermediate_size=512,
             num_experts=8,
             num_experts_per_tok=2,
             moe_intermediate_size=128,

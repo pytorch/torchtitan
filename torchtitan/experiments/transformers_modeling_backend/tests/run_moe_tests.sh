@@ -224,13 +224,13 @@ fi
 if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
     SWEEP_STEPS=${3:-10}
     SWEEP_MODELS=(
-        "Qwen/Qwen3-30B-A3B"                     # qwen3_moe (reference)
-        "mistralai/Mixtral-8x7B-Instruct-v0.1"   # mixtral (no shared experts)
-        "Qwen/Qwen2-57B-A14B"                    # qwen2_moe (shared experts)
+        "Qwen/Qwen3-30B-A3B"                           # qwen3_moe (reference)
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"         # mixtral
+        "Qwen/Qwen2-57B-A14B"                          # qwen2_moe (shared experts)
+        "zai-org/GLM-4.7"                               # glm4_moe_lite (shared experts)
+        # deepseek-ai/DeepSeek-V3 — MLA attention with interdependent head dims
+        # zai-org/GLM-5 — same MLA attention as DeepSeek V3
         # Qwen/Qwen3.5-35B-A3B — VLM (ForConditionalGeneration), not ForCausalLM
-        # microsoft/Phi-3.5-MoE-instruct — PhiMoEForCausalLM not in transformers 5.x
-        # zai-org/GLM-* — uses n_routed_experts instead of num_experts
-        # deepseek-ai/DeepSeek-V3 — needs qk_head_dim in TitanModelConfig
     )
 
     for hf_model in "${SWEEP_MODELS[@]}"; do
@@ -243,7 +243,8 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
 
     # TP+EP sweep for shared expert models (verifies shared expert TP sharding)
     SWEEP_SHARED_MODELS=(
-        "Qwen/Qwen2-57B-A14B"                    # qwen2_moe (shared experts)
+        "Qwen/Qwen2-57B-A14B"                          # qwen2_moe
+        # zai-org/GLM-4.7 — TP init fails (non-MoE layer dim mismatch with debug config)
     )
     for hf_model in "${SWEEP_SHARED_MODELS[@]}"; do
         run_half "TP=2+EP=2 $hf_model" \
