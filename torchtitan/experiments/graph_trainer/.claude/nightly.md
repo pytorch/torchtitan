@@ -11,6 +11,21 @@ claude -p "$(cat torchtitan/experiments/graph_trainer/.claude/nightly.md)"
 
 ---
 
+## 0. Prerequisites
+
+Before running any checks, ensure you are on the torchtitan `main` branch
+with the latest upstream changes:
+
+```bash
+git checkout main
+git pull origin main
+```
+
+If not on `main`, the delta review and freshness checks will produce
+misleading results based on stale or branch-specific state.
+
+---
+
 ## 1. Core Torchtitan Delta Review
 
 Check what changed in core torchtitan since yesterday that graph_trainer should
