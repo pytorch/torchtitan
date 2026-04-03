@@ -27,6 +27,10 @@ from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
 
+# Single artifact key — there is exactly one compiled artifact per
+# precompile_artifact_dir, so no key-based dispatch is needed.
+_ARTIFACT_KEY = "default"
+
 
 @dataclass
 class PrecompiledArtifact:
@@ -106,7 +110,6 @@ def precompile_save(
     model: torch.nn.Module,
     compiled_fn: BundledAOTAutogradSerializableCallable,
     storage: StorageAdapter,
-    artifact_key: str,
     out_spec: pytree.TreeSpec | None,
     metadata: dict[str, Any] | None = None,
     config_fingerprint: ConfigFingerprint | None = None,
@@ -117,6 +120,7 @@ def precompile_save(
     Returns the path/URI of the saved artifact.
     """
     compiled_fn = _unwrap_serializable(compiled_fn)
+
     serialized_fn = BundledAOTAutogradSerializableCallable.serialize_compile_artifacts(
         compiled_fn
     )
@@ -134,9 +138,9 @@ def precompile_save(
     )
 
     data = pickle.dumps(artifact)
-    path = storage.save(artifact_key, data)
+    path = storage.save(_ARTIFACT_KEY, data)
     logger.info(
-        f"Precompile artifact saved: key={artifact_key}, "
+        f"Precompile artifact saved: "
         f"params={len(params_spec)}, buffers={len(buffers_spec)}, "
         f"size={len(data)} bytes, fingerprint={config_fingerprint}, "
         f"path={path}"
@@ -147,7 +151,6 @@ def precompile_save(
 def precompile_load(
     model: torch.nn.Module,
     storage: StorageAdapter,
-    artifact_key: str,
     expected_fingerprint: ConfigFingerprint,
 ) -> Callable:
     """
@@ -155,7 +158,7 @@ def precompile_load(
     binds model parameters/buffers (same calling convention as
     joint_graph_builder's wrapper_fn).
     """
-    data = storage.load(artifact_key)
+    data = storage.load(_ARTIFACT_KEY)
     # SAFETY: pickle.loads executes arbitrary code during deserialization.
     # This is acceptable here because storage backends are assumed to be
     # trusted (local disk or controlled shared filesystem).
@@ -202,7 +205,7 @@ def precompile_load(
         )
 
     logger.info(
-        f"Precompile artifact loaded: key={artifact_key}, "
+        f"Precompile artifact loaded: "
         f"params={len(artifact.params_spec)}, "
         f"buffers={len(artifact.buffers_spec)}, "
         f"fingerprint={artifact.config_fingerprint}, "
@@ -223,6 +226,24 @@ def precompile_load(
             logger.info(
                 f"Deserializing compiled fn on device {torch.cuda.current_device()}"
             )
+
+            # CooR-compiled artifacts reference custom ops (e.g.
+            # device_mesh._runtime_compute_coordinate_on_dim) that
+            # are lazily registered. Register DeviceMesh as an opaque
+            # type first, then import the ops module.
+            try:
+                from torch.distributed.device_mesh import (
+                    _register_distributed_opaque_types,
+                )
+
+                _register_distributed_opaque_types()
+                from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
+            except (ImportError, ValueError):
+                logger.debug(
+                    "torch.distributed._ops.device_mesh not available, "
+                    "skipping CooR custom op pre-import"
+                )
+
             compiled_fn = (
                 BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
                     serialized_fn_bytes
