@@ -229,11 +229,16 @@ def precompile_load(
 
             # CooR-compiled artifacts reference custom ops (e.g.
             # device_mesh._runtime_compute_coordinate_on_dim) that
-            # are lazily registered. Import the op module so the ops
-            # exist before the generated Inductor code runs.
+            # are lazily registered. Register DeviceMesh as an opaque
+            # type first, then import the ops module.
             try:
+                from torch.distributed.device_mesh import (
+                    _register_distributed_opaque_types,
+                )
+
+                _register_distributed_opaque_types()
                 from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
-            except ImportError:
+            except (ImportError, ValueError):
                 logger.debug(
                     "torch.distributed._ops.device_mesh not available, "
                     "skipping CooR custom op pre-import"

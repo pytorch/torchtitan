@@ -17,8 +17,19 @@ class BaseModel(Module):
     Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
     The model is constructed via ``config.build()``.
 
-    All models must implement ``init_weights`` (from Module).
+    ``init_states`` (from Module) auto-recurses; override only for custom
+    ordering (e.g., weight tying before init).
     """
+
+    def init_weights(self, **kwargs) -> None:
+        """Backward-compatible alias for ``init_states``.
+
+        External tools (e.g., AutoParallel) wrap ``init_weights`` with
+        DTensor-aware interception. This alias ensures they can find it.
+        """
+        # TODO: remove this once autoparallel has wrap_init_states
+        buffer_device = kwargs.get("buffer_device")
+        self.init_states(buffer_device=buffer_device)
 
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.

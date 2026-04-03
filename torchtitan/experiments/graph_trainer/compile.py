@@ -72,8 +72,7 @@ def _apply_jit_compile(
         fsdp_reshard_after_forward,
         transformer_block_buckets,
     )
-    model = torch.compile(
-        model,
+    model.compile(
         backend=backend,
         fullgraph=True,
     )

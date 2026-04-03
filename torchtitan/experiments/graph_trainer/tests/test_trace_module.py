@@ -12,14 +12,15 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_flex_attention_for_regional_inductor,
+)
+
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
     run_traced_module,
     trace_module,
-)
-from torchtitan.models.common.attention import (
-    annotate_flex_attention_for_regional_inductor,
 )
 
 
@@ -59,7 +60,7 @@ def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     model = config_cls(model_config)
     model.to(device=device, dtype=dtype)
     with torch.no_grad():
-        model.init_weights(buffer_device=torch.device(device))
+        model.init_states(buffer_device=torch.device(device))
     return model
 
 
@@ -503,35 +504,52 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_llama3(self):
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import (
+            expand_layer_configs,
+            llama3_configs,
+            Llama3Model,
+        )
 
-        self._run_model_test(Llama3Model, llama3_configs["debugmodel"])
+        config = llama3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_model_test(Llama3Model, config)
 
     def test_qwen3(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        self._run_model_test(Qwen3Model, qwen3_configs["debugmodel"])
+        config = qwen3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_model_test(Qwen3Model, config)
 
     def test_qwen3_moe(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        self._run_model_test(Qwen3Model, qwen3_configs["debugmodel_moe"])
+        config = qwen3_configs["debugmodel_moe"]()
+        expand_layer_configs(config)
+        self._run_model_test(Qwen3Model, config)
 
     def test_deepseek_v3(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import (
+            deepseekv3_configs,
+            expand_layer_configs,
+        )
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        self._run_model_test(DeepSeekV3Model, deepseekv3_configs["debugmodel"])
+        config = deepseekv3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_model_test(DeepSeekV3Model, config)
 
     def test_llama4(self):
-        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4 import expand_layer_configs, llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
+        config = llama4_configs["debugmodel"]()
+        expand_layer_configs(config)
         self._run_model_test(
             Llama4Model,
-            llama4_configs["debugmodel"],
+            config,
             use_attn_masks=True,
             use_regional_inductor=True,
         )
@@ -544,10 +562,11 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
+        expand_layer_configs(config)
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -593,10 +612,11 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
+        expand_layer_configs(config)
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_ac_regions(model)
 
@@ -757,29 +777,44 @@ class TestTraceFSDP(FSDPTest):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
     def test_llama3_fsdp(self):
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import (
+            expand_layer_configs,
+            llama3_configs,
+            Llama3Model,
+        )
 
-        self._run_fsdp_model_test(Llama3Model, llama3_configs["debugmodel"])
+        config = llama3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_fsdp_model_test(Llama3Model, config)
 
     def test_qwen3_fsdp(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        self._run_fsdp_model_test(Qwen3Model, qwen3_configs["debugmodel"])
+        config = qwen3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_fsdp_model_test(Qwen3Model, config)
 
     def test_deepseek_v3_fsdp(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import (
+            deepseekv3_configs,
+            expand_layer_configs,
+        )
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        self._run_fsdp_model_test(DeepSeekV3Model, deepseekv3_configs["debugmodel"])
+        config = deepseekv3_configs["debugmodel"]()
+        expand_layer_configs(config)
+        self._run_fsdp_model_test(DeepSeekV3Model, config)
 
     def test_llama4_fsdp(self):
-        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4 import expand_layer_configs, llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
+        config = llama4_configs["debugmodel"]()
+        expand_layer_configs(config)
         self._run_fsdp_model_test(
             Llama4Model,
-            llama4_configs["debugmodel"],
+            config,
             use_attn_masks=True,
             use_regional_inductor=True,
         )
@@ -792,10 +827,11 @@ class TestTraceFSDP(FSDPTest):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
+        expand_layer_configs(config)
         seq_len = 128
         causal = get_causal_mask_mod()
         sw_size = config.layer.attention.sliding_window_size
@@ -817,6 +853,94 @@ class TestTraceFSDP(FSDPTest):
             attn_masks=attn_masks,
             use_regional_inductor=True,
         )
+
+
+class TestAutogradGradVsBackwardFSDP(FSDPTest):
+    """Verify autograd.grad() and loss.backward() have identical peak memory with FSDP."""
+
+    @property
+    def world_size(self):
+        return min(torch.cuda.device_count(), 4)
+
+    def test_peak_memory_identical_fsdp(self):
+        from torchtitan.distributed import ParallelDims
+        from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        config = llama3_configs["debugmodel"]
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        prev_deterministic = torch.are_deterministic_algorithms_enabled()
+        torch.use_deterministic_algorithms(True)
+
+        try:
+            parallel_dims = ParallelDims(
+                dp_shard=-1,
+                dp_replicate=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                etp=1,
+                world_size=self.world_size,
+            )
+            fsdp_mesh = parallel_dims.get_mesh("fsdp")
+
+            model_backward = create_model(Llama3Model, config, "cuda", torch.bfloat16)
+            model_grad = create_model(Llama3Model, config, "cuda", torch.bfloat16)
+            model_grad.load_state_dict(model_backward.state_dict())
+            model_backward = data_parallel(
+                model_backward, device_mesh=fsdp_mesh, mode="fully_shard"
+            )
+            model_grad = data_parallel(
+                model_grad, device_mesh=fsdp_mesh, mode="fully_shard"
+            )
+
+            tokens = torch.randint(0, config.vocab_size, (2, 128), device="cuda")
+            labels = torch.randint(0, config.vocab_size, (2, 128), device="cuda")
+
+            def run_backward(model):
+                logits = model(tokens)
+                loss = get_loss(logits, labels)
+                loss.backward()
+
+            def run_grad(model):
+                logits = model(tokens)
+                loss = get_loss(logits, labels)
+                params = [p for p in model.parameters() if p.requires_grad]
+                grads = torch.autograd.grad(loss, params)
+                for p, g in zip(params, grads):
+                    p.grad = g
+
+            # Warmup
+            run_backward(model_backward)
+            model_backward.zero_grad()
+            run_grad(model_grad)
+            model_grad.zero_grad()
+            torch.cuda.empty_cache()
+
+            # Measure backward()
+            torch.cuda.reset_peak_memory_stats()
+            run_backward(model_backward)
+            peak_backward = torch.cuda.max_memory_allocated()
+            model_backward.zero_grad()
+            torch.cuda.empty_cache()
+
+            # Measure autograd.grad()
+            torch.cuda.reset_peak_memory_stats()
+            run_grad(model_grad)
+            peak_grad = torch.cuda.max_memory_allocated()
+            model_grad.zero_grad()
+            torch.cuda.empty_cache()
+
+            self.assertEqual(
+                peak_backward,
+                peak_grad,
+                f"Peak memory differs: backward()={peak_backward / 1e9:.2f} GB "
+                f"vs autograd.grad()={peak_grad / 1e9:.2f} GB",
+            )
+        finally:
+            torch.use_deterministic_algorithms(prev_deterministic)
 
 
 if __name__ == "__main__":

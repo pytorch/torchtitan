@@ -54,7 +54,7 @@ class TestApplyCompile(unittest.TestCase):
         apply_compile_sparse(unused_model1, compile_config, ep_enabled=True)
         apply_compile_sparse(unused_model2, compile_config, ep_enabled=True)
 
-        from torchtitan.models.common.moe import moe as moe_module
+        from torchtitan.models.common import moe as moe_module
 
         # Generate sample inputs for _run_experts_grouped_mm
         num_experts = 8
