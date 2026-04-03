@@ -57,3 +57,15 @@ class TrainBatch:
     advantages: torch.Tensor
     token_log_probs: torch.Tensor
     pad_token_id: int
+
+
+@dataclass
+class ForwardBackwardResult:
+    loss: float
+    metrics: dict[str, float]
+
+
+@dataclass
+class OptimStepResult:
+    grad_norm: float
+    policy_version: int
