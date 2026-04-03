@@ -329,24 +329,21 @@ class CheckpointManager(Configurable):
             }
         )
 
-        # Runtime state — always initialized so subclasses (e.g.
-        # FTCheckpointManager) can safely access these even when
-        # checkpointing is disabled.
-        self.folder = os.path.join(base_folder, config.folder)
-        self.async_mode = AsyncMode.DISABLED
-        self.pg: dist.ProcessGroup | None = None
-        self.enable_staging = False
-        self.staging = False
-        self.staging_future = None
-        self.save_future = None
-        self.stager = None
-        self.purge_thread = None
+        async_mode = config.async_mode.lower()
+        self.enable_staging = (
+            self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+        )
 
         if not self.enable:
             return
 
+        self.staging = False
+        self.sending_to_checkpoint_mp = False
         self.staging_id = None
         self.cpu_offload_state_dict = None
+        self.stager = None
+
+        self.folder = os.path.join(base_folder, config.folder)
 
         # Checkpoint policy related fields.
         self.initial_load_model_only = config.initial_load_model_only
@@ -385,8 +382,11 @@ class CheckpointManager(Configurable):
                 target=purge_thread, args=(self.purge_queue,), daemon=True
             )
             self.purge_thread.start()
+        else:
+            self.purge_thread = None
 
         self.mp = None
+        self.staging_future = None
         self.save_future = None
         if async_mode == AsyncMode.DISABLED:
             self.async_mode = AsyncMode.DISABLED
@@ -397,8 +397,6 @@ class CheckpointManager(Configurable):
         else:
             raise ValueError(f"Unknown checkpoint async_mode {config.async_mode}")
 
-        self.enable_staging = self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
         )
@@ -407,13 +405,20 @@ class CheckpointManager(Configurable):
         self.close()
 
     def close(self):
-        if not self.enable:
-            return
-        if self.purge_thread is not None and self.purge_thread.is_alive():
-            self.purge_queue.put(Terminate())
-            self.purge_thread.join()
-        if self.stager is not None:
-            self.stager.close()
+        if hasattr(self, "enable") and self.enable:
+            if hasattr(self, "mp") and self.mp and self.mp.is_alive():
+                self.mp_queue_send.put(Terminate())
+                self.mp.join()
+            if (
+                hasattr(self, "purge_thread")
+                and self.purge_thread
+                and self.purge_thread.is_alive()
+            ):
+                self.purge_queue.put(Terminate())
+                self.purge_thread.join()
+
+            if self.stager is not None:
+                self.stager.close()
 
     @torch.no_grad()
     def dcp_save(
