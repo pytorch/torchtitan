@@ -24,11 +24,11 @@ from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.actors.utils import (
-    compute_policy_gradient_loss,
-    compute_token_log_probs,
+    build_response_mask,
+    extract_logprobs_batched,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -260,15 +260,13 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     @endpoint
-    async def step(self, episodes: list[Episode]) -> dict:
+    async def step(self, batches: list[TrainBatch]) -> dict:
         """Perform one training step.
 
-        Expects a flat list of Episodes with ``advantage`` already computed
-        by the controller. Shards episodes across DP ranks so each rank
-        processes a unique slice of the data.
+        Expects one pre-collated batch per DP rank.
 
         Args:
-            episodes: Flat list of Episodes with advantages set.
+            batches: Pre-sharded batches, one per DP rank.
 
         Returns:
             Training metrics
@@ -277,49 +275,71 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        advantages = torch.tensor([ep.advantage for ep in episodes])
+        local_batch = batches[self.dp_rank]
+        device = self.device
 
-        all_token_ids: list[list[int]] = [ep.token_ids for ep in episodes]
-        all_prompt_token_ids: list[list[int]] = [ep.prompt_token_ids for ep in episodes]
-        all_token_log_probs: list[list[float]] = [ep.token_log_probs for ep in episodes]
+        token_ids = local_batch.token_ids.to(device)
+        prompt_lens = local_batch.prompt_lens.to(device)
+        response_lens = local_batch.response_lens.to(device)
+        advantages = local_batch.advantages.to(device)
 
-        all_rewards_tensor = torch.tensor([ep.reward for ep in episodes])
+        logits = self.model(token_ids)
+        policy_logprobs = extract_logprobs_batched(logits, token_ids)
 
-        # Shard flattened completions across DP ranks so each rank processes
-        # a unique subset of the data.
-        total_samples = len(all_token_ids)
-        my_indices = list(range(self.dp_rank, total_samples, self.dp_size))
-        my_token_ids = [all_token_ids[i] for i in my_indices]
-        my_prompt_token_ids = [all_prompt_token_ids[i] for i in my_indices]
-        my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
-        my_advantages = advantages[my_indices]
-
-        # Compute reference log probs using frozen ref_model (local shard only)
-        ref_token_log_probs = []
-        device = next(self.model.parameters()).device
         with torch.no_grad():
-            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
-                token_lps = compute_token_log_probs(
-                    self.ref_model,
-                    prompt_toks,
-                    gen_toks,
-                    device,
-                )
-                ref_token_log_probs.append(token_lps)
+            ref_logits = self.ref_model(token_ids)
+            ref_logprobs = extract_logprobs_batched(ref_logits, token_ids)
 
-        # Compute loss on this rank's shard
-        loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
-            self.model,
-            my_token_ids,
-            my_prompt_token_ids,
-            my_advantages,
-            ref_token_log_probs,
-            kl_coef=0.1,
+        response_mask = build_response_mask(
+            prompt_lens,
+            response_lens,
+            token_ids.shape[1],
+            device,
         )
+
+        token_log_ratio = (policy_logprobs - ref_logprobs) * response_mask
+        tokens_per_sample = response_mask.sum(dim=1).clamp(min=1.0)
+        mean_log_ratio = token_log_ratio.sum(dim=1) / tokens_per_sample
+        ratio = torch.exp(mean_log_ratio)
+
+        unclipped_loss = ratio * advantages
+        clipped_ratio = torch.clamp(ratio, 1 - 0.2, 1 + 0.2)
+        clipped_loss = clipped_ratio * advantages
+        pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
+
+        entropy = -(policy_logprobs * response_mask).sum() / response_mask.sum().clamp(
+            min=1.0
+        )
+        entropy_bonus = -0.01 * entropy
+
+        token_kl = (torch.exp(token_log_ratio) - 1 - token_log_ratio) * response_mask
+        mean_kl = token_kl.sum(dim=1) / tokens_per_sample
+        kl_div = mean_kl.mean()
+
+        loss = pg_loss + entropy_bonus + 0.1 * kl_div
+
+        loss_metrics = {
+            "pg_loss": pg_loss.item(),
+            "entropy": entropy.item(),
+            "kl_div": kl_div.item(),
+            "ratio_mean": ratio.mean().item(),
+            "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
+            .float()
+            .mean()
+            .item(),
+        }
+
+        rollout_log_probs = []
+        batch_token_log_probs = []
+        for i in range(token_ids.shape[0]):
+            start = prompt_lens[i].item()
+            end = start + response_lens[i].item()
+            rollout_log_probs.append(local_batch.token_log_probs[i, start:end].tolist())
+            batch_token_log_probs.append(policy_logprobs[i, start:end])
 
         # Verify logprob identity (local shard)
         verification_result = verify_logprob_identity(
-            my_token_log_probs,
+            rollout_log_probs,
             batch_token_log_probs,
         )
         logger.debug(
@@ -357,11 +377,8 @@ class PolicyTrainer(Actor, Configurable):
         # Return metrics
         metrics = {
             "loss": loss.item(),
-            "reward_mean": all_rewards_tensor.mean().item(),
-            "reward_std": all_rewards_tensor.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": episodes[0].text[:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             # Trainer vs generator log prob divergence

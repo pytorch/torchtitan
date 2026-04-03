@@ -42,7 +42,7 @@ from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Episode, TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -185,6 +185,51 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
+    def _collate(
+        self,
+        episodes: list[Episode],
+        pad_token_id: int = 0,
+    ) -> list[TrainBatch]:
+        """Pre-shard episodes into per-DP-rank TrainBatches."""
+        batches = []
+        for rank in range(self.trainer_dp_degree):
+            idx = list(range(rank, len(episodes), self.trainer_dp_degree))
+            rank_episodes = [episodes[i] for i in idx]
+
+            prompt_lens = [len(ep.prompt_token_ids) for ep in rank_episodes]
+            response_lens = [len(ep.token_ids) for ep in rank_episodes]
+            max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
+
+            padded_ids = []
+            padded_logprobs = []
+            for ep in rank_episodes:
+                seq = ep.prompt_token_ids + ep.token_ids
+                pad_len = max_len - len(seq)
+                padded_ids.append(seq + [pad_token_id] * pad_len)
+                padded_logprobs.append(
+                    [0.0] * len(ep.prompt_token_ids)
+                    + ep.token_log_probs
+                    + [0.0] * pad_len
+                )
+
+            batches.append(
+                TrainBatch(
+                    token_ids=torch.tensor(padded_ids, dtype=torch.long),
+                    prompt_lens=torch.tensor(prompt_lens, dtype=torch.long),
+                    response_lens=torch.tensor(response_lens, dtype=torch.long),
+                    advantages=torch.tensor(
+                        [ep.advantage for ep in rank_episodes],
+                        dtype=torch.float32,
+                    ),
+                    token_log_probs=torch.tensor(
+                        padded_logprobs,
+                        dtype=torch.float32,
+                    ),
+                    pad_token_id=pad_token_id,
+                )
+            )
+        return batches
+
     async def setup(
         self,
         *,
@@ -217,6 +262,9 @@ class RLTrainer(Configurable):
         self.generator_world_size = self._compute_world_size(
             config.generator.parallelism
         )
+        tp = config.trainer.parallelism
+        dp_shard = max(tp.data_parallel_shard_degree, 1)
+        self.trainer_dp_degree = tp.data_parallel_replicate_degree * dp_shard
 
         total_gpus = self.trainer_world_size + self.generator_world_size
         logger.info(
@@ -442,8 +490,9 @@ class RLTrainer(Configurable):
             if self.config.log_samples:
                 _log_samples(episodes)
 
-            # 4. Trainer updates policy using episodes with advantages
-            metrics = self._get_rank_0_value(self.trainer.step.call(episodes).get())
+            # 4. Trainer updates policy using pre-collated batches
+            batches = self._collate(episodes)
+            metrics = self._get_rank_0_value(self.trainer.step.call(batches).get())
 
             # 5. Sync weights
             t0 = time.perf_counter()
@@ -459,12 +508,13 @@ class RLTrainer(Configurable):
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
             all_rewards = [ep.reward for ep in episodes]
+            reward_mean = sum(all_rewards) / len(all_rewards)
             correct_count = sum(1 for r in all_rewards if r > 0)
             total_count = len(all_rewards)
 
             logger.info(
                 f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
-                f"Reward: {metrics['reward_mean']:+.3f} | "
+                f"Reward: {reward_mean:+.3f} | "
                 f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
