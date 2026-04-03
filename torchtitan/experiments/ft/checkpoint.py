@@ -143,15 +143,12 @@ class FTCheckpointManager(CheckpointManager):
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 
-        if not self._should_save(curr_step, last_step):
-            return
-
         if not self.enable_ft_dataloader_checkpoints or (
             self.ft_manager
             # pyrefly: ignore [missing-attribute]
             and self.ft_manager.participating_rank() == 0
         ):
-            self._do_save(curr_step, last_step)
+            super().save(curr_step, last_step)
         elif self.enable_ft_dataloader_checkpoints:
             assert self.ft_manager is not None
             logger.info(

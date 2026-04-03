@@ -567,10 +567,7 @@ class CheckpointManager(Configurable):
         """
         if not self._should_save(curr_step, last_step):
             return
-        self._do_save(curr_step, last_step)
 
-    def _do_save(self, curr_step: int, last_step: bool) -> None:
-        """Execute the actual checkpoint save (no guard checks)."""
         begin = time.monotonic()
         logger.info("Saving the checkpoint (or staging if async is enabled).")
         checkpoint_id = self._create_checkpoint_id(curr_step)
@@ -862,7 +859,12 @@ class CheckpointManager(Configurable):
             )
 
     def _should_purge(self) -> bool:
-        """Whether this rank should purge stale checkpoints."""
+        """Whether this rank should purge stale checkpoints.
+
+        Extracted so subclasses (e.g. FTCheckpointManager) can add
+        additional guards (like participating_rank) without duplicating
+        the purge loop in _purge_stale_checkpoints.
+        """
         return (
             self.keep_latest_k > 0
             and dist.get_rank() == 0
