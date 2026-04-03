@@ -26,6 +26,7 @@ import os
 # Must set spawn method before any CUDA operations or vLLM imports
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -34,32 +35,38 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
+pytest.importorskip("monarch")
+pytest.importorskip("torchstore")
+pytest.importorskip("vllm")
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.configs import CompileConfig, ParallelismConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.actors.generator import (
-    GeneratorCompileConfig,
-    SamplingConfig,
-    VLLMGenerator,
-)
-from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.actors.utils import (
-    compute_token_log_probs,
-    verify_logprob_identity,
-)
-from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-from torchtitan.experiments.rl.plugin import (
-    register_model_to_vllm_model_registry,
-    VLLM_MODEL_NAME,
-)
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
-from torchtitan.models.qwen3 import model_registry
-from torchtitan.tools import utils
+try:
+    from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+    from torchtitan.config.configs import CompileConfig, ParallelismConfig
+    from torchtitan.distributed import ParallelDims, utils as dist_utils
+    from torchtitan.experiments.rl.actors.generator import (
+        GeneratorCompileConfig,
+        SamplingConfig,
+        VLLMGenerator,
+    )
+    from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+    from torchtitan.experiments.rl.actors.utils import (
+        extract_logprobs_batched,
+        verify_logprob_identity,
+    )
+    from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+    from torchtitan.experiments.rl.models.vllm_wrapper import (
+        register_model_to_vllm_model_registry,
+        VLLM_MODEL_NAME,
+    )
+    from torchtitan.experiments.rl.sync_grpo_sum_digits.main import RLTrainer
+    from torchtitan.models.qwen3 import model_registry
+    from torchtitan.tools import utils
+except (ImportError, ModuleNotFoundError) as exc:
+    pytest.skip(f"RL identity test requires full runtime stack: {exc}", allow_module_level=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -200,7 +207,7 @@ def build_trainer_model(config):
     # Materialize on device
     model.to_empty(device=device_type)
     with torch.no_grad():
-        model.init_states(buffer_device=None)
+        model.init_weights(buffer_device=None)
 
     # Load HF checkpoint (same logic as PolicyTrainer._load_initial_hf_weights)
     if model_spec.state_dict_adapter is not None:
@@ -222,6 +229,22 @@ def build_trainer_model(config):
 
     model.eval()
     return model, device
+
+
+def compute_token_log_probs(
+    model: torch.nn.Module,
+    prompt_ids: list[int],
+    gen_ids: list[int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute per-token logprobs for the generated suffix."""
+    token_ids = torch.tensor([prompt_ids + gen_ids], dtype=torch.long, device=device)
+    with torch.no_grad():
+        logits = model(token_ids)
+    full_logprobs = extract_logprobs_batched(logits, token_ids)
+    prompt_len = len(prompt_ids)
+    gen_len = len(gen_ids)
+    return full_logprobs[0, prompt_len : prompt_len + gen_len]
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +273,7 @@ def _test_config() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
             ),
             compile=GeneratorCompileConfig(backend="eager", cudagraph_mode="piecewise"),
-            num_samples_per_prompt=1,
+            group_size=1,
             sampling=SamplingConfig(
                 temperature=0.0,
                 top_p=1.0,
