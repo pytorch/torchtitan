@@ -298,6 +298,38 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                # First run: compile + save artifact
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--compile.joint_passes inductor_decomposition",
+                    "--compile.passes auto_bucketing,full_inductor_compilation",
+                    "--compile.precompile",
+                    "--compile.precompile_artifact_dir /tmp/graph_trainer_precompile_test",
+                ],
+                # Second run: load artifact, skip compilation
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--compile.joint_passes inductor_decomposition",
+                    "--compile.passes auto_bucketing,full_inductor_compilation",
+                    "--compile.precompile",
+                    "--compile.precompile_artifact_dir /tmp/graph_trainer_precompile_test",
+                    "--training.steps 20",
+                ],
+            ],
+            "AOT llama3 precompile save+load",
+            "aot_llama3_precompile",
+            ngpu=8,
+        ),
         # === aot_fx_trace mode tests ===
         OverrideDefinitions(
             [
