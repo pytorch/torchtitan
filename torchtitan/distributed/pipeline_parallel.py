@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 import torch
 import torch.nn as nn
+from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
@@ -42,6 +43,20 @@ __all__ = [
     "generate_llm_fqn_per_model_part",
     "pipeline_module_split",
 ]
+
+
+def _build_get_mesh_callback(
+    parallel_dims: ParallelDims,
+) -> Callable[[tuple[str, ...], _MeshLayout | None], DeviceMesh | None]:
+    def _get_mesh(
+        mesh_dim_names: tuple[str, ...], mesh_layout: _MeshLayout | None
+    ) -> DeviceMesh | None:
+        mesh = parallel_dims.get_mesh(list(mesh_dim_names))
+        if mesh_layout is not None and mesh._layout != mesh_layout:
+            return None
+        return mesh
+
+    return _get_mesh
 
 
 def pipeline_llm(
@@ -130,12 +145,14 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
+    get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = pipeline_module_split(
         model,
         pp_mesh,
         parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
+        get_mesh=get_mesh_cb,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -370,6 +387,7 @@ def pipeline_module_split(
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
+    get_mesh: Callable | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
@@ -456,6 +474,7 @@ def pipeline_module_split(
             num_stages,
             device,
             group=pp_mesh.get_group("pp"),
+            get_mesh=get_mesh,
         )
         return stage, model
 
