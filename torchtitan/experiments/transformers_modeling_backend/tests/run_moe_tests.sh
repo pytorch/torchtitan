@@ -227,8 +227,10 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "Qwen/Qwen3-30B-A3B"                     # qwen3_moe (reference)
         "mistralai/Mixtral-8x7B-Instruct-v0.1"   # mixtral (no shared experts)
         "Qwen/Qwen2-57B-A14B"                    # qwen2_moe (shared experts)
-        # deepseek-ai/DeepSeek-V3 requires extra config attrs (qk_head_dim)
-        # not in TitanModelConfig. Needs model-specific config support.
+        # Qwen/Qwen3.5-35B-A3B — VLM (ForConditionalGeneration), not ForCausalLM
+        # microsoft/Phi-3.5-MoE-instruct — PhiMoEForCausalLM not in transformers 5.x
+        # zai-org/GLM-* — uses n_routed_experts instead of num_experts
+        # deepseek-ai/DeepSeek-V3 — needs qk_head_dim in TitanModelConfig
     )
 
     for hf_model in "${SWEEP_MODELS[@]}"; do
