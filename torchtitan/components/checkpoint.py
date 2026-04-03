@@ -342,6 +342,7 @@ class CheckpointManager(Configurable):
         self.staging_id = None
         self.cpu_offload_state_dict = None
         self.stager = None
+        self.pg: dist.ProcessGroup | None = None
 
         self.folder = os.path.join(base_folder, config.folder)
 
@@ -383,7 +384,7 @@ class CheckpointManager(Configurable):
             )
             self.purge_thread.start()
         else:
-            self.purge_thread = None
+            self.purge_thread: threading.Thread | None = None
 
         self.mp = None
         self.staging_future = None
@@ -407,7 +408,7 @@ class CheckpointManager(Configurable):
     def close(self):
         if hasattr(self, "enable") and self.enable:
             if hasattr(self, "mp") and self.mp and self.mp.is_alive():
-                self.mp_queue_send.put(Terminate())
+                self.mp_queue_send.put(Terminate())  # pyrefly: ignore [missing-attribute]
                 self.mp.join()
             if (
                 hasattr(self, "purge_thread")

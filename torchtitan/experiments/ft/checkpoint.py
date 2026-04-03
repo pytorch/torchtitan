@@ -170,9 +170,9 @@ class FTCheckpointManager(CheckpointManager):
         return states
 
     def _async_wait(self) -> None:
-        # FT dataloader checkpoints use ASYNC mode regardless of self.async_mode,
-        # so the base class would incorrectly raise when async_mode is DISABLED
-        # but save_future exists from _ft_save.
+        # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
+        # so save_future can exist even when self.async_mode is DISABLED. The base
+        # class would incorrectly raise in that case, so we override to handle it.
         if self.save_future is None:
             return
         self.save_future.result()
