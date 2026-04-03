@@ -23,8 +23,8 @@ import os
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from torchtitan.tools.logging import logger
 
@@ -121,14 +121,8 @@ def run_precompile_tests(args):
             )
 
         # Step 2: training with the precompiled artifact
-        cmd = (
-            f"NGPU={test.ngpu} LOG_RANK={all_ranks} "
-            f"./{RUN_TRAIN_SCRIPT}"
-        )
-        cmd = (
-            f'TORCH_TRACE="{args.output_dir}/{test.test_name}/compile_trace" '
-            + cmd
-        )
+        cmd = f"NGPU={test.ngpu} LOG_RANK={all_ranks} " f"./{RUN_TRAIN_SCRIPT}"
+        cmd = f'TORCH_TRACE="{args.output_dir}/{test.test_name}/compile_trace" ' + cmd
         cmd += " " + dump_folder_arg
         cmd += " " + " ".join(test.override_args)
 
