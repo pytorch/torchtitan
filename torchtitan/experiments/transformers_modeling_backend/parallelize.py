@@ -433,6 +433,18 @@ def parallelize_hf_transformers(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
+    # Register experts_to_local hooks AFTER apply_fsdp so they fire after
+    # FSDP unshard. Native titan does to_local() inside GroupedExperts.forward;
+    # we use __dict__ shadowing hooks since we don't modify the HF forward.
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        for transformer_block in model.layers:
+            if getattr(transformer_block, "moe_enabled", False):
+                experts = transformer_block.mlp.experts
+                experts.register_forward_pre_hook(_experts_to_local_pre_hook)
+                experts.register_forward_hook(
+                    _experts_restore_post_hook, prepend=True
+                )
+
     return model
 
 
@@ -635,9 +647,9 @@ def apply_moe_ep_tp(
       while native's ``moe.router.gate`` is an ``nn.Linear`` returning
       a single tensor. Relies on the topk gather patch for DTensor safety.
     - **Expert params to_local:** Done via ``__dict__`` shadowing hooks
-      (registered here, re-registered in ``apply_fsdp`` for correct
-      ordering) instead of ``to_local()`` inside the forward — we don't
-      modify the HF forward.
+      (registered in ``parallelize_hf_transformers`` after ``apply_fsdp``
+      to ensure correct hook ordering) instead of ``to_local()`` inside
+      the forward — we don't modify the HF forward.
 
     Args:
         model: The model with MoE layers.
@@ -711,11 +723,9 @@ def apply_moe_ep_tp(
                     _make_moe_to_local_pre_hook((Partial(),))
                 )
 
-        # Pre/post hooks on experts: convert DTensor params to local.
-        # Store handles so apply_fsdp can re-register after fully_shard.
-        h1 = experts.register_forward_pre_hook(_experts_to_local_pre_hook)
-        h2 = experts.register_forward_hook(_experts_restore_post_hook, prepend=True)
-        experts._to_local_hook_handles = (h1, h2)
+        # NOTE: experts_to_local hooks are registered in
+        # parallelize_hf_transformers AFTER apply_fsdp, to ensure they
+        # fire after FSDP unshard. See _experts_to_local_pre_hook docstring.
 
     logger.info("Applied MoE parallelism to the model")
 
@@ -871,24 +881,12 @@ def apply_fsdp(
             if dp_mod_ep_mesh.size() > num_local_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
-            # Remove to_local hooks registered in apply_moe_ep_tp (they'd
-            # fire before FSDP unshard, getting sharded params).
-            if hasattr(experts, "_to_local_hook_handles"):
-                for h in experts._to_local_hook_handles:
-                    h.remove()
-                del experts._to_local_hook_handles
-
             fully_shard(
                 experts,
                 **fsdp_mod_ep_config,
                 reshard_after_forward=reshard_after_forward,
                 shard_placement_fn=_experts_shard_placement_fn,
             )
-
-            # Re-register AFTER fully_shard: pre-hook fires AFTER FSDP
-            # unshard, post-hook (prepend) fires BEFORE FSDP reshard.
-            experts.register_forward_pre_hook(_experts_to_local_pre_hook)
-            experts.register_forward_hook(_experts_restore_post_hook, prepend=True)
 
         fully_shard(
             transformer_block,
