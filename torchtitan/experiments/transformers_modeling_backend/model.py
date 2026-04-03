@@ -394,6 +394,11 @@ class HFTransformerModel(BaseModel):
             # some models might not have mlp in each layer
             if hasattr(self, "mlp") and self.mlp is not None:
                 self.mlp.layer_idx = layer_idx
+                # Propagate to shared experts (e.g., Qwen2 MoE, DeepSeek V3)
+                for shared_name in ("shared_expert", "shared_experts"):
+                    shared = getattr(self.mlp, shared_name, None)
+                    if shared is not None:
+                        shared.layer_idx = layer_idx
 
         def _initialize_weights_patched(self, module):
             # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly

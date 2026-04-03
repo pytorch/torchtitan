@@ -691,11 +691,31 @@ def apply_moe_ep_tp(
                 NoParallel(local_output_grad_placements=(Partial(),)),
             )
 
-            # Warn about shared experts with TP
-            if hasattr(moe_block, "shared_expert"):
-                logger.warning(
-                    "Shared experts are not TP-sharded. Use EP-only for "
-                    "models with shared experts (e.g., Qwen3.5, DeepSeek V3)."
+            # TP-shard shared experts if present (e.g., Qwen2/3.5 MoE,
+            # DeepSeek V3). The shared expert is a dense MLP — apply
+            # ColwiseParallel/RowwiseParallel so its output is Partial,
+            # matching the routed expert output.
+            for shared_name in ("shared_expert", "shared_experts"):
+                shared = getattr(moe_block, shared_name, None)
+                if shared is not None:
+                    shared_plan = {}
+                    for name in ("gate_proj", "up_proj"):
+                        if hasattr(shared, name):
+                            shared_plan[name] = ColwiseParallel()
+                    if hasattr(shared, "down_proj"):
+                        shared_plan["down_proj"] = RowwiseParallel(
+                            output_layouts=Partial()
+                        )
+                    if shared_plan:
+                        parallelize_module(shared, tp_mesh, shared_plan)
+
+            # Replicate shared_expert_gate on TP mesh (FSDP mesh alignment)
+            shared_gate = getattr(moe_block, "shared_expert_gate", None)
+            if shared_gate is not None:
+                parallelize_module(
+                    shared_gate,
+                    tp_mesh,
+                    NoParallel(local_output_grad_placements=(Partial(),)),
                 )
 
             # MoE block TP boundary (TP-only): all-gather input, reduce-

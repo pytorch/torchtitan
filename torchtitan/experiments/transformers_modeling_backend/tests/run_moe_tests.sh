@@ -226,6 +226,7 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
     SWEEP_MODELS=(
         "Qwen/Qwen3-30B-A3B"                     # qwen3_moe (reference)
         "mistralai/Mixtral-8x7B-Instruct-v0.1"   # mixtral (no shared experts)
+        "Qwen/Qwen2-57B-A14B"                    # qwen2_moe (shared experts)
         # deepseek-ai/DeepSeek-V3 requires extra config attrs (qk_head_dim)
         # not in TitanModelConfig. Needs model-specific config support.
     )
@@ -233,6 +234,19 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
     for hf_model in "${SWEEP_MODELS[@]}"; do
         run_half "EP=2 $hf_model" \
             --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.expert_parallel_degree 2 \
+            --training.steps "$SWEEP_STEPS" \
+            --hf_model "$hf_model"
+    done
+
+    # TP+EP sweep for shared expert models (verifies shared expert TP sharding)
+    SWEEP_SHARED_MODELS=(
+        "Qwen/Qwen2-57B-A14B"                    # qwen2_moe (shared experts)
+    )
+    for hf_model in "${SWEEP_SHARED_MODELS[@]}"; do
+        run_half "TP=2+EP=2 $hf_model" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
             --parallelism.expert_parallel_degree 2 \
             --training.steps "$SWEEP_STEPS" \
             --hf_model "$hf_model"
