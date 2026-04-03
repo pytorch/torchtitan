@@ -185,6 +185,21 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.fsdp_reshard_after_forward always",
+                ],
+            ],
+            "AOT llama3 FSDP+TP fsdp_reshard_after_fwd",
+            "aot_llama3_fsdp_tp_reshard_after_fwd",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes auto_bucketing",
                 ],
             ],
