@@ -19,19 +19,14 @@ from torchtitan.protocols.module import Module
 
 def _deterministic_scatter_add(
     out: torch.Tensor,
-    token_indices: torch.Tensor,
-    dim: int,
+    index: torch.Tensor,
     src: torch.Tensor,
 ) -> torch.Tensor:
     prev = torch.are_deterministic_algorithms_enabled()
     prev_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     torch.use_deterministic_algorithms(True, warn_only=False)
     try:
-        out = out.scatter_add(
-            dim=0,
-            index=token_indices.reshape(-1, 1).expand(-1, dim),
-            src=src,
-        )
+        out = out.scatter_add(dim=0, index=index, src=src)
     finally:
         torch.use_deterministic_algorithms(prev, warn_only=prev_warn_only)
     return out
@@ -499,7 +494,9 @@ class MoE(Module):
             ).to(x.dtype)
 
         out = _deterministic_scatter_add(
-            out, token_indices_experts_sorted, dim, routed_output
+            out,
+            token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
         )
         out = out.reshape(bs, slen, dim)
         return out
