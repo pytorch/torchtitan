@@ -396,6 +396,9 @@ llama3_configs = {
 
 
 def model_registry(flavor: str) -> ModelSpec:
+    # TODO(fegin): revisit
+    # https://github.com/pytorch/torchtitan/pull/2785#issuecomment-4184528111
+    # and resolve how we expand flex/varlen/sdpa for the config.
     config = llama3_configs[flavor]()
     return ModelSpec(
         name="llama3",

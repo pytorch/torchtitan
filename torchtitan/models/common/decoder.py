@@ -76,6 +76,9 @@ class Decoder(BaseModel):
         # and Attention. Also RoPE itself as a standalone module requires PP special
         # handling, see below.
         rope: RoPE.Config
+        # TODO(fegin): revisit
+        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
+        # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
 
     def __init__(self, config: Config):
@@ -138,11 +141,11 @@ class Decoder(BaseModel):
         self,
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
+        attn_config: BaseAttention.Config,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
 
-        match self.attn_config.mask_type:
+        match attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -151,17 +154,17 @@ class Decoder(BaseModel):
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.attn_config.mask_type}"
+                    f"Unknown attention mask type: {attn_config.mask_type}"
                 )
 
-        assert isinstance(self.attn_config.inner_attention, FlexAttention.Config)
+        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         return create_attention_mask(
             and_masks(*mask_mods),
             B,
             None,
             input_batch.shape[1],
             input_batch.shape[1],
-            BLOCK_SIZE=self.attn_config.inner_attention.block_size,
+            BLOCK_SIZE=attn_config.inner_attention.block_size,
         )
 
     def get_attention_masks(
@@ -170,14 +173,15 @@ class Decoder(BaseModel):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        inner_attn = self.attn_config.inner_attention
+        attn_config = self.config.layers[0].attention
+        inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
-            return self._get_flex_attention_masks(input_batch, tokenizer, extra_inputs)
+            return self._get_flex_attention_masks(input_batch, tokenizer, attn_config)
         elif isinstance(inner_attn, VarlenAttention.Config):
-            if self.attn_config.mask_type != "block_causal":
+            if attn_config.mask_type != "block_causal":
                 raise ValueError(
                     f"varlen attention is only supported with block_causal "
-                    f"attention mask type, got {self.attn_config.mask_type}"
+                    f"attention mask type, got {attn_config.mask_type}"
                 )
             assert tokenizer.eos_id is not None
             return create_varlen_metadata_for_document(input_batch, tokenizer.eos_id)
@@ -186,8 +190,3 @@ class Decoder(BaseModel):
                 f"Only VarlenAttention and FlexAttention support attention masks, "
                 f"got {type(inner_attn).__name__}"
             )
-
-    @property
-    def attn_config(self):
-        """Convenience accessor for the attention config from the first layer."""
-        return self.config.layers[0].attention

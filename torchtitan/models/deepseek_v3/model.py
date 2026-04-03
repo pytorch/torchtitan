@@ -80,6 +80,9 @@ class Attention(BaseAttention):
             self.wq_a = config.wq_a.build()
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
+
+        # TODO(fegin): revisit
+        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
         self.wkv_a = config.wkv_a.build()
         self.kv_norm = config.kv_norm.build()
         self.wkv_b = config.wkv_b.build()

@@ -255,7 +255,7 @@ class GptOssModel(Decoder):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         basic_mask_mods = []
-        attn_cfg = self.attn_config
+        attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(attn_cfg.sliding_window_size)
