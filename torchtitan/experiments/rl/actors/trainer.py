@@ -89,18 +89,7 @@ class PolicyTrainer(Actor, Configurable):
 
         world_size = dist_utils.init_distributed(config.comm)
 
-        # Build parallel dims
-        parallelism_config = config.parallelism
-        self.parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
         # Initialize state dict adapter for HF checkpoint loading
         if model_spec.state_dict_adapter is not None:
