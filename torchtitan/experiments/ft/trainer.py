@@ -303,8 +303,11 @@ class FaultTolerantTrainer(Trainer):
         self.step = 0
         self.ntokens_seen = 0
 
-        # FT addition: pass ft_manager to CheckpointManager
-        self.checkpointer = config.checkpoint.build(
+        # FT addition: use FTCheckpointManager for fault tolerance support
+        from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
+
+        self.checkpointer = FTCheckpointManager(
+            config.checkpoint,
             dataloader=self.dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
