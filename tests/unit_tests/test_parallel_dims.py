@@ -12,6 +12,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 
 
@@ -33,6 +34,28 @@ class TestParallelDimsValidation(unittest.TestCase):
         )
         self.assertEqual(parallel_dims.dp_replicate, 2)
         self.assertEqual(parallel_dims.dp_shard, 2)
+        self.assertEqual(parallel_dims.cp, 1)
+        self.assertEqual(parallel_dims.tp, 2)
+        self.assertEqual(parallel_dims.pp, 1)
+        self.assertEqual(parallel_dims.ep, 1)
+        self.assertEqual(parallel_dims.etp, 1)
+        self.assertEqual(parallel_dims.world_size, 8)
+
+    @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
+    def test_from_config(self):
+        """Test constructing ParallelDims from a ParallelismConfig."""
+        config = ParallelismConfig(
+            data_parallel_replicate_degree=2,
+            data_parallel_shard_degree=-1,
+            context_parallel_degree=1,
+            tensor_parallel_degree=2,
+            pipeline_parallel_degree=1,
+            expert_parallel_degree=1,
+            expert_tensor_parallel_degree=1,
+        )
+        parallel_dims = ParallelDims.from_config(config, world_size=8)
+        self.assertEqual(parallel_dims.dp_replicate, 2)
+        self.assertEqual(parallel_dims.dp_shard, 2)  # auto-calculated: 8 / (2*1*2*1)
         self.assertEqual(parallel_dims.cp, 1)
         self.assertEqual(parallel_dims.tp, 2)
         self.assertEqual(parallel_dims.pp, 1)
