@@ -97,6 +97,53 @@ class TestPrecompiledArtifact(unittest.TestCase):
         self.assertEqual(loaded.metadata, artifact.metadata)
 
 
+class TestApplyCompileValidation(unittest.TestCase):
+    """Test that apply_compile raises on invalid precompile configurations."""
+
+    def _make_args(self, **compile_overrides):
+        from torchtitan.config import ParallelismConfig
+        from torchtitan.distributed import ParallelDims
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+
+        compile_config = GraphTrainerCompileConfig(
+            enable=True, mode="aot", **compile_overrides
+        )
+        parallelism = ParallelismConfig()
+        parallel_dims = ParallelDims(
+            dp_shard=2, dp_replicate=1, cp=1, tp=1, pp=1, ep=1, etp=1, world_size=2
+        )
+        return dict(
+            model=torch.nn.Linear(4, 4),
+            compile_config=compile_config,
+            parallelism=parallelism,
+            parallel_dims=parallel_dims,
+            dump_folder="/tmp/test_dump",
+        )
+
+    def test_precompile_missing_artifact_raises(self):
+        from torchtitan.experiments.graph_trainer.compile import apply_compile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = self._make_args(
+                precompile_artifact_dir=tmpdir,
+                passes=["full_inductor_compilation"],
+            )
+            with self.assertRaisesRegex(ValueError, "not found"):
+                apply_compile(**args)
+
+    def test_precompile_without_serializable_pass_raises(self):
+        from torchtitan.experiments.graph_trainer.compile import apply_compile
+
+        args = self._make_args(
+            precompile_artifact_dir="/tmp/test",
+            passes=["auto_bucketing"],
+        )
+        with self.assertRaisesRegex(ValueError, "serializable output"):
+            apply_compile(**args)
+
+
 @dataclass
 class _StubCompileConfig:
     mode: str = "aot"
@@ -163,17 +210,14 @@ class TestPrecompileSaveLoad(unittest.TestCase):
                     model,
                     compiled_fn,
                     storage,
-                    "test_key",
                     out_spec=None,
                     config_fingerprint="abc123",
                 )
 
-            self.assertTrue(storage.exists("test_key"))
+            self.assertTrue(storage.exists("default"))
 
             # Load should succeed with matching model
-            wrapper = precompile_load(
-                model, storage, "test_key", expected_fingerprint="abc123"
-            )
+            wrapper = precompile_load(model, storage, expected_fingerprint="abc123")
             self.assertTrue(callable(wrapper))
 
     def test_load_param_mismatch(self):
@@ -190,13 +234,13 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("key", pickle.dumps(artifact))
+            storage.save("default", pickle.dumps(artifact))
 
             # Model with different params should fail
             model = torch.nn.Linear(8, 8)
             model.extra = torch.nn.Parameter(torch.zeros(1))
             with self.assertRaisesRegex(ValueError, "Parameter mismatch"):
-                precompile_load(model, storage, "key", expected_fingerprint="")
+                precompile_load(model, storage, expected_fingerprint="")
 
     def test_load_buffer_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -212,12 +256,12 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("key", pickle.dumps(artifact))
+            storage.save("default", pickle.dumps(artifact))
 
             # nn.Linear has no buffers, so buffers_spec won't match
             model = torch.nn.Linear(4, 4)
             with self.assertRaisesRegex(ValueError, "Buffer mismatch"):
-                precompile_load(model, storage, "key", expected_fingerprint="")
+                precompile_load(model, storage, expected_fingerprint="")
 
     def test_load_fingerprint_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -235,12 +279,10 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("key", pickle.dumps(artifact))
+            storage.save("default", pickle.dumps(artifact))
 
             with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
-                precompile_load(
-                    model, storage, "key", expected_fingerprint="new_fingerprint"
-                )
+                precompile_load(model, storage, expected_fingerprint="new_fingerprint")
 
     def test_load_with_out_spec_unflattens(self):
         from torch._dynamo.aot_compile_types import (
@@ -265,7 +307,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("key", pickle.dumps(artifact))
+            storage.save("default", pickle.dumps(artifact))
 
             # Mock deserialize to return a fn that returns flat outputs
             def fake_compiled_fn(*args, **kwargs):
@@ -276,9 +318,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
                 "deserialize_compile_artifacts",
                 return_value=fake_compiled_fn,
             ):
-                wrapper = precompile_load(
-                    model, storage, "key", expected_fingerprint=""
-                )
+                wrapper = precompile_load(model, storage, expected_fingerprint="")
                 result = wrapper((), {})
 
             self.assertIsInstance(result, dict)
@@ -303,10 +343,10 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("key", pickle.dumps(artifact))
+            storage.save("default", pickle.dumps(artifact))
 
             with self.assertLogs(level="WARNING") as cm:
-                precompile_load(model, storage, "key", expected_fingerprint="some_fp")
+                precompile_load(model, storage, expected_fingerprint="some_fp")
             self.assertTrue(any("legacy artifact" in msg for msg in cm.output))
 
 
@@ -317,7 +357,10 @@ class TestPrecompileSaveValidation(unittest.TestCase):
         model = torch.nn.Linear(4, 4)
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            not_serializable = lambda *args: None
+
+            def not_serializable(*args):
+                return None
+
             with self.assertRaisesRegex(
                 TypeError, "BundledAOTAutogradSerializableCallable"
             ):
@@ -325,7 +368,6 @@ class TestPrecompileSaveValidation(unittest.TestCase):
                     model,
                     not_serializable,
                     storage,
-                    "test_key",
                     out_spec=None,
                 )
 
