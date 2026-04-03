@@ -108,14 +108,27 @@ class TupleNoParallel(NoParallel):
 class HFExpertParallel(BaseExpertParallel):
     """Expert Parallelism for HF Transformers MoE models.
 
-    Adapts torchtitan's BaseExpertParallel for the HF experts interface
-    (hidden_states, top_k_index, top_k_weights). Shards expert params
-    on dim 0, dispatches tokens via all-to-all based on routing decisions,
-    and combines results after expert computation.
+    Adapts torchtitan's ``ExpertParallel`` for the HF experts interface.
+    The key difference is the input/output contract:
 
-    Applied to the experts module via parallelize_module. The MoE block
+    - **Native ``ExpertParallel``** expects pre-sorted tokens:
+      input ``(routed_input, num_tokens_per_expert)``, output is sorted
+      expert results. The ``Reorderer`` in ``MoE.forward`` handles sorting
+      before and unsorting after the experts call.
+
+    - **``HFExpertParallel``** receives unsorted tokens from the HF
+      ``SparseMoeBlock``: input ``(hidden_states, top_k_index, top_k_weights)``.
+      Sorting, routing weight transport, and local routing construction
+      happen inside ``_token_dispatch``. ``_token_combine`` handles
+      unsorting and top_k accumulation, returning the final output
+      directly (HF expects experts to return the accumulated result).
+
+    Partition is the same: both shard expert params on dim 0 via
+    ``distribute_tensor(..., [Shard(0)])``.
+
+    Applied to the experts module via ``parallelize_module``. The MoE block
     forward and experts forward run unchanged — dispatch/combine happen
-    in input/output hooks registered by distribute_module.
+    in input/output hooks registered by ``distribute_module``.
     """
 
     def __init__(self):
@@ -126,7 +139,11 @@ class HFExpertParallel(BaseExpertParallel):
         self._global_num_experts = None
 
     def _partition_fn(self, name, mod, device_mesh):
-        """Shard expert params on dim 0 across EP ranks."""
+        """Shard expert params on dim 0 across EP ranks.
+
+        Same as native ``ExpertParallel``. Also captures EP metadata
+        (group, sizes) for use in dispatch/combine.
+        """
         for param_name, param in list(mod.named_parameters(recurse=False)):
             mod.register_parameter(
                 param_name,
@@ -142,7 +159,19 @@ class HFExpertParallel(BaseExpertParallel):
             self._num_local_experts = mod.num_experts // ep_size
 
     def _token_dispatch(self, mod, inputs, device_mesh):
-        """Sort tokens by expert, all-to-all dispatch, build local routing."""
+        """Sort tokens by expert, all-to-all dispatch, build local routing.
+
+        Unlike native ``ExpertParallel`` which receives pre-sorted tokens,
+        this receives the raw HF interface ``(hidden_states, top_k_index,
+        top_k_weights)`` and performs sorting internally. Routing weights
+        are transported alongside tokens via a second all-to-all (native
+        titan applies weights in ``MoE.forward``, not in dispatch).
+
+        Returns ``(dispatched_tokens, local_top_k_index, local_top_k_weights)``
+        — the same interface the HF ``Experts.forward`` expects, but with
+        tokens dispatched to the correct EP rank and indices remapped to
+        local experts.
+        """
         hidden_states, top_k_index, top_k_weights = inputs
         ep_size = self._ep_size
         num_local = self._num_local_experts
@@ -225,7 +254,13 @@ class HFExpertParallel(BaseExpertParallel):
         return dispatched, mock_top_k_index, mock_top_k_weights
 
     def _token_combine(self, mod, output, device_mesh):
-        """All-to-all combine, unsort, sum across top_k."""
+        """All-to-all combine, unsort, sum across top_k.
+
+        Unlike native ``ExpertParallel`` which returns sorted output
+        (unsorting and weight application happen in ``MoE.forward``),
+        this returns the final accumulated result because HF's
+        ``SparseMoeBlock`` expects experts to return the finished output.
+        """
         combined = all_to_all_single_autograd(
             output,
             self._input_splits,  # reversed
