@@ -381,8 +381,7 @@ class TestBitwiseParity(unittest.TestCase):
 
         from torchtitan.tools.utils import has_cuda_capability
 
-        # Hopper (SM 9.0) uses FA3; Blackwell (SM 10.0+) and older use FA2.
-        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
+        if has_cuda_capability(9, 0):
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,

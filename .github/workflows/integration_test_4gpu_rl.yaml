@@ -86,13 +86,11 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
+        # Run bitwise parity tests (TP=2, batch-invariant mode)
+        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+
         # Run E2E RL integration tests (TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
           --hf_assets_path "$MODEL_PATH"
-
-        # Run bitwise parity tests (TP=2, batch-invariant mode)
-        # Test 1: batch invariance, Test 2: trainer vs vLLM prefill,
-        # Test 3: vLLM decode vs 2nd-pass prefill
-        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
