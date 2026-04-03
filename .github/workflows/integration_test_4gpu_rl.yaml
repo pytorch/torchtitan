@@ -91,10 +91,8 @@ jobs:
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
           --hf_assets_path "$MODEL_PATH"
 
-        # Run bitwise parity test (TP=2, batch-invariant mode)
-        torchrun --nproc-per-node=2 \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py --tp 2 \
-          --hf-assets-path "$MODEL_PATH"
-
-        # Run batch-invariant unit test (TP=2)
-        python torchtitan/experiments/rl/tests/test_batch_invariant.py --tp 2
+        # Run bitwise parity tests (TP=2, batch-invariant mode)
+        # Test 1: batch invariance, Test 2: trainer vs vLLM prefill,
+        # Test 3: vLLM decode vs 2nd-pass prefill
+        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
