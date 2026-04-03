@@ -28,7 +28,7 @@ def _skip_nested_compile() -> Generator[None, None, None]:
     """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
 
     make_fx cannot trace through torch.compile'd functions (e.g. compiled
-    flex_attention in FlexAttentionWrapper). Setting error_on_nested_fx_trace
+    flex_attention in FlexAttention). Setting error_on_nested_fx_trace
     to False makes dynamo silently inline the wrapped function instead of
     raising, so make_fx traces the underlying ops normally.
     """

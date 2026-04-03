@@ -12,7 +12,7 @@ from torchtitan.protocols.module import Module
 
 
 class RMSNorm(nn.RMSNorm, Module):
-    """Configurable nn.RMSNorm with init_weights support.
+    """Configurable nn.RMSNorm.
 
     Uses diamond inheritance (nn.RMSNorm + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
@@ -44,7 +44,3 @@ class RMSNorm(nn.RMSNorm, Module):
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
-        self.config = config
-
-    def init_weights(self, **kwargs) -> None:
-        self.reset_parameters()
