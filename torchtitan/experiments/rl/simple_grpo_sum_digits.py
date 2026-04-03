@@ -37,7 +37,6 @@ from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import Configurable
-from torchtitan.config.configs import DebugConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
@@ -119,9 +118,6 @@ class RLTrainer(Configurable):
         num_steps: int = 10
         """Number of RL training steps."""
 
-        debug: DebugConfig = field(default_factory=DebugConfig)
-        """Debug and determinism settings."""
-
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
@@ -138,16 +134,11 @@ class RLTrainer(Configurable):
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
         def __post_init__(self):
-            # Propagate debug settings to sub-configs
-            self.trainer.debug = self.debug
-            self.generator.debug = self.debug
-
-            # Batch-invariant mode requires bf16 on both trainer and generator
-            # so that attention kernels (FA3) run identically on both sides
-            # without any dtype casting that could break bitwise identity.
-            if self.debug.batch_invariant:
-                if not self.debug.deterministic:
+            if self.trainer.debug.batch_invariant:
+                if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
+                # TODO: Replace trainer dtype constraint to use mixed
+                #  training enabled by FSDP.
                 if self.trainer.training.dtype != "bfloat16":
                     raise ValueError(
                         f"batch_invariant requires bfloat16 training dtype, "

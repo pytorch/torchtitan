@@ -25,7 +25,7 @@ import torch.distributed as dist
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.configs import DebugConfig
-from torchtitan.distributed.utils import set_batch_invariant
+from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import build_varlen_metadata
 from torchtitan.tools.utils import set_default_dtype
 
@@ -54,14 +54,10 @@ def _build_debug_model(
             VarlenAttention.Config,
         ), "Only varlen attention backend is allowed."
 
-    with torch.device("meta"):
+    torch.manual_seed(42)
+    with torch.device(device):
         with set_default_dtype(TORCH_DTYPE_MAP[dtype]):
             model = model_spec.model.build()
-
-    model.to_empty(device=device)
-    torch.manual_seed(42)
-    with torch.no_grad():
-        model.init_weights(buffer_device=None)
     return model, model_spec.model.vocab_size
 
 
@@ -70,7 +66,7 @@ class TestBatchInvariant(unittest.TestCase):
     """Test batch invariance on Qwen3 debugmodel."""
 
     def setUp(self):
-        set_batch_invariant()
+        set_batch_invariance(enable=True)
         self.debug = DebugConfig(batch_invariant=True, deterministic=True)
 
     def test_forward_invariance(self):
@@ -80,7 +76,7 @@ class TestBatchInvariant(unittest.TestCase):
         Runs the full Qwen3 debugmodel forward on 5 sequences individually,
         then as a batch of 5, and checks that outputs match bitwise.
         """
-        set_batch_invariant()
+        set_batch_invariance(enable=True)
 
         model, vocab_size = _build_debug_model(self.debug)
         model.eval()
@@ -136,7 +132,7 @@ class TestBatchInvariant(unittest.TestCase):
         torch.cuda.set_device(device)
 
         debug = DebugConfig(batch_invariant=True, deterministic=True)
-        set_batch_invariant()
+        set_batch_invariance(enable=True)
 
         model, vocab_size = _build_debug_model(debug)
 

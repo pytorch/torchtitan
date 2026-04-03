@@ -215,7 +215,7 @@ def is_in_batch_invariant_mode() -> bool:
     return _batch_invariant_enabled
 
 
-def set_batch_invariant() -> None:
+def set_batch_invariance(enable: bool) -> None:
     """Enable batch-invariant mode for reproducible RL training.
 
     Delegates ATen operator overrides (``mm``, ``addmm``, ``_log_softmax``,
@@ -227,10 +227,10 @@ def set_batch_invariant() -> None:
     - NCCL env vars for deterministic inter-GPU collectives
     - Disables reduced-precision reductions and TF32
 
-    Note: callers must set ``debug.deterministic=True`` separately
+    Note: callers must set ``debug.deterministic=True`` separately.
     """
     global _batch_invariant_enabled
-    if _batch_invariant_enabled:
+    if not enable or _batch_invariant_enabled:
         return
 
     # Register batch-invariant ATen overrides via upstream package

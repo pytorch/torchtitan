@@ -151,14 +151,11 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
     Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
     model_spec = model_registry("0.6B", attn_backend_override="varlen")
+    batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        debug=DebugConfig(
-            batch_invariant=True,
-            deterministic=True,
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -166,11 +163,13 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 decay_type="linear",
             ),
             # bfloat16 is needed for trainer to align with generator dtype
+            # TODO: replace bfloat16 enablement with FSDP2+TP2
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            debug=batch_invariant_config,
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -188,5 +187,6 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
+            debug=batch_invariant_config,
         ),
     )

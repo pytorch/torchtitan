@@ -28,7 +28,7 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.utils import set_batch_invariant
+from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
@@ -98,10 +98,8 @@ class PolicyTrainer(Actor, Configurable):
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         device_module.set_device(self.device)
 
-        # Enable batch-invariant mode BEFORE init_distributed so NCCL env
-        # vars are set before the first communicator is created.
-        if config.debug.batch_invariant:
-            set_batch_invariant()
+        # Enable batch-invariant mode BEFORE init_distributed
+        set_batch_invariance(config.debug.batch_invariant)
 
         world_size = dist_utils.init_distributed(config.comm)
 
@@ -343,14 +341,6 @@ class PolicyTrainer(Actor, Configurable):
         # Update weights
         self.optimizers.zero_grad()
         loss.backward()
-
-        # All-reduce gradients across DP ranks so all ranks have consistent
-        # weight updates despite processing different data shards.
-        # Skip when FSDP is enabled — FSDP already reduces gradients.
-        if self.dp_enabled and not self.parallel_dims.fsdp_enabled:
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
         # Gradient clipping
         grad_norm = dist_utils.clip_grad_norm_(

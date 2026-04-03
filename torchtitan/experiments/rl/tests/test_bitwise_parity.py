@@ -87,10 +87,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    if config.debug.batch_invariant:
-        from torchtitan.distributed.utils import set_batch_invariant
+    from torchtitan.distributed.utils import set_batch_invariance
 
-        set_batch_invariant()
+    set_batch_invariance(config.generator.debug.batch_invariant)
 
     engine_kwargs = dict(
         model=config.hf_assets_path,
@@ -133,10 +132,9 @@ def build_trainer_model(
     model_spec = config.model_spec
     hf_assets_path = config.hf_assets_path
 
-    if config.debug.batch_invariant:
-        from torchtitan.distributed.utils import set_batch_invariant
+    from torchtitan.distributed.utils import set_batch_invariance
 
-        set_batch_invariant()
+    set_batch_invariance(config.trainer.debug.batch_invariant)
 
     model_config = model_spec.model
 

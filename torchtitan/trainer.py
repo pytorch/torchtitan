@@ -106,6 +106,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
 
         def __post_init__(self):
+            if self.debug.batch_invariant:
+                raise ValueError(
+                    "Batch-invariant mode is not supported in pre-training."
+                )
             if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
                 if self.parallelism.expert_parallel_degree > 1:
                     raise NotImplementedError(
@@ -229,9 +233,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        if config.debug.batch_invariant:
-            raise RuntimeError("Batch-invariant mode is not supported in pre-training.")
-
         # build tokenizer
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
