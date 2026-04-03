@@ -231,11 +231,11 @@ def hash_model(
     Args:
         model: The model to hash.
         algo: The hash algorithm to use (default: "sha256").
-        per_tensor: If True, returns a stringified dictionary mapping each tensor
+        per_tensor: If True, returns a JSON-encoded dictionary mapping each tensor
             name to its hex hash. If False, returns a single hash of all tensors.
 
     Returns:
-        A hex string hash, or a stringified per-tensor hash dictionary.
+        A hex string hash, or a JSON-encoded per-tensor hash dictionary.
         Empty string for non-rank0 processes in distributed settings.
     """
     return _hash_model_impl(
@@ -262,11 +262,11 @@ def hash_gradient(
     Args:
         model: The model to hash gradients for.
         algo: The hash algorithm to use (default: "sha256").
-        per_tensor: If True, returns a stringified dictionary mapping each gradient
+        per_tensor: If True, returns a JSON-encoded dictionary mapping each gradient
             name to its hex hash. If False, returns a single hash of all gradients.
 
     Returns:
-        A hex string hash, or a stringified per-tensor hash dictionary.
+        A hex string hash, or a JSON-encoded per-tensor hash dictionary.
         Empty string for non-rank0 processes in distributed settings.
     """
     return _hash_model_impl(
