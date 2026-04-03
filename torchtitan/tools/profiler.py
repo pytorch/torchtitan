@@ -141,6 +141,27 @@ class Profiler(Configurable):
         This is used to configure torch.profiler.schedule.
         """
 
+        profiler_repeat: int | None = None
+        """
+        The number of times to repeat the profiling cycle
+
+        This is used to configure torch.profiler.schedule.
+        """
+
+        profiler_skip_first: int | None = None
+        """
+        The number of initial profiling cycles to skip
+
+        This is used to configure torch.profiler.schedule.
+        """
+
+        profiler_skip_first_wait: int | None = None
+        """
+        The number of initial profiling cycles to skip the wait time
+
+        This is used to configure torch.profiler.schedule.
+        """
+
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
 
@@ -161,6 +182,28 @@ class Profiler(Configurable):
         self._leaf_folder = leaf_folder
         self.torch_profiler = None
         self.memory_profiler = None
+
+    def active(
+        self,
+        *,
+        global_step: int = 0,
+        base_folder: str = "",
+        leaf_folder: str = "",
+    ) -> "Profiler":
+        """Update runtime args and return self for use as a context manager.
+
+        This allows a pre-built :class:`Profiler` (e.g. built during
+        ``__init__``) to be activated later with runtime parameters::
+
+            self.profiler = config.profiler.build()
+            ...
+            with self.profiler.active(global_step=step, base_folder=folder) as p:
+                ...
+        """
+        self._global_step = global_step
+        self._base_folder = base_folder
+        self._leaf_folder = leaf_folder
+        return self
 
     def __enter__(self) -> "Profiler":
         self.torch_profiler = self.build_torch_profiler(
@@ -246,6 +289,16 @@ class Profiler(Configurable):
 
         if not os.path.exists(trace_dir):
             os.makedirs(trace_dir, exist_ok=True)
+
+        additional_params = {
+            key: val
+            for key, val in [
+                ("repeat", cfg.profiler_repeat),
+                ("skip_first", cfg.profiler_skip_first),
+                ("skip_first_wait", cfg.profiler_skip_first_wait),
+            ]
+            if val is not None
+        }
 
         wait = profile_freq - (active + warmup)
         assert (

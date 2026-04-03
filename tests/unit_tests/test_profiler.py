@@ -19,6 +19,9 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertEqual(cfg.profile_freq, 10)
         self.assertEqual(cfg.profiler_active, 1)
         self.assertEqual(cfg.profiler_warmup, 3)
+        self.assertIsNone(cfg.profiler_repeat)
+        self.assertIsNone(cfg.profiler_skip_first)
+        self.assertIsNone(cfg.profiler_skip_first_wait)
         self.assertFalse(cfg.enable_memory_snapshot)
         self.assertEqual(cfg.save_memory_snapshot_folder, "memory_snapshot")
 
@@ -27,10 +30,16 @@ class TestProfilerConfig(unittest.TestCase):
             enable_profiling=True,
             save_traces_folder="my_traces",
             profile_freq=50,
+            profiler_repeat=2,
+            profiler_skip_first=5,
+            profiler_skip_first_wait=3,
         )
         self.assertTrue(cfg.enable_profiling)
         self.assertEqual(cfg.save_traces_folder, "my_traces")
         self.assertEqual(cfg.profile_freq, 50)
+        self.assertEqual(cfg.profiler_repeat, 2)
+        self.assertEqual(cfg.profiler_skip_first, 5)
+        self.assertEqual(cfg.profiler_skip_first_wait, 3)
 
     def test_build_returns_profiler_instance(self):
         """Profiler.Config.build() auto-wires to Profiler via Configurable."""
@@ -107,6 +116,29 @@ class TestProfilerDisabledPaths(unittest.TestCase):
             pass
         self.assertIsNone(profiler.torch_profiler)
         self.assertIsNone(profiler.memory_profiler)
+
+    def test_active_updates_runtime_args(self):
+        """active() updates runtime args and returns self for context manager use."""
+        profiler = Profiler(Profiler.Config())
+        self.assertEqual(profiler._global_step, 0)
+        self.assertEqual(profiler._base_folder, "")
+        self.assertEqual(profiler._leaf_folder, "")
+
+        result = profiler.active(
+            global_step=10, base_folder="/output", leaf_folder="replica_0"
+        )
+        self.assertIs(result, profiler)
+        self.assertEqual(profiler._global_step, 10)
+        self.assertEqual(profiler._base_folder, "/output")
+        self.assertEqual(profiler._leaf_folder, "replica_0")
+
+    def test_active_as_context_manager(self):
+        """active() can be used as a context manager with 'with' statement."""
+        profiler = Profiler(Profiler.Config())
+        with profiler.active(global_step=5, base_folder="/tmp") as prof:
+            self.assertIs(prof, profiler)
+            self.assertEqual(prof._global_step, 5)
+            prof.step()
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
