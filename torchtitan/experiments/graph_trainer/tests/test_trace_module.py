@@ -5,8 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import dataclasses
 import unittest
 from collections import Counter
+from dataclasses import fields
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -882,6 +885,313 @@ class TestGraphBasedSAC(unittest.TestCase):
             (tokens, attn_masks),
             labels,
             use_regional_inductor=True,
+        )
+
+
+class TestDistributedGraphBasedSAC(FSDPTest):
+    @property
+    def world_size(self):
+        return min(torch.cuda.device_count(), 4)
+
+    def _setup(self):
+        from torchtitan.distributed import ParallelDims
+
+        self.parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+    def _run_distributed_flex_sac_trace_test(
+        self,
+        *,
+        model_config,
+        parallelize_fn,
+        tp_degree=1,
+        expected_failure_regex=None,
+    ):
+        from torchtitan.config import (
+            ActivationCheckpointConfig,
+            ParallelismConfig,
+            TrainingConfig,
+        )
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+        from torchtitan.protocols.model_converter import ModelConvertersContainer
+        import torch._inductor.config as inductor_config
+
+        if self.world_size < 2:
+            self.skipTest("distributed graph SAC regression test requires >=2 GPUs")
+        if self.world_size < tp_degree:
+            self.skipTest(f"tp={tp_degree} requires at least {tp_degree} GPUs")
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+        self._setup_with_tp(tp_degree)
+        try:
+            def run_test():
+                training = TrainingConfig(
+                    local_batch_size=1,
+                    seq_len=64,
+                    steps=1,
+                    dtype="bfloat16",
+                )
+                parallelism = ParallelismConfig(
+                    data_parallel_replicate_degree=1,
+                    data_parallel_shard_degree=self.parallel_dims.dp_shard,
+                    context_parallel_degree=1,
+                    tensor_parallel_degree=tp_degree,
+                    disable_loss_parallel=True,
+                    pipeline_parallel_degree=1,
+                    expert_parallel_degree=1,
+                    expert_tensor_parallel_degree=1,
+                )
+                compile_config = GraphTrainerCompileConfig(
+                    enable=False,
+                    mode="aot_fx_trace",
+                )
+                debug_config = dataclasses.make_dataclass(
+                    "DebugConfig",
+                    [
+                        (
+                            "moe_force_load_balance",
+                            bool,
+                            dataclasses.field(default=False),
+                        )
+                    ],
+                )()
+                trainer_config = dataclasses.make_dataclass(
+                    "RegionalInductorProbeConfig",
+                    [
+                        ("training", TrainingConfig),
+                        ("parallelism", ParallelismConfig),
+                        ("compile", GraphTrainerCompileConfig),
+                        ("debug", type(debug_config)),
+                    ],
+                )(
+                    training=training,
+                    parallelism=parallelism,
+                    compile=compile_config,
+                    debug=debug_config,
+                )
+
+                config = dataclasses.replace(model_config)
+                config.update_from_config(trainer_config=trainer_config)
+                if hasattr(config, "n_layers"):
+                    updates = {"n_layers": 1}
+                    if hasattr(config, "layer") and hasattr(
+                        config.layer, "n_dense_layers"
+                    ):
+                        updates["layer"] = dataclasses.replace(
+                            config.layer, n_dense_layers=1
+                        )
+                    config = dataclasses.replace(config, **updates)
+
+                with torch.device("meta"):
+                    model = config.build()
+
+                model = parallelize_fn(
+                    model,
+                    parallel_dims=self.parallel_dims,
+                    training=training,
+                    model_converters=ModelConvertersContainer.Config(),
+                    parallelism=parallelism,
+                    compile_config=compile_config,
+                    ac_config=ActivationCheckpointConfig(mode="none"),
+                    dump_folder="",
+                )
+                model.to_empty(device="cuda")
+                with torch.no_grad():
+                    model.init_weights(buffer_device=torch.device("cuda"))
+                model.train()
+                model.to(dtype=torch.bfloat16)
+
+                tokens = torch.randint(
+                    2,
+                    config.vocab_size,
+                    (training.local_batch_size, training.seq_len),
+                    device="cuda",
+                )
+                tokens[:, 15::16] = 1
+                labels = torch.zeros_like(tokens)
+                attention_masks = model.get_attention_masks(
+                    tokens,
+                    SimpleNamespace(eos_id=1),
+                )
+
+                def step(mod, tok, masks, lbl):
+                    del lbl
+                    logits = mod(tok, attention_masks=masks)
+                    loss = logits.float().sum()
+                    grads = torch.autograd.grad(
+                        loss,
+                        [p for p in mod.parameters() if p.requires_grad],
+                        allow_unused=True,
+                    )
+                    return [loss] + [grad for grad in grads if grad is not None]
+
+                with annotate_flex_attention_for_regional_inductor():
+                    traced = minimal_fx_tracer(
+                        step, (model, tokens, attention_masks, labels)
+                    )
+
+                ag = sum(
+                    1
+                    for node in traced.gm.graph.nodes
+                    if "all_gather_into_tensor" in str(node.target)
+                )
+                rs = sum(
+                    1
+                    for node in traced.gm.graph.nodes
+                    if "reduce_scatter_tensor" in str(node.target)
+                )
+                self.assertTrue(
+                    ag > 0 and rs > 0,
+                    f"Expected collective ops in distributed graph (ag={ag}, rs={rs})",
+                )
+
+                flex_nodes = [
+                    node
+                    for node in traced.gm.graph.nodes
+                    if "flex_attention" in str(node.target)
+                    and "backward" not in str(node.target)
+                ]
+                self.assertGreater(len(flex_nodes), 0, "No FlexAttention nodes found")
+
+                old_compile_threads = inductor_config.compile_threads
+                inductor_config.compile_threads = 1
+                try:
+                    # Keep Inductor compilation in-process so distributed failures
+                    # surface the underlying exception instead of an autotune wrapper.
+                    traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+                    _apply_regional_inductor(traced)
+
+                    result = traced(model, tokens, attention_masks, labels)
+                    loss = result[0]
+                    self.assertTrue(torch.isfinite(loss).item())
+                finally:
+                    inductor_config.compile_threads = old_compile_threads
+
+            if expected_failure_regex is None:
+                run_test()
+            else:
+                with self.assertRaisesRegex(Exception, expected_failure_regex):
+                    run_test()
+        finally:
+            torch.use_deterministic_algorithms(False)
+
+    def _setup_with_tp(self, tp_degree):
+        from torchtitan.distributed import ParallelDims
+
+        self.parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=tp_degree,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+    def test_llama3_flex_attn_fsdp_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
+            parallelize_llama,
+        )
+        from torchtitan.experiments.graph_trainer.llama3.model import (
+            GraphTrainerLlama3Model,
+        )
+        from torchtitan.models.llama3 import llama3_configs
+
+        self._run_distributed_flex_sac_trace_test(
+            model_config=GraphTrainerLlama3Model.Config(
+                **{
+                    field.name: getattr(
+                        llama3_configs["debugmodel_flex_attn"], field.name
+                    )
+                    for field in fields(llama3_configs["debugmodel_flex_attn"])
+                }
+            ),
+            parallelize_fn=parallelize_llama,
+            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
+        )
+
+    def test_llama3_flex_attn_fsdp_tp2_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
+            parallelize_llama,
+        )
+        from torchtitan.experiments.graph_trainer.llama3.model import (
+            GraphTrainerLlama3Model,
+        )
+        from torchtitan.models.llama3 import llama3_configs
+
+        self._run_distributed_flex_sac_trace_test(
+            model_config=GraphTrainerLlama3Model.Config(
+                **{
+                    field.name: getattr(
+                        llama3_configs["debugmodel_flex_attn"], field.name
+                    )
+                    for field in fields(llama3_configs["debugmodel_flex_attn"])
+                }
+            ),
+            parallelize_fn=parallelize_llama,
+            tp_degree=2,
+            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
+        )
+
+    def test_deepseek_v3_flex_attn_fsdp_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
+            parallelize_deepseekv3,
+        )
+        from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
+            GraphTrainerDeepSeekV3Model,
+        )
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+
+        self._run_distributed_flex_sac_trace_test(
+            model_config=GraphTrainerDeepSeekV3Model.Config(
+                **{
+                    field.name: getattr(
+                        deepseekv3_configs["debugmodel_flex_attn"], field.name
+                    )
+                    for field in fields(deepseekv3_configs["debugmodel_flex_attn"])
+                }
+            ),
+            parallelize_fn=parallelize_deepseekv3,
+            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
+        )
+
+    def test_deepseek_v3_flex_attn_fsdp_tp2_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
+            parallelize_deepseekv3,
+        )
+        from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
+            GraphTrainerDeepSeekV3Model,
+        )
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+
+        self._run_distributed_flex_sac_trace_test(
+            model_config=GraphTrainerDeepSeekV3Model.Config(
+                **{
+                    field.name: getattr(
+                        deepseekv3_configs["debugmodel_flex_attn"], field.name
+                    )
+                    for field in fields(deepseekv3_configs["debugmodel_flex_attn"])
+                }
+            ),
+            parallelize_fn=parallelize_deepseekv3,
+            tp_degree=2,
+            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
         )
 
 
