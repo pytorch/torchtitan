@@ -7,9 +7,9 @@
 """
 Integration tests for the RL unified workstream.
 
-Runs the full GRPO training loop (simple_grpo.py) with different
+Runs the full GRPO training loop (sync_grpo_sum_digits/main.py) with different
 parallelism configurations. Uses OverrideDefinitions from the shared
-test infrastructure but with a custom runner since simple_grpo.py is
+test infrastructure but with a custom runner since sync_grpo_sum_digits/main.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
@@ -32,11 +32,10 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--config qwen3_0_6b",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.num_samples_per_prompt 2",
+                    "--group_size 2",
                     "--no_batch_invariant_mode",
                     "--trainer.compile.no-enable",
                     "--generator.compile.backend none",
@@ -50,11 +49,10 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--config qwen3_0_6b",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.num_samples_per_prompt 2",
+                    "--group_size 2",
                     "--no_batch_invariant_mode",
                 ],
             ],
@@ -73,7 +71,7 @@ def run_single_test(
     """Run a single RL integration test.
 
     Unlike the standard run_tests which uses ``./run_train.sh`` (torchrun),
-    this runs ``python simple_grpo.py`` directly since the RL script manages
+    this runs ``python sync_grpo_sum_digits/main.py`` directly since the RL script manages
     its own distributed setup via Monarch.
     """
     test_name = test_flavor.test_name
@@ -82,7 +80,7 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/simple_grpo_sum_digits.py",
+            "torchtitan/experiments/rl/sync_grpo_sum_digits/main.py",
             f"--dump_folder {dump_folder}",
         ]
         if hf_assets_path:

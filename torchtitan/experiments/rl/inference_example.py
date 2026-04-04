@@ -8,7 +8,7 @@
 """
 Example inference script using TorchTitan models with vLLM LLMEngine.
 
-This script uses the RL unified config_registry to configure both
+This script uses the sync_grpo_sum_digits config_registry to configure both
 the vLLM engine and sampling parameters.
 
 Run: torchrun --nproc_per_node=2 \
@@ -24,7 +24,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
-from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
+from torchtitan.experiments.rl.sync_grpo_sum_digits.config_registry import qwen3_0_6b
 
 
 logger = init_logger(__name__)
@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 
 def generate():
 
-    config = rl_grpo_qwen3_0_6b()
+    config = qwen3_0_6b()
     gen_config = config.generator
     model_path = config.hf_assets_path
 
@@ -43,7 +43,7 @@ def generate():
     config.model_spec.parallelize_fn = parallelize_qwen3
 
     # Register TorchTitan model with vLLM before engine creation
-    from torchtitan.experiments.rl.plugin import (
+    from torchtitan.experiments.rl.models.vllm_wrapper import (
         register_model_to_vllm_model_registry,
         VLLM_MODEL_NAME,
     )
