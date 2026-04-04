@@ -54,11 +54,11 @@ logger = logging.getLogger(__name__)
 
 
 class GRPOLoss:
-    """GRPO loss with token-level normalization and reference KL penalty."""
+    """Simple clipped GRPO loss with an optional KL term."""
 
     def __init__(
         self,
-        kl_coef: float = 0.1,
+        kl_coef: float = 0.0,
         clip_eps: float = 0.2,
     ):
         self.kl_coef = kl_coef
@@ -86,19 +86,13 @@ class GRPOLoss:
         clipped_loss = clipped_ratio * advantages
         pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
 
-        entropy = -(policy_logprobs * response_mask).sum() / response_mask.sum().clamp(
-            min=1.0
-        )
-        entropy_bonus = -0.01 * entropy
-
         token_kl = (torch.exp(token_log_ratio) - 1 - token_log_ratio) * response_mask
         mean_kl = token_kl.sum(dim=1) / tokens_per_sample
         kl_div = mean_kl.mean()
 
-        loss = pg_loss + entropy_bonus + self.kl_coef * kl_div
+        loss = pg_loss + self.kl_coef * kl_div
         metrics = {
             "pg_loss": pg_loss.item(),
-            "entropy": entropy.item(),
             "kl_div": kl_div.item(),
             "ratio_mean": ratio.mean().item(),
             "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
