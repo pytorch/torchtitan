@@ -18,6 +18,7 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
+    run_traced,
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import optimize_fwd_bwd_graph
@@ -111,16 +112,13 @@ class GraphTrainer(Trainer):
             if self.config.activation_checkpoint.mode != "none":
                 annotate_ac_regions(model)
             with self.train_context(), self.maybe_enable_amp:
-                self._traced_step = minimal_fx_tracer(
-                    fwd_bwd_fn,
-                    (
-                        model,
-                        inputs,
-                        labels,
-                        global_valid_tokens,
-                        extra_inputs,
-                        extra_kwargs,
-                    ),
+                self._traced_step = minimal_fx_tracer(fwd_bwd_fn)(
+                    model,
+                    inputs,
+                    labels,
+                    global_valid_tokens,
+                    extra_inputs,
+                    extra_kwargs,
                 )
             self._traced_step.gm = optimize_fwd_bwd_graph(
                 self._traced_step.gm,
@@ -128,7 +126,8 @@ class GraphTrainer(Trainer):
             )
 
         with self.train_context(), self.maybe_enable_amp:
-            outputs = self._traced_step(
+            outputs = run_traced(
+                self._traced_step,
                 model,
                 inputs,
                 labels,
