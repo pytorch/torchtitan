@@ -235,50 +235,67 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
-    def _collate(
-        self,
-        episodes: list[Episode],
-        pad_token_id: int = 0,
-    ) -> list[TrainBatch]:
-        """Pre-shard episodes into per-DP-rank TrainBatches."""
-        batches = []
-        for rank in range(self.trainer_dp_degree):
-            idx = list(range(rank, len(episodes), self.trainer_dp_degree))
-            rank_episodes = [episodes[i] for i in idx]
+    @staticmethod
+    def _validate_policy_versions(episodes: list[Episode]) -> int:
+        if not episodes:
+            raise ValueError("episodes must be non-empty")
 
-            prompt_lens = [len(ep.prompt_token_ids) for ep in rank_episodes]
-            response_lens = [len(ep.token_ids) for ep in rank_episodes]
-            max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
-
-            padded_ids = []
-            padded_logprobs = []
-            for ep in rank_episodes:
-                seq = ep.prompt_token_ids + ep.token_ids
-                pad_len = max_len - len(seq)
-                padded_ids.append(seq + [pad_token_id] * pad_len)
-                padded_logprobs.append(
-                    [0.0] * len(ep.prompt_token_ids)
-                    + ep.token_log_probs
-                    + [0.0] * pad_len
-                )
-
-            batches.append(
-                TrainBatch(
-                    token_ids=torch.tensor(padded_ids, dtype=torch.long),
-                    prompt_lens=torch.tensor(prompt_lens, dtype=torch.long),
-                    response_lens=torch.tensor(response_lens, dtype=torch.long),
-                    advantages=torch.tensor(
-                        [ep.advantage for ep in rank_episodes],
-                        dtype=torch.float32,
-                    ),
-                    token_log_probs=torch.tensor(
-                        padded_logprobs,
-                        dtype=torch.float32,
-                    ),
-                    pad_token_id=pad_token_id,
-                )
+        policy_versions = {ep.policy_version for ep in episodes}
+        if len(policy_versions) != 1:
+            raise ValueError(
+                "all episodes in a synchronous GRPO step must share one policy_version, "
+                f"got {sorted(policy_versions)}"
             )
-        return batches
+        return next(iter(policy_versions))
+
+    def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
+        """Shard episodes across trainer DP ranks with interleaved indexing."""
+        self._validate_policy_versions(episodes)
+        return [
+            [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
+            for rank in range(self.trainer_dp_degree)
+        ]
+
+    @staticmethod
+    def _collate_rank_episodes(
+        episodes: list[Episode],
+        *,
+        pad_token_id: int = 0,
+    ) -> TrainBatch:
+        """Collate one DP rank's episodes into a padded TrainBatch."""
+        if not episodes:
+            raise ValueError("episodes must be non-empty")
+
+        prompt_lens = [len(ep.prompt_token_ids) for ep in episodes]
+        response_lens = [len(ep.token_ids) for ep in episodes]
+        max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
+
+        padded_ids = []
+        padded_logprobs = []
+        for ep in episodes:
+            seq = ep.prompt_token_ids + ep.token_ids
+            pad_len = max_len - len(seq)
+            padded_ids.append(seq + [pad_token_id] * pad_len)
+            padded_logprobs.append(
+                [0.0] * len(ep.prompt_token_ids)
+                + ep.token_log_probs
+                + [0.0] * pad_len
+            )
+
+        return TrainBatch(
+            token_ids=torch.tensor(padded_ids, dtype=torch.long),
+            prompt_lens=torch.tensor(prompt_lens, dtype=torch.long),
+            response_lens=torch.tensor(response_lens, dtype=torch.long),
+            advantages=torch.tensor(
+                [ep.advantage for ep in episodes],
+                dtype=torch.float32,
+            ),
+            token_log_probs=torch.tensor(
+                padded_logprobs,
+                dtype=torch.float32,
+            ),
+            pad_token_id=pad_token_id,
+        )
 
     async def setup(
         self,
@@ -542,7 +559,11 @@ class RLTrainer(Configurable):
                 _log_samples(episodes)
 
             # 4. Trainer updates policy using pre-collated batches
-            batches = self._collate(episodes)
+            sharded_episodes = self._shard_episodes(episodes)
+            batches = [
+                self._collate_rank_episodes(rank_episodes)
+                for rank_episodes in sharded_episodes
+            ]
             fwd_bwd_result = self._get_rank_0_value(
                 self.trainer.forward_backward.call(batches).get()
             )
