@@ -7,7 +7,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, cast, Literal
 
 import torch
 import tyro
@@ -31,7 +31,6 @@ def _load_c4_dataset(dataset_path: str, split: str):
 def _process_c4_text(sample: dict[str, Any]) -> str:
     """Process C4 dataset sample text."""
     return sample["text"]
-
 
 # Add your dataset here - more information at docs/datasets.md
 DATASETS = {
@@ -79,6 +78,8 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        overflow_policy: Literal["chunk", "truncate", "drop"] = "chunk",
+        reset_positions_on_chunk: bool = True,
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
@@ -93,6 +94,8 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
+        self.overflow_policy = overflow_policy
+        self.reset_positions_on_chunk = reset_positions_on_chunk
         self._text_processor = text_processor
 
         # Variables for checkpointing
@@ -112,6 +115,31 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
         return iter(self._data)
 
+    def _apply_overflow_policy(self, sample_tokens: list[int], max_buffer_token_len: int) -> list[int] | None:
+
+        match self.overflow_policy:
+            case "drop":
+                if len(sample_tokens) > max_buffer_token_len:
+                    return None
+            case "truncate":
+                if len(sample_tokens) > max_buffer_token_len:
+                    return sample_tokens[:max_buffer_token_len]
+            case "chunk":
+                return sample_tokens
+            case _:
+                raise ValueError(f"Invalid overflow_policy: {self.overflow_policy}")
+
+        return sample_tokens
+
+    def _normalize_positions(self, positions: list[int]) -> list[int]:
+        offset = positions[0]
+        if self.reset_positions_on_chunk and offset != 0:
+            for i,p in enumerate(positions):
+                if p == 0: 
+                    break
+                positions[i] = p - offset
+        return positions
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
 
@@ -122,28 +150,26 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 sample_tokens = self._tokenizer.encode(
                     sample_text, add_bos=True, add_eos=True
                 )
-                self._inputs_buffer.extend(sample_tokens)
-                # Per-document positions reset at document boundaries,
-                # matching inference frameworks (e.g. vLLM) that start
-                # positions at 0 per request.  Positions wrap at seq_len
-                # to stay within the RoPE cache, effectively chunking
-                # long documents into seq_len-sized segments.
-                # TODO: make overflow policy configurable (chunk / truncate / drop).
-                self._positions_buffer.extend(
-                    i % self.seq_len for i in range(len(sample_tokens))
-                )
                 self._sample_idx += 1
+
+                sample_tokens = self._apply_overflow_policy(sample_tokens, max_buffer_token_len)
+                if sample_tokens is None:
+                    continue
+
+                self._inputs_buffer.extend(sample_tokens)
+                self._positions_buffer.extend(range(len(sample_tokens)))
 
                 while len(self._inputs_buffer) >= max_buffer_token_len:
                     x = torch.LongTensor(self._inputs_buffer[:max_buffer_token_len])
-                    pos = torch.LongTensor(
+                    pos = torch.LongTensor(self._normalize_positions(
                         self._positions_buffer[:max_buffer_token_len]
-                    )
+                    ))
                     # update buffers to the remaining tokens
                     self._inputs_buffer = self._inputs_buffer[max_buffer_token_len:]
                     self._positions_buffer = self._positions_buffer[
                         max_buffer_token_len:
                     ]
+
                     input = x[:-1]
                     label = x[1:]
                     positions = pos[:-1]
@@ -210,6 +236,18 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
+
+        overflow_policy: Literal["chunk", "truncate", "drop"] = "chunk"
+        """
+        Policy for handling samples that exceed seq_len: 
+        'chunk' (default) splits into multiple samples, 'truncate' truncates to fit, and 'drop' skips the sample.
+        """
+
+        reset_positions_on_chunk: bool = True
+        """
+        Whether to reset position ids to 0 at the start of each chunk when using 'chunk' overflow_policy. 
+        Recommended to set to False if rope_cache is large enough to cover the longest samples to avoid position id discontinuities.
+        """
 
     def __init__(
         self,
