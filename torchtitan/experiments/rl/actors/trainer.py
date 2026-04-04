@@ -205,7 +205,7 @@ class PolicyTrainer(Actor, Configurable):
         from torchtitan.models.common.attention import VarlenAttention
 
         assert isinstance(
-            model_spec.model.layer.attention.inner_attention, VarlenAttention.Config
+            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
 
         with torch.device("meta"):

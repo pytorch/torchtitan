@@ -38,8 +38,8 @@ class DeepEPMoE(MoE):
     class Config(MoE.Config):
         pass
 
-    def __init__(self, config: Config, *, dim: int):
-        super().__init__(config, dim=dim)
+    def __init__(self, config: Config):
+        super().__init__(config)
         # DeepEP doesn't use reorderer - routing handled by DeepEPExpertParallel
         self.reorderer = None  # pyrefly: ignore [bad-assignment]
 

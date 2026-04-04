@@ -608,8 +608,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Resolve positions once: per-document positions for block_causal,
         # sequential positions when CP needs them for shard indexing,
         # or None (model uses sequential RoPE slice by default).
-        layer = getattr(self.model_config, "layer", None)
-        attn_config = getattr(layer, "attention", None) if layer else None
+        if isinstance(self.model_config, Decoder.Config):
+            layer = self.model_config.layers[0]
+            attn_config = layer.attention
+        else:
+            attn_config = None
         mask_type = getattr(attn_config, "mask_type", "causal")
 
         positions = extra_inputs.pop("positions", None)
