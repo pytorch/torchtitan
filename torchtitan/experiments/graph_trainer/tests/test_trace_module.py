@@ -366,6 +366,35 @@ class TestMetadataPropagation(unittest.TestCase):
                 )
                 self.assertEqual(custom.get("test_key"), "test_value")
 
+    def test_backward_nodes_have_stack_trace(self):
+        """Verify that backward nodes get stack_trace from their forward counterpart."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        train_step = TrainStepModule(model, get_loss)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        traced_result = trace_module(train_step, (tokens, labels))
+
+        # Find backward nodes: nodes sharing a seq_nr with an earlier (forward) node
+        seq_nr_first: dict[int, torch.fx.Node] = {}
+        bwd_nodes_missing_stack_trace = []
+        for node in traced_result.gm.graph.nodes:
+            if node.op != "call_function" or "seq_nr" not in node.meta:
+                continue
+            seq_nr = node.meta["seq_nr"]
+            if seq_nr not in seq_nr_first:
+                seq_nr_first[seq_nr] = node
+            else:
+                # This is a backward node
+                if not node.stack_trace:
+                    bwd_nodes_missing_stack_trace.append((node.name, seq_nr))
+
+        self.assertEqual(
+            bwd_nodes_missing_stack_trace,
+            [],
+            f"Backward nodes missing stack_trace: {bwd_nodes_missing_stack_trace}",
+        )
+
     def test_patch_engine_restores_original(self):
         """Verify that _patch_engine_run_backward restores the original function."""
         import torch.autograd
