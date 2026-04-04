@@ -12,7 +12,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torchtitan.config import CompileConfig
-from torchtitan.models.common.moe import moe as moe_module
+from torchtitan.models.common import moe as moe_module
 from torchtitan.tools.logging import logger
 
 

@@ -14,67 +14,56 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.models.common import (
-    compute_ffn_hidden_dim,
-    Embedding,
-    FeedForward,
-    FlexAttention,
-    GQAttention,
-    Linear,
-    RMSNorm,
-    RoPE,
-)
-from torchtitan.models.common.moe import MoE
-from torchtitan.models.llama4.model import (
-    compute_moe_hidden_dim,
-    Llama4Model,
-    Llama4TransformerBlock,
-)
+from torchtitan.models.llama4.model import compute_moe_hidden_dim, Llama4Model
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
 
 def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     """Build a tiny Llama4Model with a configurable number of experts."""
+    from torchtitan.models.common import compute_ffn_hidden_dim
+
+    # Use the standard debugmodel config but override num_experts.
+    # Rebuild layers with the requested num_experts.
+    from torchtitan.models.llama4 import _build_llama4_layers
+
     dim = 256
     n_heads = 16
-    return Llama4Model(
-        Llama4Model.Config(
+    n_layers = 4
+    moe_hidden_dim = compute_moe_hidden_dim(dim)
+
+    from torchtitan.models.common.embedding import Embedding
+    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.rmsnorm import RMSNorm
+    from torchtitan.models.common.rope import RoPE
+
+    config = Llama4Model.Config(
+        dim=dim,
+        vocab_size=2048,
+        tok_embeddings=Embedding.Config(num_embeddings=2048, embedding_dim=dim),
+        norm=RMSNorm.Config(normalized_shape=dim),
+        output=Linear.Config(in_features=dim, out_features=2048),
+        rope=RoPE.Config(
+            dim=dim // n_heads,
+            max_seq_len=2048,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
+        layers=_build_llama4_layers(
+            n_layers=n_layers,
             dim=dim,
-            n_layers=4,
-            vocab_size=2048,
-            tok_embeddings=Embedding.Config(),
-            norm=RMSNorm.Config(),
-            output=Linear.Config(),
-            layer=Llama4TransformerBlock.Config(
-                every_n_layers_nope=4,
-                fixed_attn_block_size=256,
-                attention_norm=RMSNorm.Config(),
-                ffn_norm=RMSNorm.Config(),
-                feed_forward=FeedForward.Config(
-                    hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-                ),
-                attention=GQAttention.Config(
-                    n_heads=n_heads,
-                    inner_attention=FlexAttention.Config(),
-                    mask_type="block_causal",
-                    rope_backend="complex",
-                ),
-                moe=MoE.Config(
-                    num_experts=num_experts,
-                    hidden_dim=compute_moe_hidden_dim(dim),
-                ),
-            ),
-            rope=RoPE.Config(
-                dim=dim // n_heads,
-                max_seq_len=2048,
-                theta=500000,
-                backend="complex",
-                scaling="llama",
-                scaling_factor=16.0,
-                high_freq_factor=1.0,
-            ),
-        )
+            n_heads=n_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            moe_hidden_dim=moe_hidden_dim,
+            num_experts=num_experts,
+            every_n_layers_nope=4,
+            interleave_moe_layer_step=1,
+            fixed_attn_block_size=256,
+        ),
     )
+    return Llama4Model(config)
 
 
 def _get_expert_shard_dim(model: Llama4Model) -> int | None:

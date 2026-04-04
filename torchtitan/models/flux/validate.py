@@ -69,8 +69,6 @@ class FluxValidator(Validator):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Sampling configuration for validation image generation"""
 
-    validation_dataloader: BaseDataLoader
-
     def __init__(
         self,
         config: Config,
@@ -100,17 +98,14 @@ class FluxValidator(Validator):
         assert isinstance(config.dataloader, FluxDataLoader.Config)
         assert isinstance(tokenizer, FluxTokenizerContainer)
 
-        dl_config = replace(
+        self.dl_config = replace(
             config.dataloader,
             infinite=config.steps != -1,
             generate_timesteps=not config.all_timesteps,
         )
-        self.validation_dataloader = dl_config.build(
-            dp_world_size=dp_world_size,
-            dp_rank=dp_rank,
-            local_batch_size=local_batch_size,
-            tokenizer=tokenizer,
-        )
+        self.dp_world_size = dp_world_size
+        self.dp_rank = dp_rank
+        self.local_batch_size = local_batch_size
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         # pyrefly: ignore [bad-assignment]
@@ -159,7 +154,14 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
+        validation_dataloader = self.dl_config.build(
+            dp_world_size=self.dp_world_size,
+            dp_rank=self.dp_rank,
+            local_batch_size=self.local_batch_size,
+            tokenizer=self.tokenizer,
+        )
+
+        for input_dict, labels in validation_dataloader:
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 

@@ -152,7 +152,7 @@ class TorchTitanVLLMModelWrapper(Module):
 
         # Replace inner_attention with VLLMAttentionWrapper in config
         model_config = model_spec.model
-        attn_config = model_config.layer.attention
+        attn_config = model_config.layers[0].attention
         n_heads = attn_config.n_heads
         n_kv_heads = attn_config.n_kv_heads or n_heads
         head_dim = (
@@ -166,9 +166,16 @@ class TorchTitanVLLMModelWrapper(Module):
             num_kv_heads=n_kv_heads,
             head_dim=head_dim,
         )
-        new_attn = dataclasses.replace(attn_config, inner_attention=vllm_backend)
-        new_layer = dataclasses.replace(model_config.layer, attention=new_attn)
-        self.config = dataclasses.replace(model_config, layer=new_layer)
+        new_layers = [
+            dataclasses.replace(
+                layer_cfg,
+                attention=dataclasses.replace(
+                    layer_cfg.attention, inner_attention=vllm_backend
+                ),
+            )
+            for layer_cfg in model_config.layers
+        ]
+        self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # TODO: Check if it's possible to apply meta init

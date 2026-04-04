@@ -80,13 +80,6 @@ class PolicyTrainer(Actor, Configurable):
         requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
         self._transfer_dtype = requested if requested != training_dtype else None
 
-        # The policy and ref models share code objects, so dynamo's
-        # per-code-object cache must hold entries for both grad modes
-        # (grad for policy, no_grad for ref). The default limit of 8
-        # is not enough; 16 accommodates both without recompile storms.
-        # TODO: @Lucaskabela fix recompiles in general as these increase startup
-        torch._dynamo.config.cache_size_limit = 16
-
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -94,18 +87,7 @@ class PolicyTrainer(Actor, Configurable):
 
         world_size = dist_utils.init_distributed(config.comm)
 
-        # Build parallel dims
-        parallelism_config = config.parallelism
-        self.parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
         # Initialize state dict adapter for HF checkpoint loading
         if model_spec.state_dict_adapter is not None:
@@ -212,7 +194,7 @@ class PolicyTrainer(Actor, Configurable):
         from torchtitan.models.common.attention import VarlenAttention
 
         assert isinstance(
-            model_spec.model.layer.attention.inner_attention, VarlenAttention.Config
+            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
 
         with torch.device("meta"):
@@ -273,6 +255,13 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Training metrics
         """
+        # The policy and ref models share code objects, so dynamo's
+        # per-code-object cache must hold entries for both grad modes
+        # (grad for policy, no_grad for ref). The default limit of
+        # is not enough; 16 accommodates both without recompile storms.
+        # TODO: @Lucaskabela fix recompiles in general as these increase startup
+        torch._dynamo.config.recompile_limit = 16
+
         logger.debug(
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )

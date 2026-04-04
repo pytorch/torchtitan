@@ -6,43 +6,31 @@
 
 import unittest
 
-from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.feed_forward import compute_ffn_hidden_dim, FeedForward
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.models.common.rope import RoPE
-from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
+import torch.nn as nn
+
+from torchtitan.models.common.param_init import skip_param_init
+from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3.model import Llama3Model
 
 
-def _make_config(enable_weight_tying: bool = False):
-    return Llama3Model.Config(
-        dim=64,
-        n_layers=2,
-        vocab_size=256,
-        enable_weight_tying=enable_weight_tying,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
-        output=Linear.Config(),
-        layer=Llama3TransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
-            feed_forward=FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(64, multiple_of=64),
-            ),
-            attention=GQAttention.Config(
-                n_heads=4,
-                rope_backend="complex",
-            ),
-        ),
-        rope=RoPE.Config(
-            dim=64 // 4,
-            max_seq_len=512,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
+def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
+    # Start from the standard debugmodel config and adjust weight tying.
+    config = llama3_configs["debugmodel"]()
+    # Replace tok_embeddings param_init based on weight tying flag.
+    import dataclasses
+    from functools import partial
+
+    tok_init = (
+        {"weight": skip_param_init}
+        if enable_weight_tying
+        else {"weight": partial(nn.init.normal_, std=1.0)}
     )
+    config = dataclasses.replace(
+        config,
+        enable_weight_tying=enable_weight_tying,
+        tok_embeddings=dataclasses.replace(config.tok_embeddings, param_init=tok_init),
+    )
+    return config
 
 
 class TestLlama3WeightTying(unittest.TestCase):
@@ -64,14 +52,15 @@ class TestLlama3WeightTying(unittest.TestCase):
             "tok_embeddings.weight and output.weight must be distinct tensor objects",
         )
 
-    def test_weights_remain_tied_after_init_weights(self):
-        """Weights must still be shared after calling init_weights."""
-        model = Llama3Model(_make_config(enable_weight_tying=True))
-        model.init_weights()
+    def test_weights_remain_tied_after_init_states(self):
+        """Weights must still be shared after calling init_states."""
+        config = _make_config(enable_weight_tying=True)
+        model = Llama3Model(config)
+        model.init_states()
         self.assertIs(
             model.tok_embeddings.weight,
             model.output.weight,
-            "tok_embeddings.weight and output.weight must remain tied after init_weights",
+            "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
 
     def test_pp_guard_raises_when_weight_tying_and_pp_enabled(self):

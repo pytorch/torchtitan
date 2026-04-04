@@ -36,20 +36,3 @@ class SpecialTokens:
             special_tokens_dict[f"{prefix}_token"] = tok
             special_tokens_dict[f"{prefix}_id"] = token_to_id[tok]
         return cls(**special_tokens_dict)
-
-
-@dataclass
-class Siglip2Config:
-    dim: int = 768
-    ffn_dim: int = 3072
-    n_layers: int = 12
-    n_heads: int = 12
-
-    n_pos_embs: int = 16  # Number of positional embeddings per h&w
-    n_channels: int = 3  # RGB channels
-    patch_size: int = 16
-    spatial_merge_size: int = 1
-
-    layer_norm_eps: float = 1e-6
-    attn_backend: str = "flex"
-    attn_mask_type: str = "causal"

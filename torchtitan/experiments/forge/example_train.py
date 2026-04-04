@@ -427,7 +427,7 @@ def main(custom_trainer_class: type[Trainer] | None = None) -> None:
 
     try:
         # TODO(local_tensor): Remove this special case once LocalTensor supports
-        # init_weights() and foreach_allgather. In local tensor mode, skip
+        # init_states() and foreach_allgather. In local tensor mode, skip
         # training/checkpointing as the # model is not fully initialized
         # pyrefly: ignore [missing-attribute]
         if config.comm.mode == "local_tensor":

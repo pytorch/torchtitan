@@ -17,6 +17,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     trace_module,
     TracedResult,
 )
+from torchtitan.experiments.graph_trainer.passes import apply_default_graph_passes
 from torchtitan.trainer import Trainer
 
 
@@ -108,6 +109,11 @@ class GraphTrainer(Trainer):
                     self._fwd_bwd_step_module,
                     (inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs),
                 )
+
+            self._traced_step.gm = apply_default_graph_passes(
+                self._traced_step.gm,
+                self._traced_step.example_inputs,
+            )
 
         params_and_buffers = {
             **dict(self._fwd_bwd_step_module.named_parameters(remove_duplicate=False)),
