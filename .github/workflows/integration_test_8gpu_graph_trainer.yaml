@@ -73,7 +73,6 @@ jobs:
         pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation"
 
         # Run precompile unit tests
-        # TODO: Currently failing, re-enable once fixed.
-        # pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
