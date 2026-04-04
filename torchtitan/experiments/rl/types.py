@@ -6,6 +6,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 
 @dataclass
 class Episode:
@@ -43,3 +45,15 @@ class Episode:
     reward: float = 0.0
     group_id: str = ""
     advantage: float = 0.0
+
+
+@dataclass
+class TrainBatch:
+    """Pre-collated batch for one trainer DP rank."""
+
+    token_ids: torch.Tensor
+    prompt_lens: torch.Tensor
+    response_lens: torch.Tensor
+    advantages: torch.Tensor
+    token_log_probs: torch.Tensor
+    pad_token_id: int
