@@ -18,7 +18,7 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -271,9 +271,7 @@ class ChatDataset(IterableDataset, Stateful):
         infinite: bool = False,
     ) -> None:
         if train_on not in ("all", "assistant"):
-            raise ValueError(
-                f"train_on must be 'all' or 'assistant', got '{train_on}'"
-            )
+            raise ValueError(f"train_on must be 'all' or 'assistant', got '{train_on}'")
 
         if tokenizer.eos_id is None:
             raise ValueError(
@@ -287,7 +285,15 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
+
         self._assistant_only = train_on == "assistant"
+        self._assistant_end_token_ids = {self._eos_id}
+        if isinstance(tokenizer, HuggingFaceTokenizer):
+            self._assistant_end_token_ids.update(
+                token_id
+                for token_id, token in tokenizer.tokenizer.get_added_tokens_decoder().items()
+                if token.special
+            )
 
         self._dataset_id = f"{dataset.info.dataset_name}/{dataset.split}"
 
@@ -368,9 +374,7 @@ class ChatDataset(IterableDataset, Stateful):
             # Strips extra fields (e.g. reasoning_content) so template
             # conditionals like Qwen3's <think> insertion also differ.
             blanked_messages = [
-                {"role": msg["role"], "content": ""}
-                if idx == assistant_idx
-                else msg
+                {"role": msg["role"], "content": ""} if idx == assistant_idx else msg
                 for idx, msg in enumerate(messages)
             ]
 
@@ -396,6 +400,15 @@ class ChatDataset(IterableDataset, Stateful):
             if end <= start:
                 raise ValueError("Blanked assistant turn did not produce a token diff")
 
+            # Heuristic: if the next token is a special token, include it so
+            # assistant-only supervision can cover turn terminators such as
+            # EOS or model-specific end-of-turn markers.
+            if (
+                end < len(full_tokens)
+                and full_tokens[end] in self._assistant_end_token_ids
+            ):
+                end += 1
+
             spans.append((start, end))
 
         return spans
@@ -409,11 +422,11 @@ class ChatDataset(IterableDataset, Stateful):
         label_ids = tokens[1:]. By default, the full rendered conversation is
         supervised. When assistant-only supervision is enabled, non-assistant
         tokens are masked with IGNORE_INDEX by diffing the rendered
-        conversation against versions with each assistant turn blanked. This
-        supervises assistant content only; generic turn terminators such as
-        EOT/EOS are not included. Supports both single-turn and multi-turn
-        conversations. Returns None if the sample exceeds seq_len (dropped to
-        avoid training on truncated responses).
+        conversation against versions with each assistant turn blanked. We
+        extend each assistant span by one token when the next token is EOS
+        or another special token, allowing supervision of end-of-turn markers.
+        Returns None if the sample exceeds seq_len (dropped to avoid training
+        on truncated responses).
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)

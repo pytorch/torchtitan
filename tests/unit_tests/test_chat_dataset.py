@@ -536,8 +536,8 @@ class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(supervised_text, "4")
-        self.assertNotEqual(supervised_token_ids[-1], tokenizer.eos_id)
+        self.assertEqual(supervised_text, "4<|end_of_text|>")
+        self.assertEqual(supervised_token_ids[-1], tokenizer.eos_id)
         self.assertNotIn("assistant\n", supervised_text)
 
     def test_gpt_oss_template_supervises_assistant_message_content_only(self):
@@ -578,7 +578,7 @@ class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
             "2+2=4.<|return|>",
             supervised_text,
         )
-        self.assertNotEqual(supervised_token_ids[-1], tokenizer.eos_id)
+        self.assertEqual(supervised_token_ids[-1], tokenizer.eos_id)
         self.assertNotIn("What is 2 + 2?", supervised_text)
 
     def test_qwen3_template_supervises_assistant_content_only(self):
