@@ -284,11 +284,12 @@ def _get_params_and_buffers(mod: nn.Module) -> dict[str, torch.Tensor]:
 class TracedResult:
     """Holds the traced graph and metadata needed to execute it.
 
-    Returned by :func:`minimal_fx_tracer`.  Call the instance directly to execute
-    the traced graph with fresh parameters read from the live module::
+    Returned by :func:`minimal_fx_tracer`. Call the tracer returned by
+    :func:`minimal_fx_tracer` with trace-time args, then execute it with
+    :func:`run_traced`::
 
-        traced = minimal_fx_tracer(train_step, (model, tokens, labels))
-        result = traced(model, tokens, labels)
+        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
+        result = run_traced(traced, model, tokens, labels)
 
     Args:
         gm: The traced FX graph (a pure function of flat tensors).
@@ -324,42 +325,9 @@ class TracedResult:
         self.num_flat_outputs = num_flat_outputs
         self.output_subclass_layouts = output_subclass_layouts
         self.output_spec = output_spec
-        self._validated = False
-
-    def __call__(self, *args: Any) -> Any:
-        """Execute the traced graph, reading fresh params from the module in ``args``.
-
-        The module must be the first argument (position 0), matching the
-        convention enforced by :func:`minimal_fx_tracer`.
-        """
-        mod = args[0]
-        params_dict = _get_params_and_buffers(mod)
-        if not self._validated:
-            fqns = list(params_dict.keys())
-            if fqns != self.param_fqns:
-                raise ValueError(
-                    f"Module at args[0] has different parameter/buffer "
-                    f"names than during tracing.\n"
-                    f"  Traced: {self.param_fqns}\n"
-                    f"  Got:    {fqns}"
-                )
-            self._validated = True
-        params_flat = list(params_dict.values())
-
-        user_args = list(args[1:])
-        user_args_flat, _ = pytree.tree_flatten(user_args)
-
-        all_args = params_flat + list(user_args_flat)
-        flat_inputs, _ = _unwrap_subclasses(all_args)
-
-        flat_outputs = self.gm(*flat_inputs)
-        wrapped = _wrap_subclasses(
-            flat_outputs, self.num_flat_outputs, self.output_subclass_layouts
-        )
-        return pytree.tree_unflatten(wrapped, self.output_spec)
 
 
-def minimal_fx_tracer(
+def _trace_with_args(
     fn: Callable,
     args: tuple,
 ) -> TracedResult:
@@ -377,11 +345,11 @@ def minimal_fx_tracer(
     prepending.  Non-tensor, non-module values like ``loss_fn`` should be
     captured in ``fn``'s closure rather than passed as args.
 
-    The returned :class:`TracedResult` is directly callable — pass the same
-    positional arguments (with the live module first) to execute the graph::
+    Execute the returned :class:`TracedResult` with :func:`run_traced`, passing
+    the same positional arguments (with the live module first)::
 
-        traced = minimal_fx_tracer(train_step, (model, tokens, labels))
-        result = traced(model, tokens, labels)
+        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
+        result = run_traced(traced, model, tokens, labels)
 
     Args:
         fn: The callable to trace.
@@ -493,3 +461,61 @@ def minimal_fx_tracer(
         output_subclass_layouts=output_layouts,
         output_spec=output_spec,
     )
+
+
+def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
+    """Return a tracer for ``fn`` that traces a concrete module/input invocation.
+
+    ``fn`` must be a plain callable (not an ``nn.Module``). The returned
+    callable expects the trace-time positional arguments, with the live module
+    at position 0::
+
+        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
+        result = run_traced(traced, model, tokens, labels)
+    """
+
+    def trace_with_args(*args: Any) -> TracedResult:
+        return _trace_with_args(fn, args)
+
+    return trace_with_args
+
+
+def run_traced(traced_result: TracedResult, *args: Any) -> Any:
+    """Execute a traced graph with fresh parameters read from the live module.
+
+    This is a reference implementation of traced-graph execution. It keeps the
+    parameter lookup, subclass unwrapping, and output reconstruction logic
+    explicit instead of baking those semantics into ``TracedResult`` itself.
+
+    The module must be the first argument (position 0), matching the
+    convention enforced by :func:`minimal_fx_tracer`.
+    """
+
+    mod = args[0]
+    params_dict = _get_params_and_buffers(mod)
+    fqns = list(params_dict.keys())
+    if fqns != traced_result.param_fqns:
+        raise ValueError(
+            f"Module at args[0] has different parameter/buffer "
+            f"names than during tracing.\n"
+            f"  Traced: {traced_result.param_fqns}\n"
+            f"  Got:    {fqns}"
+        )
+    params_flat = list(params_dict.values())
+
+    user_args = list(args[1:])
+    user_args_flat, _ = pytree.tree_flatten(user_args)
+
+    all_args = params_flat + list(user_args_flat)
+    flat_inputs, _ = _unwrap_subclasses(all_args)
+
+    flat_outputs = traced_result.gm(*flat_inputs)
+    wrapped = _wrap_subclasses(
+        flat_outputs,
+        traced_result.num_flat_outputs,
+        traced_result.output_subclass_layouts,
+    )
+    return pytree.tree_unflatten(wrapped, traced_result.output_spec)
+
+
+run_traced_module = run_traced
