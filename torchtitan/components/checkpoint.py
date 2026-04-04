@@ -372,6 +372,7 @@ class CheckpointManager(Configurable):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
         self.keep_latest_k = config.keep_latest_k
+        self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
@@ -383,8 +384,6 @@ class CheckpointManager(Configurable):
                 target=purge_thread, args=(self.purge_queue,), daemon=True
             )
             self.purge_thread.start()
-        else:
-            self.purge_thread: threading.Thread | None = None
 
         self.mp = None
         self.staging_future = None
@@ -408,7 +407,8 @@ class CheckpointManager(Configurable):
     def close(self):
         if hasattr(self, "enable") and self.enable:
             if hasattr(self, "mp") and self.mp and self.mp.is_alive():
-                self.mp_queue_send.put(Terminate())  # pyrefly: ignore [missing-attribute]
+                # pyrefly: ignore [missing-attribute]
+                self.mp_queue_send.put(Terminate())
                 self.mp.join()
             if (
                 hasattr(self, "purge_thread")
