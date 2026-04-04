@@ -12,7 +12,7 @@ import torch
 
 @dataclass
 class Completion:
-    """Output of the generator."""
+    """Output of the Generator. Prompt + model response + logprobs."""
 
     prompt_tokens: list[int]
     response_tokens: list[int]
@@ -33,38 +33,50 @@ class ScoredCompletion:
 
 @dataclass
 class Episode:
-    """Training episode consumed by the trainer."""
+    """Ready for training. Flat structure for ergonomic access in _collate.
 
-    policy_version: int
-    prompt_token_ids: list[int]
+    Built by the orchestrator from ScoredCompletion + computed advantage.
+    """
+
+    prompt_tokens: list[int]
+    response_tokens: list[int]
+    logprobs: list[float]
+    group_id: str
     text: str
-    token_ids: list[int]
-    token_log_probs: list[float]
-    expected_answer: str = ""
-    reward: float = 0.0
-    group_id: str = ""
-    advantage: float = 0.0
+    reward: float
+    advantage: float
+    policy_version: int = 0
 
 
 @dataclass
 class TrainBatch:
-    """Pre-collated batch for one trainer DP rank."""
+    """Input to Trainer.forward_backward().
 
-    token_ids: torch.Tensor
-    prompt_lens: torch.Tensor
-    response_lens: torch.Tensor
-    advantages: torch.Tensor
-    token_log_probs: torch.Tensor
+    One TrainBatch per DP rank. The controller's collate function
+    pre-shards data into a list[TrainBatch] before sending to the trainer.
+    All sequences are right-padded to the same length within the batch.
+    """
+
+    token_ids: torch.Tensor  # [B, L] padded (prompt + response + padding)
+    prompt_lens: torch.Tensor  # [B]
+    response_lens: torch.Tensor  # [B]
+    advantages: torch.Tensor  # [B]
+    old_logprobs: torch.Tensor  # [B, L] (0 for prompt/padding positions)
+    policy_version: int
     pad_token_id: int
 
 
 @dataclass
 class ForwardBackwardResult:
+    """Output of Trainer.forward_backward()."""
+
     loss: float
     metrics: dict[str, float]
 
 
 @dataclass
 class OptimStepResult:
+    """Output of Trainer.optim_step()."""
+
     grad_norm: float
     policy_version: int
