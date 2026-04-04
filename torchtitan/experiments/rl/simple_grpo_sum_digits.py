@@ -243,22 +243,8 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
-    @staticmethod
-    def _validate_policy_versions(episodes: list[Episode]) -> int:
-        if not episodes:
-            raise ValueError("episodes must be non-empty")
-
-        policy_versions = {ep.policy_version for ep in episodes}
-        if len(policy_versions) != 1:
-            raise ValueError(
-                "all episodes in a synchronous GRPO step must share one policy_version, "
-                f"got {sorted(policy_versions)}"
-            )
-        return next(iter(policy_versions))
-
     def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
         """Shard episodes across trainer DP ranks with interleaved indexing."""
-        self._validate_policy_versions(episodes)
         return [
             [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
             for rank in range(self.trainer_dp_degree)
@@ -271,9 +257,6 @@ class RLTrainer(Configurable):
         pad_token_id: int = 0,
     ) -> TrainBatch:
         """Collate one DP rank's episodes into a padded TrainBatch."""
-        if not episodes:
-            raise ValueError("episodes must be non-empty")
-
         prompt_lens = [len(ep.prompt_token_ids) for ep in episodes]
         response_lens = [len(ep.token_ids) for ep in episodes]
         max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
