@@ -12,7 +12,7 @@ from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import ChatDataset
+from torchtitan.hf_datasets.text_datasets import ChatDataset, SupervisionMode
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     get_document_mask_mod,
@@ -488,6 +488,7 @@ class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
         *,
         chat_template: str,
         messages: list[dict[str, str]],
+        train_on: SupervisionMode = SupervisionMode.ASSISTANT,
     ) -> tuple[HuggingFaceTokenizer, list[int], str]:
         tokenizer = _load_tokenizer()
         tokenizer.set_chat_template(chat_template)
@@ -496,7 +497,7 @@ class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
             dataset=Dataset.from_list([{"id": 1}]),
             tokenizer=tokenizer,
             sample_processor=lambda sample, messages=messages: messages,
-            train_on="assistant",
+            train_on=train_on,
             seq_len=512,
             infinite=False,
         )
@@ -709,7 +710,7 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=lambda sample: messages,
-            train_on="assistant",
+            train_on=SupervisionMode.ASSISTANT,
             seq_len=sample_len * 2,
             infinite=False,
         )
@@ -740,6 +741,30 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
 
         metadata = create_varlen_metadata_for_document(positions=positions)
         self.assertEqual(metadata.cu_seq_q.tolist(), [0, sample_len, sample_len * 2])
+
+
+class TestChatDatasetLastAssistantMasking(unittest.TestCase):
+    def test_last_assistant_supervises_only_the_final_assistant_turn(self):
+        tokenizer, supervised_token_ids, supervised_text = (
+            TestChatDatasetAssistantOnlyTemplates()._get_supervised_output(
+                chat_template=(
+                    "{{ bos_token }}{% for msg in messages %}"
+                    "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
+                    "{% endfor %}"
+                ),
+                messages=[
+                    {"role": "user", "content": "Q1?"},
+                    {"role": "assistant", "content": "4"},
+                    {"role": "user", "content": "Q2?"},
+                    {"role": "assistant", "content": "6"},
+                ],
+                train_on=SupervisionMode.LAST_ASSISTANT,
+            )
+        )
+
+        self.assertEqual(supervised_text, "6<|end_of_text|>")
+        self.assertNotIn("4", supervised_text)
+        self.assertEqual(supervised_token_ids[-1], tokenizer.eos_id)
 
 
 if __name__ == "__main__":

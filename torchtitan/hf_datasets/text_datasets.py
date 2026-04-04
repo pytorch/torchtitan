@@ -6,6 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import partial
 from typing import Annotated, Any, cast
 
@@ -51,6 +52,20 @@ DATASETS = {
         sample_processor=_process_c4_text,
     ),
 }
+
+
+class SupervisionMode(str, Enum):
+    """
+    Controls which tokens receive supervised labels during training.
+
+    ALL: Supervise the full rendered conversation.
+    ASSISTANT: Supervise all assistant turns.
+    LAST_ASSISTANT: Supervise only the final assistant turn.
+    """
+
+    ALL = "all"
+    ASSISTANT = "assistant"
+    LAST_ASSISTANT = "last_assistant"
 
 
 def _validate_dataset(
@@ -252,10 +267,9 @@ class ChatDataset(IterableDataset, Stateful):
     """Dataset for single-turn and multi-turn chat/instruction-tuning.
 
     Tokenizes conversations with alternating user/assistant turns and uses
-    greedy sequence packing with per-document positions. By default, labels
-    supervise the full rendered conversation. When ``train_on="assistant"``,
-    labels supervise assistant content spans only. Implements Stateful for
-    checkpointing.
+    greedy sequence packing with per-document positions. Labels can supervise
+    the full rendered conversation, all assistant content spans, or only the
+    last assistant span. Implements Stateful for checkpointing.
     """
 
     def __init__(
@@ -264,15 +278,12 @@ class ChatDataset(IterableDataset, Stateful):
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
         *,
-        train_on: str = "all",
+        train_on: SupervisionMode = SupervisionMode.ALL,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
     ) -> None:
-        if train_on not in ("all", "assistant"):
-            raise ValueError(f"train_on must be 'all' or 'assistant', got '{train_on}'")
-
         if tokenizer.eos_id is None:
             raise ValueError(
                 "Tokenizer does not have an eos_id set. "
@@ -285,8 +296,7 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-
-        self._assistant_only = train_on == "assistant"
+        self._train_on = train_on
         self._assistant_end_token_ids = {self._eos_id}
         if isinstance(tokenizer, HuggingFaceTokenizer):
             self._assistant_end_token_ids.update(
@@ -420,13 +430,14 @@ class ChatDataset(IterableDataset, Stateful):
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
         label_ids = tokens[1:]. By default, the full rendered conversation is
-        supervised. When assistant-only supervision is enabled, non-assistant
-        tokens are masked with IGNORE_INDEX by diffing the rendered
-        conversation against versions with each assistant turn blanked. We
-        extend each assistant span by one token when the next token is EOS
-        or another special token, allowing supervision of end-of-turn markers.
-        Returns None if the sample exceeds seq_len (dropped to avoid training
-        on truncated responses).
+        supervised. Assistant masking modes instead keep either all assistant
+        spans or only the last assistant span, masking everything else with
+        IGNORE_INDEX by diffing the rendered conversation against versions
+        with each assistant turn blanked. We extend each assistant span by
+        one token when the next token is EOS or another special token,
+        allowing supervision of end-of-turn markers. Returns None if the
+        sample exceeds seq_len (dropped to avoid training on truncated
+        responses).
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
@@ -448,7 +459,7 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        if not self._assistant_only:
+        if self._train_on == SupervisionMode.ALL:
             return input_ids, label_ids
 
         # Find assistant spans and unmask only those in labels.
@@ -456,6 +467,8 @@ class ChatDataset(IterableDataset, Stateful):
         # an assistant span (start, end) in full_tokens maps to
         # label indices [start-1, end-1) when supervising assistant content.
         spans = self._get_assistant_spans(messages, full_tokens)
+        if self._train_on == SupervisionMode.LAST_ASSISTANT:
+            spans = spans[-1:]
 
         # Start with everything masked
         masked_labels = [IGNORE_INDEX] * len(label_ids)
@@ -596,8 +609,10 @@ class ChatDataLoader(ParallelAwareDataloader):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
-        train_on: str = "all"
-        """Which tokens to supervise: 'all' or 'assistant'."""
+        train_on: Annotated[SupervisionMode, tyro.conf.EnumChoicesFromValues] = (
+            SupervisionMode.ALL
+        )
+        """Which tokens to supervise: 'all', 'assistant', or 'last_assistant'."""
 
         infinite: bool = True
         """Whether to loop the dataset infinitely. Might hang on multi-GPU."""
