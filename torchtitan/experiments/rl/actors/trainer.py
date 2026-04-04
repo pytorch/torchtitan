@@ -29,7 +29,11 @@ from torchtitan.experiments.rl.actors.utils import (
     extract_logprobs_batched,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import TrainBatch
+from torchtitan.experiments.rl.types import (
+    ForwardBackwardResult,
+    OptimStepResult,
+    TrainBatch,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -263,20 +267,15 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     @endpoint
-    async def step(self, batches: list[TrainBatch]) -> dict:
-        """Perform one training step.
-
-        Expects one pre-collated batch per DP rank.
-
-        Args:
-            batches: Pre-sharded batches, one per DP rank.
-
-        Returns:
-            Training metrics
-        """
+    async def forward_backward(
+        self, batches: list[TrainBatch]
+    ) -> ForwardBackwardResult:
+        """Run forward, compute loss, and backpropagate."""
         logger.debug(
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
+
+        self.optimizers.zero_grad()
 
         local_batch = batches[self.dp_rank]
         device = self.device
@@ -327,38 +326,11 @@ class PolicyTrainer(Actor, Configurable):
             f"tokens_checked={verification_result['total_tokens_checked']}"
         )
 
-        # Update weights
-        self.optimizers.zero_grad()
         loss.backward()
 
-        # All-reduce gradients across DP ranks so all ranks have consistent
-        # weight updates despite processing different data shards.
-        if self.dp_enabled:
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-
-        # Gradient clipping
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
-        )
-
-        self.optimizers.step()
-        self.lr_schedulers.step()
-
-        self.policy_version += 1
-
-        # Return metrics
         metrics = {
-            "loss": loss.item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "policy_version": self.policy_version,
-            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
-            # Trainer vs generator log prob divergence
             "logprob_diff_mean": verification_result["logprob_diff_mean"],
             "logprob_diff_max": verification_result["logprob_diff_max"],
             "logprob_max_delta": verification_result["logprob_max_delta"],
@@ -368,6 +340,31 @@ class PolicyTrainer(Actor, Configurable):
             **loss_metrics,
         }
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer finished step {self.policy_version}"
+            f"{os.getpid()=} PolicyTrainer finished forward_backward "
+            f"for step {self.policy_version}"
         )
-        return metrics
+        return ForwardBackwardResult(loss=loss.item(), metrics=metrics)
+
+    @endpoint
+    async def optim_step(self) -> OptimStepResult:
+        """Consume accumulated gradients and update the policy."""
+        if self.dp_enabled:
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
+        grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in self.model_parts for p in m.parameters()],
+            self.config.training.max_norm,
+            foreach=True,
+            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+        )
+
+        self.optimizers.step()
+        self.lr_schedulers.step()
+        self.policy_version += 1
+
+        return OptimStepResult(
+            grad_norm=grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
+            policy_version=self.policy_version,
+        )
