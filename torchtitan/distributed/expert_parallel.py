@@ -217,14 +217,13 @@ class ExpertParallel(BaseExpertParallel):
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        # NOTE: Token dispatch/combine is now handled by Experts.token_dispatcher.
+        # ExpertParallel only shards expert weights. The _token_dispatch and
+        # _token_combine methods are retained for ExpertTensorParallel (deferred).
         return distribute_module(
             module,
             device_mesh,
             partition_fn=self._partition_fn,
-            # pyrefly: ignore [bad-argument-type]
-            input_fn=self._token_dispatch,
-            # pyrefly: ignore [bad-argument-type]
-            output_fn=self._token_combine,
         )
 
 
@@ -261,14 +260,12 @@ class ExpertTensorParallel(ExpertParallel):
         return super()._token_combine(mod, routed_output, device_mesh["ep"])
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        # NOTE: Token dispatch/combine is now handled by MoE.token_dispatcher.
+        # ExpertTensorParallel only shards expert weights with 2D [EP, TP] placement.
         return distribute_module(
             module,
             device_mesh,
             partition_fn=self._partition_fn,
-            # pyrefly: ignore [bad-argument-type]
-            input_fn=self._token_dispatch,
-            # pyrefly: ignore [bad-argument-type]
-            output_fn=self._token_combine,
         )
 
 

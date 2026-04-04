@@ -16,6 +16,8 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
+from .token_dispatcher import LocalTokenDispatcher
+
 
 # NOTE: keeping this for-loop implementation for comparison
 #       and readability, may remove later
@@ -108,6 +110,8 @@ class GroupedExperts(Module):
             w2 = self.w2
             w3 = self.w3
 
+        # NOTE: The token dispatcher handles _permute/_unpermute for grouped_mm
+        # alignment padding, so GroupedExperts always receives pre-padded input.
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         else:
@@ -277,61 +281,6 @@ class TokenChoiceTopKRouter(Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
 
-# NOTE: the reason we make this a stateless module is to support
-#       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
-class TokenReorderer(Module):
-    """This module reorders token indices to match the order of experts, enabling
-    efficient parallel processing of tokens by experts.
-    """
-
-    def __init__(self, *, num_experts: int, top_k: int):
-        super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
-
-    def forward(
-        self,
-        top_scores: torch.Tensor,
-        selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Reorders token indices to match the order of experts for MoE routing.
-
-        Args:
-            top_scores (torch.Tensor): Routing scores for selected experts,
-                shape (batch_size * seq_len, top_k)
-            selected_experts_indices (torch.Tensor): Expert indices selected for each token,
-                shape (batch_size*seq_len, top_k)
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                - top_scores_experts_sorted: Scores reordered to match expert ordering
-                - token_indices_experts_sorted: Token indices reordered to match expert ordering
-                - num_tokens_per_expert: Number of tokens assigned to each expert
-        """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
-
-        # Reorder the token indices to match the order of the experts
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-
-        return (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-        )
-
-
 class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -354,10 +303,14 @@ class MoE(Module):
         self.experts = config.experts.build(
             dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
         )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
-        self.reorderer = TokenReorderer(
-            num_experts=num_experts, top_k=config.router.top_k
+        self.token_dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(
+                num_experts=num_experts,
+                top_k=config.router.top_k,
+                score_before_experts=config.score_before_experts,
+            )
         )
+        self.router = config.router.build(dim=dim, num_experts=num_experts)
         self.shared_experts = (
             config.shared_experts.build(dim=dim)
             if config.shared_experts is not None
@@ -436,58 +389,17 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # top_scores_experts_sorted and token_indices_experts_sorted shape (bs*slen*top_k,)
-        # num_tokens_per_expert shape (num_experts,)
-        # NOTE: the reason we need to compute num_tokens_per_expert again is:
-        #       1st computation in router is to update self.tokens_per_expert
-        #       which would be the same across all TP ranks.
-        #       2nd computation in reorderer is for the actual routing and experts computation
-        #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
-        #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
-        (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-        ) = self.reorderer(top_scores, selected_experts_indices)
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted // self.router.top_k]
-
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
+        # Dispatch tokens to experts, compute, and combine
+        routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
+            x, top_scores, selected_experts_indices, num_tokens_per_expert
+        )
+        routed_output = self.experts(routed_input, num_tokens_local)
+        out_experts = self.token_dispatcher.combine(routed_output, metadata)
 
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
         out = self.shared_experts(x) if self.shared_experts is not None else None
-
-        # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            -1, self.router.top_k, dim
-        )
-        if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
-            )
-        else:
-            out_experts = routed_output_unsorted.sum(dim=1)
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)

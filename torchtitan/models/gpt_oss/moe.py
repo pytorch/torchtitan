@@ -184,6 +184,8 @@ class GptOssGroupedExperts(Module):
                 tp_dim_idx = mesh_dim_names.index("tp")
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 
+        # NOTE: The token dispatcher handles _permute/_unpermute for grouped_mm
+        # alignment padding, so GptOssGroupedExperts always receives pre-padded input.
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(
                 mlp1_weight,
