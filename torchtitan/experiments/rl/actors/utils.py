@@ -31,6 +31,30 @@ def build_varlen_metadata(
     )
 
 
+def extract_logprobs_batched(
+    logits: torch.Tensor, token_ids: torch.Tensor
+) -> torch.Tensor:
+    """Extract per-token logprobs from batched logits."""
+    shift_logits = logits[:, :-1, :].float()
+    shift_targets = token_ids[:, 1:]
+    logprobs = F.log_softmax(shift_logits, dim=-1)
+    token_logprobs = logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
+    return F.pad(token_logprobs, (1, 0), value=0.0)
+
+
+def build_response_mask(
+    prompt_lens: torch.Tensor,
+    response_lens: torch.Tensor,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a binary mask selecting response tokens only."""
+    positions = torch.arange(seq_len, device=device).unsqueeze(0)
+    start = prompt_lens.unsqueeze(1)
+    end = start + response_lens.unsqueeze(1)
+    return ((positions >= start) & (positions < end)).float()
+
+
 def compute_token_log_probs(
     model: torch.nn.Module,
     prompt_ids: list[int],

@@ -42,10 +42,60 @@ from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Episode, TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+class GRPOLoss:
+    """Simple clipped GRPO loss with an optional KL term."""
+
+    def __init__(
+        self,
+        kl_coef: float = 0.0,
+        clip_eps: float = 0.2,
+    ):
+        self.kl_coef = kl_coef
+        self.clip_eps = clip_eps
+
+    def __call__(
+        self,
+        policy_logprobs: torch.Tensor,
+        response_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        ref_logprobs: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        device = policy_logprobs.device
+        response_mask = response_mask.to(device)
+        advantages = advantages.to(device)
+        ref_logprobs = ref_logprobs.to(device).detach()
+
+        token_log_ratio = (policy_logprobs - ref_logprobs) * response_mask
+        tokens_per_sample = response_mask.sum(dim=1).clamp(min=1.0)
+        mean_log_ratio = token_log_ratio.sum(dim=1) / tokens_per_sample
+        ratio = torch.exp(mean_log_ratio)
+
+        unclipped_loss = ratio * advantages
+        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        clipped_loss = clipped_ratio * advantages
+        pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
+
+        token_kl = (torch.exp(token_log_ratio) - 1 - token_log_ratio) * response_mask
+        mean_kl = token_kl.sum(dim=1) / tokens_per_sample
+        kl_div = mean_kl.mean()
+
+        loss = pg_loss + self.kl_coef * kl_div
+        metrics = {
+            "pg_loss": pg_loss.item(),
+            "kl_div": kl_div.item(),
+            "ratio_mean": ratio.mean().item(),
+            "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
+            .float()
+            .mean()
+            .item(),
+        }
+        return loss, metrics
 
 
 class Provisioner:
@@ -185,6 +235,51 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
+    def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
+        """Shard episodes across trainer DP ranks with interleaved indexing."""
+        return [
+            [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
+            for rank in range(self.trainer_dp_degree)
+        ]
+
+    @staticmethod
+    def _collate_rank_episodes(
+        episodes: list[Episode],
+        *,
+        pad_token_id: int = 0,
+    ) -> TrainBatch:
+        """Collate one DP rank's episodes into a padded TrainBatch."""
+        prompt_lens = [len(ep.prompt_token_ids) for ep in episodes]
+        response_lens = [len(ep.token_ids) for ep in episodes]
+        max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
+
+        padded_ids = []
+        padded_logprobs = []
+        for ep in episodes:
+            seq = ep.prompt_token_ids + ep.token_ids
+            pad_len = max_len - len(seq)
+            padded_ids.append(seq + [pad_token_id] * pad_len)
+            padded_logprobs.append(
+                [0.0] * len(ep.prompt_token_ids)
+                + ep.token_log_probs
+                + [0.0] * pad_len
+            )
+
+        return TrainBatch(
+            token_ids=torch.tensor(padded_ids, dtype=torch.long),
+            prompt_lens=torch.tensor(prompt_lens, dtype=torch.long),
+            response_lens=torch.tensor(response_lens, dtype=torch.long),
+            advantages=torch.tensor(
+                [ep.advantage for ep in episodes],
+                dtype=torch.float32,
+            ),
+            token_log_probs=torch.tensor(
+                padded_logprobs,
+                dtype=torch.float32,
+            ),
+            pad_token_id=pad_token_id,
+        )
+
     async def setup(
         self,
         *,
@@ -217,6 +312,9 @@ class RLTrainer(Configurable):
         self.generator_world_size = self._compute_world_size(
             config.generator.parallelism
         )
+        tp = config.trainer.parallelism
+        dp_shard = max(tp.data_parallel_shard_degree, 1)
+        self.trainer_dp_degree = tp.data_parallel_replicate_degree * dp_shard
 
         total_gpus = self.trainer_world_size + self.generator_world_size
         logger.info(
@@ -303,6 +401,7 @@ class RLTrainer(Configurable):
             "trainer",
             PolicyTrainer,
             config.trainer,
+            loss_fn=GRPOLoss(),
             model_spec=config.model_spec,
             batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
@@ -442,8 +541,13 @@ class RLTrainer(Configurable):
             if self.config.log_samples:
                 _log_samples(episodes)
 
-            # 4. Trainer updates policy using episodes with advantages
-            metrics = self._get_rank_0_value(self.trainer.step.call(episodes).get())
+            # 4. Trainer updates policy using pre-collated batches
+            sharded_episodes = self._shard_episodes(episodes)
+            batches = [
+                self._collate_rank_episodes(rank_episodes)
+                for rank_episodes in sharded_episodes
+            ]
+            metrics = self._get_rank_0_value(self.trainer.step.call(batches).get())
 
             # 5. Sync weights
             t0 = time.perf_counter()
@@ -459,12 +563,13 @@ class RLTrainer(Configurable):
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
             all_rewards = [ep.reward for ep in episodes]
+            reward_mean = sum(all_rewards) / len(all_rewards)
             correct_count = sum(1 for r in all_rewards if r > 0)
             total_count = len(all_rewards)
 
             logger.info(
                 f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
-                f"Reward: {metrics['reward_mean']:+.3f} | "
+                f"Reward: {reward_mean:+.3f} | "
                 f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
