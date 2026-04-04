@@ -6,6 +6,7 @@
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,12 +68,14 @@ class PolicyTrainer(Actor, Configurable):
         self,
         config: Config,
         *,
+        loss_fn: Callable,
         model_spec: ModelSpec,
         batch_invariant_mode: bool,
         hf_assets_path: str = "",
         transfer_dtype: str = "",
     ):
         self.config = config
+        self.loss_fn = loss_fn
         self.model_spec = model_spec
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -296,38 +299,12 @@ class PolicyTrainer(Actor, Configurable):
             token_ids.shape[1],
             device,
         )
-
-        token_log_ratio = (policy_logprobs - ref_logprobs) * response_mask
-        tokens_per_sample = response_mask.sum(dim=1).clamp(min=1.0)
-        mean_log_ratio = token_log_ratio.sum(dim=1) / tokens_per_sample
-        ratio = torch.exp(mean_log_ratio)
-
-        unclipped_loss = ratio * advantages
-        clipped_ratio = torch.clamp(ratio, 1 - 0.2, 1 + 0.2)
-        clipped_loss = clipped_ratio * advantages
-        pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
-
-        entropy = -(policy_logprobs * response_mask).sum() / response_mask.sum().clamp(
-            min=1.0
+        loss, loss_metrics = self.loss_fn(
+            policy_logprobs=policy_logprobs,
+            response_mask=response_mask,
+            advantages=advantages,
+            ref_logprobs=ref_logprobs,
         )
-        entropy_bonus = -0.01 * entropy
-
-        token_kl = (torch.exp(token_log_ratio) - 1 - token_log_ratio) * response_mask
-        mean_kl = token_kl.sum(dim=1) / tokens_per_sample
-        kl_div = mean_kl.mean()
-
-        loss = pg_loss + entropy_bonus + 0.1 * kl_div
-
-        loss_metrics = {
-            "pg_loss": pg_loss.item(),
-            "entropy": entropy.item(),
-            "kl_div": kl_div.item(),
-            "ratio_mean": ratio.mean().item(),
-            "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
-            .float()
-            .mean()
-            .item(),
-        }
 
         rollout_log_probs = []
         batch_token_log_probs = []

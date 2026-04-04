@@ -48,6 +48,62 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
+class GRPOLoss:
+    """GRPO loss with token-level normalization and reference KL penalty."""
+
+    def __init__(
+        self,
+        kl_coef: float = 0.1,
+        clip_eps: float = 0.2,
+    ):
+        self.kl_coef = kl_coef
+        self.clip_eps = clip_eps
+
+    def __call__(
+        self,
+        policy_logprobs: torch.Tensor,
+        response_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        ref_logprobs: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        device = policy_logprobs.device
+        response_mask = response_mask.to(device)
+        advantages = advantages.to(device)
+        ref_logprobs = ref_logprobs.to(device).detach()
+
+        token_log_ratio = (policy_logprobs - ref_logprobs) * response_mask
+        tokens_per_sample = response_mask.sum(dim=1).clamp(min=1.0)
+        mean_log_ratio = token_log_ratio.sum(dim=1) / tokens_per_sample
+        ratio = torch.exp(mean_log_ratio)
+
+        unclipped_loss = ratio * advantages
+        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        clipped_loss = clipped_ratio * advantages
+        pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
+
+        entropy = -(policy_logprobs * response_mask).sum() / response_mask.sum().clamp(
+            min=1.0
+        )
+        entropy_bonus = -0.01 * entropy
+
+        token_kl = (torch.exp(token_log_ratio) - 1 - token_log_ratio) * response_mask
+        mean_kl = token_kl.sum(dim=1) / tokens_per_sample
+        kl_div = mean_kl.mean()
+
+        loss = pg_loss + entropy_bonus + self.kl_coef * kl_div
+        metrics = {
+            "pg_loss": pg_loss.item(),
+            "entropy": entropy.item(),
+            "kl_div": kl_div.item(),
+            "ratio_mean": ratio.mean().item(),
+            "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
+            .float()
+            .mean()
+            .item(),
+        }
+        return loss, metrics
+
+
 class Provisioner:
     """Allocates non-overlapping GPU ranges for Monarch proc meshes.
 
@@ -351,6 +407,7 @@ class RLTrainer(Configurable):
             "trainer",
             PolicyTrainer,
             config.trainer,
+            loss_fn=GRPOLoss(),
             model_spec=config.model_spec,
             batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
