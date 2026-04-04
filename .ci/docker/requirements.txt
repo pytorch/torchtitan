@@ -8,5 +8,3 @@ tokenizers >= 0.15.0
 safetensors
 einops
 pillow
-numpy < 2
-pytest

@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
+from tests.utils import hash_gradient, hash_model
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed.utils import get_train_context
@@ -32,7 +33,6 @@ from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.tools.utils import hash_gradient, hash_model
 from torchtitan.trainer import Trainer
 
 SEED = 42
