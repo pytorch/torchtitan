@@ -227,9 +227,10 @@ class GptOssMoE(MoE):
             use_grouped_mm=config.experts.use_grouped_mm,
             param_init=config.experts.param_init,
         )
-        # pyrefly: ignore [bad-assignment]
+        token_dispatcher = self.experts.token_dispatcher
         self.experts = gptoss_experts_config.build(
             dim=dim,
             hidden_dim=config.hidden_dim,
             num_experts=config.num_experts,
         )
+        self.experts.token_dispatcher = token_dispatcher

@@ -84,9 +84,9 @@ class DeepEPMoE(MoE):
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Call experts with routing info - hooks handle DeepEP dispatch/combine.
-        # The combine operation returns asynchronously, allowing overlap with
-        # shared_experts computation below.
+        # Call experts directly - DeepEP hooks on experts handle
+        # dispatch/combine. The combine operation returns asynchronously,
+        # allowing overlap with shared_experts computation below.
         routed_output = self.experts(
             x,
             num_tokens_per_expert,

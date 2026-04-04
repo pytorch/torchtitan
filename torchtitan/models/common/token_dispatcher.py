@@ -24,14 +24,14 @@ class LocalDispatchMetadata:
     token_indices_sorted: torch.Tensor  # (N*top_k,)
     top_scores: torch.Tensor  # (N, top_k) original scores
     top_scores_sorted: torch.Tensor  # (N*top_k,) scores in expert-sorted order
-    input_shape: tuple  # for _unpermute
-    permuted_indices: torch.Tensor  # for _unpermute
 
 
 @dataclass(frozen=True, kw_only=True)
 class DispatchMetadata(LocalDispatchMetadata):
     """Metadata returned by TokenDispatcher.dispatch() for use in combine()."""
 
+    input_shape: tuple  # for _unpermute
+    permuted_indices: torch.Tensor  # for _unpermute
     input_splits: list[int]
     output_splits: list[int]
 
@@ -104,19 +104,19 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         selected_experts_indices: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
-        # Sort token indices by expert assignment
-        token_indices_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-        top_scores_sorted = top_scores.view(-1)[token_indices_sorted]
-
-        # Recompute per-expert token counts (may differ from router's if sharded)
+        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
         )
+
+        # Sort token indices by expert assignment
+        token_indices_sorted = torch.argsort(
+            selected_experts_indices.view(-1), stable=True
+        )
+        top_scores_sorted = top_scores.view(-1)[token_indices_sorted]
 
         # Gather tokens in expert-sorted order
         routed_input = x[token_indices_sorted // self.top_k]
@@ -127,17 +127,10 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
                 routed_input.to(torch.float32) * top_scores_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        # Permute for grouped_mm alignment padding
-        input_shape, routed_input, permuted_indices, num_tokens_per_expert = _permute(
-            routed_input, num_tokens_per_expert, 1, self.num_experts
-        )
-
         metadata = LocalDispatchMetadata(
             token_indices_sorted=token_indices_sorted,
             top_scores=top_scores,
             top_scores_sorted=top_scores_sorted,
-            input_shape=input_shape,
-            permuted_indices=permuted_indices,
         )
         return routed_input, num_tokens_per_expert, metadata
 
@@ -148,11 +141,6 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
     ) -> torch.Tensor:
         num_tokens = metadata.token_indices_sorted.shape[0] // self.top_k
         dim = routed_output.shape[1]
-
-        # Unpermute to remove alignment padding
-        routed_output = _unpermute(
-            routed_output, metadata.input_shape, metadata.permuted_indices
-        )
 
         # Scatter back to original token order
         routed_output_unsorted = torch.zeros(
@@ -257,15 +245,17 @@ class TokenDispatcher(BaseTokenDispatcher):
             self.ep_group,
         )
 
-        # Permute for grouped_mm alignment (also reorders from per-source-rank
-        # to per-expert layout)
-        input_shape, routed_input, permuted_indices, num_tokens_per_expert_group = (
-            _permute(
-                routed_input,
-                num_tokens_per_expert_group,
-                self.ep_degree,
-                self.num_local_experts,
-            )
+        # Reorder tokens from rank-major to expert-major layout for grouped_mm
+        (
+            input_shape,
+            routed_input,
+            permuted_indices,
+            num_tokens_per_expert_group,
+        ) = _permute(
+            routed_input,
+            num_tokens_per_expert_group,
+            self.ep_degree,
+            self.num_local_experts,
         )
 
         metadata = DispatchMetadata(
@@ -288,7 +278,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         num_tokens = metadata.token_indices_sorted.shape[0] // self.top_k
         dim = routed_output.shape[1]
 
-        # Unpermute to remove alignment padding
+        # Reverse expert-major reordering
         routed_output = _unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
         )

@@ -16,7 +16,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import BaseTokenDispatcher, LocalTokenDispatcher
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -77,6 +77,7 @@ class GroupedExperts(Module):
         hidden_dim: int = field(init=False)
         num_experts: int = field(init=False)
         use_grouped_mm: bool = True
+        token_dispatcher: BaseTokenDispatcher.Config = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -91,6 +92,7 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.use_grouped_mm = config.use_grouped_mm
+        self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
 
     def forward(
         self,
@@ -301,14 +303,14 @@ class MoE(Module):
         num_experts = config.num_experts
         hidden_dim = config.hidden_dim
         self.experts = config.experts.build(
-            dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
-        )
-        self.token_dispatcher = LocalTokenDispatcher(
-            LocalTokenDispatcher.Config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            token_dispatcher=BaseTokenDispatcher.Config(
                 num_experts=num_experts,
                 top_k=config.router.top_k,
                 score_before_experts=config.score_before_experts,
-            )
+            ),
         )
         self.router = config.router.build(dim=dim, num_experts=num_experts)
         self.shared_experts = (
@@ -390,11 +392,15 @@ class MoE(Module):
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # Dispatch tokens to experts, compute, and combine
-        routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
+        (
+            routed_input,
+            num_tokens_local,
+            metadata,
+        ) = self.experts.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices, num_tokens_per_expert
         )
         routed_output = self.experts(routed_input, num_tokens_local)
-        out_experts = self.token_dispatcher.combine(routed_output, metadata)
+        out_experts = self.experts.token_dispatcher.combine(routed_output, metadata)
 
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert

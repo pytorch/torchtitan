@@ -641,7 +641,7 @@ def apply_moe_ep_tp(
 
             # pyrefly: ignore [missing-attribute]
             moe = transformer_block.moe
-            moe.token_dispatcher = TokenDispatcher(
+            moe.experts.token_dispatcher = TokenDispatcher(
                 TokenDispatcher.Config(
                     num_experts=moe.experts.num_experts,
                     top_k=moe.router.top_k,
