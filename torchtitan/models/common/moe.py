@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
@@ -71,9 +71,9 @@ def _run_experts_grouped_mm(
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        hidden_dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        dim: int
+        hidden_dim: int
+        num_experts: int
         use_grouped_mm: bool = True
 
     def __init__(self, config: Config):
@@ -125,22 +125,19 @@ class TokenChoiceTopKRouter(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        num_experts: int
+        gate: Linear.Config
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
-        gate: Linear.Config = field(default_factory=Linear.Config)
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
-        self.gate = config.gate.build(
-            in_features=config.dim, out_features=config.num_experts
-        )
+        self.gate = config.gate.build()
         self.num_experts = config.num_experts
         self.num_expert_groups = config.num_expert_groups
         self.num_limited_groups = config.num_limited_groups
@@ -336,32 +333,23 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
+        experts: GroupedExperts.Config
+        router: TokenChoiceTopKRouter.Config
         score_before_experts: bool = True
         load_balance_coeff: float | None = 1e-3
-        # Expert hidden dimension (replaces old moe_inter_dim)
-        hidden_dim: int = 0
-        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
-        router: TokenChoiceTopKRouter.Config = field(
-            default_factory=TokenChoiceTopKRouter.Config
-        )
         shared_experts: FeedForward.Config | None = None
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        hidden_dim = config.hidden_dim
-        self.experts = config.experts.build(
-            dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
-        )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.experts = config.experts.build()
+        self.router = config.router.build()
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
         self.shared_experts = (
-            config.shared_experts.build(dim=dim)
-            if config.shared_experts is not None
-            else None
+            config.shared_experts.build() if config.shared_experts is not None else None
         )
         self.score_before_experts = config.score_before_experts
 

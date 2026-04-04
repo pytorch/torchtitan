@@ -12,35 +12,9 @@ registry::
 
     Linear.Config(param_init={"weight": partial(trunc_normal_, std=0.02), "bias": zeros_})
     RMSNorm.Config(param_init={"weight": nn.init.ones_})
-
-``Function.Config`` wraps a factory for init that varies by layer
-depth.  ``resolve_deferred`` walks a config tree and resolves all deferred
-markers during layer expansion.
 """
 
-import dataclasses
-
 import torch.nn as nn
-
-from torchtitan.config import Function
-
-
-def resolve_deferred(cfg: object, layer_id: int) -> None:
-    """Walk a dataclass config tree and resolve all ``Function.Config`` fields.
-
-    Mutates *cfg* in place (intended for use on a deep-copied config).
-    """
-    if not dataclasses.is_dataclass(cfg):
-        return
-    for f in dataclasses.fields(cfg):
-        try:
-            val = getattr(cfg, f.name)
-        except AttributeError:
-            continue
-        if isinstance(val, Function.Config):
-            object.__setattr__(cfg, f.name, val.build()(layer_id))
-        elif dataclasses.is_dataclass(val):
-            resolve_deferred(val, layer_id)
 
 
 def skip_param_init(param: nn.Parameter) -> None:

@@ -49,13 +49,9 @@ class FluxModel(BaseModel):
         pe_config: EmbedND.Config
         time_in_config: MLPEmbedder.Config
         vector_in_config: MLPEmbedder.Config
-        double_block_config: DoubleStreamBlock.Config
-        single_block_config: SingleStreamBlock.Config
         final_layer_config: LastLayer.Config
-
-        # Populated by expand_layer_configs() in the model registry; one config per block.
-        double_blocks_expanded: list = field(default_factory=list)
-        single_blocks_expanded: list = field(default_factory=list)
+        double_blocks: list[DoubleStreamBlock.Config]
+        single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass
@@ -79,8 +75,8 @@ class FluxModel(BaseModel):
             #   attn.proj: h * h         =  h²
             #   mlp:       2 * h * h*r   = 2rh²
             #   Total: h² * (4 + 2r)
-            db_h = self.double_block_config.hidden_size
-            db_r = self.double_block_config.mlp_ratio
+            db_h = self.double_blocks[0].hidden_size
+            db_r = self.double_blocks[0].mlp_ratio
             nparams_db_one_side_per_token = int(db_h * db_h * (4 + 2 * db_r))
             num_flops_per_token -= 6 * nparams_db_one_side_per_token * self.depth
 
@@ -93,7 +89,7 @@ class FluxModel(BaseModel):
             #   DoubleStreamBlock: img_mod(6h²) + txt_mod(6h²) = 12h² per block
             #   SingleStreamBlock: modulation(3h²) per block
             #   LastLayer: adaLN_modulation(2h²)
-            sb_h = self.single_block_config.hidden_size
+            sb_h = self.single_blocks[0].hidden_size
             fl_h = self.final_layer_config.hidden_size
             nparams_mod_per_sample = (
                 12 * db_h * db_h * self.depth
@@ -131,30 +127,14 @@ class FluxModel(BaseModel):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_heads
         self.pe_embedder = config.pe_config.build()
-        self.img_in = config.img_in.build(
-            in_features=self.in_channels, out_features=self.hidden_size
-        )
+        self.img_in = config.img_in.build()
         self.time_in = config.time_in_config.build()
         self.vector_in = config.vector_in_config.build()
-        self.txt_in = config.txt_in.build(
-            in_features=config.context_in_dim, out_features=self.hidden_size
-        )
+        self.txt_in = config.txt_in.build()
 
-        assert config.double_blocks_expanded, (
-            "config.double_blocks_expanded must be populated by expand_layer_configs() "
-            "in the model registry before build()."
-        )
-        self.double_blocks = ModuleList(
-            [cfg.build() for cfg in config.double_blocks_expanded]
-        )
+        self.double_blocks = ModuleList([cfg.build() for cfg in config.double_blocks])
 
-        assert config.single_blocks_expanded, (
-            "config.single_blocks_expanded must be populated by expand_layer_configs() "
-            "in the model registry before build()."
-        )
-        self.single_blocks = ModuleList(
-            [cfg.build() for cfg in config.single_blocks_expanded]
-        )
+        self.single_blocks = ModuleList([cfg.build() for cfg in config.single_blocks])
 
         self.final_layer = config.final_layer_config.build()
 

@@ -18,12 +18,9 @@ from .parallelize_deepseekv3 import parallelize_deepseekv3
 
 
 def model_registry(flavor: str) -> ModelSpec:
-    from torchtitan.models.deepseek_v3 import expand_layer_configs
-
     config = deepseekv3_configs[flavor]()
     if "flex_attn" not in flavor:
-        config.layer.attention = DeepSeekV3Model.Config().layer.attention
-    expand_layer_configs(config)
+        config.layers[0].attention = DeepSeekV3Model.Config().layers[0].attention
     return ModelSpec(
         name="autoparallel/deepseek_v3",
         flavor=flavor,
