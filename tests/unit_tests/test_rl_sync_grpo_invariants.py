@@ -167,7 +167,7 @@ def _episode(
     )
 
 
-def test_collate_preserves_rollout_policy_version_and_old_logprobs():
+def test_shard_episodes_interleaves_by_dp_rank():
     trainer = object.__new__(RLTrainer)
     trainer.trainer_dp_degree = 2
 
@@ -202,14 +202,40 @@ def test_collate_preserves_rollout_policy_version_and_old_logprobs():
         ),
     ]
 
-    batches = trainer._collate(episodes, pad_token_id=99)
+    shards = trainer._shard_episodes(episodes)
 
-    assert len(batches) == 2
-    assert batches[0].policy_version == 7
-    assert batches[1].policy_version == 7
+    assert len(shards) == 2
+    assert [ep.prompt_tokens for ep in shards[0]] == [[10, 11], [30, 31, 32]]
+    assert [ep.prompt_tokens for ep in shards[1]] == [[20], [40, 41]]
 
+
+def test_collate_rank_episodes_preserves_rollout_policy_version_and_old_logprobs():
+    episodes = [
+        _episode(
+            prompt_tokens=[10, 11],
+            response_tokens=[12, 13],
+            logprobs=[-0.1, -0.2],
+            group_id="g0",
+            policy_version=7,
+        ),
+        _episode(
+            prompt_tokens=[30, 31, 32],
+            response_tokens=[33],
+            logprobs=[-0.6],
+            group_id="g1",
+            policy_version=7,
+        ),
+    ]
+
+    batch = RLTrainer._collate_rank_episodes(
+        episodes,
+        policy_version=7,
+        pad_token_id=99,
+    )
+
+    assert batch.policy_version == 7
     assert torch.equal(
-        batches[0].old_logprobs,
+        batch.old_logprobs,
         torch.tensor(
             [
                 [0.0, 0.0, -0.1, -0.2],
@@ -218,19 +244,9 @@ def test_collate_preserves_rollout_policy_version_and_old_logprobs():
             dtype=torch.float32,
         ),
     )
-    assert torch.equal(
-        batches[1].old_logprobs,
-        torch.tensor(
-            [
-                [0.0, -0.3, -0.4, -0.5],
-                [0.0, 0.0, -0.7, -0.8],
-            ],
-            dtype=torch.float32,
-        ),
-    )
 
 
-def test_collate_rejects_mixed_policy_versions():
+def test_shard_episodes_rejects_mixed_policy_versions():
     trainer = object.__new__(RLTrainer)
     trainer.trainer_dp_degree = 1
 
@@ -252,7 +268,78 @@ def test_collate_rejects_mixed_policy_versions():
     ]
 
     with pytest.raises(ValueError, match="policy_version"):
-        trainer._collate(episodes)
+        trainer._shard_episodes(episodes)
+
+
+def test_shard_then_collate_preserves_rollout_policy_version_and_old_logprobs():
+    trainer = object.__new__(RLTrainer)
+    trainer.trainer_dp_degree = 2
+
+    episodes = [
+        _episode(
+            prompt_tokens=[10, 11],
+            response_tokens=[12, 13],
+            logprobs=[-0.1, -0.2],
+            group_id="g0",
+            policy_version=7,
+        ),
+        _episode(
+            prompt_tokens=[20],
+            response_tokens=[21, 22, 23],
+            logprobs=[-0.3, -0.4, -0.5],
+            group_id="g0",
+            policy_version=7,
+        ),
+        _episode(
+            prompt_tokens=[30, 31, 32],
+            response_tokens=[33],
+            logprobs=[-0.6],
+            group_id="g1",
+            policy_version=7,
+        ),
+        _episode(
+            prompt_tokens=[40, 41],
+            response_tokens=[42, 43],
+            logprobs=[-0.7, -0.8],
+            group_id="g1",
+            policy_version=7,
+        ),
+    ]
+
+    policy_version = trainer._validate_policy_versions(episodes)
+    shards = trainer._shard_episodes(episodes)
+    batches = [
+        trainer._collate_rank_episodes(
+            shard,
+            policy_version=policy_version,
+            pad_token_id=99,
+        )
+        for shard in shards
+    ]
+
+    assert len(batches) == 2
+    assert batches[0].policy_version == 7
+    assert batches[1].policy_version == 7
+    assert torch.equal(
+        batches[0].old_logprobs,
+        torch.tensor(
+            [
+                [0.0, 0.0, -0.1, -0.2],
+                [0.0, 0.0, 0.0, -0.6],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    assert torch.equal(
+        batches[1].old_logprobs,
+        torch.tensor(
+            [
+                [0.0, -0.3, -0.4, -0.5],
+                [0.0, 0.0, -0.7, -0.8],
+            ],
+            dtype=torch.float32,
+        ),
+    )
 
 
 def test_trainer_rejects_stale_policy_version():
