@@ -9,57 +9,55 @@ from collections.abc import Callable
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Completion, ScoredCompletion
 
 logger = logging.getLogger(__name__)
 
 
 class Grader(Actor):
-    """
-    Evaluates completions and assigns rewards to episodes.
+    """Evaluates completions and assigns rewards.
 
-    The Grader receives a flat list of Episodes and computes rewards
-    using a reward function. It scores each episode independently.
+    The Grader receives a flat list of Completions and a corresponding list
+    of expected answers (one per completion, pre-expanded by the orchestrator).
+    It scores each completion independently and returns ScoredCompletions.
 
     Args:
         reward_fn: Reward function that takes (completions: list[str], expected_answer: str)
                    and returns a tensor of rewards.
     """
 
-    def __init__(
-        self,
-        reward_fn: Callable,
-    ):
+    def __init__(self, reward_fn: Callable):
         self.reward_fn = reward_fn
-
         logger.info("Grader initialized")
 
     @endpoint
-    async def score(self, episodes: list[Episode]) -> list[Episode]:
-        """
-        Score episodes by computing rewards.
-
-        Calls the reward_fn with each episode's completion text and
-        expected answer, then sets the reward on each episode.
+    async def score(
+        self,
+        completions: list[Completion],
+        expected_answers: list[str],
+    ) -> list[ScoredCompletion]:
+        """Score completions by computing rewards.
 
         Args:
-            episodes: Flat list of Episodes to score.
+            completions: Flat list of Completions to score.
+            expected_answers: Expected answer per completion (pre-expanded
+                by the orchestrator so len matches completions).
 
         Returns:
-            Episodes with rewards filled in.
+            List of ScoredCompletions with rewards filled in.
         """
-        logger.debug(f"Grader scoring {len(episodes)} episodes...")
+        logger.debug(f"Grader scoring {len(completions)} completions...")
 
-        # Score each episode individually
-        for ep in episodes:
-            rewards = self.reward_fn([ep.text], ep.expected_answer)
-            ep.reward = rewards[0].item()
+        scored = []
+        for comp, answer in zip(completions, expected_answers):
+            rewards = self.reward_fn([comp.text], answer)
+            scored.append(ScoredCompletion(completion=comp, reward=rewards[0].item()))
 
-        all_rewards = torch.tensor([ep.reward for ep in episodes])
+        all_rewards = torch.tensor([sc.reward for sc in scored])
         logger.debug(
             f"Grader finished scoring: "
             f"reward_mean={all_rewards.mean().item():.4f}, "
             f"reward_std={all_rewards.std().item():.4f}"
         )
 
-        return episodes
+        return scored
