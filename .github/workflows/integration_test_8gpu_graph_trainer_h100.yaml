@@ -65,4 +65,5 @@ jobs:
 
         # Run the DeepSeek numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "dsv3"
+
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

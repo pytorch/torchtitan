@@ -14,6 +14,7 @@ Pass Types:
 - Joint custom passes: Applied to the joint forward-backward graph before partitioning
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
+
 import operator
 from collections import defaultdict
 from collections.abc import Sequence
@@ -37,6 +38,19 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
+
+
+def apply_default_graph_passes(
+    gm: torch.fx.GraphModule, example_inputs: tuple
+) -> torch.fx.GraphModule:
+    """Entry point for optimizing the traced fwd+bwd graph.
+
+    Called by GraphTrainer after tracing to apply graph-level optimization
+    passes before execution. Individual passes are defined below.
+    """
+    gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
+
+    return gm
 
 
 def autobucketing_reordering_pass(
@@ -285,7 +299,9 @@ def inductor_decomposition_pass(
 
     # Build fake inputs directly from the joint graph placeholders' metadata.
     # This handles all inputs including effect tokens (e.g. from MoE load
-    # balancing copy_ mutations) that AOT Autograd prepends as placeholders.
+    # balancing copy_ mutations) that AOT Autograd prepends as placeholders,
+    # as well as opaque inputs (e.g. DeviceMesh FakeScriptObjects) that the
+    # graph lifts when compile-on-one-rank is enabled.
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
     all_inputs = []
     for ph in placeholders:
@@ -295,16 +311,14 @@ def inductor_decomposition_pass(
         all_inputs.append(val)
 
     # The joint graph forward() takes (primals, tangents) as two list args.
-    # Split based on the actual updated_flat_args from graph capture, which
-    # reflects post-subclass-unwrapping structure (e.g. DTensor flattened into
-    # local tensor + device mesh).
-    updated_flat_args = joint_with_descriptors._aot_graph_capture.updated_flat_args
-    assert isinstance(
-        updated_flat_args, tuple
-    ), f"Expected (primals, tangents) tuple, got {type(updated_flat_args)}"
-    num_tangents = len(updated_flat_args[1])
-    primals_fake = all_inputs[: len(all_inputs) - num_tangents]
-    tangents_fake = all_inputs[len(all_inputs) - num_tangents :]
+    # Use the graph's _in_spec (set by AOTAutograd during joint export) to
+    # determine the correct split point rather than
+    # fw_metadata.traced_tangents, because the latter only counts tensor
+    # tangents and misses opaque inputs (e.g. DeviceMesh objects) that may
+    # appear as additional placeholders when compile-on-one-rank is enabled.
+    num_primals = gm._in_spec.child(0).num_children
+    primals_fake = all_inputs[:num_primals]
+    tangents_fake = all_inputs[num_primals:]
 
     # Get the FakeTensorMode from the original joint graph
     fake_mode = None

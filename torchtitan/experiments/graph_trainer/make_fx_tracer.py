@@ -61,6 +61,7 @@ class TracedResult:
     """Holds the traced graph and metadata needed to run it."""
 
     gm: torch.fx.GraphModule
+    example_inputs: tuple[torch.Tensor, ...]
     params_len: int
     params_spec: pytree.TreeSpec
     input_subclass_layouts: list[SubclassLayout]
@@ -250,6 +251,9 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             nn_module_stack = fwd_node.meta.get("nn_module_stack")
             if nn_module_stack is not None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
+            stack_trace = fwd_node.meta.get("stack_trace")
+            if stack_trace is not None:
+                node.meta["stack_trace"] = stack_trace
 
 
 def trace_module(
@@ -354,6 +358,7 @@ def trace_module(
 
     return TracedResult(
         gm=traced,
+        example_inputs=fake_args,
         params_len=params_len,
         params_spec=params_spec,
         input_subclass_layouts=input_layouts,
