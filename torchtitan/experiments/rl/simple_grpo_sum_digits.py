@@ -547,13 +547,18 @@ class RLTrainer(Configurable):
                 self._collate_rank_episodes(rank_episodes)
                 for rank_episodes in sharded_episodes
             ]
-            metrics = self._get_rank_0_value(self.trainer.step.call(batches).get())
+            fwd_bwd_result = self._get_rank_0_value(
+                self.trainer.forward_backward.call(batches).get()
+            )
+            optim_result = self._get_rank_0_value(
+                self.trainer.optim_step.call().get()
+            )
 
             # 5. Sync weights
             t0 = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            self.generator.pull_model_state_dict.call(optim_result.policy_version).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
@@ -568,17 +573,17 @@ class RLTrainer(Configurable):
             total_count = len(all_rewards)
 
             logger.info(
-                f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
+                f"Step {step:2d} | Loss: {fwd_bwd_result.loss:+.4f} | "
                 f"Reward: {reward_mean:+.3f} | "
                 f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
-                f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
-                f"max={metrics['logprob_diff_max']:.4e} | "
+                f"Logprob diff: mean={fwd_bwd_result.metrics['logprob_diff_mean']:.4e}, "
+                f"max={fwd_bwd_result.metrics['logprob_diff_max']:.4e} | "
                 f"Time: {t_step:.1f}s"
             )
 
             # Check for divergence
-            if not torch.isfinite(torch.tensor(metrics["loss"])):
+            if not torch.isfinite(torch.tensor(fwd_bwd_result.loss)):
                 logger.info("!" * 80)
                 logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
                 logger.info("!" * 80)
