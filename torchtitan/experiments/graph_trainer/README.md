@@ -9,8 +9,9 @@ This experiment demonstrates graph-based distributed training in torchtitan thro
 - Provenance-tracking infrastructure as the user annotation backbone
 - Graph optimization via FX graph passes
 
-The goal is to give users more explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. Two compilation modes are currently supported:
+The goal is to give users more explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. Three compilation modes are currently supported:
 - **AOT mode** (`--compile.mode aot`): Explicit joint graph export with a custom graph pass pipeline.
+- **AOT FX Trace mode** (`--compile.mode aot_fx_trace`): Non-strict tracing of the forward + loss + backward via `make_fx`, producing an explicit FX graph without Dynamo. Useful for models or code paths that are difficult to trace with Dynamo.
 - **JIT mode** (`--compile.mode jit`): Standard `torch.compile()` with graph passes registered to custom backends.
 
 ### Prerequisites
