@@ -24,11 +24,9 @@ python3 torchtitan/experiments/rl/simple_grpo_sum_digits.py \
 
 import asyncio
 import logging
-import os
-import re
+import math
 import time
 from collections import defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -41,6 +39,7 @@ from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.controller import create_meshes
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
 from torchtitan.experiments.rl.types import (
     Completion,
@@ -54,7 +53,11 @@ logger = logging.getLogger(__name__)
 
 
 class GRPOLoss:
-    """Simple clipped GRPO loss with an optional KL term."""
+    """GRPO loss with DAPO-style token-level normalization.
+
+    KL is disabled in this synchronous recipe. The rollout logprobs are used
+    as the clipping anchor.
+    """
 
     def __init__(
         self,
@@ -69,91 +72,57 @@ class GRPOLoss:
         policy_logprobs: torch.Tensor,
         response_mask: torch.Tensor,
         advantages: torch.Tensor,
-        ref_logprobs: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        **_,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         device = policy_logprobs.device
-        response_mask = response_mask.to(device)
+        old_logprobs = old_logprobs.to(device).detach()
         advantages = advantages.to(device)
-        ref_logprobs = ref_logprobs.to(device).detach()
+        response_mask = response_mask.to(device)
 
-        token_log_ratio = (policy_logprobs - ref_logprobs) * response_mask
-        tokens_per_sample = response_mask.sum(dim=1).clamp(min=1.0)
-        mean_log_ratio = token_log_ratio.sum(dim=1) / tokens_per_sample
-        ratio = torch.exp(mean_log_ratio)
+        log_ratio = policy_logprobs - old_logprobs
+        ratio = torch.exp(log_ratio)
+        per_token_adv = advantages.unsqueeze(1).expand_as(policy_logprobs)
 
-        unclipped_loss = ratio * advantages
-        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-        clipped_loss = clipped_ratio * advantages
-        pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
+        clipped = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        pg_loss = -torch.min(ratio * per_token_adv, clipped * per_token_adv)
 
-        token_kl = (torch.exp(token_log_ratio) - 1 - token_log_ratio) * response_mask
-        mean_kl = token_kl.sum(dim=1) / tokens_per_sample
-        kl_div = mean_kl.mean()
+        num_response_tokens = response_mask.sum().clamp(min=1.0)
+        pg_loss = (pg_loss * response_mask).sum() / num_response_tokens
+        kl_div = ((ratio - 1 - log_ratio) * response_mask).sum() / num_response_tokens
 
         loss = pg_loss + self.kl_coef * kl_div
         metrics = {
             "pg_loss": pg_loss.item(),
             "kl_div": kl_div.item(),
-            "ratio_mean": ratio.mean().item(),
-            "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
-            .float()
-            .mean()
-            .item(),
+            "ratio_mean": (ratio * response_mask).sum().item()
+            / num_response_tokens.item(),
         }
         return loss, metrics
 
 
-class Provisioner:
-    """Allocates non-overlapping GPU ranges for Monarch proc meshes.
-
-    In non-colocated mode, the trainer and generator run on separate GPU
-    meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
-    call to ``allocate(n)`` reserves the next *n* GPUs and returns a
-    bootstrap callable that sets ``CUDA_VISIBLE_DEVICES`` before CUDA
-    initializes in the spawned process, ensuring each mesh only sees its
-    own devices.
-    """
-
-    def __init__(self, total_gpus: int = 8):
-        self.total_gpus = total_gpus
-        self.next_gpu = 0
-
-    @property
-    def available(self) -> int:
-        return self.total_gpus - self.next_gpu
-
-    def allocate(self, num_gpus: int) -> Callable[[], None]:
-        if num_gpus > self.available:
-            raise RuntimeError(
-                f"Requested {num_gpus} GPUs but only {self.available} "
-                f"available (total={self.total_gpus}, allocated={self.next_gpu})"
-            )
-        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
-        self.next_gpu += num_gpus
-
-        def _bootstrap():
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
-
-        return _bootstrap
+def compute_advantages(group: list[ScoredCompletion]) -> list[float]:
+    """Compute GRPO advantages for a single group."""
+    mean_reward = sum(sc.reward for sc in group) / len(group)
+    return [sc.reward - mean_reward for sc in group]
 
 
-def _log_samples(episodes: list[Episode]) -> None:
-    """Log the first completion per group for debugging."""
-    seen_groups: set[str] = set()
-    for ep in episodes:
-        if ep.group_id in seen_groups:
-            continue
-        seen_groups.add(ep.group_id)
-        extracted = extract_answer(ep.text)
-        is_correct = (
-            extracted == int(ep.expected_answer) if ep.expected_answer else None
-        )
-        mark = "+" if is_correct else "-"
-        logger.info(
-            f"  [{mark}] expected={ep.expected_answer} extracted={extracted} "
-            f"reward={ep.reward:+.1f}"
-        )
-        logger.info(f"       A: {ep.text[:300].replace(chr(10), ' ').strip()}")
+def _log_group_sample(
+    group: list[ScoredCompletion],
+    expected_answer: str,
+) -> None:
+    """Log the first completion in a group for debugging."""
+    sc = group[0]
+    extracted = extract_answer(sc.completion.text)
+    is_correct = extracted == int(expected_answer) if expected_answer else None
+    mark = "+" if is_correct else "-"
+    logger.info(
+        f"  [{mark}] expected={expected_answer} extracted={extracted} "
+        f"reward={sc.reward:+.1f}"
+    )
+    logger.info(
+        f"       A: {sc.completion.text[:300].replace(chr(10), ' ').strip()}"
+    )
 
 
 class RLTrainer(Configurable):
@@ -195,11 +164,9 @@ class RLTrainer(Configurable):
     def __init__(self, config: Config):
         self.config = config
 
-        # Patch model_spec to use the RL-specific parallelize function.
-        # TODO: Switch to canonical Qwen3 parallel plan
-        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-
-        config.model_spec.parallelize_fn = parallelize_qwen3
+        config.trainer.model_spec = config.model_spec
+        config.trainer.hf_assets_path = config.hf_assets_path
+        config.trainer.dump_folder = config.dump_folder
         config.generator.model_spec = config.model_spec
         config.generator.hf_assets_path = config.hf_assets_path
         config.generator.batch_invariant_mode = config.batch_invariant_mode
@@ -243,8 +210,22 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
+    @staticmethod
+    def _validate_policy_versions(episodes: list[Episode]) -> int:
+        if not episodes:
+            raise ValueError("episodes must be non-empty")
+
+        policy_versions = {ep.policy_version for ep in episodes}
+        if len(policy_versions) != 1:
+            raise ValueError(
+                "all episodes in a synchronous GRPO step must share one policy_version, "
+                f"got {sorted(policy_versions)}"
+            )
+        return next(iter(policy_versions))
+
     def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
         """Shard episodes across trainer DP ranks with interleaved indexing."""
+        self._validate_policy_versions(episodes)
         return [
             [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
             for rank in range(self.trainer_dp_degree)
@@ -254,23 +235,25 @@ class RLTrainer(Configurable):
     def _collate_rank_episodes(
         episodes: list[Episode],
         *,
+        policy_version: int,
         pad_token_id: int = 0,
     ) -> TrainBatch:
         """Collate one DP rank's episodes into a padded TrainBatch."""
-        prompt_lens = [len(ep.prompt_token_ids) for ep in episodes]
-        response_lens = [len(ep.token_ids) for ep in episodes]
+        if not episodes:
+            raise ValueError("episodes must be non-empty")
+
+        prompt_lens = [len(ep.prompt_tokens) for ep in episodes]
+        response_lens = [len(ep.response_tokens) for ep in episodes]
         max_len = max(p + r for p, r in zip(prompt_lens, response_lens))
 
         padded_ids = []
-        padded_logprobs = []
+        padded_old_logprobs = []
         for ep in episodes:
-            seq = ep.prompt_token_ids + ep.token_ids
+            seq = ep.prompt_tokens + ep.response_tokens
             pad_len = max_len - len(seq)
             padded_ids.append(seq + [pad_token_id] * pad_len)
-            padded_logprobs.append(
-                [0.0] * len(ep.prompt_token_ids)
-                + ep.token_log_probs
-                + [0.0] * pad_len
+            padded_old_logprobs.append(
+                [0.0] * len(ep.prompt_tokens) + ep.logprobs + [0.0] * pad_len
             )
 
         return TrainBatch(
@@ -281,10 +264,11 @@ class RLTrainer(Configurable):
                 [ep.advantage for ep in episodes],
                 dtype=torch.float32,
             ),
-            token_log_probs=torch.tensor(
-                padded_logprobs,
+            old_logprobs=torch.tensor(
+                padded_old_logprobs,
                 dtype=torch.float32,
             ),
+            policy_version=policy_version,
             pad_token_id=pad_token_id,
         )
 
@@ -292,8 +276,8 @@ class RLTrainer(Configurable):
         self,
         *,
         host_mesh=None,
-        trainer_nodes: int | None = None,
-        generator_nodes: int | None = None,
+        trainer_nodes: int = 0,
+        generator_nodes: int = 0,
         gpus_per_node: int | None = None,
     ):
         """Spawn Monarch actors on separate meshes and initialize weights.
@@ -303,16 +287,15 @@ class RLTrainer(Configurable):
         Must be called before :meth:`train`.
 
         Args:
-            host_mesh: Optional multi-node HostMesh. When provided,
-                whole nodes are dedicated to trainer vs generator
-                roles instead of partitioning GPUs on a single host.
-            trainer_nodes: Number of nodes for the trainer (required when
-                host_mesh is provided).
-            generator_nodes: Number of nodes for the generator (required when
-                host_mesh is provided).
-            gpus_per_node: GPUs per node, assumed to be the same across all
-                nodes (no heterogeneous node configurations). Required when
-                host_mesh is provided.
+            host_mesh: HostMesh to partition. Defaults to this_host() for
+                single-node. For multi-node, pass a HostMesh from a Job
+                API or WorkerConnection.
+            trainer_nodes: Nodes dedicated to the trainer. 0 (default)
+                means trainer and generator share the same host.
+            generator_nodes: Nodes dedicated to the generator. 0 (default)
+                means shared host.
+            gpus_per_node: Physical GPUs per node. Defaults to
+                trainer_world_size + generator_world_size for single-node.
         """
         config = self.config
 
@@ -324,79 +307,34 @@ class RLTrainer(Configurable):
         dp_shard = max(tp.data_parallel_shard_degree, 1)
         self.trainer_dp_degree = tp.data_parallel_replicate_degree * dp_shard
 
-        total_gpus = self.trainer_world_size + self.generator_world_size
+        if host_mesh is None:
+            host_mesh = this_host()
+        if gpus_per_node is None:
+            gpus_per_node = self.trainer_world_size + self.generator_world_size
+
+        self._multi_node = trainer_nodes > 0 or generator_nodes > 0
+
         logger.info(
             f"{self.generator_world_size} generator GPUs + "
-            f"{self.trainer_world_size} trainer GPUs = {total_gpus} total"
+            f"{self.trainer_world_size} trainer GPUs = "
+            f"{self.trainer_world_size + self.generator_world_size} total"
         )
 
         self.system_prompt = self.task.get_system_prompt()
 
-        self._multi_node = host_mesh is not None
-
-        if host_mesh is not None:
-            # Multi-node mode: dedicate whole nodes to trainer vs generator
-            if (
-                trainer_nodes is None
-                or generator_nodes is None
-                or gpus_per_node is None
-            ):
-                raise ValueError(
-                    "trainer_nodes, generator_nodes, and gpus_per_node are "
-                    "required when host_mesh is provided"
-                )
-            # Validate that world sizes are evenly divisible by node counts
-            assert self.trainer_world_size % trainer_nodes == 0, (
-                f"trainer_world_size ({self.trainer_world_size}) must be "
-                f"evenly divisible by trainer_nodes ({trainer_nodes})"
-            )
-            assert self.generator_world_size % generator_nodes == 0, (
-                f"generator_world_size ({self.generator_world_size}) must be "
-                f"evenly divisible by generator_nodes ({generator_nodes})"
-            )
-
-            # Compute GPUs per node for each role based on the config's
-            # world size and number of nodes allocated to that role
-            trainer_gpus_per_node = self.trainer_world_size // trainer_nodes
-            generator_gpus_per_node = self.generator_world_size // generator_nodes
-
-            trainer_tp = config.trainer.parallelism.tensor_parallel_degree
-            generator_tp = config.generator.parallelism.tensor_parallel_degree
-
-            trainer_host_mesh = host_mesh.slice(hosts=slice(0, trainer_nodes))
-            generator_host_mesh = host_mesh.slice(
-                hosts=slice(trainer_nodes, trainer_nodes + generator_nodes)
-            )
-
-            # Use Provisioner to set CUDA_VISIBLE_DEVICES so each role
-            # only sees its own GPUs and doesn't conflict with other
-            # processes on the node
-            trainer_provisioner = Provisioner(total_gpus=gpus_per_node)
-            generator_provisioner = Provisioner(total_gpus=gpus_per_node)
-
-            trainer_mesh = trainer_host_mesh.spawn_procs(
-                per_host={"gpus": trainer_gpus_per_node},
-                bootstrap=trainer_provisioner.allocate(trainer_gpus_per_node),
-            )
-            generator_mesh = generator_host_mesh.spawn_procs(
-                per_host={"gpus": generator_gpus_per_node},
-                bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
-            )
-            # Grader runs on CPU on the first trainer node
-            grader_mesh = trainer_host_mesh.spawn_procs()
-        else:
-            # Single-node mode: partition GPUs on this_host() via
-            # CUDA_VISIBLE_DEVICES
-            provisioner = Provisioner(total_gpus=total_gpus)
-            trainer_mesh = this_host().spawn_procs(
-                per_host={"gpus": self.trainer_world_size},
-                bootstrap=provisioner.allocate(self.trainer_world_size),
-            )
-            generator_mesh = this_host().spawn_procs(
-                per_host={"gpus": self.generator_world_size},
-                bootstrap=provisioner.allocate(self.generator_world_size),
-            )
-            grader_mesh = this_host().spawn_procs()
+        node_assignments = (
+            [trainer_nodes, generator_nodes, 0] if self._multi_node else None
+        )
+        trainer_mesh, generator_mesh, grader_mesh = create_meshes(
+            host_mesh,
+            gpus_per_node,
+            gpu_requests=[
+                self.trainer_world_size,
+                self.generator_world_size,
+                0,
+            ],
+            node_assignments=node_assignments,
+        )
 
         # Store proc meshes for cleanup
         self._proc_meshes = [trainer_mesh, generator_mesh, grader_mesh]
@@ -410,10 +348,6 @@ class RLTrainer(Configurable):
             PolicyTrainer,
             config.trainer,
             loss_fn=GRPOLoss(),
-            model_spec=config.model_spec,
-            batch_invariant_mode=config.batch_invariant_mode,
-            hf_assets_path=config.hf_assets_path,
-            transfer_dtype=config.generator.model_dtype,
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -435,32 +369,19 @@ class RLTrainer(Configurable):
         await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
-        self.trainer.push_model_state_dict.call().get()
+        self.trainer.push_weights.call().get()
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_weights.call(0).get()
 
     async def evaluate(self, num_samples: int = 20) -> dict:
-        """Run evaluation on held-out prompts.
-
-        Generates on eval prompts, scores them, and reports accuracy.
-
-        Args:
-            num_samples: Number of eval prompts to generate
-
-        Returns:
-            Dict with accuracy, correct, total, format_rate
-        """
         eval_task = SumDigitsTask(seed=99)
         eval_prompts = []
         eval_answers = []
-        eval_questions = []
         for _ in range(num_samples):
             question, answer = eval_task.create_question()
             eval_prompts.append(self.system_prompt + "\n\n" + question)
             eval_answers.append(answer)
-            eval_questions.append(question)
 
-        # Generate on eval prompts
         completions: list[Completion] = self._get_rank_0_value(
             self.generator.generate.call(eval_prompts).get()
         )
@@ -473,51 +394,20 @@ class RLTrainer(Configurable):
             has_gpus=False,
         )
 
-        # Score: check first episode per prompt (episodes are ordered by prompt)
         correct = 0
-        format_ok = 0
-        for i, (question, answer) in enumerate(zip(eval_questions, eval_answers)):
+        for i, answer in enumerate(eval_answers):
             scored_completion = scored[i * samples_per_prompt]
             extracted = extract_answer(scored_completion.completion.text)
-            is_correct = extracted == int(answer)
-            has_tag = bool(re.search(r"\[ANSWER\]", scored_completion.completion.text))
-            correct += int(is_correct)
-            format_ok += int(has_tag)
-
-        if self.config.log_samples:
-            episodes = [
-                Episode(
-                    policy_version=sc.completion.policy_version,
-                    prompt_token_ids=sc.completion.prompt_tokens,
-                    text=sc.completion.text,
-                    token_ids=sc.completion.response_tokens,
-                    token_log_probs=sc.completion.logprobs,
-                    expected_answer=answer,
-                    reward=sc.reward,
-                    group_id=sc.completion.group_id,
-                )
-                for sc, answer in zip(scored, answers_per_completion)
-            ]
-            _log_samples(episodes)
+            correct += int(extracted == int(answer))
 
         result = {
             "accuracy": correct / num_samples,
             "correct": correct,
             "total": num_samples,
-            "format_rate": format_ok / num_samples,
-            "format_ok": format_ok,
         }
-        logger.info(
-            f"Eval: Accuracy={result['accuracy']:.0%} ({correct}/{num_samples}) "
-            f"Format={result['format_rate']:.0%} ({format_ok}/{num_samples})"
-        )
         return result
 
     async def train(self):
-        """Run the RL training loop.
-
-        Must call :meth:`setup` first.
-        """
         num_steps = self.config.num_steps
 
         # Pre-training evaluation
@@ -529,26 +419,19 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
 
         for step in range(num_steps):
-            # Generate data sample for this step
             train_prompts = []
             train_answers = []
-            train_questions = []
             for _ in range(self.config.num_episodes_per_step):
                 question, answer = self.task.create_question()
                 train_prompts.append(self.system_prompt + "\n\n" + question)
                 train_answers.append(answer)
-                train_questions.append(question)
 
             step_start: float = time.perf_counter()
 
-            # Fully sync RL loop (GRPO)
-            # 1. Generator produces flat list of Episodes with group_id
-            # TODO: Create a queue to use all episodes from all GPUs
             completions: list[Completion] = self._get_rank_0_value(
                 self.generator.generate.call(train_prompts).get()
             )
 
-            # 2. Grader computes rewards per episode
             answers_per_completion = [
                 answer
                 for answer in train_answers
@@ -559,37 +442,44 @@ class RLTrainer(Configurable):
                 has_gpus=False,
             )
 
-            episodes = [
-                Episode(
-                    policy_version=sc.completion.policy_version,
-                    prompt_token_ids=sc.completion.prompt_tokens,
-                    text=sc.completion.text,
-                    token_ids=sc.completion.response_tokens,
-                    token_log_probs=sc.completion.logprobs,
-                    expected_answer=answer,
-                    reward=sc.reward,
-                    group_id=sc.completion.group_id,
-                )
+            scored_groups: dict[str, list[ScoredCompletion]] = defaultdict(list)
+            for sc in scored:
+                scored_groups[sc.completion.group_id].append(sc)
+
+            answers_by_group = {
+                sc.completion.group_id: answer
                 for sc, answer in zip(scored, answers_per_completion)
-            ]
+            }
 
-            # 3. Controller computes GRPO advantages (normalize within group)
-            groups: dict[str, list[int]] = defaultdict(list)
-            for idx, ep in enumerate(episodes):
-                groups[ep.group_id].append(idx)
-            for indices in groups.values():
-                rewards = torch.tensor([episodes[i].reward for i in indices])
-                mean_reward = rewards.mean().item()
-                for i in indices:
-                    episodes[i].advantage = episodes[i].reward - mean_reward
+            episodes = []
+            for group_id, group in scored_groups.items():
+                advantages = compute_advantages(group)
 
-            if self.config.log_samples:
-                _log_samples(episodes)
+                if self.config.log_samples:
+                    _log_group_sample(group, answers_by_group.get(group_id, ""))
 
-            # 4. Trainer updates policy using pre-collated batches
+                for sc, adv in zip(group, advantages):
+                    c = sc.completion
+                    episodes.append(
+                        Episode(
+                            prompt_tokens=c.prompt_tokens,
+                            response_tokens=c.response_tokens,
+                            logprobs=c.logprobs,
+                            group_id=c.group_id,
+                            text=c.text,
+                            reward=sc.reward,
+                            advantage=adv,
+                            policy_version=c.policy_version,
+                        )
+                    )
+
+            policy_version = self._validate_policy_versions(episodes)
             sharded_episodes = self._shard_episodes(episodes)
             batches = [
-                self._collate_rank_episodes(rank_episodes)
+                self._collate_rank_episodes(
+                    rank_episodes,
+                    policy_version=policy_version,
+                )
                 for rank_episodes in sharded_episodes
             ]
             fwd_bwd_result = self._get_rank_0_value(
@@ -599,9 +489,8 @@ class RLTrainer(Configurable):
                 self.trainer.optim_step.call().get()
             )
 
-            # 5. Sync weights
             t0 = time.perf_counter()
-            self.trainer.push_model_state_dict.call().get()
+            self.trainer.push_weights.call().get()
             t_push = time.perf_counter() - t0
             self.generator.pull_weights.call(optim_result.policy_version).get()
             t_total = time.perf_counter() - t0
@@ -609,7 +498,7 @@ class RLTrainer(Configurable):
 
             t_step = time.perf_counter() - step_start
 
-            all_token_lens = [len(ep.token_ids) for ep in episodes]
+            all_token_lens = [len(ep.response_tokens) for ep in episodes]
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
             all_rewards = [ep.reward for ep in episodes]
@@ -628,13 +517,12 @@ class RLTrainer(Configurable):
             )
 
             # Check for divergence
-            if not torch.isfinite(torch.tensor(fwd_bwd_result.loss)):
+            if not math.isfinite(fwd_bwd_result.loss):
                 logger.info("!" * 80)
                 logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
                 logger.info("!" * 80)
                 break
 
-        # Post-training evaluation
         logger.info("RL Training complete")
         logger.info("Evaluating post-training performance...")
         post_eval = await self.evaluate()
@@ -642,13 +530,11 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
         logger.info(
             f"Pre-training:  Accuracy={pre_eval['accuracy']:.0%} "
-            f"({pre_eval['correct']}/{pre_eval['total']}) "
-            f"Format={pre_eval['format_rate']:.0%} ({pre_eval['format_ok']}/{pre_eval['total']})"
+            f"({pre_eval['correct']}/{pre_eval['total']})"
         )
         logger.info(
             f"Post-training: Accuracy={post_eval['accuracy']:.0%} "
-            f"({post_eval['correct']}/{post_eval['total']}) "
-            f"Format={post_eval['format_rate']:.0%} ({post_eval['format_ok']}/{post_eval['total']})"
+            f"({post_eval['correct']}/{post_eval['total']})"
         )
         logger.info("=" * 80)
 
