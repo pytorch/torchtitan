@@ -31,8 +31,10 @@ class ConfigManager:
     def __init__(self):
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(self, args: list[str] = sys.argv[1:]):
-        loaded_config, args = self._load_config(args)
+    def parse_args(
+        self, args: list[str] = sys.argv[1:], default_module: str | None = None
+    ):
+        loaded_config, args = self._load_config(args, default_module=default_module)
         config_cls = type(loaded_config)
 
         self.config = tyro.cli(
@@ -43,7 +45,9 @@ class ConfigManager:
 
         return self.config
 
-    def _load_config(self, args: list[str]) -> tuple[object, list[str]]:
+    def _load_config(
+        self, args: list[str], default_module: str | None = None
+    ) -> tuple[object, list[str]]:
         """Parse --module and --config from args, load config from config_registry.
 
         Both --module and --config are required.
@@ -81,9 +85,12 @@ class ConfigManager:
             i += 1
 
         if module_name is None:
-            raise ValueError(
-                "--module is required. Example: --module llama3 --config llama3_debugmodel"
-            )
+            if default_module is not None:
+                module_name = default_module
+            else:
+                raise ValueError(
+                    "--module is required. Example: --module llama3 --config llama3_debugmodel"
+                )
         if config_name is None:
             raise ValueError(
                 "--config is required. Example: --module llama3 --config llama3_debugmodel"

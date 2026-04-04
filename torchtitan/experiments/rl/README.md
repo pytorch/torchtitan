@@ -6,7 +6,7 @@ This directory contains code for RL training using TorchTitan model definitions 
 The integration consists of the following components:
 
 1. **vLLM Model Wrapper** (`models/vllm_wrapper.py`): Adapts TorchTitan models for vLLM's inference engine
-2. **RL Training Loop** (`simple_grpo_sum_digits.py`): GRPO-based RL training with Monarch actors
+2. **RL Training Loop** (`sync_grpo_sum_digits/main.py`): GRPO-based RL training with Monarch actors
 3. **Inference Script** (`inference_example.py`): Standalone inference using the vLLM engine
 
 
@@ -67,7 +67,7 @@ torchrun --nproc_per_node=2 torchtitan/experiments/rl/inference_example.py
 
 7. Run simple GRPO RL loop to learn sum digits task
 ```bash
-python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config rl_grpo_qwen3_0_6b
+python torchtitan/experiments/rl/sync_grpo_sum_digits/main.py --config qwen3_0_6b
 ```
 
 **NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.

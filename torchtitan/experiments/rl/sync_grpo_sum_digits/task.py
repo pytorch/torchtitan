@@ -62,16 +62,21 @@ class SumDigitsTask:
         self.seed = seed
         self._rng = random.Random(seed)
 
-    def create_question(self) -> tuple[str, str]:
-        """Return a (question, answer) pair."""
-        n = self._rng.randint(2, 4)
-        numbers = [self._rng.randint(10, 99) for _ in range(n)]
-        answer = sum(int(d) for num in numbers for d in str(num))
-        question = f"What is the total digit sum of {numbers}?"
-        return question, str(answer)
+    def get_samples(self, n: int) -> tuple[list[str], list[str]]:
+        """Return (prompts, answers) for n samples.
 
-    def get_system_prompt(self) -> str:
-        return _SYSTEM_PROMPT
+        Each prompt is fully formatted with the system prompt.
+        """
+        prompts, answers = [], []
+        for _ in range(n):
+            num_count = self._rng.randint(2, 4)
+            numbers = [self._rng.randint(10, 99) for _ in range(num_count)]
+            answer = sum(int(d) for num in numbers for d in str(num))
+            prompts.append(
+                _SYSTEM_PROMPT + f"\n\nWhat is the total digit sum of {numbers}?"
+            )
+            answers.append(str(answer))
+        return prompts, answers
 
     def reward_function(
         self,
