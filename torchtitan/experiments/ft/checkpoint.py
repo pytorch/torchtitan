@@ -134,15 +134,16 @@ class FTCheckpointManager(CheckpointManager):
         # FT may need staging even without async_with_pinned_mem
         if self.enable_ft_dataloader_checkpoints:
             self.enable_staging = True
+            self.ft_states = {DATALOADER: dataloader}
 
-        self.ft_states = {DATALOADER: dataloader}
-
-        # FT needs gloo pg for async dataloader checkpoints
-        if self.enable_ft_dataloader_checkpoints and self.pg is None:
-            self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
+            # FT needs gloo pg for async dataloader checkpoints
+            if self.pg is None:
+                self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
+        # FT dataloader checkpoint is saved every step (not gated by interval)
+        # to minimize data replay on replica failure.
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 

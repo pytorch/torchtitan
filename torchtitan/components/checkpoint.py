@@ -610,7 +610,7 @@ class CheckpointManager(Configurable):
         self._purge_stale_checkpoints()
 
         logger.info(
-            "Finished saving the checkpoint (or staging if async is enabled)"
+            "Finished saving the checkpoint (or staging if async is enabled) "
             f"in {time.monotonic() - begin:.2f} seconds."
         )
 
