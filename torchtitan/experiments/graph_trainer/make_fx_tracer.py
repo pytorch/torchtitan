@@ -289,186 +289,29 @@ def _get_params_and_buffers(mod: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
+@dataclass
 class TracedResult:
-    """Holds the traced graph and metadata needed to execute it.
+    """Holds the traced graph and execution metadata.
 
-    Returned by :func:`minimal_fx_tracer`. Call the tracer returned by
-    :func:`minimal_fx_tracer` with trace-time args, then execute it with
-    :func:`run_traced`::
-
-        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
-        result = run_traced(traced, model, tokens, labels)
-
-    Args:
-        gm: The traced FX graph (a pure function of flat tensors).
-        param_fqns: Fully qualified names of the module's parameters and
-            buffers, recorded at trace time for validation.
-        num_params: Number of parameters + buffers (flat count).
-        num_flat_inputs: Number of original args (before subclass unwrapping).
-        input_subclass_layouts: Maps arg positions that are tensor subclasses
-            to their unwrap/rewrap metadata.  Plain tensors have no entry.
-        num_flat_outputs: Number of original outputs (before subclass unwrapping).
-        output_subclass_layouts: Maps output positions that are tensor subclasses
-            to their rewrap metadata.  Plain tensors have no entry.
-        output_spec: Pytree spec of the original function's return value,
-            used to reconstruct the output structure.
+    Attributes:
+        gm: The traced FX graph as a pure function of flat tensors.
+        param_fqns: Trace-time parameter/buffer FQNs for execution-time validation.
+        num_params: Number of lifted parameters and buffers.
+        num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
+        input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
+        num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
+        output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
+        output_spec: Original output pytree spec used during reconstruction.
     """
 
-    def __init__(
-        self,
-        gm: torch.fx.GraphModule,
-        param_fqns: list[str],
-        num_params: int,
-        num_flat_inputs: int,
-        input_subclass_layouts: dict[int, SubclassLayout],
-        num_flat_outputs: int,
-        output_subclass_layouts: dict[int, SubclassLayout],
-        output_spec: pytree.TreeSpec,
-    ) -> None:
-        self.gm = gm
-        self.param_fqns = param_fqns
-        self.num_params = num_params
-        self.num_flat_inputs = num_flat_inputs
-        self.input_subclass_layouts = input_subclass_layouts
-        self.num_flat_outputs = num_flat_outputs
-        self.output_subclass_layouts = output_subclass_layouts
-        self.output_spec = output_spec
-
-
-def _trace_with_args(
-    fn: Callable,
-    args: tuple,
-) -> TracedResult:
-    """Trace ``fn(*args)`` into a flat FX graph, unwrapping tensor subclasses.
-
-    ``args[0]`` must be an ``nn.Module``.  Its parameters and buffers are
-    lifted as extra graph inputs so the returned graph is a pure function.
-    Tensor subclasses (e.g. DTensor) are recursively unwrapped into plain
-    tensors for tracing, and the layouts needed to rewrap them are recorded
-    in the returned :class:`TracedResult`.
-
-    ``fn`` must be a plain callable (not an ``nn.Module``).  This keeps the
-    trace and execute calling conventions identical — the same ``args`` are
-    passed at both trace time and execution time, with no hidden arg
-    prepending.  Non-tensor, non-module values like ``loss_fn`` should be
-    captured in ``fn``'s closure rather than passed as args.
-
-    Execute the returned :class:`TracedResult` with :func:`run_traced`, passing
-    the same positional arguments (with the live module first)::
-
-        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
-        result = run_traced(traced, model, tokens, labels)
-
-    Args:
-        fn: The callable to trace.
-        args: The positional arguments to trace with.  The first element must
-            be an ``nn.Module`` whose parameters will be lifted.
-    """
-    if not isinstance(args[0], nn.Module):
-        raise ValueError(
-            "minimal_fx_tracer requires args[0] to be an nn.Module, "
-            f"got {type(args[0]).__name__}."
-        )
-    if any(isinstance(a, nn.Module) for a in args[1:]):
-        raise ValueError(
-            "minimal_fx_tracer supports exactly one nn.Module at args[0]. "
-            "Additional nn.Module instances found in args[1:]."
-        )
-    mod = args[0]
-
-    # Extract params/buffers from the module.
-    params_dict = _get_params_and_buffers(mod)
-    param_fqns = list(params_dict.keys())
-    params_flat = list(params_dict.values())
-    num_params = len(params_flat)
-
-    # User args: everything after the module.
-    user_args = list(args[1:])
-    user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
-
-    # Validate leaves.
-    for leaf in user_args_flat:
-        if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
-            raise ValueError(
-                f"minimal_fx_tracer requires all pytree leaves in args to be tensors "
-                f"or primitives (int/float/bool/str), got {type(leaf).__name__}. "
-                f"Non-primitive values should either be registered as pytree "
-                f"nodes (register_pytree_node) or constants "
-                f"(pytree.register_constant), or captured in fn's closure."
-            )
-
-    # Combined flat input: [*params, *user_args] with subclasses unwrapped.
-    full_args = params_flat + list(user_args_flat)
-    num_full_args = len(full_args)
-    unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
-
-    fake_mode = FakeTensorMode(
-        allow_non_fake_inputs=True,
-        shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
-    )
-    fake_args = tuple(
-        (
-            fake_mode.from_tensor(a, static_shapes=True)
-            if isinstance(a, torch.Tensor)
-            else a
-        )
-        for a in unwrapped_args
-    )
-
-    output_layouts: dict[int, SubclassLayout] = {}
-    num_flat_outputs: int = 0
-    output_spec: pytree.TreeSpec | None = None
-
-    def fn_with_subclass_handling(*plain_args: Any) -> list:
-        nonlocal output_layouts, output_spec, num_flat_outputs
-        output_layouts = {}
-
-        wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
-        params_wrapped = wrapped[:num_params]
-        user_flat = wrapped[num_params:]
-
-        params_for_mod = dict(zip(param_fqns, params_wrapped, strict=True))
-        user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
-
-        # Reconstruct the original args: module at position 0 keeps the live
-        # module, remaining positions get the traced user tensors.
-        rebuilt = [mod] + user_list
-
-        with stateless._reparametrize_module(mod, params_for_mod):
-            with _patch_engine_run_backward():
-                result = fn(*rebuilt)
-
-        flat_outs, output_spec = pytree.tree_flatten(result)
-        num_flat_outputs = len(flat_outs)
-        unwrapped_outs, output_layouts = _unwrap_subclasses(flat_outs)
-        return unwrapped_outs
-
-    ctx = TracingContext(fake_mode)
-    # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
-        traced = make_fx(
-            fn_with_subclass_handling,
-            record_stack_traces=True,
-            record_module_stack=False,  # don't need nn_module_stack for now
-        )(*fake_args)
-
-    # Copy forward annotations to backward nodes.
-    # Must run before DCE so that forward nodes used for matching aren't removed.
-    _copy_fwd_metadata_to_bw_nodes(traced)
-
-    _remove_cpu_shadow_chains(traced)
-
-    assert output_spec is not None
-    return TracedResult(
-        gm=traced,
-        param_fqns=param_fqns,
-        num_params=num_params,
-        num_flat_inputs=num_full_args,
-        input_subclass_layouts=input_layouts,
-        num_flat_outputs=num_flat_outputs,
-        output_subclass_layouts=output_layouts,
-        output_spec=output_spec,
-    )
+    gm: torch.fx.GraphModule
+    param_fqns: list[str]
+    num_params: int
+    num_flat_inputs: int
+    input_subclass_layouts: dict[int, SubclassLayout]
+    num_flat_outputs: int
+    output_subclass_layouts: dict[int, SubclassLayout]
+    output_spec: pytree.TreeSpec
 
 
 def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
@@ -476,16 +319,134 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
     ``fn`` must be a plain callable (not an ``nn.Module``). The returned
     callable expects the trace-time positional arguments, with the live module
-    at position 0::
+    at position 0.
 
-        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
-        result = run_traced(traced, model, tokens, labels)
+    Execute the returned :class:`TracedResult` with :func:`run_traced`, passing
+    the same positional arguments (with the live module first)::
+
+        traced_result = minimal_fx_tracer(train_step)(model, tokens, labels)
+        result = run_traced(traced_result, model, tokens, labels)
+
+    The trace-time args must satisfy these constraints:
+    - ``args[0]`` must be an ``nn.Module`` whose parameters and buffers are
+      lifted as extra graph inputs
+    - there must be no additional ``nn.Module`` instances in ``args[1:]``
+    - all remaining pytree leaves must be tensors or make_fx-safe primitives
+      (``int``, ``float``, ``bool``, ``str``, ``None``)
+
+    Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
+    plain tensors for tracing, and the layouts needed to rewrap them are stored
+    in the returned :class:`TracedResult`.
     """
 
-    def trace_with_args(*args: Any) -> TracedResult:
-        return _trace_with_args(fn, args)
+    def _trace_with_args(*args: Any) -> TracedResult:
+        if not isinstance(args[0], nn.Module):
+            raise ValueError(
+                "minimal_fx_tracer requires args[0] to be an nn.Module, "
+                f"got {type(args[0]).__name__}."
+            )
+        if any(isinstance(a, nn.Module) for a in args[1:]):
+            raise ValueError(
+                "minimal_fx_tracer supports exactly one nn.Module at args[0]. "
+                "Additional nn.Module instances found in args[1:]."
+            )
+        mod = args[0]
 
-    return trace_with_args
+        # Extract params/buffers from the module.
+        params_dict = _get_params_and_buffers(mod)
+        param_fqns = list(params_dict.keys())
+        params_flat = list(params_dict.values())
+        num_params = len(params_flat)
+
+        # User args: everything after the module.
+        user_args = list(args[1:])
+        user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
+
+        # Validate leaves.
+        for leaf in user_args_flat:
+            if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
+                raise ValueError(
+                    f"minimal_fx_tracer requires all pytree leaves in args to be tensors "
+                    f"or primitives (int/float/bool/str), got {type(leaf).__name__}. "
+                    f"Non-primitive values should either be registered as pytree "
+                    f"nodes (register_pytree_node) or constants "
+                    f"(pytree.register_constant), or captured in fn's closure."
+                )
+
+        # Combined flat input: [*params, *user_args] with subclasses unwrapped.
+        full_args = params_flat + list(user_args_flat)
+        num_full_args = len(full_args)
+        unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
+
+        fake_mode = FakeTensorMode(
+            allow_non_fake_inputs=True,
+            shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+        )
+        fake_args = tuple(
+            (
+                fake_mode.from_tensor(a, static_shapes=True)
+                if isinstance(a, torch.Tensor)
+                else a
+            )
+            for a in unwrapped_args
+        )
+
+        output_layouts: dict[int, SubclassLayout] = {}
+        num_flat_outputs: int = 0
+        output_spec: pytree.TreeSpec | None = None
+
+        def fn_with_subclass_handling(*plain_args: Any) -> list:
+            nonlocal output_layouts, output_spec, num_flat_outputs
+            output_layouts = {}
+
+            wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
+            params_wrapped = wrapped[:num_params]
+            user_flat = wrapped[num_params:]
+
+            params_for_mod = dict(zip(param_fqns, params_wrapped, strict=True))
+            user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
+
+            # Reconstruct the original args: module at position 0 keeps the live
+            # module, remaining positions get the traced user tensors.
+            rebuilt = [mod] + user_list
+
+            with stateless._reparametrize_module(mod, params_for_mod):
+                with _patch_engine_run_backward():
+                    result = fn(*rebuilt)
+
+            flat_outs, output_spec = pytree.tree_flatten(result)
+            num_flat_outputs = len(flat_outs)
+            unwrapped_outs, output_layouts = _unwrap_subclasses(flat_outs)
+            return unwrapped_outs
+
+        ctx = TracingContext(fake_mode)
+        # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
+        with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
+            traced = make_fx(
+                fn_with_subclass_handling,
+                record_stack_traces=True,
+                record_module_stack=False,  # don't need nn_module_stack for now
+            )(*fake_args)
+
+        # Copy forward annotations to backward nodes.
+        # Must run before DCE so that forward nodes used for matching aren't removed.
+        _copy_fwd_metadata_to_bw_nodes(traced)
+
+        _remove_cpu_shadow_chains(traced)
+
+        assert output_spec is not None
+        return TracedResult(
+            gm=traced,
+            param_fqns=param_fqns,
+            num_params=num_params,
+            num_flat_inputs=num_full_args,
+            input_subclass_layouts=input_layouts,
+            num_flat_outputs=num_flat_outputs,
+            output_subclass_layouts=output_layouts,
+            output_spec=output_spec,
+        )
+
+    return _trace_with_args
 
 
 def run_traced(traced_result: TracedResult, *args: Any) -> Any:
