@@ -10,7 +10,6 @@ import einops as E
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
-
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model as Llama3

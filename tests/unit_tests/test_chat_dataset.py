@@ -9,7 +9,6 @@ import unittest
 
 import torch
 from datasets import Dataset
-
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatDataset, SupervisionMode
@@ -745,21 +744,23 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
 
 class TestChatDatasetLastAssistantMasking(unittest.TestCase):
     def test_last_assistant_supervises_only_the_final_assistant_turn(self):
-        tokenizer, supervised_token_ids, supervised_text = (
-            TestChatDatasetAssistantOnlyTemplates()._get_supervised_output(
-                chat_template=(
-                    "{{ bos_token }}{% for msg in messages %}"
-                    "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
-                    "{% endfor %}"
-                ),
-                messages=[
-                    {"role": "user", "content": "Q1?"},
-                    {"role": "assistant", "content": "4"},
-                    {"role": "user", "content": "Q2?"},
-                    {"role": "assistant", "content": "6"},
-                ],
-                train_on=SupervisionMode.LAST_ASSISTANT,
-            )
+        (
+            tokenizer,
+            supervised_token_ids,
+            supervised_text,
+        ) = TestChatDatasetAssistantOnlyTemplates()._get_supervised_output(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q1?"},
+                {"role": "assistant", "content": "4"},
+                {"role": "user", "content": "Q2?"},
+                {"role": "assistant", "content": "6"},
+            ],
+            train_on=SupervisionMode.LAST_ASSISTANT,
         )
 
         self.assertEqual(supervised_text, "6<|end_of_text|>")

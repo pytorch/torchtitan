@@ -38,7 +38,6 @@ from torchtitan.models.common.rope import (
 )
 from torchtitan.protocols.module import Module
 
-
 __all__ = [
     "FlexAttention",
     "GQAttention",
@@ -450,9 +449,7 @@ def create_attention_mask(*args, **kwargs):
     return _compiled_create_block_mask(*args, **kwargs)
 
 
-def create_varlen_metadata_for_document(
-    *, positions: torch.Tensor
-) -> VarlenMetadata:
+def create_varlen_metadata_for_document(*, positions: torch.Tensor) -> VarlenMetadata:
     """
     Creates cumulative sequence length indices needed for variable length attention
 

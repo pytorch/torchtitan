@@ -28,7 +28,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 from torchtitan.trainer import Trainer as TitanTrainer
-
 from .engine import ForgeEngine
 
 

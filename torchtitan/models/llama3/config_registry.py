@@ -28,7 +28,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.profiling import ProfilingConfig
 from torchtitan.trainer import Trainer
-
 from . import model_registry
 
 
