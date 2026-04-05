@@ -6,9 +6,8 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from functools import partial
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, cast, Literal
 
 import torch
 import tyro
@@ -52,20 +51,6 @@ DATASETS = {
         sample_processor=_process_c4_text,
     ),
 }
-
-
-class SupervisionMode(str, Enum):
-    """
-    Controls which tokens receive supervised labels during training.
-
-    ALL: Supervise the full rendered conversation.
-    ASSISTANT: Supervise all assistant turns.
-    LAST_ASSISTANT: Supervise only the final assistant turn.
-    """
-
-    ALL = "all"
-    ASSISTANT = "assistant"
-    LAST_ASSISTANT = "last_assistant"
 
 
 def _validate_dataset(
@@ -278,7 +263,7 @@ class ChatDataset(IterableDataset, Stateful):
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
         *,
-        train_on: SupervisionMode = SupervisionMode.ALL,
+        train_on: Literal["all", "assistant", "last_assistant"] = "assistant",
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -459,7 +444,7 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        if self._train_on == SupervisionMode.ALL:
+        if self._train_on == "all":
             return input_ids, label_ids
 
         # Find assistant spans and unmask only those in labels.
@@ -467,7 +452,7 @@ class ChatDataset(IterableDataset, Stateful):
         # an assistant span (start, end) in full_tokens maps to
         # label indices [start-1, end-1) when supervising assistant content.
         spans = self._get_assistant_spans(messages, full_tokens)
-        if self._train_on == SupervisionMode.LAST_ASSISTANT:
+        if self._train_on == "last_assistant":
             spans = spans[-1:]
 
         # Start with everything masked
@@ -609,9 +594,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
-        train_on: Annotated[SupervisionMode, tyro.conf.EnumChoicesFromValues] = (
-            SupervisionMode.ALL
-        )
+        train_on: Literal["all", "assistant", "last_assistant"] = "assistant"
         """Which tokens to supervise: 'all', 'assistant', or 'last_assistant'."""
 
         infinite: bool = True

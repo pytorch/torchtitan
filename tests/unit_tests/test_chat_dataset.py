@@ -6,12 +6,13 @@
 
 import os
 import unittest
+from typing import Literal
 
 import torch
 from datasets import Dataset
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import ChatDataset, SupervisionMode
+from torchtitan.hf_datasets.text_datasets import ChatDataset
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     get_document_mask_mod,
@@ -50,7 +51,7 @@ def _get_full_tokens(tokenizer, messages):
 class TestChatDatasetDefaultSupervision(unittest.TestCase):
     """With train_on='all', labels supervise the full rendered conversation."""
 
-    def test_default_supervises_full_sequence(self):
+    def test_all_supervises_full_sequence(self):
         tokenizer = _load_tokenizer()
         sample = _load_dataset()[0]
         ds = Dataset.from_list([sample])
@@ -58,6 +59,7 @@ class TestChatDatasetDefaultSupervision(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
+            train_on="all",
             seq_len=2048,
             infinite=False,
         )
@@ -94,6 +96,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
+            train_on="all",
             seq_len=2048,
             infinite=False,
         )
@@ -461,6 +464,7 @@ class TestChatDatasetMultiTurnDefaultSupervision(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=processor,
+            train_on="all",
             seq_len=2048,
             infinite=False,
         )
@@ -487,7 +491,7 @@ class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
         *,
         chat_template: str,
         messages: list[dict[str, str]],
-        train_on: SupervisionMode = SupervisionMode.ASSISTANT,
+        train_on: Literal["all", "assistant", "last_assistant"] = "assistant",
     ) -> tuple[HuggingFaceTokenizer, list[int], str]:
         tokenizer = _load_tokenizer()
         tokenizer.set_chat_template(chat_template)
@@ -709,7 +713,7 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=lambda sample: messages,
-            train_on=SupervisionMode.ASSISTANT,
+            train_on="assistant",
             seq_len=sample_len * 2,
             infinite=False,
         )
@@ -760,7 +764,7 @@ class TestChatDatasetLastAssistantMasking(unittest.TestCase):
                 {"role": "user", "content": "Q2?"},
                 {"role": "assistant", "content": "6"},
             ],
-            train_on=SupervisionMode.LAST_ASSISTANT,
+            train_on="last_assistant",
         )
 
         self.assertEqual(supervised_text, "6<|end_of_text|>")

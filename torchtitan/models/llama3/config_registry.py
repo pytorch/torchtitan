@@ -22,7 +22,6 @@ from torchtitan.config import (
 from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
-    SupervisionMode,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -258,7 +257,7 @@ def sft_debugmodel() -> Trainer.Config:
                 "split": "train",
             },
             sample_processor=process_sample,
-            train_on=SupervisionMode.ASSISTANT,
+            train_on="assistant",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

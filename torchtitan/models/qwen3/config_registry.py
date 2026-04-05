@@ -16,7 +16,6 @@ from torchtitan.config import (
 from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
-    SupervisionMode,
 )
 from torchtitan.trainer import Trainer
 from . import model_registry
@@ -284,7 +283,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             dataset_path="openai/gsm8k",
             load_dataset_kwargs={"name": "main", "split": "train"},
             sample_processor=process_sample,
-            train_on=SupervisionMode.ASSISTANT,
+            train_on="assistant",
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,
