@@ -81,9 +81,6 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        echo "ft_unit_tests"
-        pytest torchtitan/experiments/ft/tests/test_ft_checkpoint.py -v
-
         echo "torchft_lighthouse"
         RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
         echo "ft_integration_test"
