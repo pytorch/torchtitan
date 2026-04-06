@@ -50,6 +50,8 @@ def apply_default_graph_passes(
     """
     gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
 
+    gm = autobucketing_reordering_pass(gm, example_inputs)
+
     return gm
 
 
