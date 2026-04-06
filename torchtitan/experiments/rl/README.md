@@ -2,6 +2,8 @@
 
 This directory contains code for RL training using TorchTitan model definitions with vLLM inference engine for fast rollout generation.
 
+> **Note:** This experiment is under active development. APIs and configurations may change.
+
 ## Overview
 The integration consists of the following components:
 
@@ -9,6 +11,12 @@ The integration consists of the following components:
 2. **RL Training Loop** (`simple_grpo_sum_digits.py`): GRPO-based RL training with Monarch actors
 3. **Inference Script** (`inference_example.py`): Standalone inference using the vLLM engine
 
+
+## Key features available
+
+1. **Unified model definition**: Canonical TorchTitan model definition shared by both trainer (TorchTitan) and generator (vLLM), enabling fast iteration, shared optimizations, and straightforward bitwise parity verification
+2. **[Monarch](https://github.com/meta-pytorch/monarch) as controller**: Distributed actor framework for orchestrating trainer and generator on separate GPU meshes with async communication
+3. **[TorchStore](https://github.com/meta-pytorch/torchstore) for weight sync**: Efficient weight synchronization between trainer and generator, supporting direct GPU-to-GPU RDMA transfers
 
 ## Quick Start
 ### Prerequisites
