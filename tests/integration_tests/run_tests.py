@@ -122,11 +122,31 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
             )
         else:
             try:
+                # test
+                start = time.perf_counter()
+
                 run_single_test(test_flavor, args.output_dir, module, config)
+
+                # test
+                duration = time.perf_counter() - start
+                print(f"############ Duration for {test_flavor.test_name} test: {duration:.6f}s ############")
+
             except Exception as e:
                 logger.error(str(e))
                 failed_tests.append((test_flavor.test_name, str(e)))
             ran_any_test = True
+
+    if failed_tests:
+        failure_summary = "\n".join(
+            f"  {name}: {error}" for name, error in failed_tests
+        )
+        raise RuntimeError(
+            f"{len(failed_tests)} integration test(s) failed:\n{failure_summary}"
+        )
+
+    # test
+    total_duration = time.perf_counter() - total_start
+    print(f"************ Total duration for Features test: {total_duration:.6f}s ************")
 
     if failed_tests:
         failure_summary = "\n".join(
