@@ -155,6 +155,9 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(llama3_model_registry)
 
+    # TODO: Re-enable once upstream PyTorch numerical change is resolved.
+    # Broken by https://github.com/pytorch/pytorch/pull/160509
+    @unittest.skip("Upstream PyTorch change broke expected numerics")
     def test_eager_self_deterministic(self):
         """Eager mode: results match hardcoded expected values.
 
@@ -179,6 +182,9 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(dsv3_model_registry)
 
+    # TODO: Re-enable once upstream PyTorch numerical change is resolved.
+    # Broken by https://github.com/pytorch/pytorch/pull/160509
+    @unittest.skip("Upstream PyTorch change broke expected numerics")
     def test_eager_self_deterministic(self):
         """Eager mode: results match hardcoded expected values.
 
