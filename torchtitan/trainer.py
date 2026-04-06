@@ -518,17 +518,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        parallelism_config = config.parallelism
-        return ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        return ParallelDims.from_config(config.parallelism, world_size)
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -608,8 +598,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Resolve positions once: per-document positions for block_causal,
         # sequential positions when CP needs them for shard indexing,
         # or None (model uses sequential RoPE slice by default).
-        layer = getattr(self.model_config, "layer", None)
-        attn_config = getattr(layer, "attention", None) if layer else None
+        if isinstance(self.model_config, Decoder.Config):
+            layer = self.model_config.layers[0]
+            attn_config = layer.attention
+        else:
+            attn_config = None
         mask_type = getattr(attn_config, "mask_type", "causal")
 
         positions = extra_inputs.pop("positions", None)
