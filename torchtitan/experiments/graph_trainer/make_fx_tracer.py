@@ -455,7 +455,11 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
     return _trace_with_args
 
 
-def run_traced(traced_result: TracedResult, *args: Any) -> Any:
+def run_traced(
+    traced_result: TracedResult,
+    *args: Any,
+    validate_module_fqns: bool = False,
+) -> Any:
     """Execute a traced graph with fresh parameters read from the live module.
 
     This is a reference implementation of traced-graph execution. It keeps the
@@ -473,14 +477,15 @@ def run_traced(traced_result: TracedResult, *args: Any) -> Any:
 
     mod = args[0]
     params_dict = _get_params_and_buffers(mod)
-    fqns = list(params_dict.keys())
-    if fqns != traced_result.param_fqns:
-        raise ValueError(
-            f"Module at args[0] has different parameter/buffer "
-            f"names than during tracing.\n"
-            f"  Traced: {traced_result.param_fqns}\n"
-            f"  Got:    {fqns}"
-        )
+    if validate_module_fqns:
+        fqns = list(params_dict.keys())
+        if fqns != traced_result.param_fqns:
+            raise ValueError(
+                f"Module at args[0] has different parameter/buffer "
+                f"names than during tracing.\n"
+                f"  Traced: {traced_result.param_fqns}\n"
+                f"  Got:    {fqns}"
+            )
     params_flat = list(params_dict.values())
 
     user_args = list(args[1:])
