@@ -184,13 +184,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         selected_experts_indices: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
-        # Sort token indices by expert assignment
-        token_indices_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-        top_scores_sorted = top_scores.view(-1)[token_indices_sorted]
-
-        # Recompute per-expert token counts
+        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
             bins=self.num_experts,
@@ -198,13 +192,23 @@ class TokenDispatcher(BaseTokenDispatcher):
             max=self.num_experts,
         )
 
-        # Gather tokens in expert-sorted order
-        routed_input = x[token_indices_sorted // self.top_k]
+        # Reorder the token indices to match the order of the experts
+        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        token_indices_experts_sorted = torch.argsort(
+            selected_experts_indices.view(-1), stable=True
+        )
+
+        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
+
+        # shape (bs*slen*top_k, dim)
+        routed_input = x[token_indices_experts_sorted]
 
         # Apply scores before expert computation if configured
         if self.score_before_experts:
             routed_input = (
-                routed_input.to(torch.float32) * top_scores_sorted.reshape(-1, 1)
+                routed_input.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
         # All-to-all of per-expert token counts
@@ -254,13 +258,10 @@ class TokenDispatcher(BaseTokenDispatcher):
             self.num_local_experts,
         )
 
-        # Convert argsort indices to token indices
-        token_indices_sorted = token_indices_sorted // self.top_k
-
         metadata = DispatchMetadata(
-            token_indices_experts_sorted=token_indices_sorted,
+            token_indices_experts_sorted=token_indices_experts_sorted,
             top_scores=top_scores,
-            top_scores_experts_sorted=top_scores_sorted,
+            top_scores_experts_sorted=top_scores_experts_sorted,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
