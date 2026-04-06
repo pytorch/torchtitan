@@ -66,6 +66,38 @@ After 60+ experiments, the pass-level optimization ceiling has been reached:
 - **Communication volume**: FSDP already communicates in bf16. Reducing parallelism would reduce communication but requires config changes.
 - **MFU ceiling**: At 42% MFU, ~58% overhead is split between communication (~5%), memory bandwidth (~10-15%), and non-matmul compute time.
 
+## GPU Kernel Time Breakdown (Profiling, Llama3 8B, FSDP4+TP2, 8xH100)
+
+Per-step GPU kernel time ~1258ms (from Chrome trace profiling at step 5):
+
+| Category | Time (ms) | % of Kernel Time |
+|----------|-----------|-------------------|
+| Matmul (nvjet) | 380 | 30.3% |
+| NCCL RS (fp32) | 287 | 22.8% |
+| NCCL AR (fp32) | 131 | 10.4% |
+| NCCL AG | 115 | 9.1% |
+| Elementwise | 83 | 6.6% |
+| SDPA bwd | 63 | 5.0% |
+| DType conv | 55 | 4.3% |
+| NCCL RS (bf16) | 42 | 3.3% |
+| Optimizer | 34 | 2.7% |
+| SDPA fwd | 28 | 2.2% |
+| Cat (bucketing) | 16 | 1.3% |
+| NCCL AR (bf16) | 7 | 0.5% |
+
+**Key insight**: NCCL communication is **46.2%** of GPU kernel time — not ~5% as initially estimated. The fp32 reduce-scatter alone is 22.8%. This means the fundamental bottleneck is COMMUNICATION, not compute or graph-level overhead.
+
+**Implications**:
+- Pass-level graph optimizations have diminishing returns beyond CUDAGraph (which already eliminated kernel launch overhead).
+- Meaningful further speedups require: reducing communication volume (bf16 gradients — breaks numerics), changing parallelism config (fewer DP ranks = fewer collectives), or overlapping comm with compute more aggressively.
+- The 42% MFU ceiling is primarily communication-bounded, not compute-bounded.
+
+## Fundamental Incompatibilities
+
+- **regional_inductor + fwd+bwd graphs**: Completely incompatible. Even a single 2-node annotation (silu+mul) causes dependency cycles. Backward nodes share inputs with forward nodes, creating unavoidable partition-level cycles regardless of annotation strategy.
+- **torch.compile on FX GraphModules**: RecursionError — Dynamo double-traces the pre-traced graph. Fundamentally wrong approach for 8000+ op FX graphs.
+- **torch.compile(fullgraph=False) + collectives**: Even if Dynamo could trace the graph, Inductor can't compile collective ops. Graph breaks at every collective would negate fusion benefits.
+
 ## Benchmark Notes
 
 - Use `--dataloader.dataset c4_test` for local data (avoids network dependency).
