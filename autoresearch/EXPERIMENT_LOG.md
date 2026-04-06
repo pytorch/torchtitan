@@ -303,3 +303,51 @@ This file records every experiment attempted during the autoresearch loop.
 - **Idea**: Force all eligible collectives into buckets by setting off-bucket limit to zero.
 - **Result**: tps=6997.
 - **Lessons**: No improvement. The scheduler already buckets everything it can given dependency constraints.
+
+## NVIDIA_TF32_OVERRIDE=1 — discard (xxxxxxx)
+
+- **Idea**: Force TF32 for all fp32 matmul operations. TF32 is ~3x faster than fp32 GEMM on H100.
+- **Result**: tps=7293.
+- **Lessons**: Within noise. The matmuls are already in bf16, which uses Tensor Cores. TF32 only affects fp32 matmul which is not the bottleneck.
+
+## Custom runtime estimation (inflate RS/AR) — discard (xxxxxxx)
+
+- **Idea**: Use `custom_runtime_estimation` callback to inflate RS and AR collective time estimates by ~1000x. This should make the scheduler allocate significantly more compute budget to overlap with these collectives.
+- **Result**: tps=7221.
+- **Lessons**: The scheduler already handles RS/AR overlap as well as it can given dependency constraints. Inflating estimates doesn't create new scheduling opportunities — the dependencies are the binding constraint, not the time budget.
+
+## Wait_tensor deduplication — no-op (xxxxxxx)
+
+- **Idea**: After bucketing: 662 waits for 597 collectives. Expected 65 redundant waits.
+- **Result**: 0 duplicates found. Bucketing creates exactly 1 wait per collective.
+- **Lessons**: The 65-count difference comes from different collective types, not duplicate waits.
+
+## Inductor remove_noop_ops — discard (xxxxxxx)
+
+- **Idea**: Apply Inductor's comprehensive no-op removal pass (handles single-element cat, all-ones repeat, same-dtype convert, clone, etc.) — catches patterns our manual passes miss.
+- **Result**: Found and removed 6 additional no-op nodes. tps=7070 (within noise).
+- **Lessons**: Our manual passes already cover >99.9% of identity patterns. The remaining 6 nodes are from patterns like single-use clone or view operations that our passes don't handle but Inductor's does. Too few to impact performance.
+
+## NCCL_ALGO=Tree — crash (xxxxxxx)
+
+- **Idea**: Use Tree algorithm for NCCL collectives (potentially faster for small messages like TP all-reduces).
+- **Result**: Crash — "no algorithm/protocol available for Broadcast with ncclInt8".
+- **Lessons**: Setting NCCL_ALGO=Tree restricts ALL collectives to Tree, but some ops (Broadcast/int8) only support Ring. Can't use NCCL_ALGO globally.
+
+## PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True — discard (xxxxxxx)
+
+- **Idea**: Enable expandable CUDA memory segments to reduce allocator fragmentation.
+- **Result**: tps=7300.
+- **Lessons**: Within noise. The CUDA allocator is already efficient for this workload. CUDAGraph pins all allocations, so allocator behavior during replay is irrelevant.
+
+## OMP_NUM_THREADS=1 — discard (xxxxxxx)
+
+- **Idea**: Reduce CPU thread contention by limiting OpenMP threads.
+- **Result**: tps=6062. -13% regression.
+- **Lessons**: CPU parallelism matters — DataLoader preprocessing and other CPU-side operations need multiple threads. Never reduce OMP threads for GPU training.
+
+## CUDA max_split_size_mb=128 — discard (xxxxxxx)
+
+- **Idea**: Reduce maximum CUDA allocation split size to improve cache behavior.
+- **Result**: tps=6246, memory=56.1GiB (+7GiB). Regression on both metrics.
+- **Lessons**: Smaller split sizes cause more memory fragmentation and force the allocator to use more segments. This hurts both performance and memory.

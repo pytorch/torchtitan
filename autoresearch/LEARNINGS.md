@@ -50,6 +50,15 @@ After simplification and autobucketing:
 - **Memory budget is not the limiter**: Increasing max_memory_increase_gb from 1.0 to 8.0 doesn't improve RS bucketing.
 - **Total CUDA ops in CUDAGraph**: ~8437+ nodes. CUDAGraph replay overhead ~12ms (<1% of step time).
 
+## Exhaustive Exploration Summary
+
+After 60+ experiments, the pass-level optimization ceiling has been reached:
+- **FX-level simplification**: All identity/no-op patterns found and removed (2171 nodes = 19% of original graph). Inductor's `remove_noop_ops` found only 6 additional nodes.
+- **Autobucketing**: All 18 parameters tested. Default params are near-optimal. RS bucketing fundamentally limited by backward dependencies.
+- **CUDAGraph**: Float constant folding + static input identification is the maximum achievable. Multi-warmup, segmented CUDAGraph, etc. all regress or are unstable.
+- **Environment tuning**: All NCCL params, CUDA allocator settings, CPU thread configs either within noise or regression.
+- **Overlap scheduling**: compute_overlap_multipler=2.0 is optimal. Custom estimations, fusion regions, different bucket modes all within noise.
+
 ## What's Left to Explore (and Why It's Hard)
 
 - **Kernel fusion**: Inductor compilation crashes with collective ops in the graph. Regional Inductor has dependency cycles in fwd+bwd graph. The remaining memory-bound ops (842 _to_copy, normalization) can't be fused at the FX level.
