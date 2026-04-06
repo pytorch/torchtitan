@@ -2,7 +2,8 @@
 
 - [x] **Graph inspection**: Dump and study the FX graph structure to understand ops, collectives, and patterns before attempting optimizations.
   - @claude, 2026-04-05 22:25 — Graph has 11381 nodes, 421 AG, 421 RS, 68 AR, 675 mm, 842 _to_copy, 32 SDPA, 65 rmsnorm. Heavy collective traffic.
-- [ ] **Dead code elimination**: Remove unused nodes from the traced graph (e.g. CPU shadow chains, unused outputs).
+- [x] **Dead code elimination**: Remove unused nodes from the traced graph (e.g. CPU shadow chains, unused outputs).
+  - @claude, 2026-04-05 23:10 — DCE removes 167 nodes but hurts bucketing heuristics when applied before, and is neutral when applied after. Not worth it alone.
 - [x] **Comm/compute overlap via autobucketing**: Reorder ops to overlap collective communication (all-gather, reduce-scatter) with compute.
   - @claude, 2026-04-05 22:30 — Applied schedule_overlap_bucketing to full traced graph. +3.3% tps (4247→4387 avg). Kept.
 - [ ] **Op fusion**: Fuse sequences of element-wise ops (e.g. rmsnorm components, activation functions) to reduce kernel launch overhead.
@@ -10,7 +11,13 @@
   - @claude, 2026-04-05 22:30 — Autobucketing includes collective bucketing. Could try manual transformer-block-level bucketing for more targeted control.
 - [ ] **Selective recomputation tuning**: Tune SAC policy to find better save/recompute tradeoffs for this specific model size and parallelism config.
 - [ ] **Memory planning**: Optimize tensor lifetime and memory allocation patterns to reduce peak memory and improve cache locality.
-- [ ] **Remove redundant _to_copy ops**: 842 dtype conversion ops in graph — investigate if some are unnecessary.
+- [x] **Remove redundant _to_copy ops**: 842 dtype conversion ops in graph — investigate if some are unnecessary.
+  - @claude, 2026-04-05 22:37 — All 842 are real fp32↔bf16 conversions for mixed precision. No no-ops.
 - [ ] **Transformer block bucketing**: Use manual_overlap_bucketing with per-transformer-block bucket plans for more structured overlap.
-- [ ] **Regional Inductor compilation**: Apply Inductor kernel codegen (triton) to fuse element-wise ops within regions.
+- [x] **Regional Inductor compilation**: Apply Inductor kernel codegen (triton) to fuse element-wise ops within regions.
+  - @claude, 2026-04-05 23:14 — No-op in aot_fx_trace mode (no compile_with_inductor annotations). Full inductor crashes without decomp pass.
 - [ ] **CUDAGraph wrapping**: Wrap the traced graph with CUDAGraph to eliminate kernel launch overhead.
+- [x] **Remove identity view/reshape ops**: Removed 1522 identity view/reshape/_unsafe_view nodes (shape_in == shape_out). +9.5% tps (4427→4849). Major win.
+  - @claude, 2026-04-06 00:08 — Way more than expected 225 _unsafe_view: view.default and reshape.default also had many identity instances.
+- [ ] **Fuse _to_copy into all_gather**: Communicate in bf16 instead of fp32 to halve FSDP communication volume. Would change numerics.
+- [ ] **Annotate regions for regional_inductor**: Manually annotate compute-heavy subgraphs (rmsnorm, silu, attention) for Inductor compilation.

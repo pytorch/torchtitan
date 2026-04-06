@@ -57,3 +57,19 @@ This file records every experiment attempted during the autoresearch loop.
 - **Result**: tps=4466/4427/4388 (avg 4427), MFU=26.15/25.92/25.70%, memory=49.0GiB. Numerics pass.
 - **Analysis**: +0.9% tps over autobucketing alone (marginal, within noise). But -2 GiB memory (49.0 vs 51.0), which is consistent across runs. The detach removal simplifies the graph and reduces memory pressure from unnecessary tensor references.
 - **Lessons**: Removing identity ops is always a good idea even if tps doesn't change — it simplifies the graph and can save memory. Apply identity removal early (before other passes) so downstream passes work on a cleaner graph.
+
+## Regional Inductor with element-wise annotations — crash (xxxxxxx)
+
+- **Idea**: Annotate 1598 element-wise/reduction ops with `compile_with_inductor` metadata, then apply regional_inductor to fuse them into triton kernels.
+- **Changes**: Added `annotate_elementwise_for_inductor_pass` and called regional_inductor_pass after it.
+- **Result**: Crash — `AssertionError: Invalid partition, found dependency cycles` during `fuse_by_partitions`.
+- **Analysis**: Annotating scattered element-wise ops creates dependency cycles: annotated node A depends on unannotated node B which depends on annotated node C. The partitioner can't group them without creating cycles. Would need to annotate ALL nodes in contiguous regions (including views, transposes) to avoid this.
+- **Lessons**: Regional inductor's partition algorithm requires contiguous annotated regions without internal dependencies on unannotated nodes. Can't just sprinkle annotations on arbitrary ops. Need to annotate complete subgraphs between partition boundaries (e.g. between collectives).
+
+## Remove identity view/reshape nodes — keep (6406b785)
+
+- **Idea**: Remove view/reshape/_unsafe_view ops where output shape matches input shape. These are identity ops in the traced graph — no-op reshapes that add graph complexity.
+- **Changes**: Added `remove_identity_view_pass` before autobucketing. Checks `aten._unsafe_view.default`, `aten.view.default`, `aten.reshape.default` — compares input/output shapes via fake tensor metadata.
+- **Result**: tps=4818/4879 (avg 4849), MFU=28.21/28.57%, memory=49.0GiB. Numerics pass.
+- **Analysis**: Removed **1522** identity view/reshape nodes (out of ~11K total) — 13.4% of all nodes! This is ~6.5x more than expected (225 _unsafe_view) because view.default and reshape.default also had many identity instances. The +9.5% tps improvement over previous best (4427→4849) comes from: (a) fewer nodes means autobucketing can produce better schedules, (b) reduced graph execution overhead from fewer kernel dispatches, (c) simpler data flow for the runtime to optimize.
+- **Lessons**: Identity view/reshape removal is a high-impact graph cleanup. Unlike DCE (which removed 167 nodes and hurt bucketing), removing identity views actually helps bucketing because it removes noise nodes that dilute the scheduler's view of actual compute/comm patterns. Graph simplification passes that remove genuinely unnecessary ops (not just dead code) can have outsized impact.
