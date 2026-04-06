@@ -336,9 +336,15 @@ def cudagraph_scalar_folded_pass(
     else:
         filtered_examples = ()
 
-    # No static inputs — all inputs will be copied each step.
-    # Suboptimal for params but safe. See cudagraph_full_graph_pass comment.
-    static_input_indices = []
+    # Identify static inputs: model parameters are float tensors at stable memory
+    # addresses (optimizer updates in-place). Batch data (input_ids, labels) are
+    # integer tensors that change each step. FakeTensors don't preserve
+    # requires_grad, so we use dtype as the discriminator instead.
+    static_input_indices = [
+        i
+        for i, inp in enumerate(filtered_examples)
+        if isinstance(inp, torch.Tensor) and inp.dtype.is_floating_point
+    ]
 
     # CUDAGraph wraps the recompiled forward (which expects no float args)
     graph_forward = gm.forward
