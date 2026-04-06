@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_flex_attention_for_regional_inductor,
     register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -23,9 +24,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _patch_engine_run_backward,
     minimal_fx_tracer,
     run_traced,
-)
-from torchtitan.models.common.attention import (
-    annotate_flex_attention_for_regional_inductor,
 )
 
 register_blockmask_pytree_node()
@@ -214,6 +212,28 @@ class TestTraceModule(unittest.TestCase):
         with self.assertRaises(ValueError, msg="all pytree leaves"):
             minimal_fx_tracer(fn)(model, tokens, lambda x: x.sum())
 
+    def test_module_must_be_first_arg(self):
+        def forward(tokens, model):
+            return model(tokens)
+
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        with self.assertRaises(ValueError, msg="args[0]"):
+            minimal_fx_tracer(forward)(tokens, model)
+
+    def test_additional_module_arg_raises(self):
+        def forward(model, other_model, tokens):
+            del other_model
+            return model(tokens)
+
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        other_model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        with self.assertRaises(ValueError, msg="Additional nn.Module"):
+            minimal_fx_tracer(forward)(model, other_model, tokens)
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestTraceDTensor(unittest.TestCase):
@@ -389,16 +409,17 @@ class TestMetadataPropagation(unittest.TestCase):
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        train_step = TrainStepModule(model, get_loss)
+        train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced_result = trace_module(train_step, (tokens, labels))
+        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
 
         # Find backward nodes: nodes sharing a seq_nr with an earlier (forward) node
         seq_nr_first: dict[int, torch.fx.Node] = {}
         bwd_nodes_missing_stack_trace = []
-        for node in traced_result.gm.graph.nodes:
+        num_checked = 0
+        for node in traced.gm.graph.nodes:
             if node.op != "call_function" or "seq_nr" not in node.meta:
                 continue
             seq_nr = node.meta["seq_nr"]
@@ -406,9 +427,14 @@ class TestMetadataPropagation(unittest.TestCase):
                 seq_nr_first[seq_nr] = node
             else:
                 # This is a backward node
+                fwd_node = seq_nr_first[seq_nr]
+                if not fwd_node.stack_trace:
+                    continue
+                num_checked += 1
                 if not node.stack_trace:
                     bwd_nodes_missing_stack_trace.append((node.name, seq_nr))
 
+        self.assertEqual(num_checked, 24)
         self.assertEqual(
             bwd_nodes_missing_stack_trace,
             [],
