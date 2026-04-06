@@ -16,7 +16,10 @@
 - [ ] **Transformer block bucketing**: Use manual_overlap_bucketing with per-transformer-block bucket plans for more structured overlap.
 - [x] **Regional Inductor compilation**: Apply Inductor kernel codegen (triton) to fuse element-wise ops within regions.
   - @claude, 2026-04-05 23:14 — No-op in aot_fx_trace mode (no compile_with_inductor annotations). Full inductor crashes without decomp pass.
-- [ ] **CUDAGraph wrapping**: Wrap the traced graph with CUDAGraph to eliminate kernel launch overhead.
+- [x] **CUDAGraph wrapping**: Crash — float scalar inputs not supported by CUDAGraphWrapper. Would need to modify cudagraph.py.
+  - @claude, 2026-04-06 01:12 — aot_fx_trace lifts scalar constants as graph inputs (e.g. 32768.0).
+- [x] **Aggressive overlap scheduling**: compute_overlap_multipler=2.0. +1.7% tps (5079→5165). Crossed 30% MFU.
+  - @claude, 2026-04-06 01:24 — Default 1.0× is too conservative for this workload.
 - [x] **Remove identity view/reshape ops**: Removed 1522 identity view/reshape/_unsafe_view nodes (shape_in == shape_out). +9.5% tps (4427→4849). Major win.
   - @claude, 2026-04-06 00:08 — Way more than expected 225 _unsafe_view: view.default and reshape.default also had many identity instances.
 - [x] **Remove identity slice ops**: Removed 453 identity slices (all of them!) where full dimension is selected. +2.2% tps (4849→4959).
