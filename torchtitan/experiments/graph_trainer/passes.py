@@ -51,6 +51,7 @@ def apply_default_graph_passes(
     gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
 
     gm = remove_detach_pass(gm, example_inputs)
+    gm = remove_identity_view_pass(gm, example_inputs)
     gm = autobucketing_reordering_pass(gm, example_inputs)
 
     return gm
@@ -78,6 +79,46 @@ def remove_detach_pass(
         gm.graph.lint()
         gm.recompile()
         logger.info(f"Removed {count} detach nodes")
+    return gm
+
+
+def remove_identity_view_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity _unsafe_view ops where output shape equals input shape.
+
+    In the traced graph, _unsafe_view(tensor, shape) where shape matches the
+    input tensor's shape is a no-op. Removing these reduces graph size.
+    """
+    VIEW_OPS = {
+        torch.ops.aten._unsafe_view.default,
+        torch.ops.aten.view.default,
+        torch.ops.aten.reshape.default,
+    }
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target not in VIEW_OPS:
+            continue
+        # Check if the output shape matches the input shape via tensor metadata
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        input_val = input_node.meta.get("val")
+        output_val = node.meta.get("val")
+        if input_val is None or output_val is None:
+            continue
+        if (
+            hasattr(input_val, "shape")
+            and hasattr(output_val, "shape")
+            and input_val.shape == output_val.shape
+        ):
+            node.replace_all_uses_with(input_node)
+            gm.graph.erase_node(node)
+            count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} identity view/reshape nodes")
     return gm
 
 
