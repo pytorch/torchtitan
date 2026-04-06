@@ -71,7 +71,7 @@ jobs:
         pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestApplySACPass -v
 
         # Run the make_fx tracer unit tests
-        pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation"
+        pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation or TestTraceModels or TestTraceFSDP or TestAutogradGradVsBackwardFSDP"
 
         # Run precompile unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
