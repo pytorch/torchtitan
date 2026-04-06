@@ -228,6 +228,23 @@ def apply_sac_pass(
         ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
         node.meta["ac_graph_id"] = ac_region_id
 
+        # Always save CUDA->CPU copy results to avoid recomputing device
+        # transfers (e.g. MoE D2H sync for all-to-all metadata).
+        if node.target is torch.ops.aten._to_copy.default:
+            val = node.meta.get("val")
+            if val is not None and hasattr(val, "device") and str(val.device) == "cpu":
+                src = node.args[0] if node.args else None
+                if isinstance(src, torch.fx.Node):
+                    src_val = src.meta.get("val")
+                    if (
+                        src_val is not None
+                        and hasattr(src_val, "device")
+                        and "cuda" in str(src_val.device)
+                    ):
+                        node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                        ac_region_stats[ac_region_id]["save"] += 1
+                        continue
+
         if node.target is torch.ops.aten.mm.default:
             mm_count += 1
             # Save every odd mm, recompute every even mm
