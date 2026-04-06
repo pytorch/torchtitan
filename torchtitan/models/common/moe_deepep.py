@@ -38,8 +38,8 @@ class DeepEPMoE(MoE):
     class Config(MoE.Config):
         pass
 
-    def __init__(self, config: Config, *, dim: int):
-        super().__init__(config, dim=dim)
+    def __init__(self, config: Config):
+        super().__init__(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -84,16 +84,21 @@ class DeepEPMoE(MoE):
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Call experts directly - DeepEP hooks on experts handle
-        # dispatch/combine. The combine operation returns asynchronously,
-        # allowing overlap with shared_experts computation below.
-        routed_output = self.experts(
-            x,
-            num_tokens_per_expert,
-            selected_experts_indices,
-            top_scores,
-            self.experts.num_experts,
+        # DeepEP dispatch: send tokens to expert-owning ranks.
+        # deepep_dispatch/deepep_combine are stored on self.experts by
+        # DeepEPExpertParallel during parallelization.
+        dispatched_x, local_tokens_per_expert = self.experts.deepep_dispatch(
+            x, selected_experts_indices, top_scores
         )
+
+        # Raw expert computation (bypasses token_dispatcher dispatch/combine)
+        routed_output = self.experts._forward_experts(
+            dispatched_x, local_tokens_per_expert
+        )
+
+        # DeepEP combine (async) — returns immediately, allowing overlap
+        # with shared_experts computation below.
+        routed_output = self.experts.deepep_combine(routed_output)
 
         # shared_experts runs in parallel with combine communication.
         # This is the key optimization - we overlap compute with communication.

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch.nn as nn
 
@@ -21,24 +21,12 @@ class Embedding(nn.Embedding, Module):
     - All nn.Embedding logic (forward, state_dict, etc.) is reused as-is.
     - The Module protocol is satisfied and ``build()`` is inherited from
       ``Configurable.Config``.
-
-    ``num_embeddings`` and ``embedding_dim`` use ``field(init=False)`` so
-    they are excluded from ``Config.__init__()``.  They are typically supplied
-    via ``build()`` kwargs from the parent model.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        num_embeddings: int = field(init=False)
-        embedding_dim: int = field(init=False)
+        num_embeddings: int
+        embedding_dim: int
 
     def __init__(self, config: Config):
-        if not hasattr(config, "num_embeddings") or not hasattr(
-            config, "embedding_dim"
-        ):
-            raise TypeError(
-                "Embedding.Config requires 'num_embeddings' and 'embedding_dim' to be set. "
-                "Use Config.build(num_embeddings=..., embedding_dim=...) or set them "
-                "on the Config instance before constructing Embedding directly."
-            )
         super().__init__(config.num_embeddings, config.embedding_dim)

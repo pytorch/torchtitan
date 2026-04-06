@@ -40,6 +40,19 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
+def apply_default_graph_passes(
+    gm: torch.fx.GraphModule, example_inputs: tuple
+) -> torch.fx.GraphModule:
+    """Entry point for optimizing the traced fwd+bwd graph.
+
+    Called by GraphTrainer after tracing to apply graph-level optimization
+    passes before execution. Individual passes are defined below.
+    """
+    gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
+
+    return gm
+
+
 def autobucketing_reordering_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:

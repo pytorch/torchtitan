@@ -17,10 +17,7 @@ from .parallelize import parallelize_llama
 
 
 def model_registry(flavor: str) -> ModelSpec:
-    from torchtitan.models.llama3 import expand_layer_configs
-
     base = llama3_configs[flavor]()
-    expand_layer_configs(base)
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )

@@ -54,7 +54,7 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend_override="flex"),
+        model_spec=model_registry("debugmodel_flex"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -82,7 +82,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend_override="flex_flash"),
+        model_spec=model_registry("debugmodel_flex_flash"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -264,7 +264,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             },
         ]
 
-    model_spec = model_registry("8B", attn_backend_override="varlen")
+    model_spec = model_registry("8B_varlen")
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,

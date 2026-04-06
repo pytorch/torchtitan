@@ -15,15 +15,16 @@ from torch.distributed._functional_collectives import (
 )
 
 from torchtitan.distributed.expert_parallel import _permute, _unpermute
+from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
 @dataclass(frozen=True, kw_only=True)
 class LocalDispatchMetadata:
     """Metadata returned by LocalTokenDispatcher.dispatch() for use in combine()."""
 
-    token_indices_sorted: torch.Tensor  # (N*top_k,)
+    token_indices_experts_sorted: torch.Tensor  # (N*top_k,)
     top_scores: torch.Tensor  # (N, top_k) original scores
-    top_scores_sorted: torch.Tensor  # (N*top_k,) scores in expert-sorted order
+    top_scores_experts_sorted: torch.Tensor  # (N*top_k,) scores in expert-sorted order
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -112,25 +113,29 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
             max=self.num_experts,
         )
 
-        # Sort token indices by expert assignment
-        token_indices_sorted = torch.argsort(
+        # Reorder the token indices to match the order of the experts
+        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        token_indices_experts_sorted = torch.argsort(
             selected_experts_indices.view(-1), stable=True
         )
-        top_scores_sorted = top_scores.view(-1)[token_indices_sorted]
 
-        # Gather tokens in expert-sorted order
-        routed_input = x[token_indices_sorted // self.top_k]
+        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
+
+        # shape (bs*slen*top_k, dim)
+        routed_input = x[token_indices_experts_sorted]
 
         # Apply scores before expert computation if configured
         if self.score_before_experts:
             routed_input = (
-                routed_input.to(torch.float32) * top_scores_sorted.reshape(-1, 1)
+                routed_input.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
         metadata = LocalDispatchMetadata(
-            token_indices_sorted=token_indices_sorted,
+            token_indices_experts_sorted=token_indices_experts_sorted,
             top_scores=top_scores,
-            top_scores_sorted=top_scores_sorted,
+            top_scores_experts_sorted=top_scores_experts_sorted,
         )
         return routed_input, num_tokens_per_expert, metadata
 
@@ -139,36 +144,27 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
     ) -> torch.Tensor:
-        num_tokens = metadata.token_indices_sorted.shape[0] // self.top_k
+        num_tokens = metadata.token_indices_experts_sorted.shape[0] // self.top_k
         dim = routed_output.shape[1]
 
-        # Scatter back to original token order
-        routed_output_unsorted = torch.zeros(
-            (num_tokens * self.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[metadata.token_indices_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            num_tokens, self.top_k, dim
-        )
+        if not self.score_before_experts:
+            routed_output = (
+                routed_output.to(torch.float32)
+                * metadata.top_scores_experts_sorted.reshape(-1, 1)
+            ).to(routed_output.dtype)
 
-        # Apply scores and sum over top_k
-        if self.score_before_experts:
-            return routed_output_unsorted.sum(dim=1)
-        else:
-            return (
-                torch.bmm(
-                    metadata.top_scores.reshape(-1, 1, self.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(routed_output.dtype)
-                .squeeze(1)
-            )
+        out = torch.zeros(
+            num_tokens, dim, dtype=routed_output.dtype, device=routed_output.device
+        )
+        return deterministic_scatter_add(
+            out,
+            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )
 
 
 class TokenDispatcher(BaseTokenDispatcher):
-    """Token dispatcher for EP>1. Handles reorder + all-to-all dispatch/combine."""
+    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenDispatcher.Config):
@@ -258,10 +254,13 @@ class TokenDispatcher(BaseTokenDispatcher):
             self.num_local_experts,
         )
 
+        # Convert argsort indices to token indices
+        token_indices_sorted = token_indices_sorted // self.top_k
+
         metadata = DispatchMetadata(
-            token_indices_sorted=token_indices_sorted,
+            token_indices_experts_sorted=token_indices_sorted,
             top_scores=top_scores,
-            top_scores_sorted=top_scores_sorted,
+            top_scores_experts_sorted=top_scores_sorted,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
@@ -275,7 +274,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: DispatchMetadata,
     ) -> torch.Tensor:
-        num_tokens = metadata.token_indices_sorted.shape[0] // self.top_k
+        num_tokens = metadata.token_indices_experts_sorted.shape[0] // self.top_k
         dim = routed_output.shape[1]
 
         # Reverse expert-major reordering
@@ -291,26 +290,17 @@ class TokenDispatcher(BaseTokenDispatcher):
             self.ep_group,
         )
 
-        # Scatter back to original token order
-        routed_output_unsorted = torch.zeros(
-            (num_tokens * self.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[metadata.token_indices_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            num_tokens, self.top_k, dim
-        )
+        if not self.score_before_experts:
+            routed_output = (
+                routed_output.to(torch.float32)
+                * metadata.top_scores_experts_sorted.reshape(-1, 1)
+            ).to(routed_output.dtype)
 
-        # Apply scores and sum over top_k
-        if self.score_before_experts:
-            return routed_output_unsorted.sum(dim=1)
-        else:
-            return (
-                torch.bmm(
-                    metadata.top_scores.reshape(-1, 1, self.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(routed_output.dtype)
-                .squeeze(1)
-            )
+        out = torch.zeros(
+            num_tokens, dim, dtype=routed_output.dtype, device=routed_output.device
+        )
+        return deterministic_scatter_add(
+            out,
+            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )

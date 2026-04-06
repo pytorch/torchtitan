@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
@@ -14,6 +14,7 @@ from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import BaseTokenDispatcher, LocalTokenDispatcher
@@ -73,11 +74,10 @@ def _run_experts_grouped_mm(
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        hidden_dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        dim: int
+        hidden_dim: int
+        num_experts: int
         use_grouped_mm: bool = True
-        token_dispatcher: BaseTokenDispatcher.Config = field(init=False)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -92,13 +92,13 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.use_grouped_mm = config.use_grouped_mm
-        self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
 
-    def forward(
+    def _forward_experts(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
+        """Raw expert computation without dispatch/combine."""
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -112,12 +112,26 @@ class GroupedExperts(Module):
             w2 = self.w2
             w3 = self.w3
 
-        # NOTE: The token dispatcher handles _permute/_unpermute for grouped_mm
-        # alignment padding, so GroupedExperts always receives pre-padded input.
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dispatch tokens to experts, compute, and combine results."""
+        # pyrefly: ignore [missing-attribute]
+        routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
+            x, top_scores, selected_experts_indices, num_tokens_per_expert
+        )
+        routed_output = self._forward_experts(routed_input, num_tokens_local)
+        # pyrefly: ignore [missing-attribute]
+        return self.token_dispatcher.combine(routed_output, metadata)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -131,22 +145,19 @@ class TokenChoiceTopKRouter(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        num_experts: int
+        gate: Linear.Config
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
-        gate: Linear.Config = field(default_factory=Linear.Config)
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
-        self.gate = config.gate.build(
-            in_features=config.dim, out_features=config.num_experts
-        )
+        self.gate = config.gate.build()
         self.num_experts = config.num_experts
         self.num_expert_groups = config.num_expert_groups
         self.num_limited_groups = config.num_limited_groups
@@ -287,36 +298,27 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
+        experts: GroupedExperts.Config
+        router: TokenChoiceTopKRouter.Config
         score_before_experts: bool = True
         load_balance_coeff: float | None = 1e-3
-        # Expert hidden dimension (replaces old moe_inter_dim)
-        hidden_dim: int = 0
-        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
-        router: TokenChoiceTopKRouter.Config = field(
-            default_factory=TokenChoiceTopKRouter.Config
-        )
         shared_experts: FeedForward.Config | None = None
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        hidden_dim = config.hidden_dim
-        self.experts = config.experts.build(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
-            token_dispatcher=BaseTokenDispatcher.Config(
+        self.experts = config.experts.build()
+        self.experts.token_dispatcher = LocalTokenDispatcher(
+            BaseTokenDispatcher.Config(
                 num_experts=num_experts,
                 top_k=config.router.top_k,
                 score_before_experts=config.score_before_experts,
-            ),
+            )
         )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.router = config.router.build()
         self.shared_experts = (
-            config.shared_experts.build(dim=dim)
-            if config.shared_experts is not None
-            else None
+            config.shared_experts.build() if config.shared_experts is not None else None
         )
         self.score_before_experts = config.score_before_experts
 
@@ -392,24 +394,15 @@ class MoE(Module):
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # Dispatch tokens to experts, compute, and combine
-        (
-            routed_input,
-            num_tokens_local,
-            metadata,
-        ) = self.experts.token_dispatcher.dispatch(
-            x, top_scores, selected_experts_indices, num_tokens_per_expert
+        out_experts = self.experts(
+            x, num_tokens_per_expert, top_scores, selected_experts_indices
         )
-        routed_output = self.experts(routed_input, num_tokens_local)
-        out_experts = self.experts.token_dispatcher.combine(routed_output, metadata)
 
-        # shared expert
-        # Note: we execute the shared expert before scoring the output of the routed expert
-        # to "implicitly" overlap the shared expert compute with token combine communication
-        out = self.shared_experts(x) if self.shared_experts is not None else None
-
-        if out is None:
+        if self.shared_experts is not None:
+            out = self.shared_experts(x)
+            return (out + out_experts).reshape(bs, slen, dim)
+        else:
             return out_experts.reshape(bs, slen, dim)
-        return (out + out_experts).reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
