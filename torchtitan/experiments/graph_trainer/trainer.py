@@ -16,9 +16,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    run_traced,
     TracedResult,
+    run_traced_train_step,
+    trace_train_step,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_default_graph_passes
 from torchtitan.trainer import Trainer
@@ -30,9 +30,7 @@ def make_fwd_bwd_step(loss_fn):
     ``loss_fn`` is captured in the closure so it is not a graph input.
     """
 
-    def fwd_bwd_step(
-        model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
-    ):
+    def fwd_bwd_step(model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
         loss = loss_fn(pred, labels) / global_valid_tokens
         params = [p for p in model.parameters() if p.requires_grad]
@@ -110,7 +108,7 @@ class GraphTrainer(Trainer):
             if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
                 register_blockmask_pytree_node()
             with self.train_context(), self.maybe_enable_amp:
-                self._traced_step = minimal_fx_tracer(fwd_bwd_fn)(
+                self._traced_step = trace_train_step(fwd_bwd_fn)(
                     model,
                     inputs,
                     labels,
@@ -124,7 +122,7 @@ class GraphTrainer(Trainer):
                 self._traced_step.example_inputs,
             )
         with self.train_context(), self.maybe_enable_amp:
-            outputs = run_traced(
+            outputs = run_traced_train_step(
                 self._traced_step,
                 model,
                 inputs,
@@ -136,7 +134,7 @@ class GraphTrainer(Trainer):
         loss = outputs[0]
         grads = outputs[1:]
 
-        for param, grad in zip(params, grads):
+        for param, grad in zip(params, grads, strict=True):
             if param.grad is None:
                 param.grad = grad
             else:
