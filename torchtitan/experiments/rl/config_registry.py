@@ -150,7 +150,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
-    model_spec = model_registry("0.6B", attn_backend_override="varlen")
+    model_spec = model_registry("0.6B_varlen")
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     return RLTrainer.Config(
         model_spec=model_spec,
