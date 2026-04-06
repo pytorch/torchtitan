@@ -37,19 +37,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
 
-    precompile: bool = False
+    precompile_artifact_dir: str = ""
     """
-    Enable serializable compilation. On first run, compiles with
-    serializable=True and saves the artifact. On subsequent runs, detects
-    the existing artifact and loads it, skipping compilation entirely.
-    """
-
-    precompile_artifact_dir: str = "/tmp/precompile_artifacts"
-    """
-    Directory where precompile artifacts are stored. The default /tmp
-    is ephemeral on most cluster environments. For multi-node setups
-    or persistence across job restarts, set this to a shared filesystem
-    path (e.g. under the job output directory).
+    Directory for precompiled artifacts. Setting this enables precompile:
+    precompile_main.py saves the artifact here, and training loads it from
+    here to skip compilation. For multi-node setups use a shared filesystem
+    path.
     """
 
 

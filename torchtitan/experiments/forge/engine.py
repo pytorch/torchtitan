@@ -234,7 +234,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    m.init_weights(buffer_device=buffer_device)
+                    m.init_states(buffer_device=buffer_device)
                 m.train()
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -251,7 +251,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                model.init_weights(buffer_device=buffer_device)
+                model.init_states(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]

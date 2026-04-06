@@ -40,7 +40,7 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes.
-    - Flex attention annotation: Tags FlexAttentionWrapper.forward with
+    - Flex attention annotation: Tags FlexAttention.forward with
       {"compile_with_inductor": "flex_attention"} so the compiler can apply
       regional inductor pass based on the annotation. Regional inductor is now only
       supported in AOT mode.
@@ -50,8 +50,8 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     """
     from torchtitan.distributed.expert_parallel import ExpertParallel
-    from torchtitan.models.common.attention import FlexAttentionWrapper
-    from torchtitan.models.common.moe.moe import MoE
+    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.moe import MoE
 
     ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
         ExpertParallel._token_dispatch
@@ -61,9 +61,9 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
-    FlexAttentionWrapper.forward = annotate_fn(
-        {"compile_with_inductor": "flex_attention"}
-    )(FlexAttentionWrapper.forward)
+    FlexAttention.forward = annotate_fn({"compile_with_inductor": "flex_attention"})(
+        FlexAttention.forward
+    )
 
     annotate_ac_regions(model)
 
@@ -90,9 +90,11 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if (
-        parallelism.context_parallel_degree > 1
-        and model.config.layer.attention.attn_backend != "sdpa"
+    from torchtitan.models.common.attention import ScaledDotProductAttention
+
+    if parallelism.context_parallel_degree > 1 and not isinstance(
+        model.config.layers[0].attention.inner_attention,
+        ScaledDotProductAttention.Config,
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 
@@ -118,17 +120,23 @@ def parallelize_deepseekv3(
             parallel_dims.get_mesh("tp"),
             enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            cp_enabled=parallel_dims.cp_enabled,
+            enable_cp=parallel_dims.cp_enabled,
+            enable_sp=parallelism.enable_sequence_parallel,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        from torchtitan.components.quantization import find_pad_multiple
+
+        pad_multiple = find_pad_multiple(model_converters.converters)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            pad_multiple=pad_multiple,
         )
 
     if ac_config.mode != "none":
