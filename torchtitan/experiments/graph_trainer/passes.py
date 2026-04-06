@@ -270,6 +270,113 @@ def autobucketing_reordering_pass(
     return gm
 
 
+def remove_clone_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove clone ops that aren't followed by in-place operations.
+
+    In the traced fwd+bwd graph, clone ops exist to prevent aliasing issues.
+    If a clone's output is never modified in-place, the clone is unnecessary.
+    Only removes clones where no downstream user performs in-place mutation.
+    """
+    INPLACE_OPS = {
+        torch.ops.aten.index_put_.default,
+        torch.ops.aten.copy_.default,
+    }
+
+    def has_inplace_user(node: torch.fx.Node, visited: set | None = None) -> bool:
+        """Check if any user of this node (transitively) is an in-place op."""
+        if visited is None:
+            visited = set()
+        if node in visited:
+            return False
+        visited.add(node)
+        for user in node.users:
+            if user.op == "call_function" and user.target in INPLACE_OPS:
+                return True
+            # Check if any view/alias of this node leads to an in-place op
+            # (views share storage, so in-place on a view affects the original)
+            if user.op == "call_function" and user.target in {
+                torch.ops.aten.view.default,
+                torch.ops.aten._unsafe_view.default,
+                torch.ops.aten.slice.Tensor,
+            }:
+                if has_inplace_user(user, visited):
+                    return True
+        return False
+
+    count = 0
+    for node in list(gm.graph.nodes):
+        if (
+            node.op == "call_function"
+            and node.target == torch.ops.aten.clone.default
+            and not has_inplace_user(node)
+        ):
+            input_node = node.args[0]
+            node.replace_all_uses_with(input_node)
+            gm.graph.erase_node(node)
+            count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} unnecessary clone nodes")
+    return gm
+
+
+def remove_conj_view_as_real_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove _conj ops that feed directly into view_as_real.
+
+    In RoPE backward, the pattern _conj(view_as_complex(x)) → view_as_real
+    applies conjugation to a complex view then immediately converts back to real.
+    Since _conj just negates the imaginary part and view_as_real extracts real+imag
+    components, we can replace this with direct negation of the imaginary slice
+    or skip the _conj if the result is immediately used in element-wise ops that
+    are commutative with conjugation.
+
+    Actually, a simpler pattern: _conj(_conj(x)) → x (double conjugate is identity).
+    """
+    count = 0
+    # Pattern 1: _conj(_conj(x)) → x
+    for node in list(gm.graph.nodes):
+        if (
+            node.op == "call_function"
+            and node.target == torch.ops.aten._conj.default
+        ):
+            input_node = node.args[0]
+            if (
+                isinstance(input_node, torch.fx.Node)
+                and input_node.op == "call_function"
+                and input_node.target == torch.ops.aten._conj.default
+                and len(input_node.users) == 1
+            ):
+                original = input_node.args[0]
+                node.replace_all_uses_with(original)
+                gm.graph.erase_node(node)
+                gm.graph.erase_node(input_node)
+                count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} double-conjugate pairs")
+    return gm
+
+
+def dce_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Run dead code elimination on the graph."""
+    before = len(list(gm.graph.nodes))
+    gm.graph.eliminate_dead_code()
+    after = len(list(gm.graph.nodes))
+    removed = before - after
+    if removed > 0:
+        gm.recompile()
+        logger.info(f"DCE removed {removed} dead nodes")
+    return gm
+
+
 def annotate_contiguous_regions_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:

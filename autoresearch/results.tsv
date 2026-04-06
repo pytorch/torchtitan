@@ -17,3 +17,13 @@ xxxxxxx	0	0.0	crash	0.0	CUDAGraph full graph (float scalar inputs not supported 
 xxxxxxx	0	0.0	crash	0.0	regional inductor with contiguous regions (dependency cycles in fwd+bwd graph)
 xxxxxxx	5043	49.0	discard	29.53	autobucketing enable_fusion_regions (within noise)
 2b94943d	5165	49.0	keep	30.24	aggressive overlap scheduling compute_overlap_multipler=2.0
+xxxxxxx	5139	49.0	discard	30.09	overlap_multipler=3.0 (too aggressive, no improvement over 2.0)
+xxxxxxx	0	0.0	discard	0.0	double-conjugate removal (no pairs found)
+xxxxxxx	5120	49.0	crash	29.98	remove clone ops (breaks _unsafe_view - clones protect aliasing)
+xxxxxxx	5085	49.0	discard	29.78	analytical compute estimator (no improvement)
+xxxxxxx	5139	49.0	discard	30.09	overlap_multipler=3.0 (too aggressive)
+xxxxxxx	5000	49.0	discard	29.28	autobucketing first then simplify (scheduler needs simple graph)
+xxxxxxx	5101	49.0	discard	29.87	bucket_exposed_first=True (within noise)
+xxxxxxx	5142	49.0	discard	30.06	post-bucketing identity removal (within noise)
+xxxxxxx	5141	49.0	discard	30.10	prioritize_bucketing=False (within noise)
+xxxxxxx	5128	49.0	discard	30.03	DCE after all passes (164 dead nodes, no tps benefit)
