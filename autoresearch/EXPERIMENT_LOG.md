@@ -391,3 +391,51 @@ This file records every experiment attempted during the autoresearch loop.
 - **Result**: Same crash — dependency cycles.
 - **Analysis**: Even a single 2-node annotation creates a cycle. The issue is fundamental: in fwd+bwd graphs, backward nodes consume both the partition's outputs AND the same inputs the partition uses. When the partitioner tries to extract even {silu, mul}, it sees: (1) silu_output used by backward_silu_grad (outside partition), (2) backward_silu_grad also uses x (the partition's input). This creates a partition-level "cycle" even though the data-flow graph is acyclic.
 - **Lessons**: **regional_inductor is completely incompatible with fwd+bwd traced graphs.** The fwd+bwd data dependency structure (backward nodes sharing inputs with forward nodes) creates unavoidable partition-level cycles. This is a fundamental limitation, not a matter of annotation strategy. Kernel fusion in fwd+bwd graphs requires a different approach (e.g., manual graph splitting with `split_module`, or custom Triton kernels injected as custom ops).
+
+## NCCL_NTHREADS=1024 — discard (xxxxxxx)
+
+- **Idea**: NCCL communication is 46.2% of kernel time. Increase NCCL kernel thread count from default to 1024 for potentially better bandwidth utilization on large reduce-scatter and all-reduce operations.
+- **Changes**: Set `NCCL_NTHREADS=1024` environment variable.
+- **Result**: tps=6630 vs baseline 7314. **-9.3% regression**.
+- **Analysis**: Too many threads per NCCL kernel block creates thread scheduling overhead and register pressure that hurts overall performance.
+- **Lessons**: NCCL thread tuning generally hurts on modern GPUs. The NCCL library auto-tunes thread counts per operation type. Manual overrides are almost always worse.
+
+## NCCL_MIN_NCHANNELS=4 — discard (xxxxxxx)
+
+- **Idea**: Increase minimum NCCL channels for more parallelism in collective operations.
+- **Changes**: Set `NCCL_MIN_NCHANNELS=4` environment variable.
+- **Result**: tps=6805 vs baseline 7314. **-7.0% regression**.
+- **Analysis**: More channels doesn't help when NVLink bandwidth is already saturated. Extra channels add coordination overhead.
+- **Lessons**: NCCL auto-selects optimal channel count for the topology. All NCCL tuning knobs have regressed. Stop trying NCCL env vars.
+
+## cudnn.benchmark=True — discard (xxxxxxx)
+
+- **Idea**: Enable cuDNN auto-tuning to select optimal algorithms for SDPA and other cuDNN-backed ops. SDPA is 7.2% of kernel time.
+- **Changes**: Set `torch.backends.cudnn.benchmark = True` in `apply_default_graph_passes`.
+- **Result**: tps=7304 vs baseline 7314. Within noise.
+- **Analysis**: Flash Attention 2 is cuDNN-independent. The SDPA implementation on H100 with bf16 doesn't use cuDNN's attention backend.
+- **Lessons**: cuDNN benchmark mode is irrelevant for modern SDPA implementations using Flash Attention.
+
+## Full Inductor compile_fx_inner — discard (xxxxxxx)
+
+- **Idea**: Bypass regional_inductor's partitioner by calling `compile_fx_inner` directly on the full fwd+bwd graph after decomposition. Inductor natively supports `_c10d_functional` collective ops via `comm_lowering.py`. This would give us Triton kernel fusion for all element-wise ops.
+- **Changes**: Added `inductor_compile_full_graph_pass` that: (1) applies Inductor decompositions via `make_fx` with `select_decomp_table()`, (2) compiles the decomposed graph with `compile_fx_inner`. Replaced autobucketing + CUDAGraph with this single pass.
+- **Result**: tps=4552, memory=46.91GiB (-2GiB). No CUDAGraph (Inductor CUDAGraph OOMs, our wrapper doesn't integrate cleanly). With CUDAGraph attempt: tps=5853 (still below baseline).
+- **Analysis**: Inductor compilation works but produces inferior scheduling compared to our manual autobucketing. Without CUDAGraph, Inductor gives ~4552 (vs our 5165 with bucketing alone). The Inductor scheduler's comm/compute overlap decisions are less optimal for this specific collective-heavy graph. Memory savings (-2GiB) from Inductor's memory planning are nice but tps is the priority.
+- **Lessons**: compile_fx_inner CAN compile full fwd+bwd graphs with collectives (major finding!), but its scheduling is worse than our manual autobucketing for this workload. Combining Inductor + CUDAGraph is non-trivial — Inductor's built-in CUDAGraph OOMs on the large graph, and our CUDAGraphWrapper doesn't cleanly wrap Inductor's OutputCode. The theoretical kernel fusion benefit (~3-5% from fusing elementwise ops) is dwarfed by the scheduling regression.
+
+## In-place op conversion — discard (xxxxxxx)
+
+- **Idea**: Convert 232 eligible element-wise ops (add, mul, sub, div) to in-place variants (add_, mul_, etc.) when the first tensor input has a single use (safe to overwrite). This reduces memory allocations during CUDAGraph recording, potentially improving peak memory and cache behavior.
+- **Changes**: Added `convert_to_inplace_pass` after autobucketing. Only converts ops where: (1) first arg has single user, (2) not a graph input, (3) matching dtype and shape.
+- **Result**: tps=5852 vs baseline 7314. **-20% regression**. Memory=48.91GiB (negligible savings).
+- **Analysis**: In-place ops break CUDAGraph replay performance. CUDAGraph records memory addresses during warmup — in-place ops change the memory layout expectations, causing CUDAGraph to insert synchronization points or fall back to slower paths. The 232 conversions are individually correct but collectively disrupt CUDAGraph's memory planning.
+- **Lessons**: **Never use in-place ops with CUDAGraph.** CUDAGraph assumes a specific memory allocation pattern during recording. In-place modifications disrupt this assumption, causing severe performance degradation even though the ops are semantically correct.
+
+## Reordered simplification + second pass — discard (xxxxxxx)
+
+- **Idea**: Reorder passes (transpose→view→slice→collapse) and run a second view+collapse pass. Removing transpose pairs first might expose new identity views.
+- **Changes**: Moved `remove_transpose_pairs_pass` before `remove_identity_view_pass`, added second `remove_identity_view_pass` + `collapse_view_chains_pass` after all simplifications.
+- **Result**: Only 2 additional identity views found in second pass. tps=7297, within noise of baseline 7314.
+- **Analysis**: The simplification passes are nearly independent — each targets a distinct pattern. Reordering doesn't create new optimization opportunities.
+- **Lessons**: Pass ordering doesn't matter for this graph. The passes are idempotent and target non-overlapping patterns.
