@@ -1,3 +1,8 @@
 commit	tps	memory_gib	status	mfu_pct	description
 2231854b	4247	48.9	keep	24.87	baseline
 abe376d5	4404	51.0	keep	25.79	autobucketing reordering pass on full traced graph
+xxxxxxx	4292	49.0	discard	25.13	DCE before autobucketing (hurts bucketing heuristics)
+xxxxxxx	4362	49.0	discard	25.55	DCE after autobucketing (within noise of autobucketing alone)
+xxxxxxx	4463	51.0	discard	26.13	regional inductor after autobucketing (no-op: no annotated regions)
+xxxxxxx	0	0.0	crash	0.0	full inductor after autobucketing (needs decomp pass: _to_copy lowering fails)
+c6f0bef6	4427	49.0	keep	25.92	remove detach nodes + autobucketing (-2GiB memory)

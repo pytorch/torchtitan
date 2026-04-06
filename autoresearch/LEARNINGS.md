@@ -19,6 +19,14 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 ## What Works
 
 - **Autobucketing** (`schedule_overlap_bucketing`): +3.3% tps on the full traced graph. Simple one-liner with `collective_bucketing=True`. Good default foundation.
+- **Remove detach nodes**: -2 GiB memory, neutral-to-positive on tps. Simple graph cleanup. Apply before bucketing.
+
+## What Doesn't Work
+
+- **DCE before bucketing**: Removing dead nodes disrupts bucketing heuristics, reducing performance.
+- **DCE after bucketing**: Removes ~167 nodes but no measurable impact on tps.
+- **Regional Inductor (no annotations)**: No-op without explicit `compile_with_inductor` annotations on graph nodes. aot_fx_trace mode doesn't annotate.
+- **Full Inductor**: Crashes without inductor decomposition pass. Would need significant plumbing.
 
 ## Benchmark Notes
 
