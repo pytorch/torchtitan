@@ -52,6 +52,7 @@ def apply_default_graph_passes(
     gm = remove_detach_pass(gm, example_inputs)
     gm = remove_identity_view_pass(gm, example_inputs)
     gm = remove_identity_slice_pass(gm, example_inputs)
+    gm = collapse_view_chains_pass(gm, example_inputs)
     gm = autobucketing_reordering_pass(gm, example_inputs)
 
     return gm
@@ -156,6 +157,48 @@ def remove_identity_slice_pass(
         gm.graph.lint()
         gm.recompile()
         logger.info(f"Removed {count} identity slice nodes")
+    return gm
+
+
+def collapse_view_chains_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Collapse chains of consecutive view/reshape ops into a single op.
+
+    If view(view(x, s1), s2), the intermediate view is redundant — the final
+    output only depends on x and s2. Replace the chain with view(x, s2).
+
+    Only collapses when the intermediate result has a single use (the next
+    view in the chain), so we don't break graphs where intermediate shapes
+    are needed by other nodes.
+    """
+    VIEW_OPS = {
+        torch.ops.aten.view.default,
+        torch.ops.aten.reshape.default,
+        torch.ops.aten._unsafe_view.default,
+    }
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target not in VIEW_OPS:
+            continue
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        # Check if the input is also a view op with single use
+        if (
+            input_node.op == "call_function"
+            and input_node.target in VIEW_OPS
+            and len(input_node.users) == 1
+        ):
+            # Rewrite: view(view(x, s1), s2) → view(x, s2)
+            original_input = input_node.args[0]
+            node.args = (original_input, node.args[1])
+            gm.graph.erase_node(input_node)
+            count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Collapsed {count} consecutive view/reshape chains")
     return gm
 
 
