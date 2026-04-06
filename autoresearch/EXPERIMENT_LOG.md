@@ -439,3 +439,19 @@ This file records every experiment attempted during the autoresearch loop.
 - **Result**: Only 2 additional identity views found in second pass. tps=7297, within noise of baseline 7314.
 - **Analysis**: The simplification passes are nearly independent — each targets a distinct pattern. Reordering doesn't create new optimization opportunities.
 - **Lessons**: Pass ordering doesn't matter for this graph. The passes are idempotent and target non-overlapping patterns.
+
+## DeviceMesh constant folding — crash (xxxxxxx)
+
+- **Idea**: 291 of 586 graph inputs (50%) are DeviceMesh objects that are constant between steps. Inline them as graph constants to halve the CUDAGraph input count.
+- **Changes**: Added `materialize_devicemesh_constants_pass` that replaces DeviceMesh placeholder references with the actual objects and erases the placeholders.
+- **Result**: Crash — `SyntaxError: invalid syntax` during `gm.recompile()`. DeviceMesh's repr (`DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))`) contains `=` signs that are invalid Python in expression context.
+- **Analysis**: FX graph recompilation generates Python source from node values. Non-serializable objects like DeviceMesh can't be inlined because their repr isn't valid Python. Float constants work because `32768.0` is valid Python. DeviceMesh would need a custom serializer or `get_attr` approach instead of literal inlining.
+- **Lessons**: FX graph constant folding only works for types with valid Python repr (numbers, strings, tuples of these). Complex objects like DeviceMesh must remain as graph inputs or use `get_attr` nodes with module attributes.
+
+## Complex64 RoPE static input — discard (xxxxxxx)
+
+- **Idea**: The complex64 RoPE frequency tensor ([8192, 64]) is constant between steps but not marked as static. Mark it static to save one tensor copy per CUDAGraph replay step.
+- **Changes**: Extended static input detection to include `inp.dtype.is_complex` in addition to `inp.dtype.is_floating_point`.
+- **Result**: tps=6788 (first run, system contention evident), tps=5175 (second run, heavy GPU contention). Baseline unavailable due to GPU contention.
+- **Analysis**: Saving one ~4MB copy per step is negligible (~10us vs ~140ms step time). The tps variance was dominated by GPU contention from other users, not by the change itself.
+- **Lessons**: Marking one additional tensor as static saves ~0.01% of step time. Not worth the added complexity. The 2 dynamic int64 tensors (input_ids, labels) are the only inputs that genuinely change each step.
