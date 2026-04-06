@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_ac_regions,
-    register_blockmask_pytree_node,
+    maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
@@ -105,11 +105,7 @@ class GraphTrainer(Trainer):
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
             if self.config.activation_checkpoint.mode != "none":
                 annotate_ac_regions(model)
-            # Flex attention masks can flow through extra_inputs / extra_kwargs.
-            from torch.nn.attention.flex_attention import BlockMask
-
-            if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
-                register_blockmask_pytree_node()
+            maybe_register_blockmask_pytree_node()
             with self.train_context(), self.maybe_enable_amp:
                 self._traced_step = trace_train_step(fwd_bwd_fn)(
                     model,

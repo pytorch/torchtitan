@@ -17,7 +17,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_flex_attention_for_regional_inductor,
-    register_blockmask_pytree_node,
+    maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
@@ -28,10 +28,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced_train_step,
     trace_train_step,
 )
-
-register_blockmask_pytree_node()
-
-
 def get_loss(logits, labels):
     return torch.nn.functional.cross_entropy(
         logits.flatten(0, 1).float(),
@@ -547,6 +543,7 @@ class TestTraceModels(unittest.TestCase):
             if use_regional_inductor
             else contextlib.nullcontext()
         )
+        maybe_register_blockmask_pytree_node()
         with maybe_regional_inductor:
             traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
@@ -754,6 +751,7 @@ class TestTraceModels(unittest.TestCase):
             "basic_mask": basic_mask,
             "sliding_window_mask": sliding_window_mask,
         }
+        maybe_register_blockmask_pytree_node()
         with annotate_flex_attention_for_regional_inductor():
 
             def forward(model, tokens, attn_masks):
@@ -859,22 +857,23 @@ class TestGraphBasedSAC(unittest.TestCase):
         def traced_step_factory(model):
             annotate_ac_regions(model)
             train_step = make_train_step(get_loss)
-            maybe_regional = (
-                annotate_flex_attention_for_regional_inductor()
-                if use_regional_inductor
-                else contextlib.nullcontext()
-            )
-            with maybe_regional:
-                traced = minimal_fx_tracer(train_step, (model, *fwd_args, labels))
-            if use_regional_inductor:
-                _apply_regional_inductor(traced)
-            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+        maybe_regional = (
+            annotate_flex_attention_for_regional_inductor()
+            if use_regional_inductor
+            else contextlib.nullcontext()
+        )
+        maybe_register_blockmask_pytree_node()
+        with maybe_regional:
+            traced = trace_train_step(train_step)(model, *fwd_args, labels)
+        if use_regional_inductor:
+            _apply_regional_inductor(traced)
+        traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
 
-            def step(model):
-                result = traced(model, *fwd_args, labels)
-                return result[0], result[1:]
+        def traced_step_fn(model):
+            result = run_traced_train_step(traced, model, *fwd_args, labels)
+            return result[0], result[1:]
 
-            return step
+        return traced_step_fn
 
         # Eager + AC
         model_eager = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
@@ -914,7 +913,7 @@ class TestGraphBasedSAC(unittest.TestCase):
     def test_llama3_sac(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["1B"]
+        config = llama3_configs["1B"]()
         batch_size, seq_len = 2, 2048
         tokens = torch.randint(
             0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
@@ -928,7 +927,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["0.6B"]
+        config = qwen3_configs["0.6B"]()
         batch_size, seq_len = 2, 2048
         tokens = torch.randint(
             0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
@@ -942,7 +941,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        config = deepseekv3_configs["debugmodel"]
+        config = deepseekv3_configs["debugmodel"]()
         tokens = torch.randint(0, config.vocab_size, (4, 256), device=self.DEVICE)
         labels = torch.randint(0, config.vocab_size, (4, 256), device=self.DEVICE)
         self._run_sac_test(DeepSeekV3Model, config, (tokens,), labels)
@@ -955,7 +954,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
-        config = llama4_configs["debugmodel"]
+        config = llama4_configs["debugmodel"]()
         seq_len = 128
         tokens = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
         labels = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
@@ -979,7 +978,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]
+        config = gptoss_configs["debugmodel"]()
         seq_len = 128
         tokens = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
         labels = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
@@ -1156,9 +1155,10 @@ class TestDistributedGraphBasedSAC(FSDPTest):
                     )
                     return [loss] + [grad for grad in grads if grad is not None]
 
+                maybe_register_blockmask_pytree_node()
                 with annotate_flex_attention_for_regional_inductor():
-                    traced = minimal_fx_tracer(
-                        step, (model, tokens, attention_masks, labels)
+                    traced = trace_train_step(step)(
+                        model, tokens, attention_masks, labels
                     )
 
                 ag = sum(
@@ -1192,7 +1192,9 @@ class TestDistributedGraphBasedSAC(FSDPTest):
                     traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
                     _apply_regional_inductor(traced)
 
-                    result = traced(model, tokens, attention_masks, labels)
+                    result = run_traced_train_step(
+                        traced, model, tokens, attention_masks, labels
+                    )
                     loss = result[0]
                     self.assertTrue(torch.isfinite(loss).item())
                 finally:
@@ -1381,6 +1383,7 @@ class TestTraceFSDP(FSDPTest):
             if use_regional_inductor
             else contextlib.nullcontext()
         )
+        maybe_register_blockmask_pytree_node()
         with maybe_regional_inductor:
             traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
