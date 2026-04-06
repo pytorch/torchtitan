@@ -28,7 +28,7 @@ def _skip_nested_compile() -> Generator[None, None, None]:
     """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
 
     make_fx cannot trace through torch.compile'd functions (e.g. compiled
-    flex_attention in FlexAttentionWrapper). Setting error_on_nested_fx_trace
+    flex_attention in FlexAttention). Setting error_on_nested_fx_trace
     to False makes dynamo silently inline the wrapped function instead of
     raising, so make_fx traces the underlying ops normally.
     """
@@ -61,6 +61,7 @@ class TracedResult:
     """Holds the traced graph and metadata needed to run it."""
 
     gm: torch.fx.GraphModule
+    example_inputs: tuple[torch.Tensor, ...]
     params_len: int
     params_spec: pytree.TreeSpec
     input_subclass_layouts: list[SubclassLayout]
@@ -250,6 +251,9 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             nn_module_stack = fwd_node.meta.get("nn_module_stack")
             if nn_module_stack is not None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
+            stack_trace = fwd_node.meta.get("stack_trace")
+            if stack_trace is not None:
+                node.meta["stack_trace"] = stack_trace
 
 
 def trace_module(
@@ -354,6 +358,7 @@ def trace_module(
 
     return TracedResult(
         gm=traced,
+        example_inputs=fake_args,
         params_len=params_len,
         params_spec=params_spec,
         input_subclass_layouts=input_layouts,

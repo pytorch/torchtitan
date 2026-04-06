@@ -16,10 +16,11 @@ from torchtitan.protocols.model_spec import FaultTolerantModelSpec
 
 
 def model_registry(flavor: str) -> FaultTolerantModelSpec:
+    config = llama3_configs[flavor]()
     return FaultTolerantModelSpec(
         name="ft/llama3",
         flavor=flavor,
-        model=llama3_configs[flavor],
+        model=config,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
