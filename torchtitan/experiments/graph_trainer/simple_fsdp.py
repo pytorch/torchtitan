@@ -245,7 +245,7 @@ class ReplicateComputation(Module):
         # inspection / debugging / initialization
         # model initialization can be done now through
         # with disable_active_parametrization():
-        #     model.init_weights()
+        #     model.init_states()
         if not _active_parametrization:
             return x
 

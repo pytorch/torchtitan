@@ -29,12 +29,6 @@ from torch._library.opaque_object import (
 )
 from torch.distributed import ProcessGroup
 
-from torchtitan.models.common.moe.utils import (
-    get_mxfp8_pad_multiple,
-    maybe_align_num_tokens_for_mxfp8,
-)
-
-
 _buffer: Any = None  # Global buffer instance
 
 
@@ -101,12 +95,12 @@ _handle_type = get_opaque_type_name(DispatchHandle)
 torch.library.define(
     "hybridep::dispatch",
     f"(Tensor x, Tensor topk_idx, Tensor topk_weights, int num_experts, "
-    f"bool non_blocking, float? moe_expert_capacity_factor) -> (Tensor, Tensor, Tensor, {_handle_type})",
+    f"bool non_blocking, float? moe_expert_capacity_factor, int? pad_multiple) -> (Tensor, Tensor, Tensor, {_handle_type})",
 )
 
 torch.library.define(
     "hybridep::combine",
-    f"(Tensor x, {_handle_type} handle, int num_tokens) -> Tensor",
+    f"(Tensor x, {_handle_type} handle, int num_tokens, int? pad_multiple) -> Tensor",
 )
 
 
@@ -116,11 +110,12 @@ def _num_permuted_tokens_for_non_blocking(
     num_local_experts: int,
     top_k: int,
     moe_expert_capacity_factor: float,
+    pad_multiple: int | None = None,
 ) -> int:
     """Pre-allocated output buffer size for non-blocking dispatch.
 
     Formula: num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-    aligned for MXFP8.
+    aligned to pad_multiple if set.
 
     capacity_factor=1.0 sizes for the worst case (every token routed to
     every local expert) — no tokens are dropped but memory usage is highest.
@@ -135,7 +130,9 @@ def _num_permuted_tokens_for_non_blocking(
         * min(num_local_experts, top_k)
         * moe_expert_capacity_factor
     )
-    return maybe_align_num_tokens_for_mxfp8(n)
+    if pad_multiple is not None:
+        n = ((n + pad_multiple - 1) // pad_multiple) * pad_multiple
+    return n
 
 
 @torch.library.impl("hybridep::dispatch", "CUDA")
@@ -146,6 +143,7 @@ def _dispatch_impl(
     num_experts: int,
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
+    pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """
     DeepEP's dispatch_with_permute needs to know the output buffer size
@@ -172,8 +170,6 @@ def _dispatch_impl(
         topk_idx, topk_weights.float(), x.shape[0], num_experts
     )
 
-    pad_multiple = get_mxfp8_pad_multiple()
-
     num_permuted_tokens = None
     if non_blocking:
         assert (
@@ -185,6 +181,7 @@ def _dispatch_impl(
             num_local_experts,
             topk_idx.shape[1],
             moe_expert_capacity_factor,  # pyrefly: ignore [bad-argument-type]
+            pad_multiple=pad_multiple,
         )
 
     hidden, scores, _, tokens_per_expert, handle = _buffer.dispatch_with_permute(
@@ -223,6 +220,7 @@ def _dispatch_fake(
     num_experts: int,
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
+    pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """Fake dispatch for torch.compile tracing."""
     num_local_experts = num_experts // _buffer.group_size
@@ -233,6 +231,7 @@ def _dispatch_fake(
             num_local_experts,
             topk_idx.shape[1],
             moe_expert_capacity_factor,  # pyrefly: ignore [bad-argument-type]
+            pad_multiple=pad_multiple,
         )
     else:
         out_tokens = x.shape[0]
@@ -244,7 +243,10 @@ def _dispatch_fake(
 
 @torch.library.impl("hybridep::combine", "CUDA")
 def _combine_impl(
-    x: torch.Tensor, handle: DispatchHandle, num_tokens: int
+    x: torch.Tensor,
+    handle: DispatchHandle,
+    num_tokens: int,
+    pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """CUDA combine: reverse dispatch permutation via opaque handle."""
     global _buffer
@@ -257,7 +259,10 @@ def _combine_impl(
 
 @torch.library.register_fake("hybridep::combine")
 def _combine_fake(
-    x: torch.Tensor, handle: DispatchHandle, num_tokens: int
+    x: torch.Tensor,
+    handle: DispatchHandle,
+    num_tokens: int,
+    pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """Fake combine for torch.compile tracing."""
     return x.new_empty(num_tokens, x.shape[1])
@@ -266,7 +271,7 @@ def _combine_fake(
 def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
     """Backward: gather gradients via combine."""
     if grad_hidden is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     dispatch_handle = ctx.dispatch_handle
     if dispatch_handle is None or dispatch_handle.value is None:
@@ -275,9 +280,9 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
     (topk_idx,) = ctx.saved_tensors
     grad_x, grad_probs_dense = _buffer.combine_with_unpermute(
         hidden=grad_hidden,
-        probs=grad_scores
-        if grad_scores is not None and grad_scores.numel() > 0
-        else None,
+        probs=(
+            grad_scores if grad_scores is not None and grad_scores.numel() > 0 else None
+        ),
         handle=dispatch_handle.value,
     )
     grad_x = grad_x.to(ctx.input_dtype)
@@ -288,12 +293,14 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
         if grad_probs_dense is not None
         else None
     )
-    return grad_x, None, grad_weights, None, None, None
+    # Gradients for: x, topk_idx, topk_weights, num_experts, non_blocking,
+    #                moe_expert_capacity_factor, pad_multiple
+    return grad_x, None, grad_weights, None, None, None, None
 
 
 def _dispatch_setup_context(ctx, inputs, output):
     """Save context for dispatch backward."""
-    x, topk_idx, _, _, _, _ = inputs
+    x, topk_idx, _, _, _, _, _ = inputs
     _, _, _, dispatch_handle = output
     ctx.dispatch_handle = dispatch_handle
     ctx.input_dtype = x.dtype
@@ -306,28 +313,23 @@ def _combine_backward(ctx, grad_combined):
     if dispatch_handle is None or dispatch_handle.value is None:
         raise RuntimeError("DispatchHandle not found in combine backward")
 
-    # Must pass pad_multiple so backward gradients entering ScaledGroupedMM
-    # (torchao MXFP8) also have rows aligned to 32.
-    from torchtitan.models.common.moe.utils import get_mxfp8_pad_multiple
-
-    pad_multiple = get_mxfp8_pad_multiple()
-
     grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
         hidden=grad_combined,
         scaling_factor=None,
         handle=dispatch_handle.value,
         num_permuted_tokens=ctx.num_permuted_tokens,
-        pad_multiple=pad_multiple,
+        pad_multiple=ctx.pad_multiple,
     )
-    # Gradients: x, handle, num_tokens
-    return grad_x, None, None
+    # Gradients for: x, handle, num_tokens, pad_multiple
+    return grad_x, None, None, None
 
 
 def _combine_setup_context(ctx, inputs, output):
     """Save context for combine backward."""
-    x, dispatch_handle, _num_tokens = inputs
+    x, dispatch_handle, _num_tokens, pad_multiple = inputs
     ctx.dispatch_handle = dispatch_handle
     ctx.num_permuted_tokens = x.shape[0]
+    ctx.pad_multiple = pad_multiple
 
 
 torch.library.register_autograd(
@@ -404,6 +406,7 @@ def dispatch_tokens(
     group: ProcessGroup,
     score_before_experts: bool = True,
     non_blocking_expert_capacity_factor: float | None = None,
+    pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
 
@@ -418,7 +421,9 @@ def dispatch_tokens(
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
             tensor as num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-            aligned for MXFP8.
+            aligned to pad_multiple.
+        pad_multiple: Pad per-expert token groups to this multiple (e.g. 32 for
+            MXFP8). None means no padding.
 
     Returns:
         (permuted_hidden, tokens_per_expert, state)
@@ -447,6 +452,7 @@ def dispatch_tokens(
         num_experts,
         non_blocking,
         non_blocking_expert_capacity_factor,
+        pad_multiple,
     )
 
     hidden, permuted_scores = _apply_scores(
@@ -463,7 +469,11 @@ def dispatch_tokens(
     return hidden, tokens_per_expert, state
 
 
-def combine_tokens(hidden_states: torch.Tensor, state: DispatchState) -> torch.Tensor:
+def combine_tokens(
+    hidden_states: torch.Tensor,
+    state: DispatchState,
+    pad_multiple: int | None = None,
+) -> torch.Tensor:
     """Combine expert outputs back to original token order.
 
     Applies deferred scores (if any), then unpermutes via the opaque dispatch handle.
@@ -471,7 +481,9 @@ def combine_tokens(hidden_states: torch.Tensor, state: DispatchState) -> torch.T
     if state.permuted_scores is not None:
         hidden_states = hidden_states * state.permuted_scores.reshape(-1, 1)
 
-    return torch.ops.hybridep.combine(hidden_states, state.handle, state.num_tokens)
+    return torch.ops.hybridep.combine(
+        hidden_states, state.handle, state.num_tokens, pad_multiple
+    )
 
 
 __all__ = [

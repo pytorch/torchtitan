@@ -21,7 +21,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import optimize_fwd_bwd_graph
+from torchtitan.experiments.graph_trainer.passes import (
+    apply_default_graph_passes,
+)
 from torchtitan.trainer import Trainer
 
 # BlockMask must be registered as a pytree node so its tensor children
@@ -120,11 +122,11 @@ class GraphTrainer(Trainer):
                     extra_inputs,
                     extra_kwargs,
                 )
-            self._traced_step.gm = optimize_fwd_bwd_graph(
+            self._traced_step.gm = apply_default_graph_passes(
                 self._traced_step.gm,
-                ac_mode=self.config.activation_checkpoint.mode,
+                self._traced_step.example_inputs,
+                enable_graph_ac=self.config.activation_checkpoint.mode != "none",
             )
-
         with self.train_context(), self.maybe_enable_amp:
             outputs = run_traced(
                 self._traced_step,

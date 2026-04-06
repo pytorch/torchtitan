@@ -147,6 +147,31 @@ class RLTrainer(Configurable):
         config.model_spec.parallelize_fn = parallelize_qwen3
 
         self.task = SumDigitsTask(seed=42)
+        self._proc_meshes = []
+
+    async def cleanup(self):
+        """Stop all proc meshes to release GPU memory."""
+        for mesh in self._proc_meshes:
+            try:
+                await mesh.stop()
+            except Exception:
+                pass
+        self._proc_meshes = []
+
+    def _get_rank_0_value(self, result, has_gpus: bool = True):
+        """Extract rank 0 result, handling both single and multi-node meshes.
+
+        Monarch actor endpoints return results from all ranks in the mesh.
+        This picks out rank 0's result by indexing into the host and GPU
+        dimensions as needed (multi-node meshes have an extra host dimension).
+        This should be used in cases where all ranks return the same result.
+        """
+        kwargs = {}
+        if self._multi_node:
+            kwargs["hosts"] = 0
+        if has_gpus:
+            kwargs["gpus"] = 0
+        return result.item(**kwargs)
 
     @staticmethod
     def _compute_world_size(p: "ParallelismConfig") -> int:
@@ -160,12 +185,31 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
-    async def setup(self):
+    async def setup(
+        self,
+        *,
+        host_mesh=None,
+        trainer_nodes: int | None = None,
+        generator_nodes: int | None = None,
+        gpus_per_node: int | None = None,
+    ):
         """Spawn Monarch actors on separate meshes and initialize weights.
 
         Creates separate GPU meshes for trainer and generator, a CPU mesh for
         the grader, and synchronizes initial weights from trainer to generator.
         Must be called before :meth:`train`.
+
+        Args:
+            host_mesh: Optional multi-node HostMesh. When provided,
+                whole nodes are dedicated to trainer vs generator
+                roles instead of partitioning GPUs on a single host.
+            trainer_nodes: Number of nodes for the trainer (required when
+                host_mesh is provided).
+            generator_nodes: Number of nodes for the generator (required when
+                host_mesh is provided).
+            gpus_per_node: GPUs per node, assumed to be the same across all
+                nodes (no heterogeneous node configurations). Required when
+                host_mesh is provided.
         """
         config = self.config
 
@@ -182,19 +226,74 @@ class RLTrainer(Configurable):
 
         self.system_prompt = self.task.get_system_prompt()
 
-        # Allocate non-overlapping GPU ranges for each mesh
-        provisioner = Provisioner(total_gpus=total_gpus)
+        self._multi_node = host_mesh is not None
 
-        # Spawn separate meshes for trainer, generator, and grader
-        trainer_mesh = this_host().spawn_procs(
-            per_host={"gpus": self.trainer_world_size},
-            bootstrap=provisioner.allocate(self.trainer_world_size),
-        )
-        generator_mesh = this_host().spawn_procs(
-            per_host={"gpus": self.generator_world_size},
-            bootstrap=provisioner.allocate(self.generator_world_size),
-        )
-        grader_mesh = this_host().spawn_procs()
+        if host_mesh is not None:
+            # Multi-node mode: dedicate whole nodes to trainer vs generator
+            if (
+                trainer_nodes is None
+                or generator_nodes is None
+                or gpus_per_node is None
+            ):
+                raise ValueError(
+                    "trainer_nodes, generator_nodes, and gpus_per_node are "
+                    "required when host_mesh is provided"
+                )
+            # Validate that world sizes are evenly divisible by node counts
+            assert self.trainer_world_size % trainer_nodes == 0, (
+                f"trainer_world_size ({self.trainer_world_size}) must be "
+                f"evenly divisible by trainer_nodes ({trainer_nodes})"
+            )
+            assert self.generator_world_size % generator_nodes == 0, (
+                f"generator_world_size ({self.generator_world_size}) must be "
+                f"evenly divisible by generator_nodes ({generator_nodes})"
+            )
+
+            # Compute GPUs per node for each role based on the config's
+            # world size and number of nodes allocated to that role
+            trainer_gpus_per_node = self.trainer_world_size // trainer_nodes
+            generator_gpus_per_node = self.generator_world_size // generator_nodes
+
+            trainer_tp = config.trainer.parallelism.tensor_parallel_degree
+            generator_tp = config.generator.parallelism.tensor_parallel_degree
+
+            trainer_host_mesh = host_mesh.slice(hosts=slice(0, trainer_nodes))
+            generator_host_mesh = host_mesh.slice(
+                hosts=slice(trainer_nodes, trainer_nodes + generator_nodes)
+            )
+
+            # Use Provisioner to set CUDA_VISIBLE_DEVICES so each role
+            # only sees its own GPUs and doesn't conflict with other
+            # processes on the node
+            trainer_provisioner = Provisioner(total_gpus=gpus_per_node)
+            generator_provisioner = Provisioner(total_gpus=gpus_per_node)
+
+            trainer_mesh = trainer_host_mesh.spawn_procs(
+                per_host={"gpus": trainer_gpus_per_node},
+                bootstrap=trainer_provisioner.allocate(trainer_gpus_per_node),
+            )
+            generator_mesh = generator_host_mesh.spawn_procs(
+                per_host={"gpus": generator_gpus_per_node},
+                bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
+            )
+            # Grader runs on CPU on the first trainer node
+            grader_mesh = trainer_host_mesh.spawn_procs()
+        else:
+            # Single-node mode: partition GPUs on this_host() via
+            # CUDA_VISIBLE_DEVICES
+            provisioner = Provisioner(total_gpus=total_gpus)
+            trainer_mesh = this_host().spawn_procs(
+                per_host={"gpus": self.trainer_world_size},
+                bootstrap=provisioner.allocate(self.trainer_world_size),
+            )
+            generator_mesh = this_host().spawn_procs(
+                per_host={"gpus": self.generator_world_size},
+                bootstrap=provisioner.allocate(self.generator_world_size),
+            )
+            grader_mesh = this_host().spawn_procs()
+
+        # Store proc meshes for cleanup
+        self._proc_meshes = [trainer_mesh, generator_mesh, grader_mesh]
 
         await setup_torch_elastic_env_async(trainer_mesh)
         await setup_torch_elastic_env_async(generator_mesh)
@@ -258,8 +357,8 @@ class RLTrainer(Configurable):
             eval_questions.append(question)
 
         # Generate on eval prompts
-        episodes = (
-            self.generator.generate.call(eval_prompts, eval_answers).get().item(gpus=0)
+        episodes = self._get_rank_0_value(
+            self.generator.generate.call(eval_prompts, eval_answers).get()
         )
 
         # Score: check first episode per prompt (episodes are ordered by prompt)
@@ -321,14 +420,14 @@ class RLTrainer(Configurable):
             # Fully sync RL loop (GRPO)
             # 1. Generator produces flat list of Episodes with group_id
             # TODO: Create a queue to use all episodes from all GPUs
-            episodes = (
-                self.generator.generate.call(train_prompts, train_answers)
-                .get()
-                .item(gpus=0)
+            episodes = self._get_rank_0_value(
+                self.generator.generate.call(train_prompts, train_answers).get()
             )
 
             # 2. Grader computes rewards per episode
-            episodes = self.grader.score.call(episodes).get().item()
+            episodes = self._get_rank_0_value(
+                self.grader.score.call(episodes).get(), has_gpus=False
+            )
 
             # 3. Controller computes GRPO advantages (normalize within group)
             groups: dict[str, list[int]] = defaultdict(list)
@@ -344,7 +443,7 @@ class RLTrainer(Configurable):
                 _log_samples(episodes)
 
             # 4. Trainer updates policy using episodes with advantages
-            metrics = self.trainer.step.call(episodes).get().item(gpus=0)
+            metrics = self._get_rank_0_value(self.trainer.step.call(episodes).get())
 
             # 5. Sync weights
             t0 = time.perf_counter()

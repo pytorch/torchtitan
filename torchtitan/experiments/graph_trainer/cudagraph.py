@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
+from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
 logger = logging.getLogger(__name__)
@@ -157,12 +158,17 @@ class CUDAGraphWrapper:
             self._args[i].copy_(args[i])
 
     def _check_input_types(self, inputs) -> None:
-        for inp in inputs:
-            assert isinstance(inp, (torch.Tensor, int, torch._C.Generator)), (
-                "args must be tensor, integer (for dynamic shapes), "
-                "or Generator (for random number generator), "
-                f"but found {type(inp)}"
-            )
+        for i, inp in enumerate(inputs):
+            if not (
+                isinstance(inp, (torch.Tensor, int, torch._C.Generator))
+                or is_opaque_value(inp)
+            ):
+                raise ValueError(
+                    "args must be tensor, integer (for dynamic shapes), "
+                    "Generator (for random number generator), "
+                    "or opaque object, "
+                    f"but found {type(inp)} with value {inp!r} at index {i}"
+                )
 
     def _check_static_inputs_address(self) -> None:
         for i in self._static_input_indices:
