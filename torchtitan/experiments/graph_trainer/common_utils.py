@@ -70,6 +70,14 @@ def register_blockmask_pytree_node():
         )
 
 
+def maybe_register_blockmask_pytree_node() -> None:
+    """Register BlockMask if it is not already in the global pytree registry."""
+    from torch.nn.attention.flex_attention import BlockMask
+
+    if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
+        register_blockmask_pytree_node()
+
+
 def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
     return (
         len(passes) > 0
@@ -177,7 +185,7 @@ def apply_graph_ac(
     if ac_config.mode != "selective":
         raise ValueError(
             f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got '{ac_config.mode}'. Use 'selective' for graph-based SAC."
+            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
         )
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])
