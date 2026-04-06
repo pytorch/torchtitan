@@ -59,6 +59,12 @@ After 60+ experiments, the pass-level optimization ceiling has been reached:
 - **Environment tuning**: All NCCL params, CUDA allocator settings, CPU thread configs either within noise or regression.
 - **Overlap scheduling**: compute_overlap_multipler=2.0 is optimal. Custom estimations, fusion regions, different bucket modes all within noise.
 
+## Element-wise Fusion Potential (Post-Simplification)
+
+After all simplification passes, only 34 element-wise chains remain (all length 2-3, total 69 nodes). Zero roundtrip dtype conversions (A→B→A). The graph's compute operations are already well-separated — there's very little left to fuse.
+
+The 560 _to_copy ops remaining are: 420 bf16→fp32, 138 fp32→bf16, 1 bool→fp32, 1 int64→fp32. All genuine mixed-precision conversions.
+
 ## What's Left to Explore (and Why It's Hard)
 
 - **Kernel fusion**: Inductor compilation crashes with collective ops in the graph. Regional Inductor has dependency cycles in fwd+bwd graph. The remaining memory-bound ops (842 _to_copy, normalization) can't be fused at the FX level.
@@ -91,6 +97,38 @@ Per-step GPU kernel time ~1258ms (from Chrome trace profiling at step 5):
 - Pass-level graph optimizations have diminishing returns beyond CUDAGraph (which already eliminated kernel launch overhead).
 - Meaningful further speedups require: reducing communication volume (bf16 gradients — breaks numerics), changing parallelism config (fewer DP ranks = fewer collectives), or overlapping comm with compute more aggressively.
 - The 42% MFU ceiling is primarily communication-bounded, not compute-bounded.
+
+## compile_fx_inner on Full Graph
+
+compile_fx_inner CAN compile the full fwd+bwd graph with collective ops (they have native Inductor lowerings in comm_lowering.py). However:
+- Requires Inductor decompositions first (`select_decomp_table()` + `make_fx()`)
+- Without CUDAGraph: tps=4552 (inferior to our manual bucketing at ~5165)
+- Inductor's scheduling is less optimal than our manual autobucketing for this collective-heavy graph
+- Inductor's built-in CUDAGraph OOMs on the full 8000+ node graph
+- Our CUDAGraphWrapper doesn't cleanly integrate with Inductor's OutputCode
+- Theoretical kernel fusion benefit (~3-5%) is dwarfed by scheduling regression
+
+## In-Place Operations and CUDAGraph
+
+**Never use in-place ops with CUDAGraph.** Converting 232 ops to in-place variants (add→add_, mul→mul_) caused a -20% regression (5852 vs 7314). CUDAGraph records memory allocation patterns during warmup — in-place operations fundamentally alter these patterns, causing performance degradation even though the ops are semantically correct.
+
+## FX Graph Constant Folding Limitations
+
+FX graph `recompile()` generates Python source code from node values. Only types with valid Python repr can be inlined as constants:
+- **Works**: float (32768.0), int, bool, None, strings, tuples of these
+- **Doesn't work**: DeviceMesh, custom objects (repr contains `=` signs or other invalid syntax)
+- For non-serializable objects, use `get_attr` nodes instead of literal inlining
+
+## Graph Input Analysis (Llama3 8B, FSDP4+TP2)
+
+586 total inputs to the traced graph:
+- 291 DeviceMesh objects (process group refs for collectives — constant between steps)
+- 291 fp32 tensors (model parameters — static, addresses stable due to optimizer in-place updates)
+- 1 complex64 tensor [8192, 64] (RoPE frequencies — constant)
+- 2 int64 tensors [1, 8192] (input_ids, labels — dynamic, change each step)
+- 1 float scalar (32768.0 — loss normalization, folded into graph)
+
+Only 2 of 586 inputs actually change between training steps.
 
 ## Fundamental Incompatibilities
 
