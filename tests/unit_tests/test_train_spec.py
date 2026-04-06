@@ -31,15 +31,16 @@ class FakeModel(BaseModel):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.linear = Linear.Config().build(
+        linear_cfg = Linear.Config(
             in_features=config.hidden, out_features=config.hidden
         )
+        self.linear = linear_cfg.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
 
-    def init_weights(self, buffer_device: torch.device | None = None, **kwargs) -> None:
-        self.linear.init_weights()
+    def _init_self_parameters(self) -> None:
+        nn.init.trunc_normal_(self.linear.weight, std=0.02)
 
 
 def fake_post_optimizer_build_fn(

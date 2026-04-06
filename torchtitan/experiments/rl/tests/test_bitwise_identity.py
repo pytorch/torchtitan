@@ -200,7 +200,7 @@ def build_trainer_model(config):
     # Materialize on device
     model.to_empty(device=device_type)
     with torch.no_grad():
-        model.init_weights(buffer_device=None)
+        model.init_states(buffer_device=None)
 
     # Load HF checkpoint (same logic as PolicyTrainer._load_initial_hf_weights)
     if model_spec.state_dict_adapter is not None:
@@ -231,7 +231,7 @@ def build_trainer_model(config):
 
 def _test_config() -> RLTrainer.Config:
     """Test-specific config: greedy sampling, fewer tokens, single sample."""
-    model_spec = model_registry("0.6B", attn_backend_override="varlen")
+    model_spec = model_registry("0.6B_varlen")
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
