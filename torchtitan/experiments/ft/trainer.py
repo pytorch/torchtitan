@@ -394,18 +394,8 @@ class FaultTolerantTrainer(Trainer):
         self.ft_manager = config.fault_tolerance.build()
 
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = config.parallelism
 
-        return ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        return ParallelDims.from_config(config.parallelism, world_size)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -545,8 +535,8 @@ class FaultTolerantTrainer(Trainer):
                 ft_manager=self.ft_manager,
                 model=self.model_parts[0],
                 n_layers=(
-                    self.model_config.n_layers
-                    if hasattr(self.model_config, "n_layers")
+                    len(self.model_config.layers)
+                    if hasattr(self.model_config, "layers")
                     else 0
                 ),
                 optimizer=self.optimizers,

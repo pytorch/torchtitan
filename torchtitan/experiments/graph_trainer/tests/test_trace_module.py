@@ -366,6 +366,35 @@ class TestMetadataPropagation(unittest.TestCase):
                 )
                 self.assertEqual(custom.get("test_key"), "test_value")
 
+    def test_backward_nodes_have_stack_trace(self):
+        """Verify that backward nodes get stack_trace from their forward counterpart."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        train_step = TrainStepModule(model, get_loss)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        traced_result = trace_module(train_step, (tokens, labels))
+
+        # Find backward nodes: nodes sharing a seq_nr with an earlier (forward) node
+        seq_nr_first: dict[int, torch.fx.Node] = {}
+        bwd_nodes_missing_stack_trace = []
+        for node in traced_result.gm.graph.nodes:
+            if node.op != "call_function" or "seq_nr" not in node.meta:
+                continue
+            seq_nr = node.meta["seq_nr"]
+            if seq_nr not in seq_nr_first:
+                seq_nr_first[seq_nr] = node
+            else:
+                # This is a backward node
+                if not node.stack_trace:
+                    bwd_nodes_missing_stack_trace.append((node.name, seq_nr))
+
+        self.assertEqual(
+            bwd_nodes_missing_stack_trace,
+            [],
+            f"Backward nodes missing stack_trace: {bwd_nodes_missing_stack_trace}",
+        )
+
     def test_patch_engine_restores_original(self):
         """Verify that _patch_engine_run_backward restores the original function."""
         import torch.autograd
@@ -504,49 +533,37 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_llama3(self):
-        from torchtitan.models.llama3 import (
-            expand_layer_configs,
-            llama3_configs,
-            Llama3Model,
-        )
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
         config = llama3_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_model_test(Llama3Model, config)
 
     def test_qwen3(self):
-        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
+        from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
         config = qwen3_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_model_test(Qwen3Model, config)
 
     def test_qwen3_moe(self):
-        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
+        from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
         config = qwen3_configs["debugmodel_moe"]()
-        expand_layer_configs(config)
         self._run_model_test(Qwen3Model, config)
 
     def test_deepseek_v3(self):
-        from torchtitan.models.deepseek_v3 import (
-            deepseekv3_configs,
-            expand_layer_configs,
-        )
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
         config = deepseekv3_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_model_test(DeepSeekV3Model, config)
 
     def test_llama4(self):
-        from torchtitan.models.llama4 import expand_layer_configs, llama4_configs
+        from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
         config = llama4_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_model_test(
             Llama4Model,
             config,
@@ -562,11 +579,10 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
+        from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         config = gptoss_configs["debugmodel"]()
-        expand_layer_configs(config)
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -578,7 +594,7 @@ class TestTraceModels(unittest.TestCase):
             0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
         )
         causal = get_causal_mask_mod()
-        sw_size = config.layer.attention.sliding_window_size
+        sw_size = config.layers[0].attention.sliding_window_size
         basic_mask = create_attention_mask(causal, 1, None, self.SEQ_LEN, self.SEQ_LEN)
         sliding_window_mask = create_attention_mask(
             and_masks(causal, get_sliding_window_mask_mod(sw_size)),
@@ -612,11 +628,10 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
+        from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         config = gptoss_configs["debugmodel"]()
-        expand_layer_configs(config)
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_ac_regions(model)
 
@@ -624,7 +639,7 @@ class TestTraceModels(unittest.TestCase):
             0, config.vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
         )
         causal = get_causal_mask_mod()
-        sw_size = config.layer.attention.sliding_window_size
+        sw_size = config.layers[0].attention.sliding_window_size
         basic_mask = create_attention_mask(causal, 1, None, self.SEQ_LEN, self.SEQ_LEN)
         sliding_window_mask = create_attention_mask(
             and_masks(causal, get_sliding_window_mask_mod(sw_size)),
@@ -777,41 +792,30 @@ class TestTraceFSDP(FSDPTest):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
     def test_llama3_fsdp(self):
-        from torchtitan.models.llama3 import (
-            expand_layer_configs,
-            llama3_configs,
-            Llama3Model,
-        )
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
         config = llama3_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_fsdp_model_test(Llama3Model, config)
 
     def test_qwen3_fsdp(self):
-        from torchtitan.models.qwen3 import expand_layer_configs, qwen3_configs
+        from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
         config = qwen3_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_fsdp_model_test(Qwen3Model, config)
 
     def test_deepseek_v3_fsdp(self):
-        from torchtitan.models.deepseek_v3 import (
-            deepseekv3_configs,
-            expand_layer_configs,
-        )
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
         config = deepseekv3_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_fsdp_model_test(DeepSeekV3Model, config)
 
     def test_llama4_fsdp(self):
-        from torchtitan.models.llama4 import expand_layer_configs, llama4_configs
+        from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
         config = llama4_configs["debugmodel"]()
-        expand_layer_configs(config)
         self._run_fsdp_model_test(
             Llama4Model,
             config,
@@ -827,14 +831,13 @@ class TestTraceFSDP(FSDPTest):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import expand_layer_configs, gptoss_configs
+        from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         config = gptoss_configs["debugmodel"]()
-        expand_layer_configs(config)
         seq_len = 128
         causal = get_causal_mask_mod()
-        sw_size = config.layer.attention.sliding_window_size
+        sw_size = config.layers[0].attention.sliding_window_size
         basic_mask = create_attention_mask(causal, 1, None, seq_len, seq_len)
         sliding_window_mask = create_attention_mask(
             and_masks(causal, get_sliding_window_mask_mod(sw_size)),
