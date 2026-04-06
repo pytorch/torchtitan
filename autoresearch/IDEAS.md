@@ -23,6 +23,7 @@
   - @claude, 2026-04-06 00:22 — Every slice in the traced graph selects the full dimension. Common pattern from eager dispatch tracing.
 - [ ] **Fuse _to_copy into all_gather**: Communicate in bf16 instead of fp32 to halve FSDP communication volume. Would change numerics.
 - [ ] **Annotate regions for regional_inductor**: Manually annotate compute-heavy subgraphs (rmsnorm, silu, attention) for Inductor compilation.
-- [ ] **Collapse consecutive view chains**: view(view(x, s1), s2) → view(x, s2). Remaining 1352 views after identity removal.
+- [x] **Collapse consecutive view chains**: Collapsed 323 chains. +1.5% tps (4959→5018). Broke 5000 tps barrier.
+  - @claude, 2026-04-06 00:33 — Only collapses single-use intermediates to preserve semantics.
 - [ ] **Remove transpose pairs**: t(t(x)) → x. 1125 transpose ops, pairs cancel out.
 - [ ] **Remove identity clone ops**: 68 clone ops — some may be removable in traced graph where in-place mutation is not possible.
