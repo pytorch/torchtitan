@@ -19,5 +19,10 @@
 - [ ] **CUDAGraph wrapping**: Wrap the traced graph with CUDAGraph to eliminate kernel launch overhead.
 - [x] **Remove identity view/reshape ops**: Removed 1522 identity view/reshape/_unsafe_view nodes (shape_in == shape_out). +9.5% tps (4427→4849). Major win.
   - @claude, 2026-04-06 00:08 — Way more than expected 225 _unsafe_view: view.default and reshape.default also had many identity instances.
+- [x] **Remove identity slice ops**: Removed 453 identity slices (all of them!) where full dimension is selected. +2.2% tps (4849→4959).
+  - @claude, 2026-04-06 00:22 — Every slice in the traced graph selects the full dimension. Common pattern from eager dispatch tracing.
 - [ ] **Fuse _to_copy into all_gather**: Communicate in bf16 instead of fp32 to halve FSDP communication volume. Would change numerics.
 - [ ] **Annotate regions for regional_inductor**: Manually annotate compute-heavy subgraphs (rmsnorm, silu, attention) for Inductor compilation.
+- [ ] **Collapse consecutive view chains**: view(view(x, s1), s2) → view(x, s2). Remaining 1352 views after identity removal.
+- [ ] **Remove transpose pairs**: t(t(x)) → x. 1125 transpose ops, pairs cancel out.
+- [ ] **Remove identity clone ops**: 68 clone ops — some may be removable in traced graph where in-place mutation is not possible.
