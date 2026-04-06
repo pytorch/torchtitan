@@ -289,6 +289,22 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             # TODO: skip for now, re-enable when https://github.com/pytorch/pytorch/pull/179209 is in torch nightly
             disabled=True,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--compile.joint_passes fsdp_reshard_after_fwd",
+                    "--parallelism.fsdp_reshard_after_forward always",
+                ],
+            ],
+            "AOT llama3 FSDP+TP fsdp_reshard_after_fwd",
+            "aot_llama3_fsdp_tp_fsdp_reshard_after_fwd",
+            ngpu=8,
+        ),
         # === aot_fx_trace mode tests ===
         OverrideDefinitions(
             [
