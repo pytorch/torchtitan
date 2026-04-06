@@ -25,5 +25,6 @@
 - [ ] **Annotate regions for regional_inductor**: Manually annotate compute-heavy subgraphs (rmsnorm, silu, attention) for Inductor compilation.
 - [x] **Collapse consecutive view chains**: Collapsed 323 chains. +1.5% tps (4959→5018). Broke 5000 tps barrier.
   - @claude, 2026-04-06 00:33 — Only collapses single-use intermediates to preserve semantics.
-- [ ] **Remove transpose pairs**: t(t(x)) → x. 1125 transpose ops, pairs cancel out.
+- [x] **Remove transpose pairs**: Removed 225 pairs (450 nodes). +1.2% tps (5018→5079).
+  - @claude, 2026-04-06 00:42 — 40% of transposes are canceling pairs from fwd/bwd graph.
 - [ ] **Remove identity clone ops**: 68 clone ops — some may be removable in traced graph where in-place mutation is not possible.
