@@ -14,7 +14,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_flex_attention_for_regional_inductor,
-    register_blockmask_pytree_node,
+    maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
@@ -25,11 +25,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced_train_step,
     trace_train_step,
 )
-
-# BlockMask must be registered as a pytree node so its tensor children
-# are properly traced as graph inputs instead of opaque leaves.
-register_blockmask_pytree_node()
-
 
 def get_loss(logits, labels):
     return torch.nn.functional.cross_entropy(
@@ -546,6 +541,7 @@ class TestTraceModels(unittest.TestCase):
             if use_regional_inductor
             else contextlib.nullcontext()
         )
+        maybe_register_blockmask_pytree_node()
         with maybe_regional_inductor:
             traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
@@ -753,6 +749,7 @@ class TestTraceModels(unittest.TestCase):
             "basic_mask": basic_mask,
             "sliding_window_mask": sliding_window_mask,
         }
+        maybe_register_blockmask_pytree_node()
         with annotate_flex_attention_for_regional_inductor():
 
             def forward(model, tokens, attn_masks):
@@ -851,6 +848,7 @@ class TestTraceFSDP(FSDPTest):
             if use_regional_inductor
             else contextlib.nullcontext()
         )
+        maybe_register_blockmask_pytree_node()
         with maybe_regional_inductor:
             traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
