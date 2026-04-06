@@ -64,6 +64,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_tp2_compile",
             ngpu=4,
         ),
+    ]
+
+
+def build_rl_h100_test_list() -> list[OverrideDefinitions]:
+    return [
         OverrideDefinitions(
             [
                 [
@@ -71,11 +76,17 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--config rl_grpo_qwen3_0_6b_batch_invariant",
                 ],
             ],
-            "RL GRPO TP=2 on-policy (batch-invariant + deterministic)",
-            "rl_grpo_tp2_on_policy",
+            "RL GRPO TP=2 batch-invariant + deterministic",
+            "rl_grpo_tp2_batch_invariant",
             ngpu=4,
         ),
     ]
+
+
+_TEST_SUITES = {
+    "default": build_rl_test_list,
+    "h100": build_rl_h100_test_list,
+}
 
 
 def run_single_test(
@@ -149,6 +160,12 @@ def main():
         help="Specific test to run (default: all)",
     )
     parser.add_argument(
+        "--test_suite",
+        default="default",
+        choices=list(_TEST_SUITES.keys()),
+        help="Which test suite to run (default: default)",
+    )
+    parser.add_argument(
         "--ngpu",
         default=4,
         type=int,
@@ -164,7 +181,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    test_list = build_rl_test_list()
+    test_list = _TEST_SUITES[args.test_suite]()
     run_tests(args, test_list)
 
 

@@ -135,11 +135,30 @@ def build_trainer_model(
 
 
 # TODO: directly testing against VLLMGenerator with debug model to avoid OOM
+def _set_generator_determinism(debug) -> None:
+    """Apply deterministic flags for the generator side.
+
+    Mirrors VLLMGenerator._set_determinism() — the generator doesn't use
+    torchtitan's ParallelDims, so we apply the flags directly.
+    """
+    if debug.deterministic:
+        torch.use_deterministic_algorithms(
+            True, warn_only=debug.deterministic_warn_only
+        )
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    if debug.seed is not None:
+        torch.manual_seed(debug.seed)
+
+
 def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
     os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+    _set_generator_determinism(gen_config.debug)
 
     engine_kwargs = dict(
         model=config.hf_assets_path,
@@ -472,10 +491,9 @@ class TestBitwiseParity(unittest.TestCase):
         engine = self.engine
 
         with torch.no_grad():
-            trainer_lps = [
-                compute_trainer_prefill_logprobs(model, ids, self.device)
-                for ids in self.prompt_ids
-            ]
+            trainer_lps = compute_trainer_prefill_logprobs(
+                model, self.prompt_ids, self.device
+            )
 
         vllm_lps = vllm_prefill(engine, self.prompt_ids)
 
