@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import torch
@@ -39,31 +41,39 @@ def run_loss_compare(
         baseline_options: Additional CLI options for the baseline run.
         test_options: Additional CLI options for the test run.
 
+    Uses a unique temporary directory for each invocation so that sequential
+    test runs never share stale checkpoints or TensorBoard data.
+
     Returns:
         True if the assertion passed, False otherwise.
     """
-    cmd = [
-        sys.executable,
-        "scripts/loss_compare.py",
-        ".",
-        ".",
-        f"--baseline-module={baseline_module}",
-        f"--baseline-config={baseline_config}",
-        f"--test-module={test_module}",
-        f"--test-config={test_config}",
-        "--assert-equal",
-        f"--steps={STEPS}",
-    ]
-    if baseline_options:
-        cmd.append(f"--baseline-options={baseline_options}")
-    if test_options:
-        cmd.append(f"--test-options={test_options}")
+    job_dump_folder = tempfile.mkdtemp(prefix="graph_trainer_test_")
+    try:
+        cmd = [
+            sys.executable,
+            "scripts/loss_compare.py",
+            ".",
+            ".",
+            f"--baseline-module={baseline_module}",
+            f"--baseline-config={baseline_config}",
+            f"--test-module={test_module}",
+            f"--test-config={test_config}",
+            "--assert-equal",
+            f"--steps={STEPS}",
+            f"--job-dump-folder={job_dump_folder}",
+        ]
+        if baseline_options:
+            cmd.append(f"--baseline-options={baseline_options}")
+        if test_options:
+            cmd.append(f"--test-options={test_options}")
 
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, text=True)
-    if result.returncode != 0:
-        print("loss_compare.py failed")
-    return result.returncode == 0
+        print(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, text=True)
+        if result.returncode != 0:
+            print("loss_compare.py failed")
+        return result.returncode == 0
+    finally:
+        shutil.rmtree(job_dump_folder, ignore_errors=True)
 
 
 LLAMA3_PARALLELISM = (
