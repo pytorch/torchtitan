@@ -61,31 +61,6 @@ class SubclassLayout:
     meta: SubclassMeta | None
 
 
-@dataclass
-class TracedResult:
-    """Holds the traced graph and execution metadata.
-
-    Attributes:
-        gm: The traced FX graph as a pure function of flat tensors.
-        example_inputs: Trace-time fake flat inputs used by downstream graph passes.
-        param_fqns: Trace-time parameter/buffer FQNs for execution-time validation.
-        num_params: Number of lifted parameters and buffers.
-        num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
-        input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
-        num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
-        output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
-        output_spec: Original output pytree spec used during reconstruction.
-    """
-
-    gm: torch.fx.GraphModule
-    example_inputs: tuple[Any, ...]
-    param_fqns: list[str]
-    num_params: int
-    num_flat_inputs: int
-    input_subclass_layouts: dict[int, SubclassLayout]
-    num_flat_outputs: int
-    output_subclass_layouts: dict[int, SubclassLayout]
-    output_spec: pytree.TreeSpec
 def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta | None]:
     if not is_traceable_wrapper_subclass(t):
         return [t], None
@@ -311,10 +286,11 @@ def _get_params_and_buffers(mod: nn.Module) -> dict[str, torch.Tensor]:
 
 @dataclass
 class TracedResult:
-    """Holds the traced graph and execution metadata.
+    """Execution metadata returned by :func:`minimal_fx_tracer`.
 
     Attributes:
         gm: The traced FX graph as a pure function of flat tensors.
+        example_inputs: Trace-time fake flat inputs used by downstream graph passes.
         param_fqns: Trace-time parameter/buffer FQNs for execution-time validation.
         num_params: Number of lifted parameters and buffers.
         num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
@@ -325,6 +301,7 @@ class TracedResult:
     """
 
     gm: torch.fx.GraphModule
+    example_inputs: tuple[Any, ...]
     param_fqns: list[str]
     num_params: int
     num_flat_inputs: int
@@ -506,6 +483,3 @@ def run_traced(traced_result: TracedResult, *args: Any) -> Any:
         traced_result.output_subclass_layouts,
     )
     return pytree.tree_unflatten(wrapped, traced_result.output_spec)
-
-
-run_traced_module = run_traced
