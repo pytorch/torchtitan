@@ -24,6 +24,7 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 - **Remove identity slice ops**: +2.2% tps (4849→4959). Removed 453 full-dimension slices. All slices in the traced graph were identity. Cumulative identity removal (detach+view+slice = 2171 nodes = 19% of graph) makes autobucketing much more effective.
 - **Collapse view chains**: +1.5% tps (4959→5018). Collapsed 323 single-use intermediate view/reshape chains. Combined with identity removal, 22% of original graph simplified.
 - **Remove transpose pairs**: +1.2% tps (5018→5079). Removed 225 canceling t(t(x)) pairs (450 nodes). Common in fwd+bwd traced graphs from weight transpose patterns.
+- **Aggressive overlap scheduling**: +1.7% tps (5079→5165). `compute_overlap_multipler=2.0` in autobucketing. Default is too conservative for this workload.
 
 ## What Doesn't Work
 
@@ -31,6 +32,11 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 - **DCE after bucketing**: Removes ~167 nodes but no measurable impact on tps.
 - **Regional Inductor (no annotations)**: No-op without explicit `compile_with_inductor` annotations on graph nodes. aot_fx_trace mode doesn't annotate.
 - **Full Inductor**: Crashes without inductor decomposition pass. Would need significant plumbing.
+- **Regional Inductor on fwd+bwd graph**: Dependency cycles are fundamental — backward regions depend on forward regions in complex, non-sequential ways. Can't partition the full fwd+bwd graph.
+- **CUDAGraph on full graph**: Float scalar inputs from aot_fx_trace mode are not supported by CUDAGraphWrapper.
+- **Autobucketing memory params**: Scheduler already uses memory budget effectively — more budget doesn't help.
+- **enable_fusion_regions**: Doesn't change scheduling significantly for this graph.
+- **Roundtrip dtype removal**: No roundtrips exist — all 842 _to_copy ops are genuine conversions.
 
 ## Benchmark Notes
 

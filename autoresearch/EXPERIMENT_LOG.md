@@ -97,3 +97,41 @@ This file records every experiment attempted during the autoresearch loop.
 - **Result**: tps=5094/5064 (avg 5079), MFU=29.83/29.65%, memory=49.0GiB. Numerics pass.
 - **Analysis**: Removed 225 pairs (450 nodes = 40% of 1125 transposes). +1.2% tps. These come from forward + backward cancellation: in forward, weight is transposed for mm; in backward, the transpose is reversed. Total nodes removed/collapsed: 2944 (26% of original 11,381).
 - **Lessons**: Transpose pairs are common in fwd+bwd traced graphs. The forward adds transpose for mm weight, backward reverses it. Diminishing returns on graph simplification — each successive pass finds fewer redundancies.
+
+## Roundtrip dtype conversion removal — discard (xxxxxxx)
+
+- **Idea**: Remove _to_copy(bf16→fp32) → _to_copy(fp32→bf16) roundtrips where single-use intermediate converts back to original dtype.
+- **Result**: No-op — zero roundtrip pairs found. All 842 _to_copy ops are genuine conversions.
+- **Lessons**: Mixed precision conversions in the traced graph are all necessary. No redundant roundtrips.
+
+## Aggressive autobucketing memory params — discard (xxxxxxx)
+
+- **Idea**: Increase max_memory_increase_gb from 1.0→10.0 and max_in_flight_gb from 5→10 to allow more prefetching.
+- **Result**: tps=5055, memory=48.98 GiB — within noise, memory didn't increase.
+- **Lessons**: Scheduler already uses the memory budget effectively. More budget doesn't help.
+
+## CUDAGraph full graph — crash (xxxxxxx)
+
+- **Idea**: Wrap the full fwd+bwd graph with CUDAGraph to eliminate kernel launch overhead.
+- **Result**: Crash — CUDAGraphWrapper rejects float scalar input at index 585 (value 32768.0).
+- **Lessons**: aot_fx_trace mode lifts scalar constants as graph inputs. CUDAGraphWrapper only handles tensors, ints, Generators, and opaque objects. Would need to modify cudagraph.py to handle floats.
+
+## Regional inductor with contiguous regions — crash (xxxxxxx)
+
+- **Idea**: Annotate ALL nodes between consecutive collectives (not scattered ops). Complete contiguous regions should avoid the dependency cycle issue.
+- **Result**: Same crash — `AssertionError: Invalid partition, found dependency cycles`.
+- **Lessons**: Dependency cycles in fwd+bwd graph are fundamental, not caused by scattered annotations. Backward regions depend on forward regions in complex, non-sequential ways. Regional inductor can't partition the full fwd+bwd graph.
+
+## Autobucketing enable_fusion_regions — discard (xxxxxxx)
+
+- **Idea**: Set enable_fusion_regions=True in autobucketing to detect and account for fusible op regions.
+- **Result**: tps=5043 — within noise of baseline (5079).
+- **Lessons**: Fusion region detection doesn't change the scheduling significantly for this graph.
+
+## Aggressive overlap scheduling — keep (2b94943d)
+
+- **Idea**: Set compute_overlap_multipler=2.0 to make the scheduler more aggressive about overlapping compute with communication.
+- **Changes**: Modified autobucketing_reordering_pass to pass `compute_overlap_multipler=2.0`.
+- **Result**: tps=5142/5187 (avg 5165), MFU=30.11/30.37%, memory=49.0GiB. Numerics pass.
+- **Analysis**: +1.7% tps over previous (5079→5165). The default multipler (1.0) was too conservative — it underestimated how much compute could be overlapped. 2.0× tells the scheduler that compute takes twice as long as estimated, so it schedules more collectives concurrently. Crossed **30% MFU**.
+- **Lessons**: The default compute estimation in autobucketing may undercount the time for certain ops. Increasing the overlap aggressiveness helps when there's enough compute to hide communication latency. This is model-size and parallelism-config dependent.

@@ -11,3 +11,9 @@ xxxxxxx	0	0.0	crash	0.0	regional inductor with element-wise annotations (depende
 85446291	4959	49.0	keep	29.04	remove identity slice nodes (+2.2% over prev best)
 ab0e0a82	5018	49.0	keep	29.39	collapse view chains (+1.5% over prev best)
 58900f23	5079	49.0	keep	29.74	remove transpose pairs (+1.2% over prev best)
+xxxxxxx	5079	49.0	discard	29.74	roundtrip to_copy removal (no-op: no roundtrips found)
+xxxxxxx	5055	49.0	discard	29.60	aggressive autobucketing params (within noise, scheduler already optimal)
+xxxxxxx	0	0.0	crash	0.0	CUDAGraph full graph (float scalar inputs not supported by CUDAGraphWrapper)
+xxxxxxx	0	0.0	crash	0.0	regional inductor with contiguous regions (dependency cycles in fwd+bwd graph)
+xxxxxxx	5043	49.0	discard	29.53	autobucketing enable_fusion_regions (within noise)
+2b94943d	5165	49.0	keep	30.24	aggressive overlap scheduling compute_overlap_multipler=2.0
