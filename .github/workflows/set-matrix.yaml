@@ -18,6 +18,7 @@ on:
 
 jobs:
   set:
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
