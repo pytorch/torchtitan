@@ -33,7 +33,7 @@ def _skip_nested_compile() -> Generator[None, None, None]:
     """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
 
     make_fx cannot trace through torch.compile'd functions (e.g. compiled
-    flex_attention in FlexAttentionWrapper). Setting error_on_nested_fx_trace
+    flex_attention in FlexAttention). Setting error_on_nested_fx_trace
     to False makes dynamo silently inline the wrapped function instead of
     raising, so make_fx traces the underlying ops normally.
     """
@@ -61,6 +61,31 @@ class SubclassLayout:
     meta: SubclassMeta | None
 
 
+@dataclass
+class TracedResult:
+    """Holds the traced graph and execution metadata.
+
+    Attributes:
+        gm: The traced FX graph as a pure function of flat tensors.
+        example_inputs: Trace-time fake flat inputs used by downstream graph passes.
+        param_fqns: Trace-time parameter/buffer FQNs for execution-time validation.
+        num_params: Number of lifted parameters and buffers.
+        num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
+        input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
+        num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
+        output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
+        output_spec: Original output pytree spec used during reconstruction.
+    """
+
+    gm: torch.fx.GraphModule
+    example_inputs: tuple[Any, ...]
+    param_fqns: list[str]
+    num_params: int
+    num_flat_inputs: int
+    input_subclass_layouts: dict[int, SubclassLayout]
+    num_flat_outputs: int
+    output_subclass_layouts: dict[int, SubclassLayout]
+    output_spec: pytree.TreeSpec
 def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta | None]:
     if not is_traceable_wrapper_subclass(t):
         return [t], None
@@ -279,6 +304,9 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             nn_module_stack = fwd_node.meta.get("nn_module_stack")
             if nn_module_stack is not None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
+            stack_trace = fwd_node.meta.get("stack_trace")
+            if stack_trace is not None:
+                node.meta["stack_trace"] = stack_trace
 
 
 def _get_params_and_buffers(mod: nn.Module) -> dict[str, torch.Tensor]:
@@ -437,6 +465,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
         assert output_spec is not None
         return TracedResult(
             gm=traced,
+            example_inputs=fake_args,
             param_fqns=param_fqns,
             num_params=num_params,
             num_flat_inputs=num_full_args,

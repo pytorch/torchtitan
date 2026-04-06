@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -36,32 +36,19 @@ class FeedForward(Module):
 
     Config takes the **final** hidden_dim (no internal 2/3 scaling).
     Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
-    Runtime ``dim`` is passed as a build() kwarg.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        hidden_dim: int
-        linear_bias: bool = False
-        dim: int = field(init=False)
+        w1: Linear.Config
+        w2: Linear.Config
+        w3: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__()
-        linear_config = Linear.Config(bias=config.linear_bias)
-        self.w1 = linear_config.build(
-            in_features=config.dim, out_features=config.hidden_dim
-        )
-        self.w2 = linear_config.build(
-            in_features=config.hidden_dim, out_features=config.dim
-        )
-        self.w3 = linear_config.build(
-            in_features=config.dim, out_features=config.hidden_dim
-        )
+        self.w1 = config.w1.build()
+        self.w2 = config.w2.build()
+        self.w3 = config.w3.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02, **kwargs):
-        self.w1.init_weights()
-        self.w2.init_weights(init_std=init_std)
-        self.w3.init_weights(init_std=init_std)

@@ -597,6 +597,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config sft_debugmodel",
+                ],
+            ],
+            "SFT ChatDataset integration test",
+            "sft",
+            ngpu=2,
+        ),
     ]
 
     return integration_tests_flavors
