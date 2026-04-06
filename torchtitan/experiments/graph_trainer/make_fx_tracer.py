@@ -284,7 +284,7 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
                 node.meta["stack_trace"] = stack_trace
 
 
-def _get_params_and_buffers(mod: nn.Module) -> dict[str, torch.Tensor]:
+def extract_module_state(mod: nn.Module) -> dict[str, torch.Tensor]:
     """Return a merged dict of the module's named parameters and buffers."""
     return {
         **dict(mod.named_parameters(remove_duplicate=False)),
@@ -299,8 +299,7 @@ class TracedResult:
     Attributes:
         gm: The traced FX graph as a pure function of flat tensors.
         example_inputs: Trace-time fake flat inputs used by downstream graph passes.
-        param_fqns: Trace-time parameter/buffer FQNs for execution-time validation.
-        num_params: Number of lifted parameters and buffers.
+        state_fqns: Trace-time state keys.
         num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
         input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
         num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
@@ -310,8 +309,7 @@ class TracedResult:
 
     gm: torch.fx.GraphModule
     example_inputs: tuple[Any, ...]
-    param_fqns: list[str]
-    num_params: int
+    state_fqns: list[str]
     num_flat_inputs: int
     input_subclass_layouts: dict[int, SubclassLayout]
     num_flat_outputs: int
@@ -320,66 +318,51 @@ class TracedResult:
 
 
 def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
-    """Return a tracer for ``fn`` that traces a concrete module/input invocation.
+    """Return a tracer for a stateless ``fn`` with explicit ``state`` input.
 
     ``fn`` must be a plain callable (not an ``nn.Module``). The returned
-    callable expects the trace-time positional arguments, with the live module
-    at position 0.
+    callable expects ``state`` as the first positional argument, followed by
+    the traced user inputs::
 
-    Execute the returned :class:`TracedResult` with :func:`run_traced`, passing
-    the same positional arguments (with the live module first)::
+        traced_result = minimal_fx_tracer(train_step)(state, tokens, labels)
+        result = run_traced(traced_result, state, tokens, labels)
 
-        traced_result = minimal_fx_tracer(train_step)(model, tokens, labels)
-        result = run_traced(traced_result, model, tokens, labels)
-
-    The trace-time args must satisfy these constraints:
-    - ``args[0]`` must be an ``nn.Module`` whose parameters and buffers are
-      lifted as extra graph inputs
-    - there must be no additional ``nn.Module`` instances in ``args[1:]``
-    - all remaining pytree leaves must be tensors or make_fx-safe primitives
+    The trace-time ``state`` and ``args`` must satisfy these constraints:
+    - ``state`` must be a ``dict[str, Tensor]`` of parameters/buffers
+    - all pytree leaves must be tensors or make_fx-safe primitives
       (``int``, ``float``, ``bool``, ``str``, ``None``)
+    - there must be no ``nn.Module`` instances in ``state`` or ``args``
 
     Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
     plain tensors for tracing, and the layouts needed to rewrap them are stored
     in the returned :class:`TracedResult`.
     """
 
-    def _trace_with_args(*args: Any) -> TracedResult:
-        if not isinstance(args[0], nn.Module):
-            raise ValueError(
-                "minimal_fx_tracer requires args[0] to be an nn.Module, "
-                f"got {type(args[0]).__name__}."
-            )
-        if any(isinstance(a, nn.Module) for a in args[1:]):
-            raise ValueError(
-                "minimal_fx_tracer supports exactly one nn.Module at args[0]. "
-                "Additional nn.Module instances found in args[1:]."
-            )
-        mod = args[0]
-
-        # Extract params/buffers from the module.
-        params_dict = _get_params_and_buffers(mod)
-        param_fqns = list(params_dict.keys())
-        params_flat = list(params_dict.values())
-        num_params = len(params_flat)
-
-        # User args: everything after the module.
-        user_args = list(args[1:])
+    def _trace_with_args(state: Any, *args: Any) -> TracedResult:
+        state_fqns = list(state.keys())
+        state_flat = list(state.values())
+        user_args = list(args)
         user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
 
         # Validate leaves.
-        for leaf in user_args_flat:
+        for leaf in [*state_flat, *user_args_flat]:
+            if isinstance(leaf, nn.Module):
+                raise ValueError(
+                    "minimal_fx_tracer requires explicit tensor state, not nn.Module "
+                    "instances. Use trace_train_step(...) for the reference "
+                    "train-step wrapper."
+                )
             if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
                 raise ValueError(
-                    f"minimal_fx_tracer requires all pytree leaves in args to be tensors "
-                    f"or primitives (int/float/bool/str), got {type(leaf).__name__}. "
-                    f"Non-primitive values should either be registered as pytree "
-                    f"nodes (register_pytree_node) or constants "
+                    "minimal_fx_tracer requires all pytree leaves in state/args to "
+                    f"be tensors or primitives (int/float/bool/str), got "
+                    f"{type(leaf).__name__}. Non-primitive values should either be "
+                    "registered as pytree nodes (register_pytree_node) or constants "
                     f"(pytree.register_constant), or captured in fn's closure."
                 )
 
-        # Combined flat input: [*params, *user_args] with subclasses unwrapped.
-        full_args = params_flat + list(user_args_flat)
+        # Combined flat input: [*state, *user_args] with subclasses unwrapped.
+        full_args = list(state_flat) + list(user_args_flat)
         num_full_args = len(full_args)
         unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
 
@@ -405,19 +388,14 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             output_layouts = {}
 
             wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
-            params_wrapped = wrapped[:num_params]
-            user_flat = wrapped[num_params:]
+            state_wrapped = wrapped[: len(state_flat)]
+            user_flat = wrapped[len(state_flat) :]
 
-            params_for_mod = dict(zip(param_fqns, params_wrapped, strict=True))
+            state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
 
-            # Reconstruct the original args: module at position 0 keeps the live
-            # module, remaining positions get the traced user tensors.
-            rebuilt = [mod] + user_list
-
-            with stateless._reparametrize_module(mod, params_for_mod):
-                with _patch_engine_run_backward():
-                    result = fn(*rebuilt)
+            with _patch_engine_run_backward():
+                result = fn(state_for_fn, *user_list)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
             num_flat_outputs = len(flat_outs)
@@ -443,8 +421,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
         return TracedResult(
             gm=traced,
             example_inputs=fake_args,
-            param_fqns=param_fqns,
-            num_params=num_params,
+            state_fqns=state_fqns,
             num_flat_inputs=num_full_args,
             input_subclass_layouts=input_layouts,
             num_flat_outputs=num_flat_outputs,
@@ -457,41 +434,27 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
 def run_traced(
     traced_result: TracedResult,
+    state: Any,
     *args: Any,
-    validate_module_fqns: bool = False,
 ) -> Any:
     """Execute a traced graph with fresh parameters read from the live module.
 
     This is a reference implementation of traced-graph execution. It keeps the
-    parameter lookup, subclass unwrapping, and output reconstruction logic
+    state handling, subclass unwrapping, and output reconstruction logic
     explicit instead of baking those semantics into ``TracedResult`` itself.
-
-    The module must be the first argument (position 0), matching the
-    convention enforced by :func:`minimal_fx_tracer`.
-
     Runs under ``torch.no_grad()`` because the graph already contains explicit
     backward ops (from ``torch.autograd.grad`` traced by make_fx). Without
     this, PyTorch would build a redundant autograd graph on top, keeping all
     forward intermediates alive via ``grad_fn`` references.
     """
-
-    mod = args[0]
-    params_dict = _get_params_and_buffers(mod)
-    if validate_module_fqns:
-        fqns = list(params_dict.keys())
-        if fqns != traced_result.param_fqns:
-            raise ValueError(
-                f"Module at args[0] has different parameter/buffer "
-                f"names than during tracing.\n"
-                f"  Traced: {traced_result.param_fqns}\n"
-                f"  Got:    {fqns}"
-            )
-    params_flat = list(params_dict.values())
-
-    user_args = list(args[1:])
-    user_args_flat, _ = pytree.tree_flatten(user_args)
-
-    all_args = params_flat + list(user_args_flat)
+    state_flat = list(state.values())
+    user_args_flat, _ = pytree.tree_flatten(list(args))
+    if any(isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_args_flat]):
+        raise ValueError(
+            "run_traced requires explicit tensor state, not nn.Module instances. "
+            "Use run_traced_train_step(...) for the reference train-step wrapper."
+        )
+    all_args = list(state_flat) + list(user_args_flat)
     flat_inputs, _ = _unwrap_subclasses(all_args)
 
     with torch.no_grad():
@@ -502,3 +465,57 @@ def run_traced(
         traced_result.output_subclass_layouts,
     )
     return pytree.tree_unflatten(wrapped, traced_result.output_spec)
+
+
+def trace_train_step(fn: Callable) -> Callable[..., TracedResult]:
+    """Reference implementation for capturing a whole train step via the core API."""
+
+    def _trace_with_module(module: nn.Module, *args: Any) -> TracedResult:
+        if not isinstance(module, nn.Module):
+            raise ValueError(
+                "trace_train_step requires args[0] to be an nn.Module, "
+                f"got {type(module).__name__}."
+            )
+        if any(isinstance(arg, nn.Module) for arg in args):
+            raise ValueError(
+                "trace_train_step supports exactly one nn.Module at args[0]. "
+                "Additional nn.Module instances found in args[1:]."
+            )
+
+        def _stateless_fn(state: dict[str, torch.Tensor], *user_args: Any) -> Any:
+            with stateless._reparametrize_module(module, state):
+                return fn(module, *user_args)
+
+        return minimal_fx_tracer(_stateless_fn)(extract_module_state(module), *args)
+
+    return _trace_with_module
+
+
+def run_traced_train_step(
+    traced_result: TracedResult,
+    module: nn.Module,
+    *args: Any,
+    validate_module_fqns: bool = False,
+) -> Any:
+    """Reference implementation for executing a traced whole train step."""
+
+    if not isinstance(module, nn.Module):
+        raise ValueError(
+            "run_traced_train_step requires args[0] to be an nn.Module, "
+            f"got {type(module).__name__}."
+        )
+    if any(isinstance(arg, nn.Module) for arg in args):
+        raise ValueError(
+            "run_traced_train_step supports exactly one nn.Module at args[0]. "
+            "Additional nn.Module instances found in args[1:]."
+        )
+
+    # TODO: Consider stronger state validation once the long-term state API settles.
+    state = extract_module_state(module)
+    if validate_module_fqns and list(state.keys()) != traced_result.state_fqns:
+        raise ValueError(
+            "module has different parameter/buffer names than during tracing.\n"
+            f"  Traced: {traced_result.state_fqns}\n"
+            f"  Got:    {list(state.keys())}"
+        )
+    return run_traced(traced_result, state, *args)

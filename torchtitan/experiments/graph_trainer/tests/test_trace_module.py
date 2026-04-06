@@ -22,8 +22,11 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     _patch_engine_run_backward,
+    extract_module_state,
     minimal_fx_tracer,
     run_traced,
+    run_traced_train_step,
+    trace_train_step,
 )
 
 register_blockmask_pytree_node()
@@ -38,7 +41,7 @@ def get_loss(logits, labels):
 
 
 def make_train_step(loss_fn):
-    """Return a plain function for minimal_fx_tracer tracing.  loss_fn is captured in closure."""
+    """Return a plain function for module-first tracing. loss_fn is captured in closure."""
 
     def train_step(model, *args):
         *fwd_args, labels = args
@@ -46,6 +49,20 @@ def make_train_step(loss_fn):
         loss = loss_fn(logits, labels)
         params = list(model.parameters())
         grads = torch.autograd.grad(loss, params)
+        return [loss] + list(grads)
+
+    return train_step
+
+
+def make_stateless_train_step(model, loss_fn):
+    """Return a state-first function for the minimal_fx_tracer core API."""
+
+    def train_step(state, *args):
+        *fwd_args, labels = args
+        with torch.nn.utils.stateless._reparametrize_module(model, state):
+            logits = model(*fwd_args)
+        loss = loss_fn(logits, labels)
+        grads = torch.autograd.grad(loss, list(state.values()))
         return [loss] + list(grads)
 
     return train_step
@@ -123,9 +140,9 @@ class TestTraceModule(unittest.TestCase):
         def forward(model, tokens):
             return model(tokens)
 
-        traced = minimal_fx_tracer(forward)(model, tokens)
+        traced = trace_train_step(forward)(model, tokens)
         out_eager = model(tokens)
-        wrapped = run_traced(traced, model, tokens)
+        wrapped = run_traced_train_step(traced, model, tokens)
         self.assertTrue(torch.equal(out_eager, wrapped))
 
     def test_mlp_train_step(self):
@@ -134,14 +151,14 @@ class TestTraceModule(unittest.TestCase):
         model_test.load_state_dict(model_ref.state_dict())
 
         train_step = make_train_step(loss_fn)
-        traced = minimal_fx_tracer(train_step)(model_ref, tokens, labels)
+        traced = trace_train_step(train_step)(model_ref, tokens, labels)
 
         logits_ref = model_ref(tokens)
         loss_ref = loss_fn(logits_ref, labels)
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        wrapped = run_traced(traced, model_test, tokens, labels)
+        wrapped = run_traced_train_step(traced, model_test, tokens, labels)
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -155,7 +172,7 @@ class TestTraceModule(unittest.TestCase):
         model_test.load_state_dict(model_ref.state_dict())
 
         train_step = make_train_step(loss_fn)
-        traced = minimal_fx_tracer(train_step)(model_ref, tokens, labels)
+        traced = trace_train_step(train_step)(model_ref, tokens, labels)
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR)
@@ -168,7 +185,7 @@ class TestTraceModule(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            wrapped = run_traced(traced, model_test, tokens, labels)
+            wrapped = run_traced_train_step(traced, model_test, tokens, labels)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -192,7 +209,7 @@ class TestTraceModule(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
         with self.assertRaises(ValueError, msg="all pytree leaves"):
-            minimal_fx_tracer(fn)(model, tokens, lambda x: x.sum())
+            trace_train_step(fn)(model, tokens, lambda x: x.sum())
 
     def test_mismatched_module_raises_when_validation_enabled(self):
         """Opt-in module FQN validation catches execution with the wrong module."""
@@ -201,7 +218,7 @@ class TestTraceModule(unittest.TestCase):
         def forward(model, tokens):
             return model(tokens)
 
-        traced = minimal_fx_tracer(forward)(model, tokens)
+        traced = trace_train_step(forward)(model, tokens)
 
         different_model = nn.Sequential(
             nn.Embedding(256, 64),
@@ -209,17 +226,56 @@ class TestTraceModule(unittest.TestCase):
         ).to(device=self.DEVICE, dtype=self.DTYPE)
 
         with self.assertRaises(ValueError, msg="different parameter/buffer names"):
-            run_traced(traced, different_model, tokens, validate_module_fqns=True)
+            run_traced_train_step(
+                traced, different_model, tokens, validate_module_fqns=True
+            )
 
-    def test_module_must_be_first_arg(self):
-        def forward(tokens, model):
+    def test_trace_train_step_requires_module_first_arg(self):
+        def forward(model, tokens):
             return model(tokens)
 
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+
+        with self.assertRaises(ValueError, msg="args\\[0\\]"):
+            trace_train_step(forward)(tokens)
+
+    def test_core_explicit_state_executes(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        with self.assertRaises(ValueError, msg="args[0]"):
-            minimal_fx_tracer(forward)(tokens, model)
+        def forward(state, tokens):
+            with torch.nn.utils.stateless._reparametrize_module(model, state):
+                return model(tokens)
+
+        state = extract_module_state(model)
+        traced = minimal_fx_tracer(forward)(state, tokens)
+        out_ref = forward(state, tokens)
+        out_traced = run_traced(traced, state, tokens)
+
+        self.assertTrue(torch.equal(out_ref, out_traced))
+
+    def test_core_explicit_state_train_step(self):
+        model_ref, tokens, labels, loss_fn = self._make_mlp()
+        model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        model_test.load_state_dict(model_ref.state_dict())
+
+        state_ref = extract_module_state(model_ref)
+        state_test = extract_module_state(model_test)
+        train_step = make_stateless_train_step(model_ref, loss_fn)
+        traced = minimal_fx_tracer(train_step)(state_ref, tokens, labels)
+
+        logits_ref = model_ref(tokens)
+        loss_ref = loss_fn(logits_ref, labels)
+        loss_ref.backward()
+        grads_ref = [p.grad.clone() for p in model_ref.parameters()]
+
+        wrapped = run_traced(traced, state_test, tokens, labels)
+        loss_tr = wrapped[0]
+        grads_tr = wrapped[1:]
+
+        self.assertTrue(torch.equal(loss_ref, loss_tr))
+        for gr, gt in zip(grads_ref, grads_tr, strict=True):
+            self.assertTrue(torch.equal(gr, gt))
 
     def test_additional_module_arg_raises(self):
         def forward(model, other_model, tokens):
@@ -231,7 +287,7 @@ class TestTraceModule(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
         with self.assertRaises(ValueError, msg="Additional nn.Module"):
-            minimal_fx_tracer(forward)(model, other_model, tokens)
+            trace_train_step(forward)(model, other_model, tokens)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -285,14 +341,14 @@ class TestTraceDTensor(unittest.TestCase):
         def forward(model, tokens):
             return model(tokens)
 
-        traced = minimal_fx_tracer(forward)(model, tokens_dt)
+        traced = trace_train_step(forward)(model, tokens_dt)
         has_subclass = any(
             layout.meta is not None for layout in traced.input_subclass_layouts.values()
         )
         self.assertTrue(has_subclass)
 
         out_eager = model(tokens_dt)
-        wrapped = run_traced(traced, model, tokens_dt)
+        wrapped = run_traced_train_step(traced, model, tokens_dt)
         self.assertTrue(torch.equal(out_eager.full_tensor(), wrapped.full_tensor()))
 
     def test_dtensor_train_step(self):
@@ -314,14 +370,14 @@ class TestTraceDTensor(unittest.TestCase):
         labels_dt = DTensor.from_local(labels, mesh, [Replicate()])
 
         train_step = make_train_step(get_loss)
-        traced = minimal_fx_tracer(train_step)(model_ref, tokens_dt, labels_dt)
+        traced = trace_train_step(train_step)(model_ref, tokens_dt, labels_dt)
 
         logits_ref = model_ref(tokens_dt)
         loss_ref = get_loss(logits_ref, labels_dt)
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        wrapped = run_traced(traced, model_test, tokens_dt, labels_dt)
+        wrapped = run_traced_train_step(traced, model_test, tokens_dt, labels_dt)
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -347,7 +403,7 @@ class TestMetadataPropagation(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
+        traced = trace_train_step(train_step)(model, tokens, labels)
 
         # Collect seq_nr values from all call_function nodes
         seq_nrs = []
@@ -375,7 +431,7 @@ class TestMetadataPropagation(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
+        traced = trace_train_step(train_step)(model, tokens, labels)
         gm = traced.gm
 
         # Manually set custom metadata on the first fwd node for each seq_nr
@@ -412,7 +468,7 @@ class TestMetadataPropagation(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = minimal_fx_tracer(train_step)(model, tokens, labels)
+        traced = trace_train_step(train_step)(model, tokens, labels)
 
         # Find backward nodes: nodes sharing a seq_nr with an earlier (forward) node
         seq_nr_first: dict[int, torch.fx.Node] = {}
@@ -492,7 +548,7 @@ class TestTraceModels(unittest.TestCase):
             else contextlib.nullcontext()
         )
         with maybe_regional_inductor:
-            traced = minimal_fx_tracer(train_step)(model_ref, *fwd_args, labels)
+            traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
         if check_collective_ops:
             ag = sum(
@@ -524,7 +580,7 @@ class TestTraceModels(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            wrapped = run_traced(traced, model_test, *fwd_args, labels)
+            wrapped = run_traced_train_step(traced, model_test, *fwd_args, labels)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -703,7 +759,7 @@ class TestTraceModels(unittest.TestCase):
             def forward(model, tokens, attn_masks):
                 return model(tokens, attn_masks)
 
-            traced = minimal_fx_tracer(forward)(model, tokens, attn_masks)
+            traced = trace_train_step(forward)(model, tokens, attn_masks)
 
         flex_nodes = [
             n
@@ -1326,7 +1382,7 @@ class TestTraceFSDP(FSDPTest):
             else contextlib.nullcontext()
         )
         with maybe_regional_inductor:
-            traced = minimal_fx_tracer(train_step)(model_ref, *fwd_args, labels)
+            traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
         ag = sum(
             1
@@ -1355,7 +1411,7 @@ class TestTraceFSDP(FSDPTest):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            wrapped = run_traced(traced, model_test, *fwd_args, labels)
+            wrapped = run_traced_train_step(traced, model_test, *fwd_args, labels)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -1433,6 +1489,124 @@ class TestTraceFSDP(FSDPTest):
             config,
             attn_masks=attn_masks,
             use_regional_inductor=True,
+        )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestGraphSACPeakMemory(unittest.TestCase):
+    DEVICE = "cuda"
+
+    def setUp(self):
+        torch.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+
+    def tearDown(self):
+        torch.use_deterministic_algorithms(False)
+
+    def test_llama_1b_peak_memory(self):
+        """Traced+AC peak memory stays within 10% of eager+AC for Llama 1B."""
+        from torchtitan.config import ActivationCheckpointConfig
+        from torchtitan.distributed.activation_checkpoint import apply_ac
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_ac_regions,
+        )
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        config = llama3_configs["1B"]()
+        batch_size, seq_len = 2, 2048
+        dtype = torch.bfloat16
+        num_steps = 3
+        tokens = torch.randint(
+            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
+        )
+        labels = torch.randint(
+            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
+        )
+
+        ref_model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
+        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
+        del ref_model
+        torch.cuda.empty_cache()
+
+        def make_model():
+            model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
+            with torch.no_grad():
+                model.init_weights(buffer_device=torch.device(self.DEVICE))
+            model.load_state_dict(state)
+            return model
+
+        def run_steps(model, step_fn):
+            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+            step_results = []
+            torch.cuda.reset_peak_memory_stats()
+            for _ in range(num_steps):
+                loss, grads = step_fn(model)
+                step_results.append(
+                    (loss.detach().cpu(), [g.detach().cpu().clone() for g in grads])
+                )
+                for p, g in zip(model.parameters(), grads, strict=True):
+                    p.grad = g
+                opt.step()
+                opt.zero_grad()
+            peak = torch.cuda.max_memory_allocated() / 1e9
+            del opt
+            return step_results, peak
+
+        def eager_step(model):
+            logits = model(tokens)
+            loss = get_loss(logits, labels)
+            loss.backward()
+            grads = [p.grad.clone() for p in model.parameters()]
+            return loss, grads
+
+        def traced_step_factory(model):
+            annotate_ac_regions(model)
+            train_step = make_train_step(get_loss)
+            traced = trace_train_step(train_step)(model, tokens, labels)
+            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+
+            def step(model):
+                result = run_traced_train_step(traced, model, tokens, labels)
+                return result[0], result[1:]
+
+            return step
+
+        model_eager = make_model()
+        apply_ac(model_eager, ActivationCheckpointConfig(mode="selective"))
+        eager_results, peak_eager = run_steps(model_eager, eager_step)
+        del model_eager
+        torch.cuda.empty_cache()
+
+        model_traced = make_model()
+        traced_step = traced_step_factory(model_traced)
+        traced_results, peak_traced = run_steps(model_traced, traced_step)
+        del model_traced
+        torch.cuda.empty_cache()
+
+        for step, ((el, eg), (tl, tg)) in enumerate(
+            zip(eager_results, traced_results, strict=True)
+        ):
+            self.assertTrue(
+                torch.equal(el, tl),
+                f"Step {step}: eager loss={el.item():.6f} vs traced loss={tl.item():.6f}",
+            )
+            for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
+                self.assertTrue(
+                    torch.equal(ge, gt),
+                    f"Step {step}: grad[{i}] mismatch",
+                )
+
+        ratio = peak_traced / peak_eager
+        self.assertLess(
+            ratio,
+            1.1,
+            f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
+            f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
         )
 
 

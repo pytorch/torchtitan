@@ -388,7 +388,7 @@ def inductor_decomposition_pass(
             f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
         )
 
-    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders, strict=True):
         # Copy all metadata from original to decomposed
         for key, value in orig.meta.items():
             if key not in decomp.meta:
