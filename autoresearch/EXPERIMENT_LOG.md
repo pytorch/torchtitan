@@ -243,3 +243,15 @@ This file records every experiment attempted during the autoresearch loop.
 - **Idea**: Skip collective bucketing, only reorder for overlap. Eliminates ~282 clone ops from bucketing. Multi-warmup CUDAGraph wrapper to stabilize NCCL capture.
 - **Result**: Inconsistent: 3/4 runs give ~7350 tps (43% MFU), 1/4 gives 5798 tps. Multi-warmup with bucketing regresses to 6389 tps.
 - **Lessons**: Without bucketing, CUDAGraph capture is non-deterministic (842 individual NCCL collectives have variable timing). Multi-warmup CUDAGraph fragments the memory pool, reducing CUDAGraph efficiency. Bucketing provides capture stability at the cost of 282 extra clone ops.
+
+## custom_ops bucket mode — discard (xxxxxxx)
+
+- **Idea**: Use `bucket_mode="custom_ops"` instead of default in `schedule_overlap_bucketing`. custom_ops mode uses opaque `_foreach_copy_` ops for bucketing instead of traced cat+copy sequences, which avoids intermediate buffers and should be more memory-efficient.
+- **Result**: tps=6978, MFU=40.87%, memory=49.0GiB.
+- **Lessons**: Within noise of baseline CUDAGraph (6971). custom_ops mode works correctly but doesn't provide measurable tps improvement. The default bucket mode's traced operations are already efficiently handled by CUDAGraph replay.
+
+## NCCL_MAX_NCHANNELS=32 — discard (xxxxxxx)
+
+- **Idea**: Tune NCCL channel count via `NCCL_MAX_NCHANNELS=32` environment variable (default is typically 8-16 depending on algorithm). More channels increases bandwidth utilization but adds overhead per collective.
+- **Result**: tps=6003, MFU=35.16%, memory=49.0GiB. -14% regression.
+- **Lessons**: More NCCL channels significantly hurts performance in this CUDAGraph-captured graph. Each extra channel adds kernel overhead that compounds across 421 AG + 421 RS + 68 AR collectives. The default NCCL channel count is already well-tuned for NVLink topology. Environment-level NCCL tuning is unlikely to help — the bottleneck is elsewhere.
