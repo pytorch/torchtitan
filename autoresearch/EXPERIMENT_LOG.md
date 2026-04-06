@@ -159,3 +159,44 @@ This file records every experiment attempted during the autoresearch loop.
   - Total improvement over baseline: **+64.1% (4247→6971)**.
   - Crossed **40% MFU** barrier.
 - **Lessons**: CUDAGraph is the single highest-impact optimization. The float input blocker was trivial to fix (1 constant, 1 pass). The detach trick for `requires_grad` tensors is critical — CUDAGraphWrapper's `copy_()` fails on leaf variables with grad. In aot_fx_trace mode, detaching at the graph boundary is safe because autograd is handled internally.
+
+## CUDAGraph static input optimization — keep (14ba6512)
+
+- **Idea**: Mark parameter tensors as static in CUDAGraphWrapper to skip unnecessary copy_() for 291 params each step.
+- **Changes**: Identify static inputs by `dtype.is_floating_point` (params are fp32, batch data is int64). Example_inputs are FakeTensors so `requires_grad` isn't reliable.
+- **Result**: tps=7305/6669 (avg 6987), within noise of non-static (avg 7039). Memory unchanged. Numerics pass (bitwise identical over 10 deterministic steps).
+- **Analysis**: Copy overhead for 291 params is ~4ms per step (0.4% of step time). Negligible improvement but technically cleaner.
+- **Lessons**: FakeTensors don't preserve `requires_grad`, so use dtype as discriminator. Static params reduce copy overhead but it's too small to measure.
+
+## CUDAGraph without autobucketing — discard (xxxxxxx)
+
+- **Idea**: With CUDAGraph eliminating launch overhead, autobucketing's concat/split overhead may outweigh its overlap benefit.
+- **Changes**: Commented out `autobucketing_reordering_pass`.
+- **Result**: tps=7080/6585 (avg 6833), memory=46.90 GiB. -2 GiB memory but ~3% lower tps.
+- **Analysis**: Autobucketing still helps with CUDAGraph because it reorders ops for comm/compute overlap (not just for launch batching). The 2 GiB memory savings comes from not needing bucketing concat/split buffers.
+- **Lessons**: Autobucketing's value with CUDAGraph is from overlap scheduling, not from reducing launch overhead.
+
+## Reorder-only (no bucketing) + CUDAGraph — discard (xxxxxxx)
+
+- **Idea**: Keep the reordering (comm/compute overlap) but disable collective bucketing.
+- **Changes**: `collective_bucketing=False` in `schedule_overlap_bucketing`.
+- **Result**: tps=7096, memory=49.58 GiB. Within noise, slightly more memory than full bucketing.
+- **Lessons**: All three variants (full bucketing, reorder-only, no scheduling) produce similar tps with CUDAGraph. The variance is too high to distinguish.
+
+## bf16 all-gather communication — discard (xxxxxxx)
+
+- **Idea**: Move fp32→bf16 conversion before all-gather to halve FSDP communication volume.
+- **Result**: No candidates found — all-gathers already communicate in bf16. SimpleFSDP handles mixed precision at the FSDP level.
+- **Lessons**: SimpleFSDP already stores shards in bf16 and all-gathers in bf16. No further optimization needed.
+
+## Aggressive prefetch params + CUDAGraph — discard (xxxxxxx)
+
+- **Idea**: With CUDAGraph, memory fragmentation isn't a concern. Increase max_compute_pre_fetch=500, max_coll_distance=500, max_in_flight_gb=20.
+- **Result**: tps=7301. Within noise.
+- **Lessons**: With CUDAGraph, the scheduler's decisions are baked into the recorded graph. More aggressive prefetching doesn't help because the execution order is already fixed.
+
+## torch.compile on traced graph — crash (xxxxxxx)
+
+- **Idea**: Apply torch.compile(mode='reduce-overhead') to the graph for Inductor kernel fusion + CUDAGraph.
+- **Result**: Crash — `RuntimeError: Found a custom (non-ATen) operator whose output has alias annotations: _c10d_functional::all_gather_into_tensor_out`.
+- **Lessons**: Inductor can't compile graphs containing NCCL collective ops. The bucketing pass introduces out-variant collectives that Inductor can't functionalize. Would need regional compilation that excludes collectives.
