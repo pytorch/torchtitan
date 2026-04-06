@@ -50,8 +50,34 @@ def apply_default_graph_passes(
     """
     gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
 
+    gm = remove_detach_pass(gm, example_inputs)
     gm = autobucketing_reordering_pass(gm, example_inputs)
 
+    return gm
+
+
+def remove_detach_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity-like detach nodes from the graph.
+
+    In a traced graph, `aten.detach.default` is semantically a no-op (there is
+    no autograd context). Replacing each detach node with its input reduces
+    graph size and may improve scheduling.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if (
+            node.op == "call_function"
+            and node.target == torch.ops.aten.detach.default
+        ):
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
+            count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} detach nodes")
     return gm
 
 
