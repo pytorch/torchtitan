@@ -52,6 +52,7 @@ def apply_default_graph_passes(
 
     gm = remove_detach_pass(gm, example_inputs)
     gm = remove_identity_view_pass(gm, example_inputs)
+    gm = remove_identity_slice_pass(gm, example_inputs)
     gm = autobucketing_reordering_pass(gm, example_inputs)
 
     return gm
@@ -119,6 +120,43 @@ def remove_identity_view_pass(
         gm.graph.lint()
         gm.recompile()
         logger.info(f"Removed {count} identity view/reshape nodes")
+    return gm
+
+
+def remove_identity_slice_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity slice ops that select the full dimension.
+
+    `aten.slice.Tensor(input, dim, 0, end)` where end >= input.size(dim)
+    is a no-op — it returns the full tensor along that dimension.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if (
+            node.op != "call_function"
+            or node.target != torch.ops.aten.slice.Tensor
+        ):
+            continue
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        input_val = input_node.meta.get("val")
+        if input_val is None or not hasattr(input_val, "shape"):
+            continue
+        # slice.Tensor(input, dim=0, start=0, end=9223372036854775807, step=1)
+        dim = node.args[1] if len(node.args) > 1 else 0
+        start = node.args[2] if len(node.args) > 2 else 0
+        end = node.args[3] if len(node.args) > 3 else input_val.shape[dim]
+        step = node.args[4] if len(node.args) > 4 else 1
+        if start == 0 and step == 1 and end >= input_val.shape[dim]:
+            node.replace_all_uses_with(input_node)
+            gm.graph.erase_node(node)
+            count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} identity slice nodes")
     return gm
 
 
