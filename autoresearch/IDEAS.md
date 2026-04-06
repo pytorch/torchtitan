@@ -31,3 +31,9 @@
 - [x] **Remove transpose pairs**: Removed 225 pairs (450 nodes). +1.2% tps (5018→5079).
   - @claude, 2026-04-06 00:42 — 40% of transposes are canceling pairs from fwd/bwd graph.
 - [ ] **Remove identity clone ops**: 68 clone ops — some may be removable in traced graph where in-place mutation is not possible.
+- [x] **Split-cat cancellation**: Remove split→cat identity pairs. No-op — 0 pairs found in FSDP/TP graph.
+  - @claude, 2026-04-06 02:18 — 131 split + 130 cat ops serve different structural purposes, not invertible pairs.
+- [x] **CUDAGraph with float constant folding**: Inline scalar float inputs as constants, then wrap with CUDAGraph. **+35% tps (5165→6971). Crossed 40% MFU.**
+  - @claude, 2026-04-06 02:35 — Only 1 float input (32768.0 at index 585). Detach trick fixes requires_grad issue.
+- [ ] **CUDAGraph static input optimization**: Mark parameter inputs as static in CUDAGraph to skip copying ~294 tensors per step.
+- [ ] **Op fusion via triton**: Write custom triton kernels for SwiGLU (silu*mul, 32 instances) or RMSNorm patterns.

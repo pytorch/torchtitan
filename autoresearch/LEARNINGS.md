@@ -25,6 +25,7 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 - **Collapse view chains**: +1.5% tps (4959→5018). Collapsed 323 single-use intermediate view/reshape chains. Combined with identity removal, 22% of original graph simplified.
 - **Remove transpose pairs**: +1.2% tps (5018→5079). Removed 225 canceling t(t(x)) pairs (450 nodes). Common in fwd+bwd traced graphs from weight transpose patterns.
 - **Aggressive overlap scheduling**: +1.7% tps (5079→5165). `compute_overlap_multipler=2.0` in autobucketing. Default is too conservative for this workload.
+- **CUDAGraph with float constant folding**: **+35% tps (5165→6971).** Single highest-impact optimization. aot_fx_trace lifts 1 float scalar (32768.0) as a graph input, which CUDAGraphWrapper rejects. Inlining it as a literal + detaching tensor args fixes both blockers. Eliminates kernel launch overhead for ~8437+ node graph.
 
 ## What Doesn't Work
 
@@ -33,7 +34,7 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 - **Regional Inductor (no annotations)**: No-op without explicit `compile_with_inductor` annotations on graph nodes. aot_fx_trace mode doesn't annotate.
 - **Full Inductor**: Crashes without inductor decomposition pass. Would need significant plumbing.
 - **Regional Inductor on fwd+bwd graph**: Dependency cycles are fundamental — backward regions depend on forward regions in complex, non-sequential ways. Can't partition the full fwd+bwd graph.
-- **CUDAGraph on full graph**: Float scalar inputs from aot_fx_trace mode are not supported by CUDAGraphWrapper.
+- **CUDAGraph on full graph (without float folding)**: Float scalar inputs from aot_fx_trace mode are not supported by CUDAGraphWrapper. Fixed by `materialize_float_constants_pass`.
 - **Autobucketing memory params**: Scheduler already uses memory budget effectively — more budget doesn't help.
 - **enable_fusion_regions**: Doesn't change scheduling significantly for this graph.
 - **Roundtrip dtype removal**: No roundtrips exist — all 842 _to_copy ops are genuine conversions.

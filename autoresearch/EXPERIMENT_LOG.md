@@ -135,3 +135,27 @@ This file records every experiment attempted during the autoresearch loop.
 - **Result**: tps=5142/5187 (avg 5165), MFU=30.11/30.37%, memory=49.0GiB. Numerics pass.
 - **Analysis**: +1.7% tps over previous (5079→5165). The default multipler (1.0) was too conservative — it underestimated how much compute could be overlapped. 2.0× tells the scheduler that compute takes twice as long as estimated, so it schedules more collectives concurrently. Crossed **30% MFU**.
 - **Lessons**: The default compute estimation in autobucketing may undercount the time for certain ops. Increasing the overlap aggressiveness helps when there's enough compute to hide communication latency. This is model-size and parallelism-config dependent.
+
+## Split-cat cancellation — discard (xxxxxxx)
+
+- **Idea**: Remove split→cat identity patterns where cat reassembles all split outputs in order along the same dimension. 131 split + 130 cat ops could have matching pairs.
+- **Changes**: Added `remove_split_cat_pairs_pass` after transpose pair removal.
+- **Result**: No-op — zero split→cat identity pairs found. tps=5129 (noise).
+- **Analysis**: The 131 split and 130 cat ops serve different purposes in the graph (splits for FSDP param extraction, cats for gradient assembly). None are direct inverses of each other.
+- **Lessons**: Split-cat cancellation is not applicable to FSDP/TP traced graphs — the ops are structurally necessary.
+
+## CUDAGraph with float constant folding — keep (pending commit)
+
+- **Idea**: Enable CUDAGraph for the full fwd+bwd graph by fixing the float scalar input blocker. aot_fx_trace lifts Python scalar constants (e.g. 32768.0) as graph placeholder inputs, which CUDAGraphWrapper rejects. Inline these constants into the graph to remove them from inputs.
+- **Changes**: Added two new passes:
+  1. `materialize_float_constants_pass`: Finds float placeholder inputs, replaces all uses with the literal float value, erases the placeholder. Stores float indices on `gm._materialized_float_indices`.
+  2. `cudagraph_scalar_folded_pass`: Wraps `gm.forward` with CUDAGraphWrapper using filtered example_inputs (no floats). Installs outer wrapper that strips float args and detaches tensor args before CUDAGraph.
+  - Detaching is safe because aot_fx_trace includes backward in the graph — no external autograd needed.
+  - Only 1 float input found: index 585, value 32768.0 (loss normalization constant).
+  - All other non-tensor inputs are DeviceMesh (291) and integers, which CUDAGraphWrapper handles.
+- **Result**: tps=6952/6989 (avg 6971), MFU=40.71/40.92%, memory=48.95GiB. Numerics pass (all 4 bitwise deterministic tests pass including Llama3 and DeepSeek-v3).
+- **Analysis**: **+35.0% tps over previous best** (5165→6971). CUDAGraph eliminates kernel launch overhead for the entire fwd+bwd graph (~8437+ nodes after autobucketing). With ~10μs per kernel launch, this saves ~84ms per step. At ~1.59s per step (at 5165 tps), this is ~5.3% from launch overhead alone. The remaining 30% improvement likely comes from CUDAGraph's ability to batch CUDA API calls and optimize GPU scheduling.
+  - Currently uses `static_input_indices=[]` (no static inputs), meaning all 585 inputs are copied every step. This is suboptimal for parameters (~294 tensors) which are static. Optimizing this could yield further gains.
+  - Total improvement over baseline: **+64.1% (4247→6971)**.
+  - Crossed **40% MFU** barrier.
+- **Lessons**: CUDAGraph is the single highest-impact optimization. The float input blocker was trivial to fix (1 constant, 1 pass). The detach trick for `requires_grad` tensors is critical — CUDAGraphWrapper's `copy_()` fails on leaf variables with grad. In aot_fx_trace mode, detaching at the graph boundary is safe because autograd is handled internally.

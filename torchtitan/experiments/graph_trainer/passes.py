@@ -57,6 +57,9 @@ def apply_default_graph_passes(
     gm = remove_transpose_pairs_pass(gm, example_inputs)
     gm = autobucketing_reordering_pass(gm, example_inputs)
 
+    gm = materialize_float_constants_pass(gm, example_inputs)
+    gm = cudagraph_scalar_folded_pass(gm, example_inputs)
+
     return gm
 
 
@@ -255,6 +258,241 @@ def collapse_view_chains_pass(
     return gm
 
 
+def materialize_float_constants_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Inline float scalar graph inputs as constants in the graph.
+
+    aot_fx_trace lifts Python scalar constants (e.g. 32768.0 for loss normalization)
+    as graph placeholder inputs. This prevents CUDAGraph wrapping because
+    CUDAGraphWrapper rejects float inputs. This pass inlines the float values
+    directly into the graph ops that use them, removing the float placeholders.
+
+    The graph signature changes (fewer inputs), so a wrapper is installed on
+    gm.forward that strips the float args from the caller's argument list.
+    """
+    if example_inputs is None:
+        return gm
+
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    if len(placeholders) != len(example_inputs):
+        logger.warning(
+            f"Placeholder/input count mismatch: {len(placeholders)} vs {len(example_inputs)}"
+        )
+        return gm
+
+    float_indices = []
+    for i, (ph, inp) in enumerate(zip(placeholders, example_inputs)):
+        if not isinstance(inp, float):
+            continue
+
+        # Replace all uses of this placeholder with the literal float value
+        for user in list(ph.users):
+            new_args = tuple(inp if arg is ph else arg for arg in user.args)
+            user.args = new_args
+            new_kwargs = {
+                k: (inp if v is ph else v) for k, v in user.kwargs.items()
+            }
+            user.kwargs = new_kwargs
+        gm.graph.erase_node(ph)
+        float_indices.append(i)
+
+    if not float_indices:
+        return gm
+
+    gm.graph.lint()
+    gm.recompile()
+
+    # Store float indices for downstream passes (e.g. CUDAGraph wrapping)
+    # Don't install a wrapper here — let the CUDAGraph pass handle argument filtering
+    gm._materialized_float_indices = float_indices
+    logger.info(
+        f"Materialized {len(float_indices)} float constant(s) into graph, "
+        f"removed from inputs: indices {float_indices}"
+    )
+    return gm
+
+
+def cudagraph_scalar_folded_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Wrap the graph with CUDAGraph after float constants have been folded.
+
+    Must be applied AFTER materialize_float_constants_pass. All graph inputs
+    should now be tensors, DeviceMesh objects, or integers (no floats).
+    """
+    from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
+
+    # Get float indices from materialize_float_constants_pass
+    float_indices = getattr(gm, "_materialized_float_indices", [])
+    float_index_set = frozenset(float_indices)
+
+    # Filter example_inputs to match the modified graph (no float placeholders)
+    if example_inputs is not None:
+        filtered_examples = tuple(
+            inp
+            for i, inp in enumerate(example_inputs)
+            if i not in float_index_set
+        )
+    else:
+        filtered_examples = ()
+
+    # No static inputs — all inputs will be copied each step.
+    # Suboptimal for params but safe. See cudagraph_full_graph_pass comment.
+    static_input_indices = []
+
+    # CUDAGraph wraps the recompiled forward (which expects no float args)
+    graph_forward = gm.forward
+    cuda_wrapped = CUDAGraphWrapper(
+        graph_forward, filtered_examples, static_input_indices
+    )
+
+    # Install outer wrapper: strip float args and detach tensors before CUDAGraph.
+    # Detaching is safe in aot_fx_trace mode because the backward pass is already
+    # part of the traced graph — no external autograd is needed. Without detach,
+    # CUDAGraphWrapper's in-place copy_() fails on parameters with requires_grad=True.
+    if float_index_set:
+
+        def final_forward(*args):
+            filtered = tuple(
+                a.detach() if isinstance(a, torch.Tensor) else a
+                for i, a in enumerate(args)
+                if i not in float_index_set
+            )
+            return cuda_wrapped(*filtered)
+
+        gm.forward = final_forward
+    else:
+
+        def final_forward(*args):
+            detached = tuple(
+                a.detach() if isinstance(a, torch.Tensor) else a for a in args
+            )
+            return cuda_wrapped(*detached)
+
+        gm.forward = final_forward
+
+    logger.info(
+        f"Wrapped graph with CUDAGraph ({len(filtered_examples)} inputs, "
+        f"{len(static_input_indices)} static, "
+        f"{len(float_indices)} float(s) folded)"
+    )
+    return gm
+
+
+def _log_scalar_inputs(gm: torch.fx.GraphModule, example_inputs: tuple) -> None:
+    """Diagnostic: log all non-tensor graph inputs with their types and values."""
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    scalar_info = []
+    for i, (ph, inp) in enumerate(zip(placeholders, example_inputs)):
+        if not isinstance(inp, torch.Tensor):
+            scalar_info.append(f"  [{i}] {ph.name}: type={type(inp).__name__}, value={inp}")
+    if scalar_info:
+        logger.info(
+            f"Non-tensor graph inputs ({len(scalar_info)} of {len(placeholders)}):\n"
+            + "\n".join(scalar_info)
+        )
+    else:
+        logger.info("All graph inputs are tensors")
+
+
+def remove_split_cat_pairs_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove split→cat identity patterns where cat reassembles all split outputs.
+
+    When split(x, sizes, dim) produces N pieces and cat([piece_0, ..., piece_N-1], dim)
+    reassembles them in order along the same dimension, the result is x. Replace the
+    cat output with the split input, then clean up dead getitem/split nodes.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target != torch.ops.aten.cat.default:
+            continue
+
+        # cat(tensors_list, dim=0)
+        cat_inputs = node.args[0]
+        cat_dim = node.args[1] if len(node.args) > 1 else 0
+
+        if not isinstance(cat_inputs, (list, tuple)) or len(cat_inputs) < 2:
+            continue
+
+        # Check if all cat inputs are getitems from the same split node
+        split_node = None
+        indices = []
+        valid = True
+        for cat_input in cat_inputs:
+            if not isinstance(cat_input, torch.fx.Node):
+                valid = False
+                break
+            if (
+                cat_input.op != "call_function"
+                or cat_input.target != operator.getitem
+            ):
+                valid = False
+                break
+            source = cat_input.args[0]
+            idx = cat_input.args[1]
+            if split_node is None:
+                split_node = source
+            elif source != split_node:
+                valid = False
+                break
+            indices.append(idx)
+
+        if not valid or split_node is None:
+            continue
+
+        # Verify the source is a split op
+        if split_node.op != "call_function" or split_node.target not in (
+            torch.ops.aten.split.Tensor,
+            torch.ops.aten.split_with_sizes.default,
+        ):
+            continue
+
+        # Indices must be 0, 1, 2, ... in order
+        if indices != list(range(len(indices))):
+            continue
+
+        # Split dim must match cat dim
+        split_dim = split_node.args[2] if len(split_node.args) > 2 else 0
+        if split_dim != cat_dim:
+            continue
+
+        # ALL getitems from split must be included (not a subset)
+        num_getitems = sum(
+            1
+            for u in split_node.users
+            if u.op == "call_function" and u.target == operator.getitem
+        )
+        if len(indices) != num_getitems:
+            continue
+
+        # This is an identity: cat(split(x)) = x
+        original = split_node.args[0]
+        node.replace_all_uses_with(original)
+        gm.graph.erase_node(node)
+
+        # Clean up dead getitem nodes
+        for cat_input in cat_inputs:
+            if isinstance(cat_input, torch.fx.Node) and len(cat_input.users) == 0:
+                gm.graph.erase_node(cat_input)
+
+        # Clean up split if no remaining users
+        if len(split_node.users) == 0:
+            gm.graph.erase_node(split_node)
+
+        count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} split→cat identity pairs")
+    else:
+        logger.info("No split→cat identity pairs found")
+    return gm
+
+
 def autobucketing_reordering_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
@@ -361,6 +599,21 @@ def remove_conj_view_as_real_pass(
         gm.graph.lint()
         gm.recompile()
         logger.info(f"Removed {count} double-conjugate pairs")
+    return gm
+
+
+def constant_fold_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Apply Inductor's constant folding pass to simplify uniform values."""
+    from torch._inductor.fx_passes.joint_graph import constant_fold_uniform_value
+
+    try:
+        constant_fold_uniform_value(gm)
+        gm.recompile()
+        logger.info("Applied constant_fold_uniform_value pass")
+    except Exception as e:
+        logger.warning(f"constant_fold_uniform_value failed: {e}")
     return gm
 
 
