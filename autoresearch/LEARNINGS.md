@@ -23,6 +23,7 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 - **Remove identity view/reshape ops**: +9.5% tps (4427→4849). Removed 1522 nodes where shape_in==shape_out. Unlike DCE (which removes dead nodes and disrupts bucketing), identity view removal removes noise nodes that dilute the scheduler's view of real compute/comm patterns. Apply before bucketing.
 - **Remove identity slice ops**: +2.2% tps (4849→4959). Removed 453 full-dimension slices. All slices in the traced graph were identity. Cumulative identity removal (detach+view+slice = 2171 nodes = 19% of graph) makes autobucketing much more effective.
 - **Collapse view chains**: +1.5% tps (4959→5018). Collapsed 323 single-use intermediate view/reshape chains. Combined with identity removal, 22% of original graph simplified.
+- **Remove transpose pairs**: +1.2% tps (5018→5079). Removed 225 canceling t(t(x)) pairs (450 nodes). Common in fwd+bwd traced graphs from weight transpose patterns.
 
 ## What Doesn't Work
 
