@@ -351,3 +351,43 @@ This file records every experiment attempted during the autoresearch loop.
 - **Idea**: Reduce maximum CUDA allocation split size to improve cache behavior.
 - **Result**: tps=6246, memory=56.1GiB (+7GiB). Regression on both metrics.
 - **Lessons**: Smaller split sizes cause more memory fragmentation and force the allocator to use more segments. This hurts both performance and memory.
+
+## Bucketing + CUDAGraph only (no simplification) — discard (xxxxxxx)
+
+- **Idea**: Ablation: remove all simplification passes (detach, identity view, slice, chain collapse, transpose), keep only bucketing + CUDAGraph. Test if simplification contributes with CUDAGraph.
+- **Changes**: Commented out all simplification passes, kept `autobucketing_reordering_pass`, `materialize_float_constants_pass`, `cudagraph_scalar_folded_pass`.
+- **Result**: tps=7291/5778 (high variance — system contention), memory=50.92GiB (+2GiB). Baseline check: 6656 tps.
+- **Analysis**: First run (7291) is within noise of full pipeline. Second run (5778) anomalously low due to system load. Memory increased ~2GiB (expected: detach removal saves memory). Simplification passes contribute ~2GiB memory savings but unclear tps impact.
+- **Lessons**: With CUDAGraph, simplification passes primarily save memory (~2GiB from detach removal), not tps. High system variance makes small differences unmeasurable.
+
+## torch.compile reduce-overhead on FX graph — crash (xxxxxxx)
+
+- **Idea**: Replace manual bucketing + CUDAGraph with `torch.compile(mode="reduce-overhead")` for automatic kernel fusion + CUDAGraph. Inductor should graph-break at collectives and compile compute portions.
+- **Changes**: Added `torch_compile_pass` that calls `torch.compile(gm, mode="reduce-overhead", fullgraph=False)`.
+- **Result**: Crash — `RecursionError: maximum recursion depth exceeded` in `torch._dynamo.trace_rules`.
+- **Analysis**: Dynamo tries to trace the FX GraphModule's compiled forward (8000+ aten ops). Each op triggers Dynamo's rule lookup, causing deep recursion. Fundamentally wrong approach: torch.compile is designed for Python code, not for replaying pre-traced FX graphs.
+- **Lessons**: torch.compile on FX GraphModules is double-tracing and doesn't work for large graphs. Need to use compile_fx_inner (Inductor codegen) directly, but that requires decomposed ops.
+
+## compute_overlap_multipler=1.5 — discard (xxxxxxx)
+
+- **Idea**: Test midpoint between 1.0 (default) and 2.0 (committed) for overlap scheduling with CUDAGraph.
+- **Changes**: Changed `compute_overlap_multipler` from 2.0 to 1.5 in `autobucketing_reordering_pass`.
+- **Result**: tps=7295, MFU=42.72%, memory=48.97GiB.
+- **Analysis**: Within noise of 2.0 (full pipeline ~6971 avg). With CUDAGraph, the overlap multiplier's effect is minimal because the kernel order is fixed during replay.
+- **Lessons**: The overlap multiplier matters more for eager execution (pre-CUDAGraph). With CUDAGraph, any reasonable multiplier (1.0-3.0) produces similar results.
+
+## Regional Inductor on SwiGLU (32 pairs) — crash (xxxxxxx)
+
+- **Idea**: Annotate 32 silu+mul (SwiGLU) patterns with `compile_with_inductor` for regional Inductor fusion. Each silu+mul is a pure forward pattern with no backward dependencies.
+- **Changes**: Added `annotate_swiglu_for_inductor_pass` + called `regional_inductor_pass`.
+- **Result**: Crash — `AssertionError: Invalid partition, found dependency cycles`.
+- **Analysis**: regional_inductor's `_RegionScooper` tries to merge ALL 32 annotated pairs into one region. Even though individual silu+mul pairs are in forward-only code, merging scattered pairs across the fwd+bwd graph creates partition-level cycles.
+- **Lessons**: regional_inductor cannot compile ANY scattered annotations in fwd+bwd graphs. The partitioner merges all annotated nodes, which inevitably creates cycles when the annotations span multiple transformer layers.
+
+## Regional Inductor on single silu+mul pair — crash (xxxxxxx)
+
+- **Idea**: Test with absolute minimum: annotate ONE silu+mul pair. If this works, we can compile each pair independently.
+- **Changes**: Modified to annotate only the first silu+mul pair found.
+- **Result**: Same crash — dependency cycles.
+- **Analysis**: Even a single 2-node annotation creates a cycle. The issue is fundamental: in fwd+bwd graphs, backward nodes consume both the partition's outputs AND the same inputs the partition uses. When the partitioner tries to extract even {silu, mul}, it sees: (1) silu_output used by backward_silu_grad (outside partition), (2) backward_silu_grad also uses x (the partition's input). This creates a partition-level "cycle" even though the data-flow graph is acyclic.
+- **Lessons**: **regional_inductor is completely incompatible with fwd+bwd traced graphs.** The fwd+bwd data dependency structure (backward nodes sharing inputs with forward nodes) creates unavoidable partition-level cycles. This is a fundamental limitation, not a matter of annotation strategy. Kernel fusion in fwd+bwd graphs requires a different approach (e.g., manual graph splitting with `split_module`, or custom Triton kernels injected as custom ops).
