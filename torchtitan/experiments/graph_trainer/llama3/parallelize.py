@@ -101,6 +101,8 @@ def parallelize_llama(
             tp_mesh,
             enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            enable_cp=parallel_dims.cp_enabled,
+            enable_sp=parallelism.enable_sequence_parallel,
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
