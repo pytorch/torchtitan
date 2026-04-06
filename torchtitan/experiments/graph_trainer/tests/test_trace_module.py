@@ -182,24 +182,6 @@ class TestTraceModule(unittest.TestCase):
             for gr, gt in zip(grads_ref, grads_tr, strict=True):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
-    def test_mismatched_module_raises(self):
-        """Executing with a module that has different params than at trace time raises."""
-        model, tokens, labels, loss_fn = self._make_mlp()
-
-        def forward(model, tokens):
-            return model(tokens)
-
-        traced = minimal_fx_tracer(forward)(model, tokens)
-
-        # A model with a different architecture (extra layer → different FQNs).
-        different_model = nn.Sequential(
-            nn.Embedding(256, 64),
-            nn.Linear(64, 256),
-        ).to(device=self.DEVICE, dtype=self.DTYPE)
-
-        with self.assertRaises(ValueError, msg="different parameter/buffer names"):
-            run_traced(traced, different_model, tokens)
-
     def test_non_tensor_leaf_raises(self):
         """Passing a callable leaf in args raises (should be in closure instead)."""
 
@@ -211,6 +193,23 @@ class TestTraceModule(unittest.TestCase):
 
         with self.assertRaises(ValueError, msg="all pytree leaves"):
             minimal_fx_tracer(fn)(model, tokens, lambda x: x.sum())
+
+    def test_mismatched_module_raises_when_validation_enabled(self):
+        """Opt-in module FQN validation catches execution with the wrong module."""
+        model, tokens, labels, loss_fn = self._make_mlp()
+
+        def forward(model, tokens):
+            return model(tokens)
+
+        traced = minimal_fx_tracer(forward)(model, tokens)
+
+        different_model = nn.Sequential(
+            nn.Embedding(256, 64),
+            nn.Linear(64, 256),
+        ).to(device=self.DEVICE, dtype=self.DTYPE)
+
+        with self.assertRaises(ValueError, msg="different parameter/buffer names"):
+            run_traced(traced, different_model, tokens, validate_module_fqns=True)
 
     def test_module_must_be_first_arg(self):
         def forward(tokens, model):
@@ -1491,7 +1490,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 loss = get_loss(logits, labels)
                 params = [p for p in model.parameters() if p.requires_grad]
                 grads = torch.autograd.grad(loss, params)
-                for p, g in zip(params, grads):
+                for p, g in zip(params, grads, strict=True):
                     p.grad = g
 
             # Warmup
