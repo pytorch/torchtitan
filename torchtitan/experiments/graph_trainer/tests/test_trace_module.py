@@ -26,6 +26,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     trace_train_step,
 )
 
+
 def get_loss(logits, labels):
     return torch.nn.functional.cross_entropy(
         logits.flatten(0, 1).float(),
