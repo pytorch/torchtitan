@@ -264,8 +264,83 @@ def autobucketing_reordering_pass(
     This pass applies schedule_overlap_bucketing with collective_bucketing enabled
     to optimize comm/compute overlap patterns in the graph.
     """
-    schedule_overlap_bucketing(gm, collective_bucketing=True)
+    schedule_overlap_bucketing(
+        gm, collective_bucketing=True, compute_overlap_multipler=2.0
+    )
     gm.recompile()
+    return gm
+
+
+def annotate_contiguous_regions_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Annotate complete compute regions between collectives for regional_inductor.
+
+    Finds all collective ops (all_gather, reduce_scatter, all_reduce, wait_tensor)
+    and annotates ALL non-collective nodes between them with `compile_with_inductor`.
+    This creates contiguous annotated regions that regional_inductor can compile
+    without dependency cycles (unlike annotating scattered individual ops).
+    """
+    COLLECTIVE_OPS = {
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        torch.ops._c10d_functional.all_reduce.default,
+        torch.ops._c10d_functional.wait_tensor.default,
+    }
+
+    annotated = 0
+    min_region_size = 5  # only annotate regions with enough ops to benefit from fusion
+    region_nodes = []
+
+    for node in gm.graph.nodes:
+        if node.op in ("placeholder", "output"):
+            # Flush any accumulated region at graph boundaries
+            if len(region_nodes) >= min_region_size:
+                for n in region_nodes:
+                    custom = n.meta.get("custom", {})
+                    custom["compile_with_inductor"] = True
+                    n.meta["custom"] = custom
+                    annotated += 1
+            region_nodes = []
+            continue
+
+        if node.op == "call_function" and node.target in COLLECTIVE_OPS:
+            # Collective boundary — flush the current region
+            if len(region_nodes) >= min_region_size:
+                for n in region_nodes:
+                    custom = n.meta.get("custom", {})
+                    custom["compile_with_inductor"] = True
+                    n.meta["custom"] = custom
+                    annotated += 1
+            region_nodes = []
+        else:
+            region_nodes.append(node)
+
+    if annotated > 0:
+        gm.recompile()
+        logger.info(
+            f"Annotated {annotated} nodes in contiguous regions for regional_inductor"
+        )
+    return gm
+
+
+def cudagraph_full_graph_pass(
+    gm: torch.fx.GraphModule, example_inputs: Sequence[Any]
+) -> torch.fx.GraphModule:
+    """Wrap the full fwd+bwd traced graph with CUDAGraph.
+
+    For aot_fx_trace mode, the entire forward-backward step is a single graph.
+    CUDAGraph eliminates kernel launch overhead by recording and replaying
+    the CUDA stream. All inputs are treated as non-static (copied each step)
+    since we don't know the params/data split from within the pass.
+    """
+    from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
+
+    # No static inputs — all inputs will be copied each step.
+    # This is safe but suboptimal. Params are static in practice, but we
+    # don't have params_len here to identify them.
+    static_input_indices = []
+    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
 
 
