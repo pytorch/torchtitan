@@ -255,3 +255,51 @@ This file records every experiment attempted during the autoresearch loop.
 - **Idea**: Tune NCCL channel count via `NCCL_MAX_NCHANNELS=32` environment variable (default is typically 8-16 depending on algorithm). More channels increases bandwidth utilization but adds overhead per collective.
 - **Result**: tps=6003, MFU=35.16%, memory=49.0GiB. -14% regression.
 - **Lessons**: More NCCL channels significantly hurts performance in this CUDAGraph-captured graph. Each extra channel adds kernel overhead that compounds across 421 AG + 421 RS + 68 AR collectives. The default NCCL channel count is already well-tuned for NVLink topology. Environment-level NCCL tuning is unlikely to help — the bottleneck is elsewhere.
+
+## custom_ops_multidtype bucket mode — discard (xxxxxxx)
+
+- **Idea**: Use `bucket_mode="custom_ops_multidtype"` which allows mixed-dtype (fp32+bf16) bucketing, potentially enabling better scheduling given 842 mixed-precision ops.
+- **Result**: tps=7340/7332 (avg 7336), MFU=42.94%.
+- **Lessons**: Within noise of default bucket mode. Mixed-dtype bucketing doesn't change the scheduling outcome significantly.
+
+## CUDA_DEVICE_MAX_CONNECTIONS=1 — discard (xxxxxxx)
+
+- **Idea**: Force all CUDA work through a single hardware queue. Can improve overlap between compute and NCCL communication with CUDAGraph.
+- **Result**: tps=7355, MFU=43.07%.
+- **Lessons**: Within noise. With CUDAGraph, the CUDA stream is already recorded and replayed deterministically. Changing queue depth doesn't affect replay performance.
+
+## Identity _to_copy removal — no-op (xxxxxxx)
+
+- **Idea**: Remove _to_copy ops where input and output dtypes match (identity casts exposed after simplification passes). Diagnostic found 31 consecutive _to_copy pairs.
+- **Result**: 0 identity _to_copy found. The diagnostic had a bug — it detected consecutive nodes in topological order, not actual data-flow chains.
+- **Lessons**: All 842 _to_copy ops are genuine fp32↔bf16 conversions. No identity casts exist even after aggressive simplification. The "consecutive pairs" in the diagnostic were unrelated ops that happened to be adjacent.
+
+## view_as_complex/view_as_real pair removal — no-op (xxxxxxx)
+
+- **Idea**: Remove canceling view_as_real(view_as_complex(x)) pairs from RoPE computation. Graph has 128 each.
+- **Result**: 0 pairs found.
+- **Lessons**: The 128 view_as_complex and 128 view_as_real serve different stages of RoPE rotation. Between them are actual complex multiplications. No identity pairs.
+
+## Aggressive RS bucketing — discard (xxxxxxx)
+
+- **Idea**: Increase memory budget to max_memory_increase_gb=8.0, max_memory_increase_ratio=0.50, max_in_flight_gb=10.0 to enable more RS bucketing. Key finding: pre-bucketing has 421 AG + 421 RS + 68 AR. Post-bucketing: AG=139 (3x reduction) but RS=390 (barely 1.08x reduction), AR=68 (unchanged).
+- **Result**: tps=7287. RS count unchanged at 390. AG slightly improved (139→135).
+- **Lessons**: RS bucketing is fundamentally limited by backward pass data dependencies, not memory budget. Each RS needs its gradients computed first, creating tight dependency chains that prevent merging. AG bucketing is effective because forward AG operations have more scheduling flexibility.
+
+## enable_fusion_regions with CUDAGraph — discard (xxxxxxx)
+
+- **Idea**: Enable fusion region detection in scheduler (retest with CUDAGraph active).
+- **Result**: tps=7288, same collective structure.
+- **Lessons**: Fusion region estimation doesn't change scheduling decisions for this graph/CUDAGraph combination.
+
+## Post-bucketing simplification — discard (xxxxxxx)
+
+- **Idea**: Run identity view removal + chain collapse + transpose pair removal after bucketing to clean up ops introduced by the bucketing pass.
+- **Result**: Found 66 identity view/reshape nodes introduced by bucketing. tps=7299.
+- **Lessons**: Bucketing introduces ~66 redundant view ops, but removing them is insufficient to measurably improve CUDAGraph replay time. The 66 nodes out of ~8437 total is <1%.
+
+## max_off_bucket_gb=0.0 — discard (xxxxxxx)
+
+- **Idea**: Force all eligible collectives into buckets by setting off-bucket limit to zero.
+- **Result**: tps=6997.
+- **Lessons**: No improvement. The scheduler already buckets everything it can given dependency constraints.

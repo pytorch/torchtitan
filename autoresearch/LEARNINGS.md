@@ -39,6 +39,24 @@ High-level guide on what works, what doesn't, and how to approach graph optimiza
 - **enable_fusion_regions**: Doesn't change scheduling significantly for this graph.
 - **Roundtrip dtype removal**: No roundtrips exist — all 842 _to_copy ops are genuine conversions.
 
+## Bucketing Analysis
+
+After simplification and autobucketing:
+- Pre-bucketing: AG=421, RS=421, AR=68, wait=910 (910 non-wait collectives)
+- Post-bucketing: AG=139, RS=390, AR=68, wait=662 (597 non-wait collectives)
+- **AG bucketing is effective**: 421→139 (3x reduction). Forward pass has scheduling flexibility.
+- **RS bucketing is near-zero**: 421→390 (31 merged). Backward pass dependencies prevent merging.
+- **AR is never bucketed**: 68→68. Different PG (tensor parallel), tight per-layer dependencies.
+- **Memory budget is not the limiter**: Increasing max_memory_increase_gb from 1.0 to 8.0 doesn't improve RS bucketing.
+- **Total CUDA ops in CUDAGraph**: ~8437+ nodes. CUDAGraph replay overhead ~12ms (<1% of step time).
+
+## What's Left to Explore (and Why It's Hard)
+
+- **Kernel fusion**: Inductor compilation crashes with collective ops in the graph. Regional Inductor has dependency cycles in fwd+bwd graph. The remaining memory-bound ops (842 _to_copy, normalization) can't be fused at the FX level.
+- **RS bucketing**: Fundamentally limited by backward pass data dependencies. Each RS needs its layer's gradients computed first.
+- **Communication volume**: FSDP already communicates in bf16. Reducing parallelism would reduce communication but requires config changes.
+- **MFU ceiling**: At 42% MFU, ~58% overhead is split between communication (~5%), memory bandwidth (~10-15%), and non-matmul compute time.
+
 ## Benchmark Notes
 
 - Use `--dataloader.dataset c4_test` for local data (avoids network dependency).
