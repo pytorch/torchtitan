@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import itertools
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -16,11 +15,17 @@ import torch.utils._pytree as pytree
 from torch._functorch._aot_autograd.logging_utils import (
     setup_stacktrace_preservation_hooks,
 )
+from torch._guards import tracing, TracingContext
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
+
+# Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
+# Everything else (callables, custom objects) should be registered as pytree
+# nodes/constants or captured in fn's closure.
+_ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
 
 
 @contextmanager
@@ -54,18 +59,6 @@ class SubclassMeta:
 class SubclassLayout:
     num_tensors: int
     meta: SubclassMeta | None
-
-
-@dataclass
-class TracedResult:
-    """Holds the traced graph and metadata needed to run it."""
-
-    gm: torch.fx.GraphModule
-    example_inputs: tuple[torch.Tensor, ...]
-    params_len: int
-    params_spec: pytree.TreeSpec
-    input_subclass_layouts: list[SubclassLayout]
-    output_subclass_layouts: list[SubclassLayout]
 
 
 def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta | None]:
@@ -108,19 +101,46 @@ def _wrap_to_subclass(
     )
 
 
-def _wrap_to_subclasses(
-    flat_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
-    layouts: list[SubclassLayout],
-) -> list[torch.Tensor]:
+def _unwrap_subclasses(
+    args: list,
+) -> tuple[list, dict[int, SubclassLayout]]:
+    """Unwrap tensor subclasses into plain tensors.
+
+    Returns the flattened plain tensors and a dict mapping original arg index
+    to its SubclassLayout.  Plain tensors have no entry.
+    """
+    flat: list = []
+    layouts: dict[int, SubclassLayout] = {}
+    for i, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor) and is_traceable_wrapper_subclass(arg):
+            inner_tensors, meta = _unwrap_subclass(arg)
+            layouts[i] = SubclassLayout(len(inner_tensors), meta)
+            flat.extend(inner_tensors)
+        else:
+            flat.append(arg)
+    return flat, layouts
+
+
+def _wrap_subclasses(
+    flat_tensors: tuple | list,
+    num_args: int,
+    layouts: dict[int, SubclassLayout],
+) -> list:
+    """Rewrap plain tensors back into their original subclass types.
+
+    Positions not in ``layouts`` are plain tensors (taken one-to-one).
+    """
     wrapped = []
     idx = 0
-    for layout in layouts:
-        tensors = flat_tensors[idx : idx + layout.num_tensors]
-        idx += layout.num_tensors
-        if layout.meta is None:
-            wrapped.append(tensors[0])
-        else:
+    for i in range(num_args):
+        if i in layouts:
+            layout = layouts[i]
+            tensors = flat_tensors[idx : idx + layout.num_tensors]
+            idx += layout.num_tensors
             wrapped.append(_wrap_to_subclass(list(tensors), layout.meta))
+        else:
+            wrapped.append(flat_tensors[idx])
+            idx += 1
     return wrapped
 
 
@@ -256,137 +276,233 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
                 node.meta["stack_trace"] = stack_trace
 
 
-def trace_module(
-    mod: nn.Module,
-    args: tuple,
-) -> TracedResult:
-    """Trace ``mod(*args)`` into a flat FX graph, unwrapping tensor subclasses.
+def extract_module_state(mod: nn.Module) -> dict[str, torch.Tensor]:
+    """Return a merged dict of the module's named parameters and buffers."""
+    return {
+        **dict(mod.named_parameters(remove_duplicate=False)),
+        **dict(mod.named_buffers(remove_duplicate=False)),
+    }
 
-    Parameters and buffers are lifted as extra graph inputs so the returned
-    graph is a pure function.  Tensor subclasses (e.g. DTensor) are recursively
-    unwrapped into plain tensors for tracing, and the layouts needed to rewrap
-    them are recorded in the returned :class:`TracedResult`.
 
-    Args:
-        mod: The module to trace.
-        args: The user arguments to trace with.
+@dataclass
+class TracedResult:
+    """Execution metadata returned by :func:`minimal_fx_tracer`.
+
+    Attributes:
+        gm: The traced FX graph as a pure function of flat tensors.
+        example_inputs: Trace-time fake flat inputs used by downstream graph passes.
+        state_fqns: Trace-time state keys.
+        num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
+        input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
+        num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
+        output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
+        output_spec: Original output pytree spec used during reconstruction.
     """
-    named_parameters = dict(mod.named_parameters(remove_duplicate=False))
-    named_buffers = dict(mod.named_buffers(remove_duplicate=False))
 
-    params_and_buffers = {**named_parameters, **named_buffers}
-    params_and_buffers_flat, params_spec = pytree.tree_flatten(params_and_buffers)
-    params_len = len(params_and_buffers_flat)
+    gm: torch.fx.GraphModule
+    example_inputs: tuple[Any, ...]
+    state_fqns: list[str]
+    num_flat_inputs: int
+    input_subclass_layouts: dict[int, SubclassLayout]
+    num_flat_outputs: int
+    output_subclass_layouts: dict[int, SubclassLayout]
+    output_spec: pytree.TreeSpec
 
-    def functional_call(*all_args):
-        flat_params = all_args[:params_len]
-        user_args = all_args[params_len:]
-        params = pytree.tree_unflatten(list(flat_params), params_spec)
-        with stateless._reparametrize_module(mod, params):
-            return mod.forward(*user_args)
 
-    user_args_flat, user_args_spec = pytree.tree_flatten(args)
-    full_args = tuple(params_and_buffers_flat) + tuple(user_args_flat)
+def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
+    """Return a tracer for a stateless ``fn`` with explicit ``state`` input.
 
-    unwrapped_args = []
-    input_layouts: list[SubclassLayout] = []
+    ``fn`` must be a plain callable (not an ``nn.Module``). The returned
+    callable expects ``state`` as the first positional argument, followed by
+    the traced user inputs::
 
-    for arg in full_args:
-        if isinstance(arg, torch.Tensor) and is_traceable_wrapper_subclass(arg):
-            inner_tensors, meta = _unwrap_subclass(arg)
-            unwrapped_args.extend(inner_tensors)
-            input_layouts.append(SubclassLayout(len(inner_tensors), meta))
-        else:
-            unwrapped_args.append(arg)
-            input_layouts.append(SubclassLayout(1, None))
+        traced_result = minimal_fx_tracer(train_step)(state, tokens, labels)
+        result = run_traced(traced_result, state, tokens, labels)
 
-    fake_mode = FakeTensorMode(
-        allow_non_fake_inputs=True,
-        shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
-    )
+    The trace-time ``state`` and ``args`` must satisfy these constraints:
+    - ``state`` must be a ``dict[str, Tensor]`` of parameters/buffers
+    - all pytree leaves must be tensors or make_fx-safe primitives
+      (``int``, ``float``, ``bool``, ``str``, ``None``)
+    - there must be no ``nn.Module`` instances in ``state`` or ``args``
 
-    def to_fake(t):
-        if isinstance(t, torch.Tensor):
-            return fake_mode.from_tensor(t, static_shapes=True)
-        return t
+    Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
+    plain tensors for tracing, and the layouts needed to rewrap them are stored
+    in the returned :class:`TracedResult`.
+    """
 
-    fake_args = tuple(to_fake(a) for a in unwrapped_args)
+    def _trace_with_args(state: Any, *args: Any) -> TracedResult:
+        state_fqns = list(state.keys())
+        state_flat = list(state.values())
+        user_args = list(args)
+        user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
 
-    output_layouts: list[SubclassLayout] = []
+        # Validate leaves.
+        for leaf in [*state_flat, *user_args_flat]:
+            if isinstance(leaf, nn.Module):
+                raise ValueError(
+                    "minimal_fx_tracer requires explicit tensor state, not nn.Module "
+                    "instances. Use trace_train_step(...) for the reference "
+                    "train-step wrapper."
+                )
+            if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
+                raise ValueError(
+                    "minimal_fx_tracer requires all pytree leaves in state/args to "
+                    f"be tensors or primitives (int/float/bool/str), got "
+                    f"{type(leaf).__name__}. Non-primitive values should either be "
+                    "registered as pytree nodes (register_pytree_node) or constants "
+                    f"(pytree.register_constant), or captured in fn's closure."
+                )
 
-    def fn_with_subclass_handling(*plain_args):
-        nonlocal output_layouts
-        output_layouts = []
+        # Combined flat input: [*state, *user_args] with subclasses unwrapped.
+        full_args = list(state_flat) + list(user_args_flat)
+        num_full_args = len(full_args)
+        unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
 
-        wrapped_args = _wrap_to_subclasses(plain_args, input_layouts)
-
-        params_args = wrapped_args[:params_len]
-        user_args_wrapped = wrapped_args[params_len:]
-        user_args_restored = pytree.tree_unflatten(
-            list(user_args_wrapped), user_args_spec
+        fake_mode = FakeTensorMode(
+            allow_non_fake_inputs=True,
+            shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+        )
+        fake_args = tuple(
+            (
+                fake_mode.from_tensor(a, static_shapes=True)
+                if isinstance(a, torch.Tensor)
+                else a
+            )
+            for a in unwrapped_args
         )
 
-        with _patch_engine_run_backward():
-            outputs = functional_call(*params_args, *user_args_restored)
+        output_layouts: dict[int, SubclassLayout] = {}
+        num_flat_outputs: int = 0
+        output_spec: pytree.TreeSpec | None = None
 
-        flat_outputs, _ = pytree.tree_flatten(outputs)
-        unwrapped_outputs = []
-        for out in flat_outputs:
-            if isinstance(out, torch.Tensor) and is_traceable_wrapper_subclass(out):
-                inner, meta = _unwrap_subclass(out)
-                unwrapped_outputs.extend(inner)
-                output_layouts.append(SubclassLayout(len(inner), meta))
-            else:
-                unwrapped_outputs.append(out)
-                output_layouts.append(SubclassLayout(1, None))
+        def fn_with_subclass_handling(*plain_args: Any) -> list:
+            nonlocal output_layouts, output_spec, num_flat_outputs
+            output_layouts = {}
 
-        return unwrapped_outputs
+            wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
+            state_wrapped = wrapped[: len(state_flat)]
+            user_flat = wrapped[len(state_flat) :]
 
-    # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-    with fake_mode, preserve_node_meta(), _skip_nested_compile():
-        traced = make_fx(
-            fn_with_subclass_handling,
-            record_stack_traces=True,
-            record_module_stack=False,  # don't need nn_module_stack for now
-        )(*fake_args)
+            state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
+            user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
 
-    # Copy forward annotations to backward nodes.
-    # Must run before DCE so that forward nodes used for matching aren't removed.
-    _copy_fwd_metadata_to_bw_nodes(traced)
+            with _patch_engine_run_backward():
+                result = fn(state_for_fn, *user_list)
 
-    _remove_cpu_shadow_chains(traced)
+            flat_outs, output_spec = pytree.tree_flatten(result)
+            num_flat_outputs = len(flat_outs)
+            unwrapped_outs, output_layouts = _unwrap_subclasses(flat_outs)
+            return unwrapped_outs
 
-    return TracedResult(
-        gm=traced,
-        example_inputs=fake_args,
-        params_len=params_len,
-        params_spec=params_spec,
-        input_subclass_layouts=input_layouts,
-        output_subclass_layouts=output_layouts,
-    )
+        ctx = TracingContext(fake_mode)
+        # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
+        with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
+            traced = make_fx(
+                fn_with_subclass_handling,
+                record_stack_traces=True,
+                record_module_stack=False,  # don't need nn_module_stack for now
+            )(*fake_args)
+
+        # Copy forward annotations to backward nodes.
+        # Must run before DCE so that forward nodes used for matching aren't removed.
+        _copy_fwd_metadata_to_bw_nodes(traced)
+
+        _remove_cpu_shadow_chains(traced)
+
+        assert output_spec is not None
+        return TracedResult(
+            gm=traced,
+            example_inputs=fake_args,
+            state_fqns=state_fqns,
+            num_flat_inputs=num_full_args,
+            input_subclass_layouts=input_layouts,
+            num_flat_outputs=num_flat_outputs,
+            output_subclass_layouts=output_layouts,
+            output_spec=output_spec,
+        )
+
+    return _trace_with_args
 
 
-def run_traced_module(
+def run_traced(
     traced_result: TracedResult,
-    params_and_buffers: dict[str, torch.Tensor],
-    args: tuple,
-) -> list[torch.Tensor]:
-    """Execute a traced graph and rewrap outputs into their original subclass types.
+    state: Any,
+    *args: Any,
+) -> Any:
+    """Execute a traced graph with fresh parameters read from the live module.
 
-    Accepts a ``params_and_buffers`` dict (from ``named_parameters`` /
-    ``named_buffers``) instead of the module itself, so callers control exactly
-    which parameter snapshot is used.
+    This is a reference implementation of traced-graph execution. It keeps the
+    state handling, subclass unwrapping, and output reconstruction logic
+    explicit instead of baking those semantics into ``TracedResult`` itself.
     """
-    params_flat, _ = pytree.tree_flatten(params_and_buffers)
-    user_args_flat, _ = pytree.tree_flatten(args)
+    state_flat = list(state.values())
+    user_args_flat, _ = pytree.tree_flatten(list(args))
+    if any(isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_args_flat]):
+        raise ValueError(
+            "run_traced requires explicit tensor state, not nn.Module instances. "
+            "Use run_traced_train_step(...) for the reference train-step wrapper."
+        )
+    all_args = list(state_flat) + list(user_args_flat)
+    flat_inputs, _ = _unwrap_subclasses(all_args)
 
-    all_args = []
-    for a in itertools.chain(params_flat, user_args_flat):
-        if isinstance(a, torch.Tensor) and is_traceable_wrapper_subclass(a):
-            inner, _ = _unwrap_subclass(a)
-            all_args.extend(inner)
-        else:
-            all_args.append(a)
+    flat_outputs = traced_result.gm(*flat_inputs)
+    wrapped = _wrap_subclasses(
+        flat_outputs,
+        traced_result.num_flat_outputs,
+        traced_result.output_subclass_layouts,
+    )
+    return pytree.tree_unflatten(wrapped, traced_result.output_spec)
 
-    flat_outputs = traced_result.gm(*all_args)
-    return _wrap_to_subclasses(flat_outputs, traced_result.output_subclass_layouts)
+
+def trace_train_step(fn: Callable) -> Callable[..., TracedResult]:
+    """Reference implementation for capturing a whole train step via the core API."""
+
+    def _trace_with_module(module: nn.Module, *args: Any) -> TracedResult:
+        if not isinstance(module, nn.Module):
+            raise ValueError(
+                "trace_train_step requires args[0] to be an nn.Module, "
+                f"got {type(module).__name__}."
+            )
+        if any(isinstance(arg, nn.Module) for arg in args):
+            raise ValueError(
+                "trace_train_step supports exactly one nn.Module at args[0]. "
+                "Additional nn.Module instances found in args[1:]."
+            )
+
+        def _stateless_fn(state: dict[str, torch.Tensor], *user_args: Any) -> Any:
+            with stateless._reparametrize_module(module, state):
+                return fn(module, *user_args)
+
+        return minimal_fx_tracer(_stateless_fn)(extract_module_state(module), *args)
+
+    return _trace_with_module
+
+
+def run_traced_train_step(
+    traced_result: TracedResult,
+    module: nn.Module,
+    *args: Any,
+    validate_module_fqns: bool = False,
+) -> Any:
+    """Reference implementation for executing a traced whole train step."""
+
+    if not isinstance(module, nn.Module):
+        raise ValueError(
+            "run_traced_train_step requires args[0] to be an nn.Module, "
+            f"got {type(module).__name__}."
+        )
+    if any(isinstance(arg, nn.Module) for arg in args):
+        raise ValueError(
+            "run_traced_train_step supports exactly one nn.Module at args[0]. "
+            "Additional nn.Module instances found in args[1:]."
+        )
+
+    # TODO: Consider stronger state validation once the long-term state API settles.
+    state = extract_module_state(module)
+    if validate_module_fqns and list(state.keys()) != traced_result.state_fqns:
+        raise ValueError(
+            "module has different parameter/buffer names than during tracing.\n"
+            f"  Traced: {traced_result.state_fqns}\n"
+            f"  Got:    {list(state.keys())}"
+        )
+    return run_traced(traced_result, state, *args)

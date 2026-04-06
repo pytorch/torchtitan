@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
-from torch.utils._pytree import register_pytree_node, tree_map
+from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
@@ -68,6 +68,16 @@ def register_blockmask_pytree_node():
             flatten_with_keys_fn=BlockMask._flatten_with_keys,
             serialized_type_name="torch.nn.attention.flex_attention.BlockMask",
         )
+
+
+def maybe_register_blockmask_pytree_node() -> None:
+    """Register flex-attention pytree helpers if they are missing."""
+    from torch.nn.attention.flex_attention import BlockMask, _MaskModWrapper
+
+    if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
+        register_blockmask_pytree_node()
+    if _MaskModWrapper not in torch.utils._pytree.SUPPORTED_NODES:
+        register_constant(_MaskModWrapper)
 
 
 def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
@@ -177,7 +187,7 @@ def apply_graph_ac(
     if ac_config.mode != "selective":
         raise ValueError(
             f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got '{ac_config.mode}'. Use 'selective' for graph-based SAC."
+            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
         )
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])
