@@ -16,9 +16,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    TracedResult,
     run_traced_train_step,
     trace_train_step,
+    TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_default_graph_passes
 from torchtitan.trainer import Trainer
@@ -30,7 +30,9 @@ def make_fwd_bwd_step(loss_fn):
     ``loss_fn`` is captured in the closure so it is not a graph input.
     """
 
-    def fwd_bwd_step(model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs):
+    def fwd_bwd_step(
+        model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
+    ):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
         loss = loss_fn(pred, labels) / global_valid_tokens
         params = [p for p in model.parameters() if p.requires_grad]
