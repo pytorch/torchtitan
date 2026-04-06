@@ -21,14 +21,8 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_default_graph_passes,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_default_graph_passes
 from torchtitan.trainer import Trainer
-
-# BlockMask must be registered as a pytree node so its tensor children
-# are properly traced as graph inputs instead of opaque leaves.
-register_blockmask_pytree_node()
 
 
 def make_fwd_bwd_step(loss_fn):
@@ -113,6 +107,11 @@ class GraphTrainer(Trainer):
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
             if self.config.activation_checkpoint.mode != "none":
                 annotate_ac_regions(model)
+            # Flex attention masks can flow through extra_inputs / extra_kwargs.
+            from torch.nn.attention.flex_attention import BlockMask
+
+            if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
+                register_blockmask_pytree_node()
             with self.train_context(), self.maybe_enable_amp:
                 self._traced_step = minimal_fx_tracer(fwd_bwd_fn)(
                     model,
