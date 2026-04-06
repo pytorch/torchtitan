@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
-from torch.utils._pytree import register_pytree_node, tree_map
+from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
@@ -71,11 +71,13 @@ def register_blockmask_pytree_node():
 
 
 def maybe_register_blockmask_pytree_node() -> None:
-    """Register BlockMask if it is not already in the global pytree registry."""
-    from torch.nn.attention.flex_attention import BlockMask
+    """Register flex-attention pytree helpers if they are missing."""
+    from torch.nn.attention.flex_attention import BlockMask, _MaskModWrapper
 
     if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
         register_blockmask_pytree_node()
+    if _MaskModWrapper not in torch.utils._pytree.SUPPORTED_NODES:
+        register_constant(_MaskModWrapper)
 
 
 def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
