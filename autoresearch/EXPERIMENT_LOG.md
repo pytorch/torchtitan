@@ -200,3 +200,46 @@ This file records every experiment attempted during the autoresearch loop.
 - **Idea**: Apply torch.compile(mode='reduce-overhead') to the graph for Inductor kernel fusion + CUDAGraph.
 - **Result**: Crash — `RuntimeError: Found a custom (non-ATen) operator whose output has alias annotations: _c10d_functional::all_gather_into_tensor_out`.
 - **Lessons**: Inductor can't compile graphs containing NCCL collective ops. The bucketing pass introduces out-variant collectives that Inductor can't functionalize. Would need regional compilation that excludes collectives.
+
+## Constant fold uniform values — discard (xxxxxxx)
+
+- **Idea**: Apply `constant_fold_uniform_value` from Inductor to fold uniform tensors (all-zeros, all-ones) in the graph before bucketing.
+- **Result**: tps=6957. Within noise.
+- **Lessons**: Pass applied successfully but found no meaningful constants to fold. The traced graph doesn't have uniform tensor computations.
+
+## Benchmark-mode collective estimation — discard (xxxxxxx)
+
+- **Idea**: Use `collective_estimator="benchmark"` for more accurate NCCL timing in autobucketing scheduler.
+- **Result**: tps=6358. -8.8% regression.
+- **Lessons**: Benchmark-mode collective estimation produces worse scheduling decisions. The analytical model (default) is better calibrated for this graph/hardware combination.
+
+## Analytical compute estimation — discard (xxxxxxx)
+
+- **Idea**: Use `compute_estimator="analytical"` (roofline model) instead of default GPU benchmarking for compute timing in scheduler.
+- **Result**: tps=6315. -9.4% regression.
+- **Lessons**: GPU-benchmarked compute estimation (default) is more accurate than analytical roofline. Both alternative estimators hurt scheduling quality.
+
+## CUDAGraph only — no simplification, no bucketing — discard (xxxxxxx)
+
+- **Idea**: Ablation study: CUDAGraph wrapping only, skip all simplification passes and bucketing. Measures the contribution of simplification+bucketing.
+- **Result**: tps=6646, MFU=38.92%.
+- **Lessons**: Simplification+bucketing contribute ~5% tps improvement even with CUDAGraph (6646→6971). Identity node removal helps because fewer graph nodes = less CUDAGraph replay overhead.
+
+## Graph diagnostic analysis — informational
+
+- **Idea**: Comprehensive op-count analysis of the simplified graph (before bucketing).
+- **Result**: 7844 call_function nodes. Top ops: view(1126), wait_tensor(910), getitem(906), _to_copy(842), t(675), mm(675), AG(421), RS(421), transpose.int(256), mul(225), add(225), split(131), cat(130), view_as_complex(128), view_as_real(128), _unsafe_view(128), clone(68), AR(68), _fused_rms_norm(65).
+- **Findings**: 0 identity expand ops, 0 contiguous ops, 0 identity _to_copy. 842 _to_copy: exactly 420 fp32→bf16 + 420 bf16→fp32 (mixed precision symmetry). 68 clone → 64 feed into mul.Tensor (backward activations). No removable ops found.
+- **Lessons**: All remaining ops are semantically necessary. No more identity/no-op patterns to eliminate at the FX graph level.
+
+## CSE (Common Subexpression Elimination) — discard (xxxxxxx)
+
+- **Idea**: Apply PyTorch's `CSEPass` to deduplicate identical computations in the graph. CSE found 258 duplicate nodes (8437→8179).
+- **Result**: tps=6280. -10% regression.
+- **Lessons**: CSE creates new data dependencies (shared nodes become bottlenecks), which constrains the scheduler's ability to reorder for comm/compute overlap. Graph-level CSE is counterproductive for overlap scheduling.
+
+## Reorder-only + CUDAGraph (no bucketing) — discard (xxxxxxx)
+
+- **Idea**: Skip collective bucketing, only reorder for overlap. Eliminates ~282 clone ops from bucketing. Multi-warmup CUDAGraph wrapper to stabilize NCCL capture.
+- **Result**: Inconsistent: 3/4 runs give ~7350 tps (43% MFU), 1/4 gives 5798 tps. Multi-warmup with bucketing regresses to 6389 tps.
+- **Lessons**: Without bucketing, CUDAGraph capture is non-deterministic (842 individual NCCL collectives have variable timing). Multi-warmup CUDAGraph fragments the memory pool, reducing CUDAGraph efficiency. Bucketing provides capture stability at the cost of 282 extra clone ops.
