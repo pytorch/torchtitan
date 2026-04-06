@@ -81,3 +81,11 @@ This file records every experiment attempted during the autoresearch loop.
 - **Result**: tps=4955/4962 (avg 4959), MFU=29.01/29.06%, memory=48.98GiB. Numerics pass.
 - **Analysis**: All 453 slice ops are identity — every single one selects the full dimension. +2.2% tps over previous best (4849→4959). Combined with view removal, we've now eliminated 2171 identity ops (196 detach + 1522 view + 453 slice = 2171) from the original ~11.4K nodes — 19% of the graph.
 - **Lessons**: Identity slices are very common in traced graphs from PyTorch's eager dispatch. The full-dimension slice pattern occurs when code like `x[:]` or `x[..., :]` is traced. Cumulative effect of graph simplification is strong: each round of identity removal makes the graph cleaner for autobucketing.
+
+## Collapse consecutive view chains — keep (ab0e0a82)
+
+- **Idea**: Collapse chains of consecutive view/reshape ops into a single op. When view(view(x, s1), s2), the intermediate view with single use is redundant.
+- **Changes**: Added `collapse_view_chains_pass` after identity removal, before autobucketing. Only collapses when intermediate result has a single user.
+- **Result**: tps=5032/5004 (avg 5018), MFU=29.47/29.30%, memory=49.0GiB. Numerics pass.
+- **Analysis**: Collapsed 323 view chains. +1.5% tps over previous (4959→5018). Total graph simplification now: 2494 nodes removed/collapsed (22% of original graph). We've broken the **5000 tps barrier** (baseline was 4247).
+- **Lessons**: View chain collapsing is a modest but additive win. The single-use constraint is important — if intermediate shapes are needed by other nodes, collapsing would change semantics. Combined with identity removal, graph simplification is the dominant optimization strategy so far.
