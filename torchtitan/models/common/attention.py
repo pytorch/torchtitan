@@ -18,7 +18,12 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
+)
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -29,6 +34,8 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 from torch.nn.attention.varlen import varlen_attn
+
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -156,6 +163,16 @@ class VarlenAttention(LocalMapInnerAttention):
     class Config(LocalMapInnerAttention.Config):
         pass
 
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+
+        from torchtitan.tools.utils import has_cuda_capability
+
+        # Hopper (SM 9.0) uses FA3
+        if has_cuda_capability(9, 0):
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -190,6 +207,15 @@ class VarlenAttention(LocalMapInnerAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
+        varlen_kwargs = dict()
+
+        if is_in_batch_invariant_mode():
+            if current_flash_attention_impl() == "FA3":
+                # Fix split count to 1 to prevent non-deterministic split-k
+                # reductions that vary with batch composition.
+                # Only needed for FA3; FA2 is automatically batch-invariant.
+                varlen_kwargs["num_splits"] = 1
+
         out_packed = varlen_attn(
             xq_packed,
             xk_packed,
@@ -210,6 +236,7 @@ class VarlenAttention(LocalMapInnerAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
+            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
