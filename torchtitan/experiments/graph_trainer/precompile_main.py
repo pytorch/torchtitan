@@ -72,22 +72,23 @@ def main():
         )
 
     parallelism = config.parallelism
-    dp_replicate = parallelism.data_parallel_replicate_degree
-    dp_shard = parallelism.data_parallel_shard_degree
-    cp = parallelism.context_parallel_degree
-    tp = parallelism.tensor_parallel_degree
-    pp = parallelism.pipeline_parallel_degree
 
     # dp_shard=-1 means "use remaining ranks" which can't be inferred
     # in single-process mode. The compiled graph bakes in tensor shapes
     # that depend on dp_shard, so the exact value must match training.
-    if dp_shard < 0:
+    if parallelism.data_parallel_shard_degree < 0:
         raise ValueError(
             "precompile_main requires an explicit "
             "--parallelism.data_parallel_shard_degree (not -1). "
             "Set it to the value you will use during torchrun training."
         )
-    world_size = dp_replicate * dp_shard * cp * tp * pp
+    world_size = (
+        parallelism.data_parallel_replicate_degree
+        * parallelism.data_parallel_shard_degree
+        * parallelism.context_parallel_degree
+        * parallelism.tensor_parallel_degree
+        * parallelism.pipeline_parallel_degree
+    )
 
     logger.info(f"Initializing single-process precompile with world_size={world_size}")
 
@@ -115,16 +116,7 @@ def main():
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
-    parallel_dims = ParallelDims(
-        dp_shard=dp_shard,
-        dp_replicate=dp_replicate,
-        cp=cp,
-        tp=tp,
-        pp=pp,
-        ep=parallelism.expert_parallel_degree,
-        etp=parallelism.expert_tensor_parallel_degree,
-        world_size=world_size,
-    )
+    parallel_dims = ParallelDims.from_config(parallelism, world_size)
     parallel_dims.build_mesh()
 
     model_spec = config.model_spec
