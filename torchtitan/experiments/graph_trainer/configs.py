@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
 from torchtitan.config import ActivationCheckpointConfig
@@ -71,8 +71,10 @@ def to_graph_trainer_config(
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
     # non-"none" AC mode to "selective" so callers don't need per-config fixups.
+    # Use dataclasses.replace to preserve user-configured sub-fields
+    # (e.g. preserve_rng_state, early_stop, memory_budget, debug).
     ac = d.get("activation_checkpoint")
     if ac is not None and ac.mode != "none":
-        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+        d["activation_checkpoint"] = replace(ac, mode="selective")
 
     return GraphTrainer.Config(**d)
