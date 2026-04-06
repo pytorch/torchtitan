@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
@@ -15,8 +15,6 @@ from torch.distributed.tensor import DTensor, Partial
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-
-from .utils import indices_padding_wrapper
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -30,9 +28,6 @@ def _run_experts_for_loop(
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
-
-    # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
@@ -49,9 +44,6 @@ def _run_experts_for_loop(
         # h shape (tokens_per_expert(varying), dim)
         out_experts_splits.append(h)
     out = torch.cat(out_experts_splits, dim=0)
-
-    # side-effect code due to the usage of generate_permute_indices
-    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
 
     return out
 
@@ -79,9 +71,9 @@ def _run_experts_grouped_mm(
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        hidden_dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        dim: int
+        hidden_dim: int
+        num_experts: int
         use_grouped_mm: bool = True
 
     def __init__(self, config: Config):
@@ -117,27 +109,9 @@ class GroupedExperts(Module):
             w3 = self.w3
 
         if self.use_grouped_mm:
-            # NOTE: If EP is not used, we need to pad the indices
-            #       to prepare for grouped_mm;
-            #       otherwise, EP will handle the padding.
-            if (
-                not isinstance(self.w1, DTensor)
-                # pyrefly: ignore[not-iterable]
-                or "ep" not in self.w1.device_mesh.mesh_dim_names
-            ):
-                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
-            else:
-                run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
-
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -151,22 +125,19 @@ class TokenChoiceTopKRouter(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        num_experts: int
+        gate: Linear.Config
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
-        gate: Linear.Config = field(default_factory=Linear.Config)
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
-        self.gate = config.gate.build(
-            in_features=config.dim, out_features=config.num_experts
-        )
+        self.gate = config.gate.build()
         self.num_experts = config.num_experts
         self.num_expert_groups = config.num_expert_groups
         self.num_limited_groups = config.num_limited_groups
@@ -302,11 +273,6 @@ class TokenChoiceTopKRouter(Module):
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        self.gate.init_weights(init_std=init_std)
-
 
 # NOTE: the reason we make this a stateless module is to support
 #       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
@@ -367,34 +333,23 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
-        num_shared_experts: int = 1
+        experts: GroupedExperts.Config
+        router: TokenChoiceTopKRouter.Config
         score_before_experts: bool = True
         load_balance_coeff: float | None = 1e-3
-        # Expert hidden dimension (replaces old moe_inter_dim)
-        hidden_dim: int = 0
-        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
-        router: TokenChoiceTopKRouter.Config = field(
-            default_factory=TokenChoiceTopKRouter.Config
-        )
+        shared_experts: FeedForward.Config | None = None
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        hidden_dim = config.hidden_dim
-        self.experts = config.experts.build(
-            dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
-        )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.experts = config.experts.build()
+        self.router = config.router.build()
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
         self.shared_experts = (
-            FeedForward.Config(
-                hidden_dim=hidden_dim * config.num_shared_experts,
-            ).build(dim=dim)
-            if config.num_shared_experts > 0
-            else None
+            config.shared_experts.build() if config.shared_experts is not None else None
         )
         self.score_before_experts = config.score_before_experts
 
@@ -526,16 +481,8 @@ class MoE(Module):
             return out_experts.reshape(bs, slen, dim)
         return (out + out_experts).reshape(bs, slen, dim)
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        buffer_device = kwargs.get("buffer_device")
-        assert init_std is not None
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
-
-        self.experts.init_weights(init_std=init_std)
-        self.router.init_weights(init_std=init_std)
-        if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std=init_std)
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(
