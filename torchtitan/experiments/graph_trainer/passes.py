@@ -53,6 +53,7 @@ def apply_default_graph_passes(
     gm = remove_identity_view_pass(gm, example_inputs)
     gm = remove_identity_slice_pass(gm, example_inputs)
     gm = collapse_view_chains_pass(gm, example_inputs)
+    gm = remove_transpose_pairs_pass(gm, example_inputs)
     gm = autobucketing_reordering_pass(gm, example_inputs)
 
     return gm
@@ -157,6 +158,57 @@ def remove_identity_slice_pass(
         gm.graph.lint()
         gm.recompile()
         logger.info(f"Removed {count} identity slice nodes")
+    return gm
+
+
+def remove_transpose_pairs_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove canceling transpose pairs: t(t(x)) → x.
+
+    Also handles transpose.int pairs where the same dims are transposed
+    twice (e.g. transpose(transpose(x, 0, 1), 0, 1) → x).
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function":
+            continue
+        input_node = node.args[0] if node.args else None
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        if input_node.op != "call_function":
+            continue
+
+        # t(t(x)) → x
+        if (
+            node.target == torch.ops.aten.t.default
+            and input_node.target == torch.ops.aten.t.default
+            and len(input_node.users) == 1
+        ):
+            original = input_node.args[0]
+            node.replace_all_uses_with(original)
+            gm.graph.erase_node(node)
+            gm.graph.erase_node(input_node)
+            count += 1
+        # transpose(transpose(x, d0, d1), d0, d1) → x
+        elif (
+            node.target == torch.ops.aten.transpose.int
+            and input_node.target == torch.ops.aten.transpose.int
+            and len(input_node.users) == 1
+            and len(node.args) >= 3
+            and len(input_node.args) >= 3
+            and set(node.args[1:3]) == set(input_node.args[1:3])
+        ):
+            original = input_node.args[0]
+            node.replace_all_uses_with(original)
+            gm.graph.erase_node(node)
+            gm.graph.erase_node(input_node)
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} canceling transpose pairs")
     return gm
 
 
