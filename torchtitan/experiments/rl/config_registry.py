@@ -26,7 +26,7 @@ from torchtitan.models.qwen3 import model_registry
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
-    model_spec = model_registry("0.6B", attn_backend_override="varlen")
+    model_spec = model_registry("0.6B_varlen")
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -66,7 +66,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
-    model_spec = model_registry("1.7B", attn_backend_override="varlen")
+    model_spec = model_registry("1.7B_varlen")
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
@@ -106,7 +106,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
-    model_spec = model_registry("debugmodel", attn_backend_override="varlen")
+    model_spec = model_registry("debugmodel_varlen")
     return RLTrainer.Config(
         model_spec=model_spec,
         num_steps=5,

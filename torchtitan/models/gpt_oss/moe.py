@@ -7,13 +7,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
 
@@ -128,11 +128,7 @@ def _run_experts_grouped_mm(
 
 class GptOssGroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int = field(init=False)
-        hidden_dim: int = field(init=False)
-        num_experts: int = field(init=False)
-        use_grouped_mm: bool = True
+    class Config(GroupedExperts.Config):
         swiglu_limit: float = 7.0
 
     def __init__(self, config: Config):
@@ -215,19 +211,18 @@ class GptOssMoE(MoE):
     class Config(MoE.Config):
         swiglu_limit: float = 7.0
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         # Initialize the base MoE class
-        super().__init__(config, dim=dim)
+        super().__init__(config)
 
         # Override the base GroupedExperts with GptOssGroupedExperts
         gptoss_experts_config = GptOssGroupedExperts.Config(
+            dim=config.experts.dim,
+            hidden_dim=config.experts.hidden_dim,
+            num_experts=config.experts.num_experts,
             swiglu_limit=config.swiglu_limit,
             use_grouped_mm=config.experts.use_grouped_mm,
             param_init=config.experts.param_init,
         )
         # pyrefly: ignore [bad-assignment]
-        self.experts = gptoss_experts_config.build(
-            dim=dim,
-            hidden_dim=config.hidden_dim,
-            num_experts=config.num_experts,
-        )
+        self.experts = gptoss_experts_config.build()
