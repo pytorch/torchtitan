@@ -30,7 +30,7 @@ source titan-rl/bin/activate
 
 1. Install Monarch and TorchStore from main:
 ```bash
-uv pip install torchmonarch==0.3.0
+uv pip install torchmonarch==0.5.0.dev20260403
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 uv pip install pygtrie portpicker
 ```
