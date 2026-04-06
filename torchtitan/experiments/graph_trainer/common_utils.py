@@ -169,21 +169,27 @@ def apply_graph_ac(
     compile_config: CompileConfig,
     ac_config: "ActivationCheckpointConfig",
 ) -> None:
-    """Add apply_sac to compile joint passes for graph-based selective AC.
+    """Add the appropriate SAC joint pass based on ac_config.mode.
 
-    Must be called only when ac_config.mode != "none". Only "selective" mode
-    is supported; other modes raise ValueError.
+    Must be called only when ac_config.mode != "none".
+    Supported modes: "selective" (graph-level PREFER annotations) and
+    "fsdp2_sac" (MUST annotations matching FSDP2 eager policy).
     """
-    if ac_config.mode != "selective":
+    mode_to_pass = {
+        "selective": "apply_sac",
+        "fsdp2_sac": "fsdp2_sac",
+    }
+    pass_name = mode_to_pass.get(ac_config.mode)
+    if pass_name is None:
         raise ValueError(
-            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got '{ac_config.mode}'. Use 'selective' for graph-based SAC."
+            f"graph_trainer only supports activation_checkpoint.mode "
+            f"'selective', 'fsdp2_sac', or 'none', got {ac_config.mode!r}."
         )
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])
-    if "apply_sac" not in joint_pass_names:
-        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
+    if pass_name not in joint_pass_names:
+        compile_config.joint_passes = list(joint_pass_names) + [pass_name]
         logger.info(
-            "activation_checkpoint.mode is 'selective', added apply_sac to "
-            "compile.joint_passes"
+            f"activation_checkpoint.mode is {ac_config.mode!r}, "
+            f"added {pass_name} to compile.joint_passes"
         )

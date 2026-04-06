@@ -72,7 +72,7 @@ def to_graph_trainer_config(
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
     # non-"none" AC mode to "selective" so callers don't need per-config fixups.
     ac = d.get("activation_checkpoint")
-    if ac is not None and ac.mode != "none":
+    if ac is not None and ac.mode not in ("none", "selective", "fsdp2_sac"):
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
 
     return GraphTrainer.Config(**d)

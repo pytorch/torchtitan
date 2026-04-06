@@ -162,6 +162,48 @@ def validate_flex_attn_annotation_pass(
     return gm
 
 
+def _propagate_recompute_tag(node: torch.fx.Node) -> bool:
+    """Propagate recompute/ac_graph_id from parent for getitem and wait_tensor.
+
+    getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa), it is
+    followed by getitem nodes that extract individual elements. They inherit
+    the parent's recompute tag, otherwise they will be exposed as graph outputs
+    and saved for backwards unnecessarily.
+
+    wait_tensor: Semantically tied to its parent async collective (e.g.,
+    reduce_scatter_tensor, all_gather_into_tensor) and must share the same
+    save/recompute decision.
+
+    Returns True if the node was handled (caller should ``continue``).
+    """
+    if node.target not in (
+        operator.getitem,
+        torch.ops._c10d_functional.wait_tensor.default,
+    ):
+        return False
+    parent = node.args[0]
+    if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
+        node.meta["recompute"] = parent.meta["recompute"]
+        node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
+    return True
+
+
+def _log_ac_region_stats(
+    pass_name: str,
+    ac_region_stats: dict[int, dict[str, int]],
+    save_label: str,
+    recompute_label: str,
+) -> None:
+    """Log per-AC-region annotation statistics."""
+    for ac_region_id in sorted(ac_region_stats):
+        stats = ac_region_stats[ac_region_id]
+        logger.info(
+            f"  AC region {ac_region_id}: "
+            f"{stats['save']} {save_label}, "
+            f"{stats['recompute']} {recompute_label}"
+        )
+
+
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
     op_list_to_save: set | None = None,
@@ -206,22 +248,7 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
-        if node.target in (
-            operator.getitem,
-            torch.ops._c10d_functional.wait_tensor.default,
-        ):
-            # Propagate recompute tag from the parent node:
-            # - getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa),
-            #   it is followed by getitem nodes that extract individual elements.
-            #   They inherit the parent's recompute tag, otherwise they will be
-            #   exposed as graph outputs and saved for backwards unnecessarily.
-            # - wait_tensor: Semantically tied to its parent async collective
-            #   (e.g., reduce_scatter_tensor, all_gather_into_tensor) and must
-            #   share the same save/recompute decision.
-            parent = node.args[0]
-            if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
-                node.meta["recompute"] = parent.meta["recompute"]
-                node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
+        if _propagate_recompute_tag(node):
             continue
 
         custom_meta = node.meta.get("custom", {})
@@ -248,13 +275,105 @@ def apply_sac_pass(
 
     gm.recompile()
     logger.info("Applied selective activation checkpointing (SAC) graph pass.")
-    for ac_region_id in sorted(ac_region_stats):
-        stats = ac_region_stats[ac_region_id]
-        logger.info(
-            f"  AC region {ac_region_id}: "
-            f"{stats['save']} nodes annotated with MUST_SAVE, "
-            f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
+    _log_ac_region_stats("apply_sac", ac_region_stats, "MUST_SAVE", "PREFER_RECOMPUTE")
+    return gm
+
+
+def fsdp2_sac_pass(
+    gm: torch.fx.GraphModule,
+) -> torch.fx.GraphModule:
+    """Apply selective AC closely matching FSDP2's eager per-op policy.
+
+    Unlike ``apply_sac_pass`` which uses ``PREFER_RECOMPUTE`` with a single
+    global mm counter, this pass uses ``MUST_SAVE`` / ``MUST_RECOMPUTE`` with
+    per-AC-region mm counters and the same op list as FSDP2 eager
+    (``_get_save_ops``).  Only nodes inside AC regions are annotated —
+    nodes outside (embedding, output, loss) are left for the partitioner.
+
+    Key differences from ``apply_sac_pass``:
+      - **MUST policies** instead of PREFER — removes partitioner flexibility to
+        ensure deterministic save/recompute decisions matching FSDP2.
+      - **Per-AC-region mm counters** — each transformer block resets its own
+        mm counter, matching FSDP2's per-module ``checkpoint_wrapper``.
+      - **mm_ops includes aten.linear** — some backends keep linear as a leaf op.
+      - **CUDA→CPU _to_copy always saved** — for MoE D2H sync metadata.
+
+    Note: ``per_op_sac_force_recompute_mm_shapes_by_fqns`` is not yet supported
+    in this graph pass. For MoE models that rely on force-recomputing specific
+    mm shapes (e.g. router gate), use ``apply_sac_pass`` (mode ``selective``)
+    until this is added.
+
+    Use ``--activation_checkpoint.mode fsdp2_sac`` to enable.
+    """
+    save_ops = _get_save_ops()
+    mm_ops = {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
+
+    ac_region_stats: dict[int, dict[str, int]] = defaultdict(
+        lambda: {"save": 0, "recompute": 0}
+    )
+    # Per-AC-region mm counters, matching FSDP2's per-module counter reset
+    mm_counts: dict[int, int] = defaultdict(int)
+    has_ac_regions = False
+
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+
+        if _propagate_recompute_tag(node):
+            continue
+
+        custom_meta = node.meta.get("custom", {})
+        # Only annotate nodes inside AC regions (transformer blocks).
+        if _AC_REGION_ID not in custom_meta:
+            continue
+        has_ac_regions = True
+        ac_region_id = custom_meta[_AC_REGION_ID]
+        node.meta["ac_graph_id"] = ac_region_id
+
+        # CUDA→CPU _to_copy: always save (matches FSDP2 eager policy for
+        # MoE D2H sync metadata).
+        if node.target == torch.ops.aten._to_copy.default:
+            src_val = node.args[0].meta.get("val") if node.args else None
+            if (
+                src_val is not None
+                and hasattr(src_val, "device")
+                and src_val.device.type == "cuda"
+                and "device" in node.kwargs
+                and torch.device(node.kwargs["device"]).type == "cpu"
+            ):
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                ac_region_stats[ac_region_id]["save"] += 1
+                continue
+
+        if node.target in mm_ops:
+            mm_counts[ac_region_id] += 1
+            if mm_counts[ac_region_id] % 2 == 0:
+                policy = CheckpointPolicy.MUST_RECOMPUTE
+            else:
+                policy = CheckpointPolicy.MUST_SAVE
+        elif node.target in save_ops:
+            policy = CheckpointPolicy.MUST_SAVE
+        else:
+            policy = CheckpointPolicy.MUST_RECOMPUTE
+
+        node.meta["recompute"] = policy
+        if policy == CheckpointPolicy.MUST_SAVE:
+            ac_region_stats[ac_region_id]["save"] += 1
+        else:
+            ac_region_stats[ac_region_id]["recompute"] += 1
+
+    if not has_ac_regions:
+        logger.warning(
+            "fsdp2_sac_pass: no nodes with AC region annotations found. "
+            "Ensure annotate_ac_regions() was called on the model before tracing."
         )
+
+    gm.recompile()
+    logger.info(
+        "Applied fsdp2_sac: selective AC with MUST_SAVE/MUST_RECOMPUTE "
+        "matching FSDP2 eager policy."
+    )
+    _log_ac_region_stats("fsdp2_sac", ac_region_stats, "MUST_SAVE", "MUST_RECOMPUTE")
     return gm
 
 
@@ -479,4 +598,5 @@ AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
     "apply_sac": apply_sac_pass,
+    "fsdp2_sac": fsdp2_sac_pass,
 }

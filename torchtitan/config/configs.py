@@ -280,8 +280,17 @@ class ParallelismConfig:
 
 @dataclass(kw_only=True, slots=True)
 class ActivationCheckpointConfig:
-    mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
-    """Type of activation checkpointing to use"""
+    mode: Literal[
+        "selective", "full", "memory_budget", "fsdp2_sac", "none"
+    ] = "selective"
+    """Type of activation checkpointing to use.
+
+    "fsdp2_sac": graph_trainer mode that closely matches FSDP2's eager per-op
+    selective AC policy — same save ops, per-AC-region mm counters, and
+    MUST_SAVE / MUST_RECOMPUTE annotations. Use for direct memory
+    comparison between graph_trainer and FSDP2 eager trainer. Note: does not
+    yet support per_op_sac_force_recompute_mm_shapes_by_fqns.
+    """
 
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]
