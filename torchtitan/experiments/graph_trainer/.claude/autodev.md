@@ -80,7 +80,14 @@ management and review coordination.
 
 While working, the agent (or its subagent):
 - Follows the development instructions in CLAUDE.md (root and graph_trainer).
-- Creates a feature branch: `graph_trainer/<topic>`
+- **CRITICAL: Branch from `main`, not the current branch.** The current session
+  branch may contain unrelated changes (e.g. workflow files). Always run:
+  ```bash
+  git checkout main && git pull origin main
+  git checkout -b graph_trainer/<topic>
+  ```
+  before starting work. Verify with `git log --oneline -5` that the branch
+  point does not contain unrelated commits.
 - Makes focused commits (one logical change per commit).
 - If blocked by something external, moves the item to **Blocked** and
   adds a comment explaining what's blocking it.
@@ -92,31 +99,38 @@ While working, the agent (or its subagent):
 ### 4. Requesting Review
 
 When the work is complete and self-reviewed:
-1. Push the branch but **do not open a PR** — the developer will review the
-   branch and decide whether the work is worth a PR.
-2. Move the item to **Need Review**.
-3. Leave a brief comment on the item summarizing what was done and
-   which branch to look at.
+1. Push the branch.
+2. **Create a draft PR** against `main`. The title MUST start with
+   `[GraphTrainer][AutoDev]` (see Conventions). Include a clear description
+   summarizing the changes.
+3. **Link the PR to the board item** — update the draft issue body to append
+   a `---` separator followed by the PR URL and branch name (use
+   `gh project item-edit --id <DI_xxx> --title "<title>" --body "<original body + PR link>"`).
+   For real issues, add a comment with the PR URL instead.
+   Also reference the board item in the PR description.
+   **The subagent MUST do this before reporting back. Verify the link is
+   present by re-reading the board item.**
+4. Move the item to **Need Review**.
 
 ### 5. Developer Review
 
-The developer reviews the branch and either:
-- **Opens a PR, approves and merges** → moves the item to **Done**.
+The developer reviews the PR and either:
+- **Approves and merges** → moves the item to **Done**.
 - **Requests changes** → moves the item back to **In Progress** with
-  review comments (on the branch or board item).
+  review comments on the PR.
 
 ### 6. Addressing Review Feedback
 
 The agent learns about review feedback in two ways:
 
 - **Board poll (default)**: At session start, the agent checks for items
-  that are **In Progress** with review comments on the board item.
+  that are **In Progress** with review comments on the PR or board item.
   These are prioritized over new Ready items.
 - **Developer-initiated (urgent)**: The developer starts a session and directly
-  points the agent to the branch or pastes the review comments.
+  points the agent to the PR or pastes the review comments.
 
 When addressing feedback, the agent:
-1. Reads all review comments on the board item (or PR if one exists).
+1. Reads all review comments on the PR.
 2. Addresses each comment — fix the code or reply explaining why not.
 3. Self-reviews the updated diff.
 4. Pushes and moves the item back to **Need Review**.
@@ -162,8 +176,13 @@ gh project item-list 161 --owner pytorch --format json
 ## Conventions
 
 - **Branch naming**: `graph_trainer/<topic>`
-- **Commit prefix**: `[graph_trainer]` for all graph_trainer commits.
-  Add `[self_improve]` if the commit came from the nightly scout.
+- **Commit prefix**: `[GraphTrainer][AutoDev]` for all commits made by the agent.
+- **PR title prefix**: `[GraphTrainer][AutoDev]` — same prefix as commits.
+  The PR title must start with this prefix so it's immediately clear
+  the PR was created by the AutoDev agent.
+- **GitHub comment prefix**: All replies to PR review comments or board
+  item comments must start with `AutoDev: ` so readers can distinguish
+  agent replies from human replies.
 - **One item = one branch** unless items are tightly coupled.
 - **Link everything**: board item should reference the branch name.
   If the developer opens a PR, link that too.
