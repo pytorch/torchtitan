@@ -297,7 +297,11 @@ def apply_fsdp(
             - "never" will disable `reshard_after_forward` for all forward passes.
 
     """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
@@ -356,7 +360,11 @@ def apply_replicate(
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
 ):
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
     replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
     if model.tok_embeddings is not None:
