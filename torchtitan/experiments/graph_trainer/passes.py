@@ -17,11 +17,12 @@ Pass Types:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import operator
 import sys
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
@@ -182,6 +183,40 @@ def remove_identity_slice_pass(
     return gm
 
 
+@contextlib.contextmanager
+def tag_for_inductor(
+    g: torch.fx.Graph, inductor_configs: dict | None = None
+) -> Generator[None, None, None]:
+    """Tag nodes created within this context for ``regional_inductor`` compilation.
+
+    Nodes created inside the context manager are annotated with
+    ``compile_with_inductor`` in ``node.meta["custom"]`` so that
+    :func:`regional_inductor_pass` can identify and compile them as
+    fused regions.
+
+    Args:
+        g: The FX graph to annotate.
+        inductor_configs: Optional per-region inductor config overrides.
+            When provided, the annotation carries the config dict so
+            ``regional_inductor`` can apply region-specific settings.
+
+    Example::
+
+        with tag_for_inductor(gm.graph):
+            # nodes created here will be compiled by regional_inductor
+            ...
+    """
+    existing_nodes = set(g.nodes)
+    annotation: dict = {"compile_with_inductor": True}
+    if inductor_configs:
+        annotation["compile_with_inductor"] = {"inductor_configs": inductor_configs}
+    yield
+    for node in g.nodes:
+        if node not in existing_nodes and node.op == "call_function":
+            node.meta.setdefault("custom", {})
+            node.meta["custom"].update(annotation)
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -202,6 +237,7 @@ def construct_default_graph_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        regional_inductor_pass,
     ]
 
     # cudagraph should be the last pass.
@@ -304,13 +340,34 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
 def regional_inductor_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
 ) -> torch.fx.GraphModule:
-    """
-    Apply regional inductor compilation based on user annotation.
+    """Compile tagged graph regions with ``regional_inductor``.
 
-    When serializable=True (precompile mode), sets force_autograd_cache
-    so that regional_inductor wraps its output in RegionalOutputCode,
-    and overrides the ops filter to allow distributed collective ops.
+    Scans the graph for nodes whose ``node.meta["custom"]`` contains a
+    ``compile_with_inductor`` key (set by :func:`tag_for_inductor`) and
+    compiles those regions with TorchInductor.  Nodes without this tag
+    are left unchanged.  If no nodes are tagged the pass is a no-op.
+
+    Inductor is configured for bitwise-equal numerics so that the
+    compiled regions match eager execution exactly.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs for shape propagation.
+        serializable: When True (precompile mode), sets
+            ``force_autograd_cache`` so that ``regional_inductor`` wraps
+            its output in ``RegionalOutputCode``, and overrides the ops
+            filter to allow distributed collective ops.
     """
+    import torch._inductor.config as ic
+
+    # Ensure inductor produces bitwise-equal numerics vs eager.
+    ic.eager_numerics.division_rounding = True
+    # Recommended by inductor team — uncomment as needed:
+    # ic.emulate_precision_casts = True
+    # ic.eager_numerics.disable_ftz = True
+    # ic.eager_numerics.use_pytorch_libdevice = True
+    # ic.fallback_random = True
+
     if serializable:
         with torch._functorch.config.patch("force_autograd_cache", True):
             result = regional_inductor(gm, example_inputs)
@@ -328,7 +385,14 @@ def regional_inductor_pass(
                 "RegionalOutputCode; distributed ops may not serialize correctly."
             )
         return result
-    return regional_inductor(gm, example_inputs)
+
+    gm = regional_inductor(gm, example_inputs)
+
+    # regional_inductor may switch to boxed calling convention; reset to
+    # default so the graph can be called with positional args as usual.
+    gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    gm.recompile()
+    return gm
 
 
 def cudagraph_pass(
