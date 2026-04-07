@@ -254,6 +254,27 @@ def _is_collective_or_wait(node: Node) -> bool:
     return target in _COLLECTIVE_OPS
 
 
+def _tensor_is_contiguous(val: torch.Tensor) -> bool:
+    """Check contiguity, handling symbolic FakeTensors gracefully."""
+    try:
+        return bool(val.is_contiguous())
+    except Exception:
+        # Symbolic shapes can't be evaluated statically; assume contiguous
+        return True
+
+
+def _tensor_bytes(val: torch.Tensor) -> int:
+    """Get tensor size in bytes, handling symbolic FakeTensors gracefully."""
+    try:
+        nbytes = val.nelement() * val.element_size()
+        # Force evaluation to a concrete int; symbolic expressions may
+        # raise GuardOnDataDependentSymNode when compared with <.
+        return int(nbytes)
+    except Exception:
+        # Symbolic shapes can't be evaluated; assume large enough
+        return _MIN_OFFLOAD_BYTES
+
+
 def _can_offload_node(node: Node) -> bool:
     """Check if a node's output can be profitably offloaded to CPU.
 
@@ -271,9 +292,9 @@ def _can_offload_node(node: Node) -> bool:
         val = node.meta.get("val")
         if not isinstance(val, torch.Tensor):
             return False
-        if not val.is_contiguous():
+        if not _tensor_is_contiguous(val):
             return False
-        if val.nelement() * val.element_size() < _MIN_OFFLOAD_BYTES:
+        if _tensor_bytes(val) < _MIN_OFFLOAD_BYTES:
             return False
         return True
     if _is_view(node):
@@ -283,9 +304,9 @@ def _can_offload_node(node: Node) -> bool:
     val = node.meta.get("val")
     if not isinstance(val, torch.Tensor):
         return False
-    if not val.is_contiguous():
+    if not _tensor_is_contiguous(val):
         return False
-    if val.nelement() * val.element_size() < _MIN_OFFLOAD_BYTES:
+    if _tensor_bytes(val) < _MIN_OFFLOAD_BYTES:
         return False
     return True
 
@@ -379,7 +400,7 @@ def tag_offloadable_activations(gm: torch.fx.GraphModule) -> None:
         tagged += 1
         val = node.meta.get("val")
         if val is not None:
-            total_bytes += val.nelement() * val.element_size()
+            total_bytes += _tensor_bytes(val)
 
     logger.info(
         f"CPU offload: tagged {tagged} activations for offload "
@@ -480,9 +501,7 @@ def _defer_offload_waits(
             continue
 
         # Check dependencies: wait must come after all its inputs
-        dep_pos = max(
-            node_to_index.get(inp, 0) for inp in wait_node.all_input_nodes
-        )
+        dep_pos = max(node_to_index.get(inp, 0) for inp in wait_node.all_input_nodes)
         target_pos = node_to_index.get(target, 0)
 
         if target_pos <= dep_pos:
@@ -548,9 +567,7 @@ def _prefetch_reloads(
             continue
 
         # Check dependencies: reload must come after all its inputs
-        dep_pos = max(
-            node_to_index.get(inp, 0) for inp in reload_node.all_input_nodes
-        )
+        dep_pos = max(node_to_index.get(inp, 0) for inp in reload_node.all_input_nodes)
         target_pos = node_to_index.get(target, 0)
 
         if target_pos <= dep_pos:
@@ -660,15 +677,16 @@ def _apply_cpu_offload_pass(
             user.replace_input_with(node, wait_node)
 
         reload_info.append((reload_node, layer_idx))
-        total_bytes += val.nelement() * val.element_size()
+        total_bytes += _tensor_bytes(val)
 
-    # 4. Defer offload waits to end of their layer's forward
-    fwd_end = _find_fwd_layer_end_nodes(gm, forward_nodes)
-    _defer_offload_waits(gm, offload_wait_info, fwd_end)
-
-    # 5. Prefetch: move reload ops to preceding layer's backward
-    bwd_start = _find_bwd_layer_start_nodes(gm, backward_nodes)
-    _prefetch_reloads(gm, reload_info, bwd_start)
+    # TODO: Add scheduling optimizations (defer offload waits, prefetch reloads)
+    # for D2H/H2D overlap with compute. The make_fx traced joint graph
+    # interleaves forward and backward nodes (unlike manually built graphs
+    # where they are cleanly separated), so the simple "defer to next layer's
+    # forward" / "prefetch to preceding layer's backward" strategy from the
+    # reference implementation needs adaptation. For now, offload/reload ops
+    # are placed right next to their producers/consumers, which still saves
+    # memory but without async transfer overlap.
 
     gm.graph.lint()
     gm.recompile()
