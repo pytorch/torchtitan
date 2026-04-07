@@ -7,7 +7,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Annotated, Any, cast, Literal
+from typing import Annotated, Any, cast
 
 import torch
 import tyro
@@ -252,9 +252,8 @@ class ChatDataset(IterableDataset, Stateful):
     """Dataset for single-turn and multi-turn chat/instruction-tuning.
 
     Tokenizes conversations with alternating user/assistant turns and uses
-    greedy sequence packing with per-document positions. Labels can supervise
-    the full rendered conversation, all assistant content spans, or only the
-    last assistant span. Implements Stateful for checkpointing.
+    greedy sequence packing with per-document positions. Labels supervise only
+    assistant content spans. Implements Stateful for checkpointing.
     """
 
     def __init__(
@@ -263,7 +262,6 @@ class ChatDataset(IterableDataset, Stateful):
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
         *,
-        train_on: Literal["all", "assistant", "last_assistant"] = "assistant",
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -281,7 +279,6 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-        self._train_on = train_on
         self._assistant_end_token_ids = {self._eos_id}
         if isinstance(tokenizer, HuggingFaceTokenizer):
             self._assistant_end_token_ids.update(
@@ -414,15 +411,13 @@ class ChatDataset(IterableDataset, Stateful):
         """Tokenize a chat sample and create input/label pairs.
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:]. By default, the full rendered conversation is
-        supervised. Assistant masking modes instead keep either all assistant
-        spans or only the last assistant span, masking everything else with
-        IGNORE_INDEX by diffing the rendered conversation against versions
-        with each assistant turn blanked. We extend each assistant span by
-        one token when the next token is EOS or another special token,
-        allowing supervision of end-of-turn markers. Returns None if the
-        sample exceeds seq_len (dropped to avoid training on truncated
-        responses).
+        label_ids = tokens[1:]. Assistant-only supervision keeps rendered
+        assistant spans and masks everything else with IGNORE_INDEX by diffing
+        the rendered conversation against versions with each assistant turn
+        blanked. We extend each assistant span by one token when the next
+        token is EOS or another special token, allowing supervision of
+        end-of-turn markers. Returns None if the sample exceeds seq_len
+        (dropped to avoid training on truncated responses).
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
@@ -444,16 +439,11 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        if self._train_on == "all":
-            return input_ids, label_ids
-
         # Find assistant spans and unmask only those in labels.
         # Labels are shifted by 1: label_ids[j] = full_tokens[j+1], so
         # an assistant span (start, end) in full_tokens maps to
         # label indices [start-1, end-1) when supervising assistant content.
         spans = self._get_assistant_spans(messages, full_tokens)
-        if self._train_on == "last_assistant":
-            spans = spans[-1:]
 
         # Start with everything masked
         masked_labels = [IGNORE_INDEX] * len(label_ids)
@@ -594,9 +584,6 @@ class ChatDataLoader(ParallelAwareDataloader):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
         """Callable(sample_dict) -> list[message_dict]. Set in config functions."""
 
-        train_on: Literal["all", "assistant", "last_assistant"] = "assistant"
-        """Which tokens to supervise: 'all', 'assistant', or 'last_assistant'."""
-
         infinite: bool = True
         """Whether to loop the dataset infinitely. Might hang on multi-GPU."""
 
@@ -623,7 +610,6 @@ class ChatDataLoader(ParallelAwareDataloader):
             dataset=dataset,  # pyrefly: ignore [bad-argument-type]
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
-            train_on=config.train_on,
             seq_len=seq_len,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,

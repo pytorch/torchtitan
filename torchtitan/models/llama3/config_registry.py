@@ -257,7 +257,6 @@ def sft_debugmodel() -> Trainer.Config:
                 "split": "train",
             },
             sample_processor=process_sample,
-            train_on="assistant",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

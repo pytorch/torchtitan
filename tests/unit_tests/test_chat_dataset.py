@@ -6,7 +6,6 @@
 
 import os
 import unittest
-from typing import Literal
 
 import torch
 from datasets import Dataset
@@ -48,45 +47,8 @@ def _get_full_tokens(tokenizer, messages):
     return full_tokens
 
 
-class TestChatDatasetDefaultSupervision(unittest.TestCase):
-    """With train_on='all', labels supervise the full rendered conversation."""
-
-    def test_all_supervises_full_sequence(self):
-        tokenizer = _load_tokenizer()
-        sample = _load_dataset()[0]
-        ds = Dataset.from_list([sample])
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            train_on="all",
-            seq_len=2048,
-            infinite=False,
-        )
-
-        batch, labels = next(iter(chat_ds))
-        input_ids = batch["input"]
-        label_ids = labels
-
-        messages = _process_sample(sample)
-        full_tokens = _get_full_tokens(tokenizer, messages)
-        expected_input = full_tokens[:-1]
-        expected_label = full_tokens[1:]
-        seq_len_actual = len(expected_input)
-
-        self.assertEqual(input_ids.shape, label_ids.shape)
-        self.assertEqual(input_ids.shape[0], 2048)
-        self.assertEqual(input_ids[:seq_len_actual].tolist(), expected_input)
-        self.assertEqual(label_ids[:seq_len_actual].tolist(), expected_label)
-        self.assertNotIn(IGNORE_INDEX, label_ids[:seq_len_actual].tolist())
-        self.assertTrue(
-            torch.all(label_ids[seq_len_actual:] == IGNORE_INDEX).item(),
-            "Only padding should be masked by default",
-        )
-
-
 class TestChatDatasetShiftedTokens(unittest.TestCase):
-    """input_ids = tokens[:-1], label_ids = tokens[1:]."""
+    """input_ids = tokens[:-1], assistant labels align with tokens[1:]."""
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
@@ -96,7 +58,6 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            train_on="all",
             seq_len=2048,
             infinite=False,
         )
@@ -118,9 +79,20 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             input_ids[:seq_len_actual].tolist(),
             expected_input,
         )
+
+        prompt_text = tokenizer.apply_chat_template(
+            messages[:1], add_generation_prompt=True
+        )
+        prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+        response_start = len(prompt_tokens) - 1
+        self.assertGreaterEqual(response_start, 0)
+        self.assertTrue(
+            torch.all(label_ids[:response_start] == IGNORE_INDEX).item(),
+            "Prompt tokens should be masked",
+        )
         self.assertEqual(
-            label_ids[:seq_len_actual].tolist(),
-            expected_label,
+            label_ids[response_start:seq_len_actual].tolist(),
+            expected_label[response_start:],
         )
         self.assertTrue(torch.all(label_ids[seq_len_actual:] == IGNORE_INDEX).item())
 
@@ -443,55 +415,12 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
         self.assertGreaterEqual(chat_ds._epoch, 1)
 
 
-class TestChatDatasetMultiTurnDefaultSupervision(unittest.TestCase):
-    """With train_on='all', multi-turn conversations are fully supervised."""
-
-    def test_multiturn_supervises_all_turns(self):
-        tokenizer = _load_tokenizer()
-
-        messages = [
-            {"role": "user", "content": "What is 2+2?"},
-            {"role": "assistant", "content": "4"},
-            {"role": "user", "content": "And 3+3?"},
-            {"role": "assistant", "content": "6"},
-        ]
-
-        def processor(sample):
-            return messages
-
-        ds = Dataset.from_list([{"id": 1}])
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=processor,
-            train_on="all",
-            seq_len=2048,
-            infinite=False,
-        )
-
-        batch, labels = next(iter(chat_ds))
-        input_ids = batch["input"]
-        full_tokens = _get_full_tokens(tokenizer, messages)
-        expected_input = full_tokens[:-1]
-        expected_label = full_tokens[1:]
-        seq_len_actual = len(expected_input)
-
-        self.assertEqual(input_ids[:seq_len_actual].tolist(), expected_input)
-        self.assertEqual(labels[:seq_len_actual].tolist(), expected_label)
-        self.assertNotIn(IGNORE_INDEX, labels[:seq_len_actual].tolist())
-        self.assertTrue(
-            torch.all(labels[seq_len_actual:] == IGNORE_INDEX).item(),
-            "Only padding should be masked by default",
-        )
-
-
 class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
     def _get_supervised_output(
         self,
         *,
         chat_template: str,
         messages: list[dict[str, str]],
-        train_on: Literal["all", "assistant", "last_assistant"] = "assistant",
     ) -> tuple[HuggingFaceTokenizer, list[int], str]:
         tokenizer = _load_tokenizer()
         tokenizer.set_chat_template(chat_template)
@@ -500,7 +429,6 @@ class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
             dataset=Dataset.from_list([{"id": 1}]),
             tokenizer=tokenizer,
             sample_processor=lambda sample, messages=messages: messages,
-            train_on=train_on,
             seq_len=512,
             infinite=False,
         )
@@ -713,7 +641,6 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=lambda sample: messages,
-            train_on="assistant",
             seq_len=sample_len * 2,
             infinite=False,
         )
@@ -744,33 +671,6 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
 
         metadata = create_varlen_metadata_for_document(positions=positions)
         self.assertEqual(metadata.cu_seq_q.tolist(), [0, sample_len, sample_len * 2])
-
-
-class TestChatDatasetLastAssistantMasking(unittest.TestCase):
-    def test_last_assistant_supervises_only_the_final_assistant_turn(self):
-        (
-            tokenizer,
-            supervised_token_ids,
-            supervised_text,
-        ) = TestChatDatasetAssistantOnlyTemplates()._get_supervised_output(
-            chat_template=(
-                "{{ bos_token }}{% for msg in messages %}"
-                "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
-                "{% endfor %}"
-            ),
-            messages=[
-                {"role": "user", "content": "Q1?"},
-                {"role": "assistant", "content": "4"},
-                {"role": "user", "content": "Q2?"},
-                {"role": "assistant", "content": "6"},
-            ],
-            train_on="last_assistant",
-        )
-
-        self.assertEqual(supervised_text, "6<|end_of_text|>")
-        self.assertNotIn("4", supervised_text)
-        self.assertEqual(supervised_token_ids[-1], tokenizer.eos_id)
-
 
 if __name__ == "__main__":
     unittest.main()
