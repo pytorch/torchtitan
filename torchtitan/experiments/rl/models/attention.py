@@ -170,6 +170,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         # split-k reductions. FA2 is automatically batch-invariant and does
         # not accept num_splits.
         extra_kwargs = {}
+
+        # Disable split_kv in Flash Attention to ensure bitwise identical output.
+        # see https://github.com/pytorch/pytorch/pull/176905
         if is_in_batch_invariant_mode() and current_flash_attention_impl() == "FA3":
             extra_kwargs["num_splits"] = 1
 
