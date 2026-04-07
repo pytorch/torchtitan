@@ -302,12 +302,12 @@ class Validator(BaseValidator):
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss_sum = (
+                if self.pp_has_last_stage:
+                    assert losses is not None
                     # using sum because loss_fn already uses reduction='sum'
-                    torch.sum(torch.stack(losses)).to(device_type)
-                    if self.pp_has_last_stage
-                    else torch.tensor([-1.0], device=device_type)
-                )
+                    loss_sum = torch.sum(torch.stack(losses)).to(device_type)
+                else:
+                    loss_sum = torch.tensor([-1.0], device=device_type)
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
