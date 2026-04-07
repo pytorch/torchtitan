@@ -144,18 +144,6 @@ Status option IDs:
 
 ---
 
-## Nightly Scout Integration
-
-The [nightly scout](nightly.md) runs on a schedule and:
-1. Reads the board to see what's already tracked (avoids duplicates).
-2. Creates Backlog drafts for new findings from its report.
-3. Picks up Ready items if any are tagged for automated fix.
-
-The scout should **not** auto-promote its own items to Ready. That's a
-human judgment call.
-
----
-
 ## Conventions
 
 - **Branch naming**: `graph_trainer/<topic>`
