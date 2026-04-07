@@ -444,12 +444,21 @@ class TestMetadataPropagation(unittest.TestCase):
         # Run the copy pass again
         _copy_fwd_metadata_to_bw_nodes(gm)
 
+        def is_backward(node: torch.fx.Node) -> bool:
+            if node.meta.get("partitioner_tag") == "is_backward":
+                return True
+            if "partitioner_tag" not in node.meta:
+                return (
+                    node.meta.get("custom", {}).get("remat_pass_tag") == "is_backward"
+                )
+            return False
+
         # Check that bwd nodes with shared seq_nr got the custom metadata
         for node in gm.graph.nodes:
             if node.op != "call_function" or "seq_nr" not in node.meta:
                 continue
             seq_nr = node.meta["seq_nr"]
-            if node is not seq_nr_first.get(seq_nr):
+            if node is not seq_nr_first.get(seq_nr) and is_backward(node):
                 # This is a backward node
                 custom = node.meta.get("custom")
                 self.assertIsNotNone(
@@ -457,6 +466,21 @@ class TestMetadataPropagation(unittest.TestCase):
                     f"Backward node {node.name} with seq_nr={seq_nr} missing custom metadata",
                 )
                 self.assertEqual(custom.get("test_key"), "test_value")
+
+    def test_copy_fwd_metadata_uses_remat_tag_fallback(self):
+        graph = torch.fx.Graph()
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(1, 2))
+        fwd.meta["seq_nr"] = 7
+        fwd.meta["custom"] = {"test_key": "test_value"}
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 3))
+        bwd.meta["seq_nr"] = 7
+        bwd.meta["custom"] = {"remat_pass_tag": "is_backward"}
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        self.assertEqual(bwd.meta["custom"].get("test_key"), "test_value")
 
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""
@@ -938,7 +962,6 @@ class TestGraphBasedSAC(unittest.TestCase):
         )
         self._run_sac_test(Qwen3Model, config, (tokens,), labels, dtype=torch.bfloat16)
 
-    @unittest.expectedFailure
     def test_deepseek_v3_sac(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
@@ -969,7 +992,6 @@ class TestGraphBasedSAC(unittest.TestCase):
             use_regional_inductor=True,
         )
 
-    @unittest.expectedFailure
     def test_gpt_oss_sac(self):
         from torch.nn.attention.flex_attention import and_masks
 
