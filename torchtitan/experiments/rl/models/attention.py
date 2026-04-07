@@ -65,6 +65,8 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
+            # activate_flash_attention_impl() will restore internal global state
+            # and re-run register function, so we want to only call it once.
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
         else:
