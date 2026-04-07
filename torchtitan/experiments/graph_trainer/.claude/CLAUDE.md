@@ -47,8 +47,20 @@ pytest torchtitan/experiments/graph_trainer/tests/test_passes.py -x
 pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -x
 pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -x
 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py -x
+pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -x
 
 # Integration tests (8 GPUs)
 python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_dir> \
     --test_suite graph_trainer_default --ngpu 8
 ```
+
+### Bitwise Deterministic Guardrail
+
+Before submitting any change, run the bitwise deterministic test first:
+```bash
+pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -x
+```
+This verifies that the aot_fx_trace path produces bitwise identical losses
+and gradients across runs, and matches eager numerics exactly. Any change
+that breaks this test must be investigated and fixed before proceeding with
+other tests.
