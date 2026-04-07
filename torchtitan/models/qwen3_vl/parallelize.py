@@ -39,7 +39,6 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_dense, apply_compile_sparse
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import NoParallel
-from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -141,12 +140,12 @@ def _apply_tp_to_vision_encoder(
     Hidden states flow as DTensor(Replicate) throughout — all ranks hold the
     full hidden_states. Only the linear layers (qkv, proj, fc1, fc2) are
     sharded via ColwiseParallel/RowwiseParallel to save memory. Norms operate
-    on Replicate DTensors directly. The learned position embedding parameter
-    is a Replicate DTensor; computing position embeddings for the current
-    input requires bilinear interpolation which doesn't support DTensors, so
-    local_map is used to unwrap the parameter, perform interpolation in plain
-    tensors, and re-wrap the result as a DTensor. Vision encoder sequence
-    lengths are short enough that redundant computation is cheap.
+    on Replicate DTensors directly.
+
+    The learned position embedding uses local_map to unwrap DTensor for
+    bilinear interpolation. TODO: Add a DTensor sharding prop rule for
+    F.interpolate (at least Replicate → Replicate) upstream in PyTorch,
+    then remove the local_map workaround in vision_encoder.py.
     """
     # NoParallel on patch_embed distributes its params as Replicate DTensors
     # on tp_mesh for FSDP mesh consistency. Its input hook wraps plain
@@ -318,14 +317,15 @@ def parallelize_qwen3_vl(
             # pyrefly: ignore [bad-argument-type]
             apply_compile_dense(model.vision_encoder, compile_config)
 
-    # Apply FSDP or HSDP
-    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    # Apply FSDP / HSDP unconditionally (fully_shard handles dp_shard=1)
+    dp_mesh_names = (
+        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    )
+    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+    # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+    edp_mesh = None
+    if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
@@ -333,45 +333,34 @@ def parallelize_qwen3_vl(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        # FSDP the vision encoder as a single unit (see _apply_fsdp_to_vision_encoder)
-        if model.vision_encoder is not None:
-            _apply_fsdp_to_vision_encoder(
-                # pyrefly: ignore [bad-argument-type]
-                model.vision_encoder,
-                dp_mesh,
-                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-                reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-                pp_enabled=parallel_dims.pp_enabled,
-            )
-
-        # FSDP the decoder with MoE-aware sharding (reuses llama4 apply_fsdp)
-        apply_fsdp(
-            model,
+    # FSDP the vision encoder as a single unit (see _apply_fsdp_to_vision_encoder)
+    if model.vision_encoder is not None:
+        _apply_fsdp_to_vision_encoder(
+            # pyrefly: ignore [bad-argument-type]
+            model.vision_encoder,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            edp_mesh=edp_mesh,
+            pp_enabled=parallel_dims.pp_enabled,
         )
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the Qwen3-VL model")
-        else:
-            logger.info("Applied FSDP to the Qwen3-VL model")
+    # FSDP the decoder with MoE-aware sharding
+    apply_fsdp(
+        model,
+        dp_mesh,
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
+    )
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the Qwen3-VL model")
+    logger.info("Applied fully_shard to the Qwen3-VL model")
 
-    elif parallel_dims.dp_replicate_enabled:
-        apply_replicate(
-            model,
-            parallel_dims.get_mesh("dp_replicate"),
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        )
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the Qwen3-VL model")
 
     return model

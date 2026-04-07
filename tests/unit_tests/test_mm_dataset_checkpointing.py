@@ -8,37 +8,49 @@ import unittest
 
 import torch
 
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.models.qwen3_vl.special_tokens import Qwen3VLDataLoader
+from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+
+
+_TOKENIZER_PATH = "tests/assets/tokenizer"
+
+_TOKENIZER_CONFIG = MultiModalTokenizer.Config(
+    image_token="<|image_pad|>",
+    video_token="<|video_pad|>",
+    vision_start_token="<|vision_start|>",
+    vision_end_token="<|vision_end|>",
+    pad_token="<|endoftext|>",
+)
+
+
+_TOKENIZER = _TOKENIZER_CONFIG.build(tokenizer_path=_TOKENIZER_PATH)
 
 
 class TestMMDatasetCheckpointing(unittest.TestCase):
     """Test save/load for multimodal dataset, mirroring test_dataset_checkpointing.py."""
 
     def _build_dataloader(self, batch_size, seq_len, world_size, rank):
-        tokenizer = HuggingFaceTokenizer.Config().build(
-            tokenizer_path="tests/assets/tokenizer"
-        )
-        dl_config = Qwen3VLDataLoader.Config(
+        dl_config = MMDataLoader.Config(
             dataset="cc12m-test",
-            patch_size=14,
+            max_images_per_batch=128,
+            patch_size=16,
             temporal_patch_size=2,
             spatial_merge_size=2,
             min_pixels=784,
             max_pixels=200000,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
         )
 
-        return Qwen3VLDataLoader(
-            dl_config,
+        return dl_config.build(
             dp_world_size=world_size,
             dp_rank=rank,
-            tokenizer=tokenizer,
+            tokenizer=_TOKENIZER,
             seq_len=seq_len,
             local_batch_size=batch_size,
         )
 
     def test_cc12m_resumption(self):
-        # cc12m_test has 32 samples; with world_size=2, each rank gets 16
         for world_size in [1, 2]:
             for rank in range(world_size):
                 batch_size = 1
@@ -71,7 +83,6 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                     assert torch.equal(
                         input_dict["positions"], expected_input["positions"]
                     ), f"positions mismatch (world_size={world_size}, rank={rank})"
-                    # Verify pixel_values shapes match (values not compared)
                     for key in ["pixel_values", "grid_thw"]:
                         exp_v = expected_input[key]
                         res_v = input_dict[key]
@@ -79,7 +90,6 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                             res_v is None
                         ), f"{key} None mismatch (world_size={world_size}, rank={rank})"
                         if exp_v is not None:
-                            print(exp_v.shape)
                             assert exp_v.shape == res_v.shape, (
                                 f"{key} shape mismatch: {exp_v.shape} vs {res_v.shape} "
                                 f"(world_size={world_size}, rank={rank})"

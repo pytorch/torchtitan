@@ -2,71 +2,7 @@
   "version": "1.0",
   "truncation": null,
   "padding": null,
-  "added_tokens": [
-    {
-      "id": 2002,
-      "content": "<|begin_of_text|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    },
-    {
-      "id": 2003,
-      "content": "<|end_of_text|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    },
-    {
-      "id": 2004,
-      "content": "<|endoftext|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    },
-    {
-      "id": 2005,
-      "content": "<|vision_start|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    },
-    {
-      "id": 2006,
-      "content": "<|vision_end|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    },
-    {
-      "id": 2007,
-      "content": "<|image_pad|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    },
-    {
-      "id": 2008,
-      "content": "<|video_pad|>",
-      "single_word": false,
-      "lstrip": false,
-      "rstrip": false,
-      "normalized": false,
-      "special": true
-    }
-  ],
+  "added_tokens": [],
   "normalizer": null,
   "pre_tokenizer": {
     "type": "ByteLevel",

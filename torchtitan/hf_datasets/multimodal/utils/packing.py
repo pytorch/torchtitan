@@ -4,21 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Utilities for efficient sample packing in Qwen3-VL datasets."""
+"""Utilities for efficient sample packing in multimodal datasets.
+
+Uses a scan-and-pick algorithm: for each packed sequence, the entire buffer
+is scanned to greedily select any sample that fits the remaining capacity,
+producing tighter packing than a single-pass sorted approach.
+"""
 
 from collections import deque
 from typing import Any
 
 import torch
 
+from torchtitan.tools.logging import logger
+
 
 class MMSamplePacker:
-    """Packs multiple samples together to maximize sequence length utilization.
+    """Packs multiple samples to maximize sequence length utilization.
 
-    Samples are accumulated in a buffer. When the buffer reaches buffer_size,
-    samples are sorted by length and greedily packed into sequences up to
-    max_seq_length. The last (incomplete) group of samples is kept in the
-    buffer to be combined with future samples, avoiding short packed sequences.
+    Samples are accumulated in an internal buffer.  When the buffer reaches
+    ``buffer_size``, a scan-and-pick pass packs samples into sequences of up
+    to ``max_seq_length``.  Samples that cannot form a complete sequence stay
+    in the buffer to be combined with future arrivals (unless ``flush=True``).
     """
 
     def __init__(
@@ -31,44 +38,45 @@ class MMSamplePacker:
         self.buffer_size = buffer_size
         self.batch_size = batch_size
 
-        self.sample_buffer: deque = deque()  # raw samples
-        self.packed_samples: deque = deque()  # packed samples ready to be yielded
+        self._sample_buffer: dict[int, dict[str, Any]] = {}
+        self._next_id: int = 0
+        self.packed_samples: deque = deque()
 
     def _pack_buffered_samples(self, flush: bool = False) -> None:
-        """Pack buffered samples into sequences.
+        """Pack buffered samples into sequences using scan-and-pick.
 
-        When flush=False, the last incomplete group stays in the buffer
-        to be combined with future samples.
+        Repeatedly scans the buffer to greedily fill each packed sequence.
+        When ``flush=False``, an incomplete sequence stays in the buffer
+        for future combination.
+
+        O(N * K) where N = buffer size, K = number of packed sequences.
+        Negligible vs data loading and model forward for typical buffer sizes.
         """
-        if not self.sample_buffer:
-            return
+        while self._sample_buffer:
+            picked_ids: list[int] = []
+            current_length = 0
 
-        samples = sorted(
-            self.sample_buffer, key=lambda x: len(x["input_ids"]), reverse=True
-        )
-        self.sample_buffer.clear()
+            for sid, sample in self._sample_buffer.items():
+                length = len(sample["input_ids"])
+                if current_length + length <= self.max_seq_length:
+                    picked_ids.append(sid)
+                    current_length += length
 
-        current_sequence = []
-        current_length = 0
+            # Nothing fit — every remaining sample exceeds max_seq_length
+            if not picked_ids:
+                logger.warning(
+                    f"Dropping {len(self._sample_buffer)} samples that"
+                    f" exceed max_seq_length {self.max_seq_length}"
+                )
+                self._sample_buffer.clear()
+                break
 
-        for sample in samples:
-            sample_length = len(sample["input_ids"])
+            # Incomplete sequence — keep in buffer for future samples
+            if not flush and current_length < self.max_seq_length:
+                break
 
-            if current_sequence and (
-                current_length + sample_length > self.max_seq_length
-            ):
-                self.packed_samples.append(self._merge_samples(current_sequence))
-                current_sequence = []
-                current_length = 0
-
-            current_sequence.append(sample)
-            current_length += sample_length
-
-        if current_sequence:
-            if flush:
-                self.packed_samples.append(self._merge_samples(current_sequence))
-            else:
-                self.sample_buffer.extend(current_sequence)
+            samples = [self._sample_buffer.pop(sid) for sid in picked_ids]
+            self.packed_samples.append(self._merge_samples(samples))
 
     @staticmethod
     def _merge_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -85,8 +93,10 @@ class MMSamplePacker:
 
     def add_sample(self, sample: dict[str, Any]) -> None:
         """Add a sample to the buffer. Triggers packing when buffer is full."""
-        self.sample_buffer.append(sample)
-        if len(self.sample_buffer) >= self.buffer_size:
+        sid = self._next_id
+        self._next_id += 1
+        self._sample_buffer[sid] = sample
+        if len(self._sample_buffer) >= self.buffer_size:
             self._pack_buffered_samples()
 
     def has_batch_ready(self) -> bool:

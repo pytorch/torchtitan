@@ -4,10 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Video processing utilities for Qwen3-VL datasets."""
+"""Video processing utilities for multimodal datasets."""
 
 import numpy as np
 import torch
+import torchvision.transforms.v2.functional as TVF  # pyrefly: ignore [missing-import]
+
 from torchtitan.tools.logging import logger
 
 from .image import smart_resize
@@ -37,52 +39,54 @@ def load_video(
     try:
         import av  # pyrefly: ignore [missing-import]
 
-        container = av.open(path)
-        stream = container.streams.video[0]
+        with av.open(path) as container:
+            stream = container.streams.video[0]
 
-        video_fps = float(stream.average_rate or stream.guessed_rate or 24)
-        total_frames = stream.frames
-        if total_frames == 0 and stream.duration:
-            # pyrefly: ignore [unsupported-operation]
-            total_frames = int(float(stream.duration * stream.time_base) * video_fps)
-        if total_frames == 0:
-            # No metadata available — decode all frames to count them
-            container.seek(0)
-            all_frames = [
-                frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)
-            ]
-            container.close()
-            if not all_frames:
-                return None
-            total_frames = len(all_frames)
+            video_fps = float(stream.average_rate or stream.guessed_rate or 24)
+            total_frames = stream.frames
+            if total_frames == 0 and stream.duration:
+                # pyrefly: ignore [unsupported-operation]
+                total_frames = int(
+                    # pyrefly: ignore [unsupported-operation]
+                    float(stream.duration * stream.time_base)
+                    * video_fps
+                )
+            if total_frames == 0:
+                # No metadata available — decode all frames to count them
+                container.seek(0)
+                all_frames = [
+                    frame.to_ndarray(format="rgb24")
+                    for frame in container.decode(video=0)
+                ]
+                if not all_frames:
+                    return None
+                total_frames = len(all_frames)
+                duration = total_frames / video_fps
+                nframes = max(min_frames, min(int(duration * fps), max_frames))
+                nframes = min(nframes, total_frames)
+                indices = np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
+                selected = [all_frames[i] for i in indices]
+                # pyrefly: ignore [bad-return]
+                return torch.from_numpy(np.stack(selected))
+
             duration = total_frames / video_fps
-            nframes = max(min_frames, min(int(duration * fps), max_frames))
+            nframes = int(duration * fps)
+            nframes = max(min_frames, min(nframes, max_frames))
             nframes = min(nframes, total_frames)
+
+            # Compute which frame indices to keep
             indices = set(
                 np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
             )
-            selected = [all_frames[i] for i in sorted(indices)]
-            # pyrefly: ignore [bad-return]
-            return torch.from_numpy(np.stack(selected))
 
-        duration = total_frames / video_fps
-        nframes = int(duration * fps)
-        nframes = max(min_frames, min(nframes, max_frames))
-        nframes = min(nframes, total_frames)
-
-        # Compute which frame indices to keep
-        indices = set(np.linspace(0, total_frames - 1, nframes).astype(int).tolist())
-
-        # Iterate stream, only convert selected frames to numpy
-        frames = []
-        container.seek(0)
-        for i, frame in enumerate(container.decode(video=0)):
-            if i in indices:
-                frames.append(frame.to_ndarray(format="rgb24"))
-                if len(frames) == nframes:
-                    break
-
-        container.close()
+            # Must decode sequentially — inter-frame codecs (H.264/H.265) have
+            # dependencies between frames. Only selected frames are converted to
+            # numpy to avoid the RGB conversion cost.
+            frames = []
+            container.seek(0)
+            for i, frame in enumerate(container.decode(video=0)):
+                if i in indices:
+                    frames.append(frame.to_ndarray(format="rgb24"))
 
         if not frames:
             return None
@@ -99,69 +103,50 @@ def process_video(
     video: torch.Tensor,
     patch_size: int,
     merge_size: int,
-    temporal_patch_size: int,
     max_pixels: int,
     min_pixels: int,
     image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
     image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
-) -> torch.Tensor | None:
-    """Resize and normalize video frames for Qwen3-VL.
+) -> torch.Tensor:
+    """Resize and normalize video frames for VLM training.
+
+    Uses torchvision v2 APIs with uint8 resize for faster SIMD paths.
 
     Args:
         video: Raw video tensor of shape (T, H, W, C) in uint8.
         patch_size: Spatial patch size.
         merge_size: Spatial merge size.
-        temporal_patch_size: Temporal patch size.
-        max_pixels: Maximum total pixels (T * H * W budget).
-        min_pixels: Minimum spatial pixels per frame.
+        max_pixels: Maximum spatial pixels per frame (H * W budget).
+        min_pixels: Minimum spatial pixels per frame (H * W budget).
         image_mean: Per-channel mean for normalization.
         image_std: Per-channel std for normalization.
 
     Returns:
-        Normalized tensor of shape (T, H', W', C) in float32,
-        or None on failure.
+        Normalized tensor of shape (T, H', W', C) in float32.
     """
-    try:
-        import torchvision.transforms.functional as F  # pyrefly: ignore [missing-import]
+    T, H, W, C = video.shape
+    factor = patch_size * merge_size
 
-        T, H, W, C = video.shape
-        factor = patch_size * merge_size
+    target_h, target_w = smart_resize(
+        H,
+        W,
+        factor=factor,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
 
-        target_h, target_w = smart_resize(
-            H,
-            W,
-            factor=factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            num_frames=T,
-            temporal_factor=temporal_patch_size,
-        )
+    # Resize on uint8 for faster SIMD paths (AVX2/NEON)
+    # (T, H, W, C) → (T, C, H, W) for torchvision
+    video = video.permute(0, 3, 1, 2)  # (T, C, H, W) uint8
+    video = TVF.resize(
+        video,
+        [target_h, target_w],
+        interpolation=TVF.InterpolationMode.BICUBIC,
+        antialias=True,
+    )
 
-        # Resize frames: torchvision F.resize expects (..., H, W) format
-        # video is (T, H, W, C) -> permute to (T, C, H, W)
-        # pyrefly: ignore [bad-assignment]
-        video = video.permute(0, 3, 1, 2).float()  # (T, C, H, W)
-        # pyrefly: ignore [bad-assignment]
-        video = F.resize(
-            # pyrefly: ignore [bad-argument-type]
-            video,
-            [target_h, target_w],
-            interpolation=F.InterpolationMode.BICUBIC,
-        )
-        # Back to channel-last: (T, H', W', C)
-        # pyrefly: ignore [bad-assignment]
-        video = video.permute(0, 2, 3, 1)
-
-        # Normalize
-        # pyrefly: ignore [bad-assignment]
-        video = video / 255.0
-        mean = torch.tensor(image_mean, dtype=video.dtype)
-        std = torch.tensor(image_std, dtype=video.dtype)
-        # pyrefly: ignore [bad-assignment]
-        video = (video - mean) / std
-
-        return video
-
-    except Exception as e:
-        logger.warning(f"Error processing video: {e}")
-        return None
+    # uint8 → float32 [0, 1] → normalize → channel-last
+    video = TVF.to_dtype(video, torch.float32, scale=True)
+    video = TVF.normalize(video, list(image_mean), list(image_std), inplace=True)
+    # (T, C, H', W') → (T, H', W', C)
+    return video.permute(0, 2, 3, 1)

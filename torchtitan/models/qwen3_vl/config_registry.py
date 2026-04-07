@@ -8,31 +8,41 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.tokenizer import MultiModalTokenizer
+
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.trainer import Trainer
 
-from . import model_registry
-from .special_tokens import Qwen3VLDataLoader
+from . import model_registry, QWEN3_VL_SPECIAL_TOKENS
+
+
+def _qwen3_vl_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
+    return MMDataLoader.Config(
+        dataset=dataset,
+        max_images_per_batch=128,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        min_pixels=65536,
+        max_pixels=16777216,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        **kwargs,
+    )
 
 
 def qwen3_vl_debugmodel() -> Trainer.Config:
-    spec = model_registry("debugmodel")
-    # pyrefly: ignore [missing-attribute]
-    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
+        tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=spec,
-        dataloader=Qwen3VLDataLoader.Config(
-            dataset="cc12m-test",
-            patch_size=encoder.patch_size,
-            temporal_patch_size=encoder.temporal_patch_size,
-            spatial_merge_size=encoder.spatial_merge_size,
-        ),
+        model_spec=model_registry("debugmodel"),
+        dataloader=_qwen3_vl_dataloader("cc12m-test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -56,19 +66,12 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
 
 
 def qwen3_vl_debugmodel_moe() -> Trainer.Config:
-    spec = model_registry("debugmodel_moe")
-    # pyrefly: ignore [missing-attribute]
-    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
+        tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=spec,
-        dataloader=Qwen3VLDataLoader.Config(
-            dataset="cc12m-test",
-            patch_size=encoder.patch_size,
-            temporal_patch_size=encoder.temporal_patch_size,
-            spatial_merge_size=encoder.spatial_merge_size,
-        ),
+        model_spec=model_registry("debugmodel_moe"),
+        dataloader=_qwen3_vl_dataloader("cc12m-test"),
         optimizer=OptimizersContainer.Config(lr=3e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
@@ -93,18 +96,11 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
 
 
 def qwen3_vl_2b() -> Trainer.Config:
-    spec = model_registry("2B")
-    # pyrefly: ignore [missing-attribute]
-    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
-        model_spec=spec,
-        dataloader=Qwen3VLDataLoader.Config(
-            dataset="cc12m",
-            patch_size=encoder.patch_size,
-            temporal_patch_size=encoder.temporal_patch_size,
-            spatial_merge_size=encoder.spatial_merge_size,
-        ),
+        tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
+        model_spec=model_registry("2B"),
+        dataloader=_qwen3_vl_dataloader("cc12m"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -129,18 +125,11 @@ def qwen3_vl_2b() -> Trainer.Config:
 
 
 def qwen3_vl_8b() -> Trainer.Config:
-    spec = model_registry("8B")
-    # pyrefly: ignore [missing-attribute]
-    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-8B-Instruct",
-        model_spec=spec,
-        dataloader=Qwen3VLDataLoader.Config(
-            dataset="cc12m",
-            patch_size=encoder.patch_size,
-            temporal_patch_size=encoder.temporal_patch_size,
-            spatial_merge_size=encoder.spatial_merge_size,
-        ),
+        tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
+        model_spec=model_registry("8B"),
+        dataloader=_qwen3_vl_dataloader("cc12m"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -165,18 +154,11 @@ def qwen3_vl_8b() -> Trainer.Config:
 
 
 def qwen3_vl_30b_a3b() -> Trainer.Config:
-    spec = model_registry("30B-A3B")
-    # pyrefly: ignore [missing-attribute]
-    encoder = spec.model.vision_encoder
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
-        model_spec=spec,
-        dataloader=Qwen3VLDataLoader.Config(
-            dataset="cc12m",
-            patch_size=encoder.patch_size,
-            temporal_patch_size=encoder.temporal_patch_size,
-            spatial_merge_size=encoder.spatial_merge_size,
-        ),
+        tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
+        model_spec=model_registry("30B-A3B"),
+        dataloader=_qwen3_vl_dataloader("cc12m"),
         optimizer=OptimizersContainer.Config(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(

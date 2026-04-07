@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal collator for Qwen3-VL datasets."""
+"""Multimodal collator for VLM datasets."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -12,21 +12,16 @@ from typing import Any
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from torchtitan.hf_datasets.multimodal import MMSpecialTokens
-
+from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.tools.logging import logger
-
 from .utils.image import vision_to_patches
-from .utils.text import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch
+from .utils.text import pad_batch_dim, pad_seq_len
 
 
 @dataclass
-class MultiModalCollatorNLD:
-    """Multimodal collator for Qwen3-VL that works with image patches in NLD format.
-
-    N: Number of images (vision encoder's batch size)
-    L: Length of patches (vision encoder's sequence length)
-    D: Dimension of a patch
+class MultiModalCollator:
+    """Multimodal collator for VLM training.
 
     Handles both image and text data, converting images to patches
     and preparing text for model input.
@@ -34,34 +29,26 @@ class MultiModalCollatorNLD:
 
     batch_size: int
     seq_len: int
+    max_images_per_batch: int
     patch_size: int
     temporal_patch_size: int
     spatial_merge_size: int
-    max_images_per_batch: int
-    max_patches_per_image: int  # This is merged patches count
-    special_tokens: MMSpecialTokens
-
-    def __post_init__(self):
-        # Calculate raw patches limit (before spatial merging)
-        self.max_raw_patches_per_image = self.max_patches_per_image * (
-            self.spatial_merge_size**2
-        )
+    tokenizer: MultiModalTokenizer
 
     def collate_images(
         self, all_images: list[torch.Tensor]
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process a list of image/video tensors into padded patches with grid dimensions.
 
         Args:
-            all_images: list of image/video tensors, each of shape (T, H, W, C)
+            all_images: Non-empty list of image/video tensors, each of shape (T, H, W, C)
 
         Returns:
-            pixel_values: Padded patches (num_images, max_num_patch, patch_dim) or None
-            grid_thw: Grid dimensions (num_images, 3) with [T, H_patches, W_patches] or None
-        """
-        if not all_images:
-            return None, None
+            pixel_values: Padded patches (num_images, max_num_patch, patch_dim)
+            grid_thw: Grid dimensions (num_images, 3) with [T, H_patches, W_patches]
 
+        NOTE: Both num_images and max_num_patch vary per batch.
+        """
         results = [
             vision_to_patches(
                 img, self.patch_size, self.temporal_patch_size, self.spatial_merge_size
@@ -101,12 +88,12 @@ class MultiModalCollatorNLD:
             [s["input_ids"] for s in batch],
             batch_first=True,
             # pyrefly: ignore [missing-attribute]
-            padding_value=self.special_tokens.pad_id,
+            padding_value=self.tokenizer.pad_id,
         )
         labels = pad_sequence(
             [s["labels"] for s in batch],
             batch_first=True,
-            padding_value=self.special_tokens.ignore_id,
+            padding_value=IGNORE_INDEX,
         )
         positions = pad_sequence(
             [s["positions"] for s in batch],
@@ -114,13 +101,13 @@ class MultiModalCollatorNLD:
             padding_value=0,
         )
         # Pad or truncate to seq_len + 1
-        input_ids, labels = pad_text_batch(
+        input_ids, labels = pad_seq_len(
             input_ids,
             labels,
             self.seq_len + 1,
             # pyrefly: ignore [missing-attribute]
-            padding_idx=self.special_tokens.pad_id,
-            ignore_idx=self.special_tokens.ignore_id,
+            padding_idx=self.tokenizer.pad_id,
+            ignore_idx=IGNORE_INDEX,
         )
         # Pad or truncate positions to seq_len + 1
         if positions.shape[1] < self.seq_len + 1:
@@ -133,13 +120,13 @@ class MultiModalCollatorNLD:
         else:
             positions = positions[:, : self.seq_len + 1]
         # Pad dummy rows to reach target batch size
-        input_ids, labels = pad_input_ids_and_labels_to_target_batch_size(
+        input_ids, labels = pad_batch_dim(
             input_ids,
             labels,
             self.batch_size,
             # pyrefly: ignore [missing-attribute]
-            padding_idx=self.special_tokens.pad_id,
-            ignore_idx=self.special_tokens.ignore_id,
+            padding_idx=self.tokenizer.pad_id,
+            ignore_idx=IGNORE_INDEX,
         )
         if positions.shape[0] < self.batch_size:
             positions = torch.nn.functional.pad(
@@ -159,6 +146,8 @@ class MultiModalCollatorNLD:
         images_per_sample: list[int] = []
         for sample in batch:
             num_images = len(sample.get("pixel_values", []))
+            for vid in sample.get("pixel_values_videos", []):
+                num_images += vid.shape[0] // self.temporal_patch_size
             images_per_sample.append(num_images)
 
         total_images = sum(images_per_sample)
@@ -167,8 +156,8 @@ class MultiModalCollatorNLD:
             total_images -= removed_images
             batch.pop()
             logger.warning(
-                f"Removed sample with {removed_images} images to keep "
-                f"total images <= {self.max_images_per_batch}"
+                f"Removed sample with {removed_images} vision entries to keep "
+                f"total <= {self.max_images_per_batch}"
             )
 
         all_images = [
@@ -177,7 +166,7 @@ class MultiModalCollatorNLD:
             if "pixel_values" in sample
             for img in sample["pixel_values"]
         ]
-        patches, grids = self.collate_images(all_images)
+        patches, grids = self.collate_images(all_images) if all_images else (None, None)
 
         all_videos = [
             vid
@@ -185,7 +174,9 @@ class MultiModalCollatorNLD:
             if "pixel_values_videos" in sample
             for vid in sample["pixel_values_videos"]
         ]
-        video_patches, video_grids = self.collate_images(all_videos)
+        video_patches, video_grids = (
+            self.collate_images(all_videos) if all_videos else (None, None)
+        )
 
         input_ids, labels, positions = self.collate_text(batch)
         input_dict = {
@@ -195,7 +186,10 @@ class MultiModalCollatorNLD:
             "grid_thw": grids,
             "pixel_values_videos": video_patches,
             "grid_thw_videos": video_grids,
-            "special_tokens": self.special_tokens,
+            "special_tokens": {
+                f"{name}_id": getattr(self.tokenizer, f"{name}_id")
+                for name in self.tokenizer.TOKEN_FIELDS
+            },
         }
 
         # pyrefly: ignore [bad-return]

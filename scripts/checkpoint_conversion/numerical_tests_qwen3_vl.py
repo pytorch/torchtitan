@@ -34,7 +34,7 @@ import torch.nn.functional as F
 torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpoint import ModelWrapper
-from torchtitan.models.qwen3_vl import model_registry, Qwen3VLSpecialTokens
+from torchtitan.models.qwen3_vl import model_registry
 from transformers import AutoProcessor
 
 
@@ -268,25 +268,25 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
 
     class _BidirectionalSDPA(torch.nn.Module):
         def forward(self, q, k, v, **kwargs):
-            return F.scaled_dot_product_attention(q, k, v, is_causal=False)
+            # q/k/v: (bs, seq, heads, dim) -> transpose to (bs, heads, seq, dim)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+            return out.transpose(1, 2)
 
     for blk in model.vision_encoder.layers.values():
         blk.attn.flex_attention = _BidirectionalSDPA()
 
     model.eval()
 
-    special_tokens = Qwen3VLSpecialTokens(
-        img_token="<|image_pad|>",
-        img_id=151655,
-        vid_token="<|video_pad|>",
-        vid_id=151656,
-        vision_start_token="<|vision_start|>",
-        vision_start_id=151652,
-        vision_end_token="<|vision_end|>",
-        vision_end_id=151653,
-        pad_token="<|endoftext|>",
-        pad_id=151643,
-    )
+    special_tokens = {
+        "image_id": 151655,
+        "video_id": 151656,
+        "vision_start_id": 151652,
+        "vision_end_id": 151653,
+        "pad_id": 151643,
+    }
 
     outputs = []
     for i, (tokens, pixel_values, grid_thw) in enumerate(tt_inputs):

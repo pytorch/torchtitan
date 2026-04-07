@@ -1,21 +1,5 @@
 {
   "added_tokens_decoder": {
-    "128000": {
-      "content": "<|begin_of_text|>",
-      "lstrip": false,
-      "normalized": false,
-      "rstrip": false,
-      "single_word": false,
-      "special": true
-    },
-    "128001": {
-      "content": "<|end_of_text|>",
-      "lstrip": false,
-      "normalized": false,
-      "rstrip": false,
-      "single_word": false,
-      "special": true
-    },
     "1998": {
       "content": "<|image|>",
       "lstrip": false,

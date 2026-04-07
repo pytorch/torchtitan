@@ -4,17 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Text processing utilities for Qwen3-VL datasets."""
+"""Text processing utilities for multimodal datasets."""
 
 import torch
 
 
-def pad_text_batch(
+def pad_seq_len(
     input_ids: torch.Tensor,
     labels: torch.Tensor,
     target_len: int,
-    padding_idx: int = 0,
-    ignore_idx: int = -100,
+    *,
+    padding_idx: int,
+    ignore_idx: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pad input_ids and labels to desired sequence length."""
     B, L = input_ids.shape
@@ -38,16 +39,18 @@ def pad_text_batch(
     return input_ids, labels
 
 
-def pad_input_ids_and_labels_to_target_batch_size(
+def pad_batch_dim(
     input_ids: torch.Tensor,
     labels: torch.Tensor,
     target_batch_size: int,
-    padding_idx: int = 0,
-    ignore_idx: int = -100,
+    *,
+    padding_idx: int,
+    ignore_idx: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pad batch dimension to target size."""
     B, L = input_ids.shape
-    if B >= target_batch_size:
+    assert B <= target_batch_size, f"Batch size {B} exceeds target {target_batch_size}"
+    if B == target_batch_size:
         return input_ids, labels
 
     padding_needed = target_batch_size - B
@@ -64,90 +67,48 @@ def pad_input_ids_and_labels_to_target_batch_size(
     return input_ids, labels
 
 
-def process_text_with_images(
-    text: list[str],
-    image_tokens: list[tuple[int, int, int]],
-    tokenizer,
-    special_tokens,
-    add_eos: bool = True,
+def insert_vision_placeholders(
+    input_parts: list[str | None],
+    num_vision_tokens: list[int],
+    *,
+    vision_start_token: str,
+    vision_token: str,
+    vision_end_token: str,
+    eos_token: str = "",
 ) -> str:
-    """Process text by interleaving image tokens for Qwen3-VL.
+    """Insert vision placeholder token sequences into text.
 
     Args:
-        text: List of text parts
-        image_tokens: List of (total_tokens, width, height) for each image
-        tokenizer: Tokenizer with special tokens
-        special_tokens: Special token definitions
-        add_eos: Whether to add EOS token
+        input_parts: Mixed list of text strings and ``None`` entries.
+            Each ``None`` marks where a vision region (image or video) should
+            be inserted; text strings are kept as-is.  Produced by the dataset
+            processor which sets ``texts[idx] = None`` for each image/video.
+        num_vision_tokens: Number of vision tokens per ``None`` placeholder.
+        vision_start_token: Token marking start of a vision region.
+        vision_token: Repeated placeholder token (image or video).
+        vision_end_token: Token marking end of a vision region.
+        eos_token: Appended at the end if non-empty.
 
     Returns:
-        Processed text with image tokens inserted
+        Text with vision placeholders expanded.
     """
-    parts: list[str] = []
-    image_idx = 0
+    output_parts: list[str] = []
+    vision_idx = 0
 
-    for part in text:
-        if part is None and image_idx < len(image_tokens):
-            num_image_tokens, _, _ = image_tokens[image_idx]
-
-            # Qwen3-VL uses <|vision_start|> and <|vision_end|> markers
-            # Insert image tokens (placeholders) between these markers
-            parts.extend(
+    for part in input_parts:
+        if part is None and vision_idx < len(num_vision_tokens):
+            output_parts.extend(
                 [
-                    special_tokens.vision_start_token,
-                    *([special_tokens.img_token] * num_image_tokens),
-                    special_tokens.vision_end_token,
+                    vision_start_token,
+                    *([vision_token] * num_vision_tokens[vision_idx]),
+                    vision_end_token,
                 ]
             )
-            image_idx += 1
+            vision_idx += 1
         else:
-            # pyrefly: ignore [bad-assignment]
-            parts.append(part)
+            output_parts.append(part)  # pyrefly: ignore [bad-argument-type]
 
-    result = "".join(parts)
-    return result.strip() + (tokenizer.eos_token if add_eos else "")
-
-
-def process_text_with_videos(
-    text: list[str],
-    video_tokens: list[tuple[int, int, int]],
-    tokenizer,
-    special_tokens,
-    add_eos: bool = True,
-) -> str:
-    """Process text by interleaving video tokens for Qwen3-VL.
-
-    Same as ``process_text_with_images`` but uses ``vid_token`` (``<|video_pad|>``)
-    instead of ``img_token``.
-
-    Args:
-        text: List of text parts (None indicates a video placeholder position).
-        video_tokens: List of (total_tokens, width, height) for each video.
-        tokenizer: Tokenizer with special tokens.
-        special_tokens: Special token definitions.
-        add_eos: Whether to add EOS token.
-
-    Returns:
-        Processed text with video tokens inserted.
-    """
-    parts: list[str] = []
-    video_idx = 0
-
-    for part in text:
-        if part is None and video_idx < len(video_tokens):
-            num_video_tokens, _, _ = video_tokens[video_idx]
-
-            parts.extend(
-                [
-                    special_tokens.vision_start_token,
-                    *([special_tokens.vid_token] * num_video_tokens),
-                    special_tokens.vision_end_token,
-                ]
-            )
-            video_idx += 1
-        else:
-            # pyrefly: ignore [bad-assignment]
-            parts.append(part)
-
-    result = "".join(parts)
-    return result.strip() + (tokenizer.eos_token if add_eos else "")
+    result = "".join(output_parts).strip()
+    if eos_token and not result.endswith(eos_token):
+        result += eos_token
+    return result

@@ -50,7 +50,6 @@ from torchtitan.distributed.tensor_parallel import (
     NoParallel,
 )
 
-from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -137,6 +136,7 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+            enable_sp=True,
             pad_multiple=pad_multiple,
         )
 
@@ -176,17 +176,17 @@ def parallelize_llama(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            edp_mesh=edp_mesh,
-        )
+    apply_fsdp(
+        model,
+        dp_mesh,
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
+    )
 
     logger.info("Applied fully_shard to the model")
 

@@ -4,24 +4,44 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Image and video preprocessing utilities for Qwen3-VL multimodal datasets.
+"""Image preprocessing and vision utilities for multimodal datasets.
 
-Handles resizing, normalization, and patch extraction for the vision encoder.
-The preprocessing matches HuggingFace's Qwen2VLImageProcessor so that
-converted checkpoints produce numerically equivalent outputs.
+Handles image decoding, resizing, normalization, and patch extraction for the
+vision encoder.
 """
 
 import math
-from io import BytesIO
 
 import einops as E
 import requests
 import torch
+import torchvision.io  # pyrefly: ignore [missing-import]
 import torchvision.transforms.v2.functional as TVF  # pyrefly: ignore [missing-import]
 
 from PIL import Image
 
 from torchtitan.tools.logging import logger
+
+
+def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
+    """Decode an image to a (C, H, W) uint8 RGB tensor.
+
+    Uses torchvision.io.decode_image for bytes/paths (faster SIMD decode),
+    falls back to TVF.pil_to_tensor for PIL Image inputs.
+    """
+    if isinstance(image, str) and image.startswith("http"):
+        response = requests.get(image, timeout=10)
+        image = response.content
+    if isinstance(image, bytes):
+        raw = torch.frombuffer(bytearray(image), dtype=torch.uint8)
+        return torchvision.io.decode_image(raw, mode=torchvision.io.ImageReadMode.RGB)
+    elif isinstance(image, str):
+        return torchvision.io.decode_image(image, mode=torchvision.io.ImageReadMode.RGB)
+    else:
+        # PIL Image fallback
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        return TVF.pil_to_tensor(image)
 
 
 def process_image(
@@ -33,13 +53,14 @@ def process_image(
     image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
     image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
 ) -> torch.Tensor | None:
-    """Load and preprocess a single image for Qwen3-VL.
+    """Load and preprocess a single image for VLM training.
 
+    Uses torchvision APIs for decoding and resizing (faster uint8 SIMD paths).
     Resizes to a pixel budget while keeping both dimensions multiples of
     ``patch_size * merge_size``, then normalizes with the given mean/std.
 
     Args:
-        image: PIL Image, raw bytes, file path, or HTTP(S) URL.
+        image: Raw bytes, file path, HTTP(S) URL, or PIL Image.
         patch_size: Spatial patch size used by the vision encoder.
         merge_size: Spatial merge factor (patches merged per dimension).
         max_pixels: Upper pixel budget for resizing.
@@ -51,22 +72,13 @@ def process_image(
         Tensor of shape (1, H, W, C) with a dummy temporal dim, or None on failure.
     """
     try:
-        if isinstance(image, str) and image.startswith("http"):
-            response = requests.get(image, timeout=10)
-            image = Image.open(BytesIO(response.content))
-        elif isinstance(image, bytes):
-            image = Image.open(BytesIO(image))
-        elif isinstance(image, str):
-            image = Image.open(image)
-
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-
+        # Decode to (C, H, W) uint8 tensor
+        img_tensor = _decode_image(image)
+        _, original_height, original_width = img_tensor.shape
         factor = patch_size * merge_size
-        original_width, original_height = image.size
 
         # Ensure both dimensions are at least ``factor`` so that
-        # smart_resize always has a valid starting point.
+        # smart_resize always has a valid starting point
         if original_height < factor or original_width < factor:
             scale = max(factor / original_width, factor / original_height)
             original_width = int(original_width * scale)
@@ -80,8 +92,7 @@ def process_image(
             max_pixels=max_pixels,
         )
 
-        # Bicubic resize with antialias to match HF's processor.
-        img_tensor = TVF.pil_to_tensor(image)  # (C, H, W) uint8
+        # Bicubic resize on uint8 (leverages AVX2/NEON SIMD fast paths)
         img_tensor = TVF.resize(
             img_tensor,
             [resized_height, resized_width],
@@ -89,11 +100,11 @@ def process_image(
             antialias=True,
         )
 
-        # [0, 255] → [0, 1] → normalize
-        img_tensor = img_tensor.float() / 255.0
-        mean = torch.tensor(image_mean).view(3, 1, 1)
-        std = torch.tensor(image_std).view(3, 1, 1)
-        img_tensor = (img_tensor - mean) / std
+        # uint8 → float32 [0, 1] → normalize
+        img_tensor = TVF.to_dtype(img_tensor, torch.float32, scale=True)
+        img_tensor = TVF.normalize(
+            img_tensor, list(image_mean), list(image_std), inplace=True
+        )
 
         # (C, H, W) → (1, H, W, C)
         return img_tensor.permute(1, 2, 0).unsqueeze(0)
@@ -109,51 +120,40 @@ def smart_resize(
     factor: int,
     min_pixels: int,
     max_pixels: int,
-    num_frames: int = 1,
-    temporal_factor: int = 1,
 ) -> tuple[int, int]:
-    """Compute target (height, width) that satisfy pixel budget constraints.
+    """Compute target (height, width) that satisfy per-frame pixel budget.
 
-    Both output dimensions are rounded to multiples of ``factor``.  The total
-    pixel count ``t * h * w`` is kept within [min_pixels, max_pixels].
-
-    Works for both images (``num_frames=1``) and videos (accounts for the
-    temporal dimension in the total pixel budget).
+    Both output dimensions are rounded to multiples of ``factor``.  The spatial
+    pixel count ``h * w`` is kept within [min_pixels, max_pixels].
 
     Args:
         height: Original height.
         width: Original width.
         factor: Spatial rounding factor (``patch_size * merge_size``).
         min_pixels: Minimum spatial pixels per frame.
-        max_pixels: Maximum total pixels (T * H * W budget).
-        num_frames: Number of frames. Use 1 for images.
-        temporal_factor: Temporal patch size for rounding T. Use 1 for images.
+        max_pixels: Maximum spatial pixels per frame.
 
     Returns:
         (resized_height, resized_width)
     """
     if max(height, width) / min(height, width) > 200:
-        logger.warning(
-            f"Aspect ratio {max(height, width) / min(height, width):.1f} exceeds 200"
+        raise ValueError(
+            f"Absolute aspect ratio must be smaller than 200, "
+            f"got {max(height, width) / min(height, width):.1f}"
         )
-
-    t = max(1, round(num_frames / temporal_factor)) * temporal_factor
 
     # Round spatial dims to nearest multiple of factor
     h_bar = max(round(height / factor) * factor, factor)
     w_bar = max(round(width / factor) * factor, factor)
 
-    # Scale up if below minimum spatial pixels
-    if h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (h_bar * w_bar))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
-
-    # Scale down if total pixels exceed budget (takes priority over min_pixels)
-    if t * h_bar * w_bar > max_pixels:
-        beta = math.sqrt((h_bar * w_bar) / (max_pixels / t))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
         h_bar = max(math.floor(height / beta / factor) * factor, factor)
         w_bar = max(math.floor(width / beta / factor) * factor, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
 
     return h_bar, w_bar
 
