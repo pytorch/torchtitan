@@ -203,6 +203,7 @@ def construct_default_graph_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        annotate_flex_attention_for_regional_inductor_pass,
         regional_inductor_pass,
     ]
 
@@ -325,6 +326,16 @@ def regional_inductor_pass(
             filter to allow distributed collective ops.
     """
     import torch._inductor.config as ic
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
+        """Extract the FakeTensorMode from a graph module's placeholder metadata."""
+        for node in gm.graph.nodes:
+            if node.op == "placeholder" and "val" in node.meta:
+                val = node.meta["val"]
+                if isinstance(val, FakeTensor):
+                    return val.fake_mode
+        return None
 
     # Ensure inductor produces bitwise-equal numerics vs eager.
     ic.eager_numerics.division_rounding = True
@@ -334,8 +345,20 @@ def regional_inductor_pass(
     # ic.eager_numerics.use_pytorch_libdevice = True
     # ic.fallback_random = True
 
+    # regional_inductor calls standalone_compile with
+    # dynamic_shapes="from_tracing_context", which requires an active
+    # TracingContext with a FakeTensorMode.  When this pass is called
+    # outside torch.compile (e.g. after make_fx tracing in graph_trainer),
+    # no TracingContext exists, so we create one from the graph's fake
+    # tensor metadata.
+    fake_mode = _get_fake_mode_from_gm(gm)
+    tracing_ctx = torch._guards.TracingContext(fake_mode)
+
     if serializable:
-        with torch._functorch.config.patch("force_autograd_cache", True):
+        with (
+            torch._guards.tracing(tracing_ctx),
+            torch._functorch.config.patch("force_autograd_cache", True),
+        ):
             result = regional_inductor(gm, example_inputs)
         from torch._inductor.output_code import RegionalOutputCode
 
@@ -352,7 +375,8 @@ def regional_inductor_pass(
             )
         return result
 
-    gm = regional_inductor(gm, example_inputs)
+    with torch._guards.tracing(tracing_ctx):
+        gm = regional_inductor(gm, example_inputs)
 
     # regional_inductor may switch to boxed calling convention; reset to
     # default so the graph can be called with positional args as usual.
@@ -400,7 +424,10 @@ def cudagraph_pass(
 
 
 def annotate_flex_attention_for_regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    inductor_configs: dict | None = None,
 ) -> torch.fx.GraphModule:
     """Tag flex attention HOPs with compile_with_inductor for regional_inductor.
 
@@ -409,28 +436,45 @@ def annotate_flex_attention_for_regional_inductor_pass(
     1. The HOP node itself (flex_attention / flex_attention_backward)
     2. The get_attr nodes referencing score_mod / mask_mod submodules.
     3. All nodes inside those submodule graphs.
-    """
-    from torchtitan.models.common.attention import FlexAttention
 
-    annotation = {"inductor_configs": FlexAttention.inductor_configs}
+    Args:
+        gm: The graph module to annotate.
+        example_inputs: Example inputs (unused, required by pass interface).
+        inductor_configs: Per-region inductor config overrides for flex
+            attention nodes. Defaults to ``FlexAttention.inductor_configs``.
+    """
+    if inductor_configs is None:
+        from torchtitan.models.common.attention import FlexAttention
+
+        inductor_configs = FlexAttention.inductor_configs
+
+    flex_compile_config = {"inductor_configs": inductor_configs}
+    mask_compile_config = {}
+
     for node in gm.graph.nodes:
         if node.target not in {
             torch.ops.higher_order.flex_attention,
             torch.ops.higher_order.flex_attention_backward,
         }:
             continue
-        node.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+        node.meta.setdefault("custom", {})[
+            "compile_with_inductor"
+        ] = flex_compile_config
         for inp in node.all_input_nodes:
             if inp.op != "get_attr":
                 continue
             submod = getattr(gm, inp.target, None)
             if not isinstance(submod, torch.fx.GraphModule):
                 continue
-            inp.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+            inp.meta.setdefault("custom", {})[
+                "compile_with_inductor"
+            ] = flex_compile_config
+
+            # Following are the nodes in mask_mod subgraph
             for sub_node in submod.graph.nodes:
                 sub_node.meta.setdefault("custom", {})[
                     "compile_with_inductor"
-                ] = annotation
+                ] = mask_compile_config
     return gm
 
 

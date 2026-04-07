@@ -279,11 +279,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """6d5b743db1c09f1ad3241eb450185e04d80e9cf2806861f26f875ff05f274c9e""",
+            """dde585df73ff27f7fae624399dbddbda7123bf6fdc0b65a8d19a3941437739e0""",
         )
         assert_expected_inline(
             grad_hash,
-            """18159ff30a8a18f40fb0d2d5e21a48b422551c971ea9f60bff97389747bff465""",
+            """d4c46d7717cb303c7b19e97cd6b4be4af79d73acabafcba6bb1f6ca244159096""",
         )
 
 
@@ -314,11 +314,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """ad64082a7ce5cc4149ebbe1c8bc733e5411bcbc66ba75313fa647d984b22afff""",
+            """1dbbbbe1c8cb02de609bc7a2da96b279715a01ab4e47188a8c7f359b5f17c3ac""",
         )
         assert_expected_inline(
             grad_hash,
-            """13c459deb2ab985f7e3f4faafb8d45ccb9a895cdd3451331133ee413c996e15b""",
+            """b86ab441a965db4cabab84f702f59613f9a5bf1cb3df18154c63b52d5b0932ad""",
         )
 
 

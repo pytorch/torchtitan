@@ -967,7 +967,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"]
+        config = llama3_configs["debugmodel"]()
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         prev_deterministic = torch.are_deterministic_algorithms_enabled()
