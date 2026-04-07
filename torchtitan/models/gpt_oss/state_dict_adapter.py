@@ -7,8 +7,10 @@
 import re
 from typing import Any
 
+import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from torchtitan.models.common.attention import FusedGQAttention
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import GptOssModel
@@ -17,15 +19,33 @@ from .model import GptOssModel
 class GptOssStateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
+        self.fuse_qkv = isinstance(
+            model_config.layers[0].attention, FusedGQAttention.Config
+        )
+
+        if self.fuse_qkv:
+            qkv_map = {
+                "model.layers.{}.self_attn.q_proj.weight": None,
+                "model.layers.{}.self_attn.q_proj.bias": None,
+                "model.layers.{}.self_attn.k_proj.weight": None,
+                "model.layers.{}.self_attn.k_proj.bias": None,
+                "model.layers.{}.self_attn.v_proj.weight": None,
+                "model.layers.{}.self_attn.v_proj.bias": None,
+            }
+        else:
+            qkv_map = {
+                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+                "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
+                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
+                "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
+                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+                "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
+            }
+
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-            "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
+            **qkv_map,
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.layers.{}.self_attn.o_proj.bias": "layers.{}.attention.wo.bias",
             "model.layers.{}.self_attn.sinks": "layers.{}.attention.sinks",
@@ -64,6 +84,18 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         else:
             return HuggingFaceStorageReader(path)
 
+    def _get_attention_dims(self) -> tuple[int, int, int]:
+        """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        attn = self.model_config.layers[0].attention
+        n_heads = attn.n_heads
+        n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
+        head_dim = (
+            attn.head_dim
+            if attn.head_dim is not None
+            else self.model_config.dim // n_heads
+        )
+        return n_heads, n_kv_heads, head_dim
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         Convert from a tt model state dict to a hf format state dict.
@@ -75,16 +107,36 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         Warning: Conversion does not support saving to mxfp4 quantization format.
                  One can save into unquantized hf checkpoints with last_save_in_hf = true.
         """
-        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
+        if self.fuse_qkv:
+            to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
+            n_heads, n_kv_heads, head_dim = self._get_attention_dims()
+        else:
+            to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
 
         for key, value in state_dict.items():
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
                 # pyrefly: ignore
                 layer_num = re.search(r"\d+", key).group(0)
+
+                if self.fuse_qkv and abstract_key == "layers.{}.attention.wqkv.weight":
+                    wq, wk, wv = self.fused_to_separate_qkv(
+                        value, n_heads, n_kv_heads, head_dim
+                    )
+                    hf_state_dict[
+                        f"model.layers.{layer_num}.self_attn.q_proj.weight"
+                    ] = wq
+                    hf_state_dict[
+                        f"model.layers.{layer_num}.self_attn.k_proj.weight"
+                    ] = wk
+                    hf_state_dict[
+                        f"model.layers.{layer_num}.self_attn.v_proj.weight"
+                    ] = wv
+                    continue
+
+                if abstract_key not in to_hf_map:
+                    continue
                 hf_key = to_hf_map[abstract_key]
                 hf_key = hf_key.format(layer_num)
                 hf_state_dict[hf_key] = value
@@ -102,17 +154,52 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         """
 
         state_dict = {}
+        # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
+        pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
+
+        if self.fuse_qkv:
+            n_heads, n_kv_heads, head_dim = self._get_attention_dims()
 
         for key, value in hf_state_dict.items():
             if "layers" in key:
                 # pyrefly: ignore
                 layer_num = re.search(r"\d+", key).group(0)
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                tt_key = self.from_hf_map[abstract_key]
+
+                if self.fuse_qkv and abstract_key in (
+                    "model.layers.{}.self_attn.q_proj.weight",
+                    "model.layers.{}.self_attn.k_proj.weight",
+                    "model.layers.{}.self_attn.v_proj.weight",
+                ):
+                    if layer_num not in pending_qkv:
+                        pending_qkv[layer_num] = {}
+                    proj = abstract_key.split(".")[-2]  # q_proj, k_proj, v_proj
+                    pending_qkv[layer_num][proj] = value
+                    if len(pending_qkv[layer_num]) == 3:
+                        fused = self.separate_to_fused_qkv(
+                            pending_qkv[layer_num]["q_proj"],
+                            pending_qkv[layer_num]["k_proj"],
+                            pending_qkv[layer_num]["v_proj"],
+                            n_heads,
+                            n_kv_heads,
+                            head_dim,
+                        )
+                        state_dict[f"layers.{layer_num}.attention.wqkv.weight"] = fused
+                        del pending_qkv[layer_num]
+                    continue
+
+                tt_key = self.from_hf_map.get(abstract_key)
+                if tt_key is None:
+                    continue
                 tt_key = tt_key.format(layer_num)
                 state_dict[tt_key] = value
             else:
                 tt_key = self.from_hf_map[key]
                 state_dict[tt_key] = value
+
+        if self.fuse_qkv and pending_qkv:
+            raise ValueError(
+                f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
+            )
 
         return state_dict

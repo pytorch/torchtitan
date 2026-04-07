@@ -257,8 +257,25 @@ def apply_non_moe_tp(
         output_layouts=sp_layout, use_local_output=enable_sp
     )
 
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = hasattr(
+        first_block.attention, "wqkv"
+    )  # pyrefly: ignore [missing-attribute]
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.wqkv": colwise_parallel(),
+            }
+        else:
+            qkv_plan = {
+                "attention.wq": colwise_parallel(),
+                "attention.wk": colwise_parallel(),
+                "attention.wv": colwise_parallel(),
+            }
         # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
@@ -266,9 +283,7 @@ def apply_non_moe_tp(
                 input_layouts=(sp_layout, None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
+            **qkv_plan,
             "attention.wo": rowwise_output_plan,
             "ffn_norm": norm_plan,
         }

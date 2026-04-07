@@ -41,7 +41,9 @@ from torchtitan.protocols.module import Module
 
 
 __all__ = [
+    "BaseGQAttention",
     "FlexAttention",
+    "FusedGQAttention",
     "GQAttention",
     "LocalMapInnerAttention",
     "ScaledDotProductAttention",
@@ -570,23 +572,18 @@ class BaseAttention(Module):
                 )
 
 
-class GQAttention(BaseAttention):
-    """Grouped-Query Attention module shared across Llama3, Llama4, Qwen3.
+class BaseGQAttention(BaseAttention):
+    """Base class for Grouped-Query Attention variants.
 
-    Supports GQA (grouped-query attention) with optional QK normalization,
-    optional RoPE (for iRoPE layers), and multiple attention backends
-    (flex, varlen, sdpa).
-
-    Config parameters define the attention head structure. Runtime ``dim``
-    is passed via ``build(dim=...)``.
+    Holds all shared GQA logic: head setup, optional QK normalization,
+    RoPE, inner attention dispatch, and output projection.  Subclasses
+    implement the QKV projection by overriding ``_project_qkv``.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
         dim: int
-        wq: Linear.Config
-        wkv: Linear.Config
         wo: Linear.Config
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
@@ -621,12 +618,15 @@ class GQAttention(BaseAttention):
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        self.wq = config.wq.build()
-        self.wk = config.wkv.build()
-        self.wv = config.wkv.build()
-        self.wo = config.wo.build()
+    def _project_qkv(
+        self, x: torch.Tensor, bs: int, seqlen: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project input into Q, K, V tensors.
 
-        self.inner_attention = config.inner_attention.build()
+        Returns:
+            (xq, xk, xv) each with shape [B, L, local_heads, head_dim].
+        """
+        raise NotImplementedError
 
     def forward(
         self,
@@ -636,14 +636,7 @@ class GQAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
-        # local heads from sizes of xq, xk, and xv as TP may have sharded them
-        # after the above linear ops.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        xq, xk, xv = self._project_qkv(x, bs, seqlen)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -675,3 +668,71 @@ class GQAttention(BaseAttention):
         ).contiguous()
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
+
+
+class GQAttention(BaseGQAttention):
+    """Grouped-Query Attention with separate Q, K, V projections."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseGQAttention.Config):
+        wq: Linear.Config
+        wkv: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.wq = config.wq.build()
+        self.wk = config.wkv.build()
+        self.wv = config.wkv.build()
+        self.wo = config.wo.build()
+        self.inner_attention = config.inner_attention.build()
+
+    def _project_qkv(
+        self, x: torch.Tensor, bs: int, seqlen: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the
+        # actual local heads from sizes as TP may have sharded them.
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        return xq, xk, xv
+
+
+class FusedGQAttention(BaseGQAttention):
+    """Grouped-Query Attention with fused Q/K/V projection.
+
+    Uses a single linear layer and splits the output along the R dimension,
+    where R = n_heads // n_kv_heads + 2 (Q-heads-per-KV-group + K + V).
+    Reduces kernel launch overhead compared to three separate projections.
+
+    Compatible with ColwiseParallel on the ``wqkv`` linear layer.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseGQAttention.Config):
+        wqkv: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.wqkv = config.wqkv.build()
+        self.heads_per_kv = self.n_heads // self.n_kv_heads
+        # R = Q-heads-per-KV-group + 1 (K) + 1 (V)
+        self.r_dim = self.heads_per_kv + 2
+        self.wo = config.wo.build()
+        self.inner_attention = config.inner_attention.build()
+
+    def _project_qkv(
+        self, x: torch.Tensor, bs: int, seqlen: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Fused QKV: single matmul, then reshape and split along R dim.
+        # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
+        # Use -1 for n_kv_heads so TP sharding is handled automatically.
+        qkv = self.wqkv(x)
+        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        # torch.split returns contiguous views for size-1 splits (xk, xv).
+        # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
+        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
+        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
+        return xq, xk, xv

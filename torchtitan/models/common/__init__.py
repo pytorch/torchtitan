@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from .attention import (
+    BaseGQAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttention,
+    FusedGQAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_fixed_block_mask_mod,
@@ -32,12 +34,14 @@ from .rope import (
 )
 
 __all__ = [
+    "BaseGQAttention",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
     "Embedding",
     "FeedForward",
     "FlexAttention",
+    "FusedGQAttention",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_fixed_block_mask_mod",
