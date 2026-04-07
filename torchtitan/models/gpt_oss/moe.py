@@ -223,12 +223,7 @@ class GptOssGroupedExperts(Module):
 
 
 class GptOssMoE(MoE):
-    """GptOss MoE implementation that inherits from the base MoE class.
-
-    Uses GptOssGroupedExperts (with swiglu activation and bias terms) instead
-    of the standard GroupedExperts. The experts config type is set by the config
-    registry (_make_gptoss_experts_config).
-    """
+    """GptOss MoE implementation that inherits from the base MoE class."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):
