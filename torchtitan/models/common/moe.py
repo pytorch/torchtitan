@@ -78,7 +78,7 @@ class GroupedExperts(Module):
         hidden_dim: int
         num_experts: int
         use_grouped_mm: bool = True
-        token_dispatcher: BaseTokenDispatcher.Config | None = None
+        token_dispatcher: BaseTokenDispatcher.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -93,10 +93,9 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.use_grouped_mm = config.use_grouped_mm
-        if config.token_dispatcher is not None:
-            self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
+        self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
 
-    def _forward_experts(
+    def _experts_forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
@@ -131,7 +130,7 @@ class GroupedExperts(Module):
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices, num_tokens_per_expert
         )
-        routed_output = self._forward_experts(routed_input, num_tokens_local)
+        routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(routed_output, metadata)
 
 

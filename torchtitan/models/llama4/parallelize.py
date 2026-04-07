@@ -37,7 +37,6 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import (
-    DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
     TensorParallel,
@@ -603,15 +602,9 @@ def apply_moe_ep_tp(
                         "DeepEP does not support pad_multiple. "
                         "Use hybridep or standard comm backend instead."
                     )
-                # pyrefly: ignore [missing-attribute]
-                score_before_experts = transformer_block.moe.score_before_experts
-
-                experts_plan = DeepEPExpertParallel(
-                    score_before_experts=score_before_experts,
-                    comm_backend=comm_backend,
-                    hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-                    pad_multiple=pad_multiple,
-                )
+                # Weight sharding only — dispatch/combine handled by
+                # DeepEPTokenDispatcher installed below.
+                experts_plan = ExpertParallel()
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             elif pad_multiple is not None:
                 experts_plan = TorchAOExpertParallel(pad_multiple)
@@ -635,21 +628,33 @@ def apply_moe_ep_tp(
             parallelize_plan=experts_plan,
         )
 
-        # Replace token dispatcher for EP>1 (standard EP and ETP=TP)
-        if ep_mesh is not None and comm_backend not in ("deepep", "hybridep"):
-            from torchtitan.models.common.token_dispatcher import (
-                BaseTokenDispatcher,
-                TokenDispatcher,
-            )
+        # Replace token dispatcher for EP>1
+        if ep_mesh is not None:
+            from torchtitan.models.common.token_dispatcher import BaseTokenDispatcher
 
             # pyrefly: ignore [missing-attribute]
             moe = transformer_block.moe
-            token_dispatcher = TokenDispatcher(
-                BaseTokenDispatcher.Config(
-                    num_experts=moe.experts.num_experts,
-                    top_k=moe.router.top_k,
-                    score_before_experts=moe.score_before_experts,
-                )
+            td_config = BaseTokenDispatcher.Config(
+                num_experts=moe.experts.num_experts,
+                top_k=moe.router.top_k,
+                score_before_experts=moe.score_before_experts,
             )
+
+            if comm_backend in ("deepep", "hybridep"):
+                from torchtitan.models.common.token_dispatcher import (
+                    DeepEPTokenDispatcher,
+                )
+
+                token_dispatcher = DeepEPTokenDispatcher(
+                    td_config,
+                    comm_backend=comm_backend,
+                    hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
+                    pad_multiple=pad_multiple,
+                )
+            else:
+                from torchtitan.models.common.token_dispatcher import TokenDispatcher
+
+                token_dispatcher = TokenDispatcher(td_config)
+
             token_dispatcher.ep_group = ep_mesh.get_group()
             moe.experts.token_dispatcher = token_dispatcher

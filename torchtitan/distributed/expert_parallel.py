@@ -17,7 +17,6 @@ from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
     distribute_tensor,
-    DTensor,
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
@@ -85,6 +84,7 @@ class BaseExpertParallel(ParallelStyle, ABC):
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         ...
 
+
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
@@ -128,8 +128,7 @@ class ExpertParallel(BaseExpertParallel):
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         # NOTE: Token dispatch/combine is now handled by Experts.token_dispatcher.
-        # ExpertParallel only shards expert weights. The _token_dispatch and
-        # _token_combine methods are retained for ExpertTensorParallel (deferred).
+        # ExpertParallel only shards expert weights.
         return distribute_module(
             module,
             device_mesh,
@@ -162,8 +161,8 @@ class ExpertTensorParallel(ExpertParallel):
         )  # Column-wise sharding
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        # NOTE: Token dispatch/combine is now handled by MoE.token_dispatcher.
-        # ExpertTensorParallel only shards expert weights with 2D [EP, TP] placement.
+        # NOTE: Token dispatch/combine is now handled by Experts.token_dispatcher.
+        # ExpertTensorParallel only shards expert weights with (EP, TP) placement.
         return distribute_module(
             module,
             device_mesh,
@@ -237,151 +236,6 @@ class ReordererSequenceParallel(ParallelStyle):
             # pyrefly: ignore [bad-argument-type]
             output_fn=self._prepare_output_fn,
         )
-
-
-class DeepEPExpertParallel(BaseExpertParallel):
-    """Expert Parallel using DeepEP/HybridEP for efficient token dispatch/combine.
-
-    Shards expert weights and stores dispatch/combine callables on the module
-    for DeepEPMoE to call explicitly. Unlike standard ExpertParallel, dispatch
-    and combine are NOT registered as forward hooks — DeepEPMoE orchestrates
-    the flow directly via ``module.deepep_dispatch()`` and
-    ``module.deepep_combine()``.
-
-    Args:
-        score_before_experts: If True, apply routing scores before expert computation.
-        comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
-        hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
-            float in (0, 1] = non-blocking mode; controls the fused-permute
-            output tensor size (num_permuted_tokens). Only used with hybridep.
-        pad_multiple: Alignment size for token groups needed by quantized grouped
-            GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
-            None means no padding.
-    """
-
-    def __init__(
-        self,
-        score_before_experts: bool = True,
-        comm_backend: str = "deepep",
-        hybridep_non_blocking_expert_capacity_factor: float | None = None,
-        pad_multiple: int | None = None,
-    ):
-        super().__init__()
-        self._state = None  # State preserved between dispatch and combine
-        self.score_before_experts = score_before_experts
-        self.comm_backend = comm_backend
-        self.hybridep_non_blocking_expert_capacity_factor = (
-            hybridep_non_blocking_expert_capacity_factor
-        )
-        self.pad_multiple = pad_multiple
-        # Import to register custom ops so SAC saves communication outputs
-        # instead of recomputing them. This must happen before apply_ac.
-        if comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep  # noqa: F401
-        else:
-            from torchtitan.distributed.deepep import deepep  # noqa: F401
-
-    # pyrefly: ignore [bad-override]
-    def _token_dispatch(
-        self,
-        mod: nn.Module,
-        hidden_states: Tensor,
-        selected_experts_indices: Tensor,
-        top_scores: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
-        # pyrefly: ignore [bad-index]
-        if isinstance(mod.w1, DTensor):
-            num_local_experts = mod.w1.to_local().shape[0]
-        else:
-            # pyrefly: ignore [bad-index]
-            num_local_experts = mod.w1.shape[0]
-        # pyrefly: ignore [bad-index]
-        num_experts = mod.num_experts
-        ep_group = self._ep_group
-
-        if self.comm_backend == "hybridep":
-            from torchtitan.distributed.deepep.hybridep import dispatch_tokens
-
-            hidden_states, tokens_per_expert, self._state = dispatch_tokens(
-                hidden_states,
-                selected_experts_indices,
-                top_scores,
-                num_local_experts,  # pyrefly: ignore [bad-argument-type]
-                num_experts,  # pyrefly: ignore [bad-argument-type]
-                ep_group,
-                score_before_experts=self.score_before_experts,
-                non_blocking_expert_capacity_factor=self.hybridep_non_blocking_expert_capacity_factor,
-                pad_multiple=self.pad_multiple,
-            )
-        else:
-            from torchtitan.distributed.deepep.deepep import dispatch_tokens
-
-            hidden_states, tokens_per_expert, self._state = dispatch_tokens(
-                hidden_states,
-                selected_experts_indices,
-                top_scores,
-                num_local_experts,  # pyrefly: ignore [bad-argument-type]
-                num_experts,  # pyrefly: ignore [bad-argument-type]
-                ep_group,
-                score_before_experts=self.score_before_experts,
-            )
-
-        return hidden_states, tokens_per_expert
-
-    @staticmethod
-    def _partition_fn(name, mod, device_mesh):
-        """Shard expert weights on expert dimension."""
-        for param_name, param in mod.named_parameters(recurse=False):
-            mod.register_parameter(
-                param_name,
-                nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])),
-            )
-
-    # pyrefly: ignore [bad-override]
-    def _token_combine(self, mod: nn.Module, routed_output: Tensor) -> Tensor:
-        """Combine tokens via DeepEP or HybridEP based on configured backend."""
-        if self.comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep
-
-            routed_output = hybridep.combine_tokens(
-                routed_output,
-                self._state,  # pyrefly: ignore [bad-argument-type]
-                pad_multiple=self.pad_multiple,
-            )
-        else:
-            from torchtitan.distributed.deepep.deepep import combine_tokens
-
-            # pyrefly: ignore [bad-argument-type]
-            routed_output = combine_tokens(routed_output, self._state)
-
-        self._state = None
-        return routed_output
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        """Apply DeepEP/HybridEP parallelization.
-
-        Shards expert weights and stores dispatch/combine callables on the
-        module for DeepEPMoE to invoke directly.
-        """
-        self._ep_group = device_mesh.get_group()
-
-        distribute_module(
-            module,
-            device_mesh,
-            partition_fn=DeepEPExpertParallel._partition_fn,
-        )
-
-        # Store dispatch/combine on the module for DeepEPMoE to call directly.
-        # pyrefly: ignore [bad-argument-type]
-        module.deepep_dispatch = lambda hidden_states, indices, scores: (
-            self._token_dispatch(module, hidden_states, indices, scores)
-        )
-        # pyrefly: ignore [bad-argument-type]
-        module.deepep_combine = lambda routed_output: (
-            self._token_combine(module, routed_output)
-        )
-        return module
 
 
 class TorchAOExpertParallel(ExpertParallel):

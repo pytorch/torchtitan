@@ -150,10 +150,9 @@ class GptOssGroupedExperts(Module):
         )  # (num_experts, out_dim, in_dim)
         self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
 
-        if config.token_dispatcher is not None:
-            self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
+        self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
 
-    def _forward_experts(
+    def _experts_forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
@@ -219,7 +218,7 @@ class GptOssGroupedExperts(Module):
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices, num_tokens_per_expert
         )
-        routed_output = self._forward_experts(routed_input, num_tokens_local)
+        routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(routed_output, metadata)
 
 
@@ -233,4 +232,21 @@ class GptOssMoE(MoE):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):
-        pass
+        swiglu_limit: float = 7.0
+
+    def __init__(self, config: Config):
+        # Initialize the base MoE class
+        super().__init__(config)
+
+        # Override the base GroupedExperts with GptOssGroupedExperts
+        gptoss_experts_config = GptOssGroupedExperts.Config(
+            dim=config.experts.dim,
+            hidden_dim=config.experts.hidden_dim,
+            num_experts=config.experts.num_experts,
+            swiglu_limit=config.swiglu_limit,
+            use_grouped_mm=config.experts.use_grouped_mm,
+            param_init=config.experts.param_init,
+            token_dispatcher=config.experts.token_dispatcher,
+        )
+        # pyrefly: ignore [bad-assignment]
+        self.experts = gptoss_experts_config.build()

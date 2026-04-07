@@ -305,3 +305,106 @@ class TokenDispatcher(BaseTokenDispatcher):
             metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
             routed_output,
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class DeepEPDispatchMetadata:
+    """Metadata for DeepEP/HybridEP token dispatch."""
+
+    state: object  # deepep.DispatchState or hybridep.DispatchState
+
+
+class DeepEPTokenDispatcher(BaseTokenDispatcher):
+    """Token dispatcher using DeepEP/HybridEP for efficient EP communication.
+
+    Delegates token permutation and all-to-all communication to the DeepEP or
+    HybridEP library. For the DeepEP backend, combine is asynchronous — callers
+    must call sync_combine() before using the result.
+
+    ep_group is set by the parallelization code after construction.
+    """
+
+    def __init__(
+        self,
+        config: BaseTokenDispatcher.Config,
+        *,
+        comm_backend: str,
+        hybridep_non_blocking_expert_capacity_factor: float | None = None,
+        pad_multiple: int | None = None,
+    ):
+        super().__init__(config)
+        self.comm_backend = comm_backend
+        self.hybridep_non_blocking_expert_capacity_factor = (
+            hybridep_non_blocking_expert_capacity_factor
+        )
+        self.pad_multiple = pad_multiple
+        # Set by parallelization code (e.g. apply_moe_ep_tp)
+        self.ep_group: dist.ProcessGroup
+
+        # Import to register custom ops so SAC saves communication outputs
+        # instead of recomputing them. This must happen before apply_ac.
+        if comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep  # noqa: F401
+        else:
+            from torchtitan.distributed.deepep import deepep  # noqa: F401
+
+    # pyrefly: ignore [bad-override]
+    def dispatch(
+        self,
+        x: torch.Tensor,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        ep_degree = dist.get_world_size(self.ep_group)
+        num_local_experts = self.num_experts // ep_degree
+
+        if self.comm_backend == "hybridep":
+            from torchtitan.distributed.deepep.hybridep import dispatch_tokens
+
+            hidden, tokens_per_expert, state = dispatch_tokens(
+                x,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                self.num_experts,
+                self.ep_group,
+                score_before_experts=self.score_before_experts,
+                non_blocking_expert_capacity_factor=self.hybridep_non_blocking_expert_capacity_factor,
+                pad_multiple=self.pad_multiple,
+            )
+        else:
+            from torchtitan.distributed.deepep.deepep import dispatch_tokens
+
+            hidden, tokens_per_expert, state = dispatch_tokens(
+                x,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                self.num_experts,
+                self.ep_group,
+                score_before_experts=self.score_before_experts,
+            )
+
+        metadata = DeepEPDispatchMetadata(state=state)
+        return hidden, tokens_per_expert, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output: torch.Tensor,
+        metadata: DeepEPDispatchMetadata,
+    ) -> torch.Tensor:
+        if self.comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep
+
+            return hybridep.combine_tokens(
+                routed_output,
+                metadata.state,  # pyrefly: ignore [bad-argument-type]
+                pad_multiple=self.pad_multiple,
+            )
+        else:
+            from torchtitan.distributed.deepep.deepep import combine_tokens
+
+            # pyrefly: ignore [bad-argument-type]
+            return combine_tokens(routed_output, metadata.state)
