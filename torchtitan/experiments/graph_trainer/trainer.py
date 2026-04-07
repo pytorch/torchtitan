@@ -110,9 +110,21 @@ class GraphTrainer(Trainer):
                     (inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs),
                 )
 
+            # Parameters and buffers are static inputs whose tensor addresses
+            # remain constant across training steps. After subclass unwrapping
+            # (e.g. DTensor -> plain tensors), the number of graph-level inputs
+            # for params/buffers may be larger than params_len.
+            num_static_inputs = sum(
+                layout.num_tensors
+                for layout in self._traced_step.input_subclass_layouts[
+                    : self._traced_step.params_len
+                ]
+            )
+
             self._traced_step.gm = apply_default_graph_passes(
                 self._traced_step.gm,
                 self._traced_step.example_inputs,
+                num_static_inputs=num_static_inputs,
             )
 
         params_and_buffers = {

@@ -41,14 +41,31 @@ from torchtitan.tools.logging import logger
 
 
 def apply_default_graph_passes(
-    gm: torch.fx.GraphModule, example_inputs: tuple
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    num_static_inputs: int = 0,
 ) -> torch.fx.GraphModule:
     """Entry point for optimizing the traced fwd+bwd graph.
 
     Called by GraphTrainer after tracing to apply graph-level optimization
     passes before execution. Individual passes are defined below.
+
+    Args:
+        gm: The traced graph module (combined fwd+loss+bwd).
+        example_inputs: Example inputs used during tracing.
+        num_static_inputs: Number of leading inputs that are static (e.g.
+            parameters and buffers whose tensor addresses do not change
+            across training steps). Used by cudagraph to avoid unnecessary
+            input copies.
     """
     gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
+
+    gm = cudagraph_pass(
+        gm,
+        example_inputs,
+        static_input_indices=list(range(num_static_inputs)),
+    )
 
     return gm
 
@@ -126,7 +143,11 @@ def regional_inductor_pass(
 
 
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: Sequence[Any],
+    *,
+    is_forward: bool | None = None,
+    static_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -136,6 +157,16 @@ def cudagraph_pass(
     - For the first run, it will warm up operators such as nccl.
     - For the second run, it will record cudagraph and replay cudagraph.
     - For the following runs, it will replay cudagraph.
+
+    Args:
+        gm: The graph module to wrap.
+        example_inputs: Example inputs for the graph module.
+        is_forward: Whether this is a forward graph (used by AOT mode to
+            infer static input indices from tracing context). Mutually
+            exclusive with ``static_input_indices``.
+        static_input_indices: Explicit list of input indices whose tensor
+            addresses are stable across invocations (e.g. parameters and
+            buffers). When provided, ``is_forward`` is ignored.
     """
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
@@ -144,7 +175,13 @@ def cudagraph_pass(
         get_static_input_indices,
     )
 
-    static_input_indices = get_static_input_indices(gm, is_forward)
+    if static_input_indices is None:
+        if is_forward is None:
+            raise ValueError(
+                "cudagraph_pass requires either static_input_indices or is_forward"
+            )
+        static_input_indices = get_static_input_indices(gm, is_forward)
+
     gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
 
