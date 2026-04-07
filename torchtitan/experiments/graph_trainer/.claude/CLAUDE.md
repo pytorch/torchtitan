@@ -6,13 +6,14 @@ apply here too unless overridden below.
 
 ## Graph Pass Signature
 
-All graph passes must follow the signature:
+All graph passes must follow this signature:
 ```python
 def my_pass(gm: torch.fx.GraphModule, example_inputs, *, other_kwargs) -> torch.fx.GraphModule:
 ```
-The first two positional args are always `(gm, example_inputs)`. Any additional
-parameters must be keyword-only. The pass must return the (possibly transformed)
-`GraphModule`.
+- The first two positional args are always `(gm, example_inputs)`.
+- Any additional parameters must be **keyword-only** (after `*`).
+- The pass must return the (possibly transformed) `GraphModule`.
+- Passes that don't need `example_inputs` should still accept it (use `example_inputs=None`).
 
 ## Don't Modify Core for This Experiment
 
