@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import enum
 import functools
 import os
@@ -19,15 +13,15 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed.checkpoint import HuggingFaceStorageWriter
+from torch.distributed.checkpoint import HuggingFaceStorageWriter  # type: ignore
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_model_state_dict,
     set_model_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
@@ -36,14 +30,13 @@ from torch.distributed.checkpoint.state_dict_saver import (
 from torch.distributed.checkpoint.stateful import Stateful
 
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Checkpoint as CheckpointConfig
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
-
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -147,20 +140,6 @@ class CheckpointManager:
     3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers
     with the assumption that all lr_schedulers have the same state_dict.
 
-    Note: TorchFT checkpointing flow
-
-    There are two types of checkpoints: when TorchFT is enabled: 1) the full persistent
-    checkpoint, 2) the per-replica checkpoint.
-
-    The full persistent checkpoint is saved by the replica with
-    ``ft_manager.participating_rank() == 0``. It contains everything including the model,
-    optimizer, lr_scheduler, dataloader, and train_state. Right now the full persistent
-    checkpoint is loaded by all replicas. However, we can optimize it to only load if
-    there are no other alive replicas.
-
-    The per-replica checkpoint contains only the dataloader and is saved/loaded by all
-    replicas to/from the its own folder. The folder name is prefixed with the ft_replica_id.
-
     Args:
         dataloader (DataLoader): The dataloader used to load the data.
         model_parts (List[nn.Module]): List of model parts to be optimized.
@@ -173,7 +152,6 @@ class CheckpointManager:
             with checkpoint_config.folder
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
-        ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
 
     """
 
@@ -190,7 +168,6 @@ class CheckpointManager:
         checkpoint_config: CheckpointConfig,
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
-        ft_manager: FTManager | None = None,
     ) -> None:
         self.enable = checkpoint_config.enable
         self.load_only = checkpoint_config.load_only
@@ -205,56 +182,13 @@ class CheckpointManager:
             }
         )
 
-        self.ft_manager = (
-            ft_manager.manager if ft_manager and ft_manager.enabled else None
-        )
-
-        self.enable_ft_dataloader_checkpoints = (
-            self.ft_manager and checkpoint_config.enable_ft_dataloader_checkpoints
-        )
-
-        if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
-            # pyrefly: ignore [deprecated]
-            logger.warning(
-                "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
-                "This means replicas can retrain over the same data multiple times, which can result in overfitting."
-            )
-
-        if self.ft_manager:
-            # pyrefly: ignore [missing-attribute]
-            optimizers.init_cache_state_dict()
-
-            def state_dict():
-                ret = {}
-                for k, v in self.states.items():
-                    if k in {
-                        MODEL,
-                        OPTIMIZER,
-                        LR_SCHEDULER,
-                        TRAIN_STATE,
-                    }:
-                        ret[k] = v.state_dict()
-                return ret
-
-            def load_state_dict(state_dict):
-                assert state_dict is not None
-                for k, v in state_dict.items():
-                    self.states[k].load_state_dict(v)
-
-            # pyrefly: ignore [missing-attribute]
-            self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
-            # pyrefly: ignore [missing-attribute]
-            self.ft_replica_id = ft_manager.replica_id
-
         async_mode = checkpoint_config.async_mode.lower()
         self.enable_staging = (
             self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-        ) or self.enable_ft_dataloader_checkpoints
+        )
 
-        if not self.enable and not self.enable_ft_dataloader_checkpoints:
+        if not self.enable:
             return
-
-        self.ft_states = {DATALOADER: dataloader}
 
         self.staging = False
         self.sending_to_checkpoint_mp = False
@@ -268,15 +202,12 @@ class CheckpointManager:
         self.initial_load_model_only = checkpoint_config.initial_load_model_only
         self.initial_load_in_hf = checkpoint_config.initial_load_in_hf
         self.initial_load_path = checkpoint_config.initial_load_path
-        self.initial_load_in_hf_quantized = (
-            checkpoint_config.initial_load_in_hf_quantized
-        )
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
         if self.last_save_in_hf:
-            assert (
-                sd_adapter is not None
-            ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+            assert sd_adapter is not None, (
+                "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+            )
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading
@@ -290,7 +221,6 @@ class CheckpointManager:
         if (
             async_mode == AsyncMode.ASYNC
             or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-            or self.enable_ft_dataloader_checkpoints
         ):
             self.pg = dist.new_group(backend="gloo")
 
@@ -372,9 +302,9 @@ class CheckpointManager:
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
         if to_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
+            assert self.sd_adapter is not None, (
+                "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
+            )
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
@@ -400,37 +330,37 @@ class CheckpointManager:
             checkpoint_save_id = checkpoint_id
 
         if async_mode == AsyncMode.ASYNC:
-            ret = dcp.async_save(
+            ret = dcp.async_save(  # type: ignore
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
                 # pyrefly: ignore [bad-argument-type]
-                process_group=self.pg,
+                process_group=self.pg,  # type: ignore
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            ret = dcp.async_save(
+            ret = dcp.async_save(  # type: ignore
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
                 # pyrefly: ignore [bad-argument-type]
-                process_group=self.pg,
+                process_group=self.pg,  # type: ignore
                 async_checkpointer_type=AsyncCheckpointerType.PROCESS,
                 async_stager=self.stager,
             )
         else:
-            ret = dcp.save(
+            ret = dcp.save(  # type: ignore
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
             )
 
         # pyrefly: ignore [missing-attribute]
-        if to_hf and self.sd_adapter.fqn_to_index_mapping:
+        if to_hf and self.sd_adapter.fqn_to_index_mapping:  # type: ignore
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
                 # pyrefly: ignore [bad-argument-type]
-                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,  # type: ignore
                 num_threads=5,
             )
 
@@ -444,7 +374,6 @@ class CheckpointManager:
         state_dict: dict[str, Any],
         checkpoint_id: str,
         from_hf: bool,
-        from_quantized: bool,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -455,15 +384,13 @@ class CheckpointManager:
         """
 
         if from_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-                checkpoint_id, from_quantized
+            assert self.sd_adapter is not None, (
+                "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             )
+            hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_id)
 
-            dcp.load(
+            dcp.load(  # type: ignore
                 hf_state_dict,
                 storage_reader=hf_storage_reader,
             )
@@ -471,7 +398,7 @@ class CheckpointManager:
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)  # type: ignore
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
@@ -495,71 +422,56 @@ class CheckpointManager:
             None
         """
 
-        if self.enable_ft_dataloader_checkpoints:
-            self._ft_save(curr_step)
-
         if not self._should_save(curr_step, last_step):
             return
 
         begin = time.monotonic()
-        if not self.enable_ft_dataloader_checkpoints or (
-            self.ft_manager
-            # pyrefly: ignore [missing-attribute]
-            and self.ft_manager.participating_rank() == 0
-        ):
-            logger.info("Saving the checkpoint (or staging if async is enabled).")
-            checkpoint_id = self._create_checkpoint_id(curr_step)
-            self._async_wait()
-            # This GC is called for async checkpoint as it is useless to do
-            # GC right after async_save -- the CPU memory is not able to be
-            # freed until _async_wait()
-            if last_step:
-                self._save_last_step(curr_step)
-                return
+        logger.info("Saving the checkpoint (or staging if async is enabled).")
+        checkpoint_id = self._create_checkpoint_id(curr_step)
+        self._async_wait()
+        # This GC is called for async checkpoint as it is useless to do
+        # GC right after async_save -- the CPU memory is not able to be
+        # freed until _async_wait()
+        if last_step:
+            self._save_last_step(curr_step)
+            return
 
-            states = self._flattened_model_states_sd()
-            if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-                GarbageCollection.collect("GC collection invoked by checkpointer.")
-                if self.stager is None:
-                    # pyrefly: ignore[bad-assignment]
-                    self.stager = DefaultStager(StagingOptions(True, True, True, True))
-                result = self.dcp_save(
-                    states,
-                    checkpoint_id=checkpoint_id,
-                    async_mode=self.async_mode,
-                )
-                # pyrefly: ignore [missing-attribute]
-                self.save_future = result.upload_completion
-                # pyrefly: ignore [missing-attribute]
-                self.staging_future = result.staging_completion
-                self.staging = True
-            elif self.async_mode == AsyncMode.ASYNC:
-                GarbageCollection.collect("GC collection invoked by checkpointer.")
+        states = self._flattened_model_states_sd()
+        if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            if self.stager is None:
                 # pyrefly: ignore[bad-assignment]
-                self.save_future = self.dcp_save(
-                    states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
-                )
-                GarbageCollection.collect("GC collection invoked by checkpointer.")
-            else:
-                self.dcp_save(
-                    states,
-                    checkpoint_id=checkpoint_id,
-                    async_mode=AsyncMode.DISABLED,
-                    enable_garbage_collection=True,
-                )
-            self._purge_stale_checkpoints()
+                self.stager = DefaultStager(StagingOptions(True, True, True, True))
+            result = self.dcp_save(
+                states,
+                checkpoint_id=checkpoint_id,
+                async_mode=self.async_mode,
+            )
+            # pyrefly: ignore [missing-attribute]
+            self.save_future = result.upload_completion  # type: ignore
+            # pyrefly: ignore [missing-attribute]
+            self.staging_future = result.staging_completion  # type: ignore
+            self.staging = True
+        elif self.async_mode == AsyncMode.ASYNC:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            # pyrefly: ignore[bad-assignment]
+            self.save_future = self.dcp_save(
+                states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
+            )
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
+        else:
+            self.dcp_save(
+                states,
+                checkpoint_id=checkpoint_id,
+                async_mode=AsyncMode.DISABLED,
+                enable_garbage_collection=True,
+            )
+        self._purge_stale_checkpoints()
 
-            logger.info(
-                "Finished saving the checkpoint (or staging if async is enabled)"
-                f"in {time.monotonic() - begin:.2f} seconds."
-            )
-        elif self.enable_ft_dataloader_checkpoints:
-            assert self.ft_manager is not None
-            logger.info(
-                "Replica %d doesn't save checkpoint.",
-                # pyrefly: ignore [missing-attribute]
-                self.ft_manager.participating_rank(),
-            )
+        logger.info(
+            "Finished saving the checkpoint (or staging if async is enabled)"
+            f"in {time.monotonic() - begin:.2f} seconds."
+        )
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
@@ -576,28 +488,18 @@ class CheckpointManager:
             bool: Whether the checkpoint was loaded successfully.
         """
 
-        if self.enable_ft_dataloader_checkpoints:
-            self._ft_load()
-
         if not self.enable:
             return False
 
         model_only = False
         from_hf = False
-        from_quantized = False
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
-            from_quantized = self.initial_load_in_hf_quantized
             if from_hf:
-                assert (
-                    model_only
-                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
-
-            if from_quantized:
-                assert (
-                    from_hf
-                ), "Quantized checkpoint can only be loaded from HuggingFace format."
+                assert model_only, (
+                    "Only model can be loaded when loading from HF's safetensors checkpoint."
+                )
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
@@ -611,7 +513,7 @@ class CheckpointManager:
                     )
             elif from_hf:
                 # pyrefly: ignore [missing-attribute]
-                checkpoint_id = self.sd_adapter.hf_assets_path
+                checkpoint_id = self.sd_adapter.hf_assets_path  # type: ignore
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights but the path is not valid. \
@@ -619,7 +521,7 @@ class CheckpointManager:
                     )
                 logger.info(
                     # pyrefly: ignore [missing-attribute]
-                    f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"
+                    f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"  # type: ignore
                 )
             else:
                 return False
@@ -652,7 +554,6 @@ class CheckpointManager:
             states,
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
-            from_quantized=from_quantized,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -668,7 +569,7 @@ class CheckpointManager:
         """
         if self.enable_staging and self.staging:
             # pyrefly: ignore [missing-attribute]
-            self.staging_future.result()
+            self.staging_future.result()  # type: ignore
             self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
@@ -702,42 +603,9 @@ class CheckpointManager:
             return -1
         return max(step_counts)
 
-    def _ft_folder(self) -> str:
-        return os.path.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
-
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
         folder = folder if folder else self.folder
         return os.path.join(folder, f"step-{step}")
-
-    def _ft_save(self, step: int) -> None:
-        begin = time.monotonic()
-        self._async_wait()
-        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        # pyrefly: ignore[bad-assignment]
-        self.save_future = self.dcp_save(
-            self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
-        )
-        logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
-
-    def _ft_load(self) -> None:
-        step = self._find_load_step(folder=self._ft_folder())
-        if step == -1:
-            return
-
-        begin = time.monotonic()
-        logger.info(f"Loading the FT checkpoint at step {step}.")
-        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self.dcp_load(
-            self.ft_states,
-            checkpoint_id=checkpoint_id,
-            # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
-            from_hf=False,
-            from_quantized=False,
-        )
-        GarbageCollection.collect("GC collection for checkpoint loading.")
-        logger.info(
-            f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
-        )
 
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
@@ -778,9 +646,6 @@ class CheckpointManager:
 
         states_to_load = self._flattened_model_states_sd(states_to_load)
 
-        if self.enable_ft_dataloader_checkpoints:
-            states_to_load.pop(DATALOADER)
-
         return states_to_load
 
     def _save_last_step(self, curr_step: int) -> None:
@@ -803,9 +668,9 @@ class CheckpointManager:
             states = self._flattened_model_states_sd()
 
         if self.last_save_in_hf:
-            assert (
-                self.last_save_model_only
-            ), "Only model can be saved when saving in HF safetensors format."
+            assert self.last_save_model_only, (
+                "Only model can be saved when saving in HF safetensors format."
+            )
 
         self.dcp_save(
             states,
@@ -833,29 +698,17 @@ class CheckpointManager:
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             if self.save_future is not None:
-                self.save_future.result()
-        elif (
-            self.async_mode == AsyncMode.ASYNC or self.enable_ft_dataloader_checkpoints
-        ):
+                self.save_future.result()  # type: ignore
+        elif self.async_mode == AsyncMode.ASYNC:
             if self.save_future is not None:
-                self.save_future.result()
+                self.save_future.result()  # type: ignore
                 self.save_future = None  # pyrefly: ignore[bad-assignment]
-        elif self.save_future is not None:
-            raise RuntimeError(
-                "self.save_future is not None, but self.async_mode is not enabled "
-                "and fault tolerance is not active."
-            )
 
     def _purge_stale_checkpoints(self):
         if (
             self.keep_latest_k > 0
             and dist.get_rank() == 0
             and os.path.isdir(self.folder)
-            and (
-                not self.enable_ft_dataloader_checkpoints
-                # pyrefly: ignore [missing-attribute]
-                or (self.ft_manager and self.ft_manager.participating_rank() == 0)
-            )
         ):
             discovered_checkpoints = []
             for filename in os.listdir(self.folder):

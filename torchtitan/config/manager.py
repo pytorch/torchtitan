@@ -1,23 +1,13 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import importlib
 import os
 import sys
-
 from dataclasses import field, fields, is_dataclass, make_dataclass
-from typing import Any, Type
-
-import tyro
+from typing import Any, Type, get_args, get_origin
 
 try:
     import tomllib
 except ModuleNotFoundError:
-    # pyrefly: ignore[import-error]
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[import-not-found]
 
 from torchtitan.tools.logging import logger
 
@@ -31,18 +21,17 @@ class ConfigManager:
     Configuration precedence:
         CLI args > TOML file > JobConfig defaults
 
-    CLI arguments use the format <section>.<key> to map to TOML entries.
+    CLI arguments use the format --<section>.<key> <value> to map to TOML entries.
     Example:
-        model.name →
+        --model.name llama3 maps to:
 
         [model]
-        name
+        name = "llama3"
     """
 
     def __init__(self, config_cls: Type[JobConfig] = JobConfig):
         self.config_cls = config_cls
         self.config: JobConfig = config_cls()
-        self.register_tyro_rules(custom_registry)
 
     def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
         toml_values = self._maybe_load_toml(args)
@@ -54,13 +43,118 @@ class ConfigManager:
             else config_cls()
         )
 
-        self.config = tyro.cli(
-            config_cls, args=args, default=base_config, registry=custom_registry
-        )
+        # Apply CLI overrides on top of the TOML-loaded config
+        self.config = self._apply_cli_overrides(config_cls, base_config, args)
 
         self._validate_config()
 
         return self.config
+
+    def _apply_cli_overrides(
+        self, config_cls: Type[JobConfig], base_config: JobConfig, args: list[str]
+    ) -> JobConfig:
+        """Parse CLI args in --section.key value format and apply as overrides."""
+        # Skip known meta-args that are handled separately
+        skip_keys = {
+            "--job.config-file",
+            "--job.config_file",
+            "--job.custom_config_module",
+            "--job.custom-config-module",
+        }
+
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if not arg.startswith("--"):
+                i += 1
+                continue
+
+            # Parse key=value or key value
+            if "=" in arg:
+                key, value = arg[2:].split("=", 1)
+            elif i + 1 < len(args) and not args[i + 1].startswith("--"):
+                key = arg[2:]
+                value = args[i + 1]
+                i += 1
+            else:
+                # Boolean flag (--some.flag means True)
+                key = arg[2:]
+                value = "true"
+
+            # Normalize key: convert hyphens to underscores
+            key = key.replace("-", "_")
+
+            if f"--{key}" in skip_keys or f"--{key.replace('_', '-')}" in skip_keys:
+                i += 1
+                continue
+
+            parts = key.split(".")
+            if len(parts) != 2:
+                i += 1
+                continue
+
+            section, field_name = parts
+            self._set_field(base_config, section, field_name, value)
+
+            i += 1
+
+        return base_config
+
+    def _set_field(
+        self, config: JobConfig, section: str, field_name: str, value_str: str
+    ) -> None:
+        """Set a field on the config object, coercing the string value to the correct type."""
+        if not hasattr(config, section):
+            logger.warning(f"Unknown config section: {section}")
+            return
+
+        section_obj = getattr(config, section)
+        if not is_dataclass(section_obj):
+            logger.warning(f"Config section '{section}' is not a dataclass")
+            return
+
+        # Find the field type
+        field_type = None
+        for f in fields(section_obj):
+            if f.name == field_name:
+                field_type = f.type
+                break
+
+        if field_type is None:
+            logger.warning(f"Unknown config field: {section}.{field_name}")
+            return
+
+        coerced = self._coerce_value(value_str, field_type)
+        setattr(section_obj, field_name, coerced)
+
+    @staticmethod
+    def _coerce_value(value_str: str, field_type: Any) -> Any:
+        """Coerce a string value to the appropriate Python type."""
+        # Handle Optional / Union types (e.g., str | None)
+        origin = get_origin(field_type)
+        if origin is type(int | str):  # UnionType
+            # Try the non-None types
+            for t in get_args(field_type):
+                if t is type(None):
+                    continue
+                try:
+                    return ConfigManager._coerce_value(value_str, t)
+                except (ValueError, TypeError):
+                    continue
+            return value_str
+
+        if field_type is bool:
+            return value_str.lower() in ("true", "1", "yes")
+        elif field_type is int:
+            return int(value_str)
+        elif field_type is float:
+            return float(value_str)
+        elif field_type is str:
+            return value_str
+        elif field_type == list[str]:
+            return value_str.split(",")
+        else:
+            return value_str
 
     def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
         # 1. Check CLI
@@ -179,66 +273,13 @@ class ConfigManager:
                     result[f.name] = self._dict_to_dataclass(f.type, value)
                 else:
                     result[f.name] = value
-        return cls(**result)  # pyrefly: ignore[not-callable, bad-instantiation]
+        return cls(**result)  # pyrefly: ignore[not-callable, bad-instantiation]  # type: ignore
 
     def _validate_config(self) -> None:
-        if self.config.experimental.custom_args_module:
-            logger.warning(
-                "This field is being moved to --job.custom_config_module and "
-                "will be deprecated soon. Setting job.custom_config_module to "
-                "experimental.custom_args_module temporarily."
-            )
-            self.config.job.custom_config_module = (
-                self.config.experimental.custom_args_module
-            )
-        # TODO: temporary mitigation of BC breaking change in hf_assets_path
-        #       tokenizer default path, need to remove later
-        if self.config.model.tokenizer_path:
-            logger.warning(
-                "tokenizer_path is deprecated, use model.hf_assets_path instead. "
-                "Setting hf_assets_path to tokenizer_path temporarily."
-            )
-            self.config.model.hf_assets_path = self.config.model.tokenizer_path
         if not os.path.exists(self.config.model.hf_assets_path):
             logger.warning(
                 f"HF assets path {self.config.model.hf_assets_path} does not exist!"
             )
-            old_tokenizer_path = (
-                "torchtitan/datasets/tokenizer/original/tokenizer.model"
-            )
-            if os.path.exists(old_tokenizer_path):
-                self.config.model.hf_assets_path = old_tokenizer_path
-                logger.warning(
-                    f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please download the new tokenizer files (python scripts/download_hf_assets.py) and update your config."
-                )
-        else:
-            # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
-            if self.config.model.hf_assets_path.endswith("tokenizer.model"):
-                raise Exception(
-                    "You are using the old tokenizer.model, please redownload the tokenizer ",
-                    "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer) ",
-                    " and update your config to the directory of the downloaded tokenizer.",
-                )
-
-    @staticmethod
-    def register_tyro_rules(registry: tyro.constructors.ConstructorRegistry) -> None:
-        @registry.primitive_rule
-        def list_str_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
-            """Support for comma separated string parsing"""
-            if type_info.type != list[str]:
-                return None
-            return tyro.constructors.PrimitiveConstructorSpec(
-                nargs=1,
-                metavar="A,B,C,...",
-                instance_from_str=lambda args: args[0].split(","),
-                is_instance=lambda instance: all(isinstance(i, str) for i in instance),
-                str_from_instance=lambda instance: [",".join(instance)],
-            )
-
-
-# Initialize the custom registry for tyro
-custom_registry = tyro.constructors.ConstructorRegistry()
 
 
 if __name__ == "__main__":
@@ -246,11 +287,8 @@ if __name__ == "__main__":
     # Run this module directly to debug or inspect configuration parsing.
     #
     # Examples:
-    #   Show help message:
-    #     > python -m torchtitan.config.manager --help
-    #
     #   Parse and print a config with CLI arguments:
-    #     > python -m torchtitan.config.manager --profiling.enable_memory_snapshot
+    #     > python -m torchtitan.config.manager --job.config_file path/to/config.toml
     #
     # -----------------------------------------------------------------------------
 

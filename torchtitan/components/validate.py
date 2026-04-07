@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import TypeAlias
@@ -11,12 +5,14 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -91,7 +87,7 @@ class Validator(BaseValidator):
 
     @torch.no_grad()
     # pyrefly: ignore [bad-override]
-    def validate(
+    def validate(  # type: ignore
         self,
         model_parts: list[nn.Module],
         step: int,
@@ -107,7 +103,7 @@ class Validator(BaseValidator):
         num_steps = 0
 
         # pyrefly: ignore [not-iterable]
-        for input_dict, labels in self.validation_dataloader:
+        for input_dict, labels in self.validation_dataloader:  # type: ignore
             if (
                 self.job_config.validation.steps != -1
                 and num_steps >= self.job_config.validation.steps
@@ -212,7 +208,7 @@ def build_validator(
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
         # pyrefly: ignore [bad-argument-type]
-        metrics_processor=metrics_processor,
+        metrics_processor=metrics_processor,  # type: ignore
         pp_schedule=pp_schedule,
         pp_has_first_stage=pp_has_first_stage,
         pp_has_last_stage=pp_has_last_stage,

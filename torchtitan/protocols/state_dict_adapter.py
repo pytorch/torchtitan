@@ -1,16 +1,10 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import json
 import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-from torch.distributed.checkpoint import HuggingFaceStorageReader
+from torch.distributed.checkpoint import HuggingFaceStorageReader  # type: ignore
 
 from torchtitan.tools.logging import logger
 
@@ -62,9 +56,7 @@ class BaseStateDictAdapter(ABC):
         pass
 
     @abstractmethod
-    def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
-    ) -> HuggingFaceStorageReader:
+    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
         """Returns hf storage reader to read HF checkpoint
 
         Args:
@@ -101,16 +93,10 @@ class StateDictAdapter(BaseStateDictAdapter):
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
                     # pyrefly: ignore [missing-attribute]
-                    indx = re.search(r"\d+", raw_indx).group(0)
+                    indx = re.search(r"\d+", raw_indx).group(0)  # type: ignore
                     self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
                 self.fqn_to_index_mapping = None
 
-    def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
-    ) -> HuggingFaceStorageReader:
-        if from_quantized:
-            logger.warning(
-                "Loading from quantized checkpoint format is not supported for this model."
-            )
+    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
         return HuggingFaceStorageReader(path)

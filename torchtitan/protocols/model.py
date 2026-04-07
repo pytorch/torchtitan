@@ -1,23 +1,14 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Protocol
 
 import torch
 import torch.nn as nn
-
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-
 from torchtitan.config import JobConfig
 from torchtitan.models.attention import VarlenMetadata
-
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 

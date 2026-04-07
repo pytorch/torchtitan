@@ -11,14 +11,12 @@ profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = true
-save_tb_folder = "tb"
+enable_wandb = false
 
 [model]
 name = "llama3"
 flavor = "405B"
 hf_assets_path = "./assets/hf/Llama-3.1-405B"
-converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
@@ -57,11 +55,6 @@ mode = "full" # ["none", "selective", "full"]
 [compile]
 enable=true
 components = ["model", "loss"]
-
-[quantize.linear.float8]
-enable_fsdp_float8_all_gather = true
-precompute_float8_dynamic_scale_for_fsdp = true
-filter_fqns = ["output"]
 
 [validation]
 enable = false

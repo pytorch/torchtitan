@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import functools
 from typing import Any, Generic, Iterator, TypeVar
 
@@ -12,15 +6,14 @@ import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 
-from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 
@@ -29,10 +22,6 @@ __all__ = [
     "build_optimizers",
     "build_optimizers_with_moe_load_balancing",
 ]
-
-
-if has_torchft:
-    import torchft as ft
 
 
 T = TypeVar("T", bound=Optimizer)
@@ -90,7 +79,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         return len(self.optimizers)
 
     # pyrefly: ignore [bad-override]
-    def step(self, *args, **kwargs) -> None:
+    def step(self, *args, **kwargs) -> None:  # type: ignore
         for optimizer in self.optimizers:
             optimizer.step(*args, **kwargs)
 
@@ -181,76 +170,10 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         pass
 
 
-class FTOptimizersContainer(OptimizersContainer):
-    def __init__(
-        self,
-        model_parts: list[nn.Module],
-        optimizer_cls: type[T],
-        optimizer_kwargs: dict[str, Any],
-        ft_manager: "ft.Manager",
-        use_ft_optimizer: bool = True,
-    ) -> None:
-        super().__init__(model_parts, optimizer_cls, optimizer_kwargs)
-
-        # Force to initialize the optimizer state so that `optim.step()`
-        # won't be called by state_dict() and load_state_dict().
-        _ = {
-            k: v
-            for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
-            for k, v in sd.items()
-        }
-        self.cache_state_dict: dict[str, Any] = {}
-        self._ft_optimizer = ft.Optimizer(ft_manager, self)
-        # Whether to determine quorum using FT.optimizer,
-        # in semi-sync training we use the synchronization step to start quorum
-        self._use_ft_optimizer: bool = use_ft_optimizer
-
-    def init_cache_state_dict(self) -> None:
-        self.cache_state_dict = super().state_dict()
-
-    def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # We have to invalidate the `cache_state_dict` because optimizer uses
-        # assign instead of copy when doing `load_state_dict()`. Without
-        # invalidating the `cache_state_dict`, there will be memory leakage.
-        self.cache_state_dict = {}
-        super().load_state_dict(state_dict)
-        self.init_cache_state_dict()
-
-    def step(self, *args, **kwargs) -> None:
-        """Calling the correct step() depending on the caller.
-
-        TorchFT's OptimizerWrapper.step() is designed to be called only once
-        per train step per ft.Manager regardless how many optimizers are used.
-        Hence we will need to appropriately dispatch the call.
-        """
-        if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.step(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().step(*args, **kwargs)
-
-    def zero_grad(self, *args, **kwargs) -> None:
-        """Calling the correct zero_grad() depending on the caller.
-
-        Check the comment in ``step()``.
-        """
-        if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.zero_grad(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().zero_grad(*args, **kwargs)
-
-
 def build_optimizers(
     model_parts: list[nn.Module],
     optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
-    ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -280,11 +203,6 @@ def build_optimizers(
             raise NotImplementedError(
                 "Optimizers in backward is not supported with Pipeline Parallel."
             )
-        if ft_manager and ft_manager.enabled:
-            raise NotImplementedError(
-                "TorchFT is not supported with optimizers in backward."
-            )
-
     name = optimizer_config.name
     lr = optimizer_config.lr
     beta1 = optimizer_config.beta1
@@ -320,15 +238,6 @@ def build_optimizers(
             model_parts, optimizer_cls, optimizer_kwargs
         )
 
-    if ft_manager and ft_manager.enabled:
-        return FTOptimizersContainer(
-            model_parts,
-            optimizer_cls,
-            optimizer_kwargs,
-            ft_manager.manager,
-            use_ft_optimizer=ft_manager.use_async_quorum,
-        )
-
     return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
 
 
@@ -336,24 +245,22 @@ def build_optimizers_with_moe_load_balancing(
     model_parts: list[nn.Module],
     optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
-    ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     optimizers = build_optimizers(
         model_parts=model_parts,
         optimizer_config=optimizer_config,
         parallel_dims=parallel_dims,
-        ft_manager=ft_manager,
     )
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
             # pyrefly: ignore [not-callable]
-            for transformer_block in model_part.layers.values():
+            for transformer_block in model_part.layers.values():  # type: ignore
                 # pyrefly: ignore [missing-attribute]
-                if transformer_block.moe_enabled:
+                if transformer_block.moe_enabled:  # type: ignore
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
                     # pyrefly: ignore [missing-attribute]
-                    return bool(transformer_block.moe.load_balance_coeff)
+                    return bool(transformer_block.moe.load_balance_coeff)  # type: ignore
         return False
 
     # for MoE auxiliary-loss-free load balancing
@@ -370,15 +277,15 @@ def build_optimizers_with_moe_load_balancing(
         tokens_per_expert_list = []
         for model_part in model_parts:
             # pyrefly: ignore [not-callable]
-            for transformer_block in model_part.layers.values():
+            for transformer_block in model_part.layers.values():  # type: ignore
                 # pyrefly: ignore [missing-attribute]
-                if not transformer_block.moe_enabled:
+                if not transformer_block.moe_enabled:  # type: ignore
                     continue
                 # pyrefly: ignore [missing-attribute]
-                if transformer_block.moe.load_balance_coeff is None:
+                if transformer_block.moe.load_balance_coeff is None:  # type: ignore
                     return
                 # pyrefly: ignore [missing-attribute]
-                tokens_per_expert = transformer_block.moe.tokens_per_expert
+                tokens_per_expert = transformer_block.moe.tokens_per_expert  # type: ignore
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
                     # This does not affect to expert choice, but affects the experts usage metrics.
@@ -408,12 +315,12 @@ def build_optimizers_with_moe_load_balancing(
         with torch.no_grad():
             for model_part in model_parts:
                 # pyrefly: ignore [not-callable]
-                for transformer_block in model_part.layers.values():
+                for transformer_block in model_part.layers.values():  # type: ignore
                     # pyrefly: ignore [missing-attribute]
-                    if not transformer_block.moe_enabled:
+                    if not transformer_block.moe_enabled:  # type: ignore
                         continue
                     # pyrefly: ignore [missing-attribute]
-                    moe = transformer_block.moe
+                    moe = transformer_block.moe  # type: ignore
 
                     tokens_per_expert = tokens_per_expert_by_layer[
                         moe_layer_idx

@@ -1,17 +1,11 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import os
 import time
 from collections import namedtuple
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import JobConfig
@@ -112,23 +106,6 @@ class BaseLogger:
 
     def close(self) -> None:
         pass
-
-
-class TensorBoardLogger(BaseLogger):
-    """Logger implementation for TensorBoard."""
-
-    def __init__(self, log_dir: str, tag: str | None = None):
-        self.tag = tag
-        self.writer = SummaryWriter(log_dir, max_queue=1000)
-        logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
-
-    def log(self, metrics: dict[str, Any], step: int) -> None:
-        for k, v in metrics.items():
-            tag = k if self.tag is None else f"{self.tag}/{k}"
-            self.writer.add_scalar(tag, v, step)
-
-    def close(self) -> None:
-        self.writer.close()
 
 
 class WandBLogger(BaseLogger):
@@ -263,15 +240,10 @@ def _build_metric_logger(
     metrics_config = job_config.metrics
 
     # Log initial config state
-    logger.debug(
-        f"Building logger with config: wandb={metrics_config.enable_wandb}, "
-        f"tensorboard={metrics_config.enable_tensorboard}"
-    )
+    logger.debug(f"Building logger with config: wandb={metrics_config.enable_wandb}")
 
     # Check if any logging backend is enabled
-    has_logging_enabled = (
-        metrics_config.enable_tensorboard or metrics_config.enable_wandb
-    )
+    has_logging_enabled = metrics_config.enable_wandb
 
     # Determine if this rank should log
     should_log = has_logging_enabled
@@ -292,12 +264,6 @@ def _build_metric_logger(
     base_log_dir = os.path.join(
         dump_dir, metrics_config.save_tb_folder, datetime.now().strftime("%Y%m%d-%H%M")
     )
-
-    if job_config.fault_tolerance.enable:
-        base_log_dir = os.path.join(
-            base_log_dir,
-            f"replica_{job_config.fault_tolerance.replica_id}",
-        )
 
     if metrics_config.save_for_all_ranks:
         base_log_dir = os.path.join(
@@ -320,11 +286,6 @@ def _build_metric_logger(
                 )
             else:
                 logger.error(f"Failed to create WandB logger: {e}")
-
-    if metrics_config.enable_tensorboard:
-        logger.debug("Creating TensorBoard logger")
-        tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
-        logger_container.add_logger(tensorboard_logger)
 
     if logger_container.number_of_loggers == 0:
         logger.debug("No loggers enabled, returning an empty LoggerContainer")

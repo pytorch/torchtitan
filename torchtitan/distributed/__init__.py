@@ -1,14 +1,7 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-
 from functools import partial
 
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh, distribute_module, DTensor, Replicate
+from torch.distributed.tensor import DeviceMesh, DTensor, Replicate, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
@@ -66,7 +59,7 @@ class NoParallel(ParallelStyle):
             module,
             device_mesh,
             None,
-            partial(
+            partial(  # type: ignore
                 # pyrefly: ignore [bad-argument-type]
                 self._prepare_input_fn,
                 self.input_layout,

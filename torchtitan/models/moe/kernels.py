@@ -1,13 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import torch
 import triton
 import triton.language as tl
-
 
 __all__ = ["generate_permute_indices", "fill_indices_wrapper"]
 
@@ -93,11 +86,11 @@ def fill_indices_wrapper(
         write_offsets,
         permuted_indices,
         # pyrefly: ignore [bad-argument-type]
-        experts_per_rank,
+        experts_per_rank,  # type: ignore
         # pyrefly: ignore [bad-argument-type]
-        num_ranks,
+        num_ranks,  # type: ignore
         # pyrefly: ignore [bad-argument-type]
-        BLOCK_SIZE=block_size,
+        BLOCK_SIZE=block_size,  # type: ignore
     )
     return permuted_indices
 

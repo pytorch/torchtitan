@@ -1,18 +1,11 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
+from torch.distributed.tensor.placement_types import Replicate, Shard, _StridedShard
 
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from torchtitan.tools.logging import logger
 
 
@@ -103,7 +96,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         # Find all the device mesh dimensios that shard on dim-i
         # pyrefly: ignore [bad-argument-type]
-        for i, name in enumerate(device_mesh.mesh_dim_names):
+        for i, name in enumerate(device_mesh.mesh_dim_names):  # type: ignore
             placement = dtensor_placements[i]
             if placement.dim == dim:
                 mesh_names.append(name)
@@ -113,9 +106,9 @@ class MoEStateDictAdapter(StateDictAdapter):
         start_index, end_index = None, None
         if len(dim_i_placements) == 2:
             # Handle StridedShard(i) + Shard(i) case
-            assert isinstance(
-                dim_i_placements[0], _StridedShard
-            ), "Expected StridedShard as first placement"
+            assert isinstance(dim_i_placements[0], _StridedShard), (
+                "Expected StridedShard as first placement"
+            )
 
             strided_shard_mesh = device_mesh[mesh_names[0]]
             shard_mesh = device_mesh[mesh_names[1]]
@@ -131,9 +124,9 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         elif len(dim_i_placements) == 1:
             # Handle single Shard(i) case
-            assert not isinstance(
-                dim_i_placements[0], _StridedShard
-            ), "Expected regular Shard, not StridedShard"
+            assert not isinstance(dim_i_placements[0], _StridedShard), (
+                "Expected regular Shard, not StridedShard"
+            )
 
             shard_mesh = device_mesh[mesh_names[0]]
             shard_degree = shard_mesh.size()
@@ -183,9 +176,9 @@ class MoEStateDictAdapter(StateDictAdapter):
             Dictionary mapping individual expert keys to their DTensor weights
         """
         # pyrefly: ignore [missing-attribute]
-        device_mesh = grouped_expert_weight.device_mesh
+        device_mesh = grouped_expert_weight.device_mesh  # type: ignore
         # pyrefly: ignore [missing-attribute]
-        dtensor_placements = grouped_expert_weight.placements
+        dtensor_placements = grouped_expert_weight.placements  # type: ignore
 
         # Step 1: Extract dimension-0 placement information
         num_experts = grouped_expert_weight.shape[0]
@@ -195,9 +188,9 @@ class MoEStateDictAdapter(StateDictAdapter):
             dtensor_placements=dtensor_placements,
             device_mesh=device_mesh,
         )
-        assert (
-            start_index is not None and end_index is not None
-        ), "Start index and end index can not be None on dim-0!"
+        assert start_index is not None and end_index is not None, (
+            "Start index and end index can not be None on dim-0!"
+        )
 
         # Step 2: Store indices for potential future use in from_hf()
         self.local_experts_indices[titan_abstract_key] = (start_index, end_index)
@@ -222,9 +215,9 @@ class MoEStateDictAdapter(StateDictAdapter):
                 raise ValueError(f"Unsupported placement type: {type(placement)}")
 
         # Step 4: Create individual expert DTensors
-        assert isinstance(
-            grouped_expert_weight, DTensor
-        ), "Expected DTensor for grouped expert weight"
+        assert isinstance(grouped_expert_weight, DTensor), (
+            "Expected DTensor for grouped expert weight"
+        )
 
         local_grouped_weights = grouped_expert_weight._local_tensor
         expected_local_experts = end_index - start_index
@@ -289,7 +282,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
         # pyrefly: ignore [missing-attribute]
-        local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
+        local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor  # type: ignore
 
         assert (
             abstract_key in self.grouped_expert_weight_placements
@@ -401,11 +394,11 @@ def get_dense_model_nparams_and_flops(
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
         # pyrefly: ignore [missing-attribute]
-        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
+        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len  # type: ignore
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
+    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:  # type: ignore
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
@@ -457,7 +450,7 @@ def get_moe_model_nparams_and_flops(
         nparams_moe_router
         + nparams_shared_experts
         # pyrefly: ignore [missing-attribute]
-        + nparams_experts * model_args.moe_args.top_k // model_args.moe_args.num_experts
+        + nparams_experts * model_args.moe_args.top_k // model_args.moe_args.num_experts  # type: ignore
     )
 
     logger.info(
@@ -468,11 +461,11 @@ def get_moe_model_nparams_and_flops(
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
         # pyrefly: ignore [missing-attribute]
-        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
+        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len  # type: ignore
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
+    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:  # type: ignore
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token

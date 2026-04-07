@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 from abc import ABC, abstractmethod
 
 import torch
@@ -14,13 +8,13 @@ from torch.distributed._functional_collectives import (
     all_to_all_single_autograd,
 )
 from torch.distributed.tensor import (
-    DeviceMesh,
-    distribute_module,
-    distribute_tensor,
+    DeviceMesh, # type: ignore
     DTensor,
     Partial,
     Replicate,
     Shard,
+    distribute_module,
+    distribute_tensor,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
@@ -29,20 +23,19 @@ from torchtitan.models.moe.utils import _permute, _unpermute
 
 class BaseExpertParallel(ParallelStyle, ABC):
     @abstractmethod
-    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
-        ...
+    def _partition_fn(
+        self, name: str, mod: nn.Module, device_mesh: DeviceMesh
+    ) -> None: ...
 
     @abstractmethod
     def _token_dispatch(
         self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
-    ) -> tuple[Tensor, Tensor]:
-        ...
+    ) -> tuple[Tensor, Tensor]: ...
 
     @abstractmethod
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
-    ) -> Tensor:
-        ...
+    ) -> Tensor: ...
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
@@ -82,7 +75,7 @@ class TensorParallel(ParallelStyle):
             device_mesh,
             self._partition_fn,
             # pyrefly: ignore [bad-argument-type]
-            self._prepare_input_fn,
+            self._prepare_input_fn,  # type: ignore
         )
 
 
@@ -186,9 +179,9 @@ class ExpertParallel(BaseExpertParallel):
             device_mesh,
             partition_fn=self._partition_fn,
             # pyrefly: ignore [bad-argument-type]
-            input_fn=self._token_dispatch,
+            input_fn=self._token_dispatch,  # type: ignore
             # pyrefly: ignore [bad-argument-type]
-            output_fn=self._token_combine,
+            output_fn=self._token_combine,  # type: ignore
         )
 
 
@@ -220,21 +213,21 @@ class ExpertTensorParallel(ExpertParallel):
         mod.register_parameter(
             "w1",
             # pyrefly: ignore [bad-argument-type]
-            nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),  # type: ignore
         )  # Column-wise sharding
 
         # w2 shape = (experts, in_dim, out_dim)
         mod.register_parameter(
             "w2",
             # pyrefly: ignore [bad-argument-type]
-            nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),
+            nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),  # type: ignore
         )  # Row-wise sharding
 
         # w3 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w3",
             # pyrefly: ignore [bad-argument-type]
-            nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),  # type: ignore
         )  # Column-wise sharding
 
     def _token_combine(self, mod, routed_output, device_mesh):
@@ -247,9 +240,9 @@ class ExpertTensorParallel(ExpertParallel):
             device_mesh,
             partition_fn=self._partition_fn,
             # pyrefly: ignore [bad-argument-type]
-            input_fn=self._token_dispatch,
+            input_fn=self._token_dispatch,  # type: ignore
             # pyrefly: ignore [bad-argument-type]
-            output_fn=self._token_combine,
+            output_fn=self._token_combine,  # type: ignore
         )
 
 
@@ -311,9 +304,9 @@ class ReordererSequenceParallel(ParallelStyle):
             device_mesh,
             partition_fn=None,
             # pyrefly: ignore [bad-argument-type]
-            input_fn=self._prepare_inputput_fn,
+            input_fn=self._prepare_inputput_fn,  # type: ignore
             # pyrefly: ignore [bad-argument-type]
-            output_fn=self._prepare_output_fn,
+            output_fn=self._prepare_output_fn,  # type: ignore
         )
 
 
@@ -334,13 +327,15 @@ class DeepEPExpertParallel(BaseExpertParallel):
 
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Dispatch tokens via DeepEP."""
-        from torchtitan.distributed.deepep import dispatch_tokens
+        from torchtitan.distributed.deepep import ( # type: ignore
+            dispatch_tokens,  # type: ignore[import-not-found]
+        )
 
         hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
         if isinstance(mod.w1, DTensor):
             num_local_experts = mod.w1.to_local().shape[0]
         else:
-            num_local_experts = mod.w1.shape[0]
+            num_local_experts = mod.w1.shape[0]  # type: ignore
         ep_group = device_mesh.get_group()
 
         # pyrefly: ignore[bad-assignment]
@@ -357,7 +352,7 @@ class DeepEPExpertParallel(BaseExpertParallel):
         return hidden_states, tokens_per_expert
 
     @staticmethod
-    def _partition_fn(name, mod, device_mesh):
+    def _partition_fn(name, mod, device_mesh):  # type: ignore
         """Shard expert weights on expert dimension."""
         for param_name, param in mod.named_parameters(recurse=False):
             mod.register_parameter(
@@ -367,7 +362,9 @@ class DeepEPExpertParallel(BaseExpertParallel):
 
     def _token_combine(self, mod, routed_output, device_mesh):
         """Combine tokens via DeepEP."""
-        from torchtitan.distributed.deepep import combine_tokens
+        from torchtitan.distributed.deepep import ( # type: ignore
+            combine_tokens,  # type: ignore[import-not-found]
+        )
 
         # pyrefly: ignore [bad-argument-type]
         routed_output = combine_tokens(routed_output, self._state)
@@ -380,6 +377,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
             module,
             device_mesh,
             partition_fn=DeepEPExpertParallel._partition_fn,
-            input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]  # type: ignore
             output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
         )

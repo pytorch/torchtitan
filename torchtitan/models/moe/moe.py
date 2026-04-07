@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -13,6 +7,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.tools.logging import logger
+
 from .utils import indices_padding_wrapper
 
 
@@ -152,9 +147,9 @@ class GroupedExperts(nn.Module):
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             w1 = self.w1.to_local()
             # pyrefly: ignore [missing-attribute]
-            w2 = self.w2.to_local()
+            w2 = self.w2.to_local()  # type: ignore
             # pyrefly: ignore [missing-attribute]
-            w3 = self.w3.to_local()
+            w3 = self.w3.to_local()  # type: ignore
         else:
             w1 = self.w1
             w2 = self.w2
@@ -167,7 +162,7 @@ class GroupedExperts(nn.Module):
             if (
                 not isinstance(self.w1, DTensor)
                 # pyrefly: ignore[unsupported-operation]
-                or "ep" not in self.w1.device_mesh.mesh_dim_names
+                or "ep" not in self.w1.device_mesh.mesh_dim_names  # type: ignore
             ):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
@@ -569,18 +564,8 @@ class MoE(nn.Module):
                 )
 
 
-def build_moe(
-    args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard"
-) -> nn.Module:
-    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
-    if moe_impl == "deepep":
-        from .moe_deepep import DeepEPMoE
-
-        logger.info(
-            f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
-        )
-        return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
-
+def build_moe(args: MoEArgs, dim: int, hidden_dim: int) -> nn.Module:
+    """Factory for building a standard MoE layer."""
     logger.info(
         f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
     )

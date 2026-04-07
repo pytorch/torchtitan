@@ -1,15 +1,9 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
 import threading
-from typing import cast, Optional
+from typing import Optional, cast
 
 import torch
 import torch.nn as nn
 from torch import Tensor
-
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
@@ -17,11 +11,10 @@ from torch.distributed.pipelining.schedules import (
     _wait_batch_p2p,
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase
-from torch.distributed.tensor import DeviceMesh, distribute_module
+from torch.distributed.tensor import DeviceMesh, distribute_module # type: ignore
 from torch.profiler import record_function
 
 from torchtitan.distributed.expert_parallel import BaseExpertParallel
-
 from torchtitan.tools.utils import get_device_info
 
 """
@@ -92,9 +85,9 @@ class DualPipeExpertParallel(BaseExpertParallel):
             device_mesh,
             partition_fn=self._partition_fn,
             # pyrefly: ignore [bad-argument-type]
-            input_fn=self._token_dispatch,
+            input_fn=self._token_dispatch,  # type: ignore
             # pyrefly: ignore [bad-argument-type]
-            output_fn=self._token_combine,
+            output_fn=self._token_combine,  # type: ignore
         )
 
 
@@ -162,7 +155,7 @@ class SyncHook(torch.autograd.Function):
 
     @staticmethod
     # pyrefly: ignore [bad-override]
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output):  # type: ignore
         hook_name = ctx.hook_name
 
         # Edge case, skip initial barrier, all subsequent backward hooks will acquire
@@ -300,12 +293,8 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
         output = forward_stage.forward_one_chunk(
             # pyrefly: ignore [bad-argument-type]
             forward_mb_index,
-            arg_mbs[
-                forward_mb_index
-            ],  # pyrefly: ignore[index-error, unsupported-operation]
-            kwarg_mbs[
-                forward_mb_index
-            ],  # pyrefly: ignore[index-error, unsupported-operation]
+            arg_mbs[forward_mb_index],  # pyrefly: ignore[index-error, unsupported-operation]
+            kwarg_mbs[forward_mb_index],  # pyrefly: ignore[index-error, unsupported-operation]
         )
         schedule._maybe_compute_loss(
             forward_stage, output, ctx.target_mbs, forward_mb_index

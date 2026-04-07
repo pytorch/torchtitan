@@ -1,11 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
-
 import inspect
 import pickle
 from abc import ABC, abstractmethod
@@ -14,6 +6,7 @@ from typing import Any
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+
 from torchtitan.tools.logging import logger
 
 
@@ -38,8 +31,7 @@ class BaseDataLoader(Stateful, ABC):
     """
 
     @abstractmethod
-    def __iter__(self):
-        ...
+    def __iter__(self): ...
 
 
 # pyrefly: ignore [inconsistent-inheritance]

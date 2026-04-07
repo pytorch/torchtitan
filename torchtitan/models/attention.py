@@ -1,27 +1,17 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
-
 from collections.abc import Callable
 from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import (
-    _mask_mod_signature,
     BlockMask,
+    _mask_mod_signature,
     create_block_mask,
     flex_attention,
 )
-
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
-
 
 __all__ = [
     "FlexAttentionWrapper",
@@ -69,11 +59,11 @@ class VarlenAttentionWrapper(torch.nn.Module):
 
         n_local_heads = xq.shape[1]
         # pyrefly: ignore [no-matching-overload]
-        xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)  # type: ignore
         # pyrefly: ignore [no-matching-overload]
-        xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)  # type: ignore
         # pyrefly: ignore [no-matching-overload]
-        xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)  # type: ignore
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,

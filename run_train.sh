@@ -31,8 +31,6 @@ CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model
 TRAIN_FILE=${TRAIN_FILE:-"torchtitan.train"}
 COMM_MODE=${COMM_MODE:-""}
 
-TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
-
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode
     echo "Running with comm_mode=${COMM_MODE}"
@@ -40,7 +38,6 @@ if [ -n "$COMM_MODE" ]; then
 else
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \
-    TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
     torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
     -m ${TRAIN_FILE} --job.config_file ${CONFIG_FILE} "$@"

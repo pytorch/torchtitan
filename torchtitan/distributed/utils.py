@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import contextlib
 import math
 import os
@@ -21,7 +15,9 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Comm as CommConfig
+from torchtitan.config import Debug as DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -46,7 +42,7 @@ def _dist_reduce(
     """
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
-        x = x.full_tensor()
+        x = x.full_tensor()  # type: ignore[attr-defined]
 
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
@@ -267,7 +263,7 @@ def maybe_enable_amp(
             return torch.autocast(
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
-            )
+            )  # type: ignore
 
 
 def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
@@ -461,7 +457,7 @@ def clip_grad_norm_(
     if isinstance(total_norm, DTensor):
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
-        total_norm = total_norm.full_tensor()
+        total_norm = total_norm.full_tensor()  # type: ignore[attr-defined]
 
     if pp_mesh is not None:
         if math.isinf(norm_type):
@@ -494,7 +490,7 @@ def _clip_grad_norm_with_ep(
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
         # pyrefly: ignore[unsupported-operation]
-        if "ep" in p.device_mesh.mesh_dim_names:
+        if "ep" in p.device_mesh.mesh_dim_names:  # type: ignore
             ep_params.append(p)
             ep_grads.append(p.grad)
         else:
@@ -506,20 +502,19 @@ def _clip_grad_norm_with_ep(
     # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
     # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
     if isinstance(ep_grads_total_norm, DTensor):
-        ep_grads_total_norm = ep_grads_total_norm.full_tensor()
+        ep_grads_total_norm = ep_grads_total_norm.full_tensor()  # type: ignore[attr-defined]
 
     # pyrefly: ignore [missing-attribute]
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
-    ).full_tensor()
+    ).full_tensor()  # type: ignore[attr-defined]
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
         total_norm = (
             # pyrefly: ignore[unsupported-operation]
-            ep_grads_total_norm**norm_type
-            + non_ep_grads_total_norm**norm_type
+            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         )
         total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
 

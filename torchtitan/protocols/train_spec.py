@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
@@ -23,7 +17,6 @@ from torchtitan.config import LRScheduler
 
 from .model import BaseModelArgs, ModelProtocol
 from .state_dict_adapter import BaseStateDictAdapter
-
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 PipeliningFunction: TypeAlias = Callable[
@@ -74,14 +67,10 @@ def get_train_spec(name: str) -> TrainSpec:
     if name in _extra_train_specs:
         return _extra_train_specs[name]
 
-    from torchtitan.experiments import _supported_experiments
     from torchtitan.models import _supported_models
 
     if name in _supported_models:
         module = import_module(f"torchtitan.models.{name}")
-        return module.get_train_spec()
-    elif name in _supported_experiments:
-        module = import_module(f"torchtitan.experiments.{name}")
         return module.get_train_spec()
 
     raise ValueError(f"TrainSpec {name} is not registered.")

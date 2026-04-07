@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import json
 import os
 from dataclasses import asdict, dataclass, field
@@ -73,20 +67,17 @@ class Profiling:
 @dataclass
 class Metrics:
     log_freq: int = 10
-    """How often to log metrics to TensorBoard, in iterations"""
-
-    enable_tensorboard: bool = False
-    """Whether to log metrics to TensorBoard"""
+    """How often to log metrics, in iterations"""
 
     disable_color_printing: bool = False
     """Whether to disable color printing in logs"""
 
     save_tb_folder: str = "tb"
-    """Folder to dump TensorBoard states"""
+    """Folder to dump log states"""
 
     save_for_all_ranks: bool = False
     """
-    Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
+    Whether to save W&B metrics only for rank 0 or for all ranks.
     When this option is False and pipeline_parallel_degree is > 1, the metrics
     component uses the 0th rank of the last stage pipeline group, which is the
     only stage that computes loss metrics.
@@ -109,24 +100,6 @@ class Model:
     Path to HF assets folder. This folder contains local copies of Hugging Face assets,
     including model weights in .safetensors format, the model.safetensor.index.json file
     (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
-    """
-
-    tokenizer_path: str | None = None
-    """DEPRECATED: Use hf_assets_path instead."""
-    """Tokenizer path"""
-
-    converters: list[str] = field(default_factory=list)
-    """
-    Comma separated list of converters to apply to the model.
-    For instance, the `float8` converter swaps `torch.nn.Linear`
-    with `Float8Linear`. This feature requires you to install 'torchao'
-    which can be found here: https://github.com/pytorch/ao
-    """
-
-    print_after_conversion: bool = False
-    """
-    If true, model definition will be printed to stdout after all model
-    converters have been applied.
     """
 
 
@@ -465,28 +438,6 @@ class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
 
-    enable_ft_dataloader_checkpoints: bool = True
-    """
-    Warning: Disabling this can have fault tolerant replicas training
-    over the same data multiple times. Use it with caution if training
-    over the same data is acceptable.
-
-    Used to enable checkpointing the dataloader index for fault tolerant training with torchft.
-
-    Fault tolerant training stores data loader index in the checkpoints, so that training can resume
-    without going over the same batch twice.
-
-    If enabled, data loader state is checkpointed. Otherwise, replicas
-    will train over the same data multiple times, which can result in
-    overfitting.
-
-    The failed replcia will still recover other state e.g. model
-    parameters from other replcias.
-
-    Note, if regular checkpointing is enabled, we also checkpoint the
-    data loader state. But when not using fault tolerance, the entire training starts from scratch.
-    """
-
     folder: str = "checkpoint"
     """
     The folder to store the checkpoints.
@@ -530,14 +481,6 @@ class Checkpoint:
     model definition and DCP format, after necessary model state dict transformation.
     `initial_load_model_only` must be true because safetensors doesn't support saving
     non-tensors. The default value is False.
-    """
-
-    initial_load_in_hf_quantized: bool = False
-    """
-    Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
-    is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
-    checkpoints in HF's model definition and dequantize on model weights if necessary. To support
-    this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
     """
 
     last_save_model_only: bool = True
@@ -705,114 +648,6 @@ class Compile:
 
 
 @dataclass
-class Float8Linear:
-    enable_fsdp_float8_all_gather: bool = False
-    """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
-
-    precompute_float8_dynamic_scale_for_fsdp: bool = False
-    """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
-
-    recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
-    """If specified, creates float8 config from recipe name"""
-
-    filter_fqns: list[str] = field(default_factory=list)
-    """
-    Comma-separated list of fully qualified names of modules to skip applying float8 training to.
-    nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --quantize.linear.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
-    """
-    emulate: bool = False
-    """
-    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
-    as the current CI does not have sm_89 capability, required by Float8.
-    Not compatible with torch.compile.
-    """
-
-
-@dataclass
-class Float8GroupedMM:
-    fqns: list[str] | str = field(default_factory=list)
-    """
-    *Prototype feature, performance optimization still in progress*
-    Comma-separated list of fully qualified names of MoE Layers to apply FP8 dynamic quantization on grouped GEMM operations.
-    This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.grouped_mm.float8.fqns="experts"
-    """
-
-
-@dataclass
-class MXLinear:
-    mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
-    """
-    Temp work around for inductor performance gap.
-
-    CUDA is recommended for best performance.
-
-    Example: --quantize.linear.mx.mxfp8_dim1_cast_kernel_choice="cuda"
-    """
-
-    recipe_name: str = "mxfp8_cublas"
-    """
-    If specified, creates MX config from recipe name. See
-    https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
-    Example: --quantize.linear.mx.recipe_name="mxfp8_cublas"
-    """
-
-    filter_fqns: list[str] = field(default_factory=lambda: ["output"])
-    """
-    Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
-    nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
-    By default we always skip the output layer.
-    Example: --quantize.linear.mx.filter_fqns="attention.wq,attention.wk,attention.wv,output"
-    """
-
-
-@dataclass
-class MXGroupedMM:
-    recipe_name: Literal["mxfp8"] = "mxfp8"
-    """
-    Quantization recipe name for grouped GEMMs. Options: ["mxfp8"]
-
-    Example: --quantize.grouped_mm.mx.recipe_name="mxfp8"
-    """
-
-    fqns: list[str] | str = field(default_factory=list)
-    """
-    *Prototype feature, performance optimization still in progress*
-    Comma-separated list of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations.
-    This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.grouped_mm.mx.fqns="experts"
-    """
-
-
-@dataclass
-class QuantizedLinear:
-    float8: Float8Linear = field(default_factory=Float8Linear)
-    """FP8 training config for nn.Linear layers"""
-
-    mx: MXLinear = field(default_factory=MXLinear)
-    """MX training config for nn.Linear layers"""
-
-
-@dataclass
-class QuantizedGroupedMM:
-    float8: Float8GroupedMM = field(default_factory=Float8GroupedMM)
-    """FP8 training config for grouped GEMMs"""
-
-    mx: MXGroupedMM = field(default_factory=MXGroupedMM)
-    """MX training config for grouped GEMMs"""
-
-
-@dataclass
-class Quantize:
-    linear: QuantizedLinear = field(default_factory=QuantizedLinear)
-    """Quantized training config for nn.Linear layers"""
-
-    grouped_mm: QuantizedGroupedMM = field(default_factory=QuantizedGroupedMM)
-    """Quantized training config for grouped GEMMs"""
-
-
-@dataclass
 class Comm:
     init_timeout_seconds: int = 300
     """Timeout for communication operations, during initialization and first train step."""
@@ -850,80 +685,6 @@ class Comm:
 
 
 @dataclass
-class MemoryEstimation:
-    enable: bool = False
-    """Whether to estimate memory usage for FSDP"""
-
-    disable_fake_mode: bool = False
-    """Whether to estimate memory under FakeTensorMode"""
-
-
-@dataclass
-class FaultTolerance:
-    enable: bool = False
-    """
-    Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
-    And --fault_tolerance.data_parallel_replicate_degree should be 1 and
-    --fault_tolerance.group_size will be used to control the maximum
-    replicate group size as the replicate group size is dynamic.
-    Note that this is still an experimental feature.
-    """
-
-    process_group: str = "gloo"
-    """
-    The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
-    """
-
-    process_group_timeout_ms: int = 10000
-    """
-    The process group will abort if operations don't succeed within this duration.
-    Note: This currently only works with gloo process group.
-    """
-
-    replica_id: int = 0
-    """The TorchFT replica ID of this run."""
-
-    group_size: int = 0
-    """
-    The number of TorchFT replicate groups. This number will be used for
-    dataloader to split the dataset across the replicate groups and FSDP
-    dimension
-    """
-
-    min_replica_size: int = 1
-    """The minimum number of FT replica for each step."""
-
-    semi_sync_method: str | None = None
-    """
-    The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
-    torchft are supported
-    (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
-    """
-
-
-@dataclass
-class Experimental:
-    custom_import: str = ""
-    """
-    This option enables the importation of external modules.
-    Currently, it only supports dotted import modules (e.g., some_package.model_x).
-    It is the user's responsibility to ensure that the specified path can be
-    successfully imported. One method to achieve this, you can place your module
-    inside the ``torchtitan/torchtitan`` folder and execute ``pip install -e .`` to
-    make it available for import.
-    """
-
-    custom_args_module: str = ""
-    """
-    DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
-
-    This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
-    needs to ensure that the path can be imported.
-    """
-
-
-@dataclass
 class Validation:
     enable: bool = False
     """Enable validation to default run validation after each training loop"""
@@ -953,9 +714,9 @@ class Validation:
     """DataLoader configuration"""
 
     def __post_init__(self):
-        assert (
-            self.steps > 0 or self.steps == -1
-        ), "validation steps must be positive or -1"
+        assert self.steps > 0 or self.steps == -1, (
+            "validation steps must be positive or -1"
+        )
 
 
 @dataclass
@@ -992,11 +753,7 @@ class JobConfig:
         default_factory=ActivationCheckpoint
     )
     compile: Compile = field(default_factory=Compile)
-    quantize: Quantize = field(default_factory=Quantize)
     comm: Comm = field(default_factory=Comm)
-    memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
-    fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
-    experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
     debug: Debug = field(default_factory=Debug)
 

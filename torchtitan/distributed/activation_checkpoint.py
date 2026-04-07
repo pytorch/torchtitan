@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
@@ -19,7 +13,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger
-
 
 _layer_sac_count = 0
 
@@ -221,7 +214,7 @@ def apply_ac(
     #
     # Also see: https://github.com/pytorch/pytorch/issues/166926
     # pyrefly: ignore [missing-attribute]
-    torch._C._dynamo.eval_frame._set_lru_cache(False)
+    torch._C._dynamo.eval_frame._set_lru_cache(False)  # type: ignore
 
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
@@ -236,7 +229,7 @@ def apply_ac(
         logger.info(f"Selected {ac_config.memory_budget} budget option")
     else:
         # pyrefly: ignore [missing-attribute]
-        for layer_id, transformer_block in model.layers.named_children():
+        for layer_id, transformer_block in model.layers.named_children():  # type: ignore
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
                 ac_config,
@@ -245,6 +238,6 @@ def apply_ac(
                 op_sac_save_list=op_sac_save_list,
             )
             # pyrefly: ignore [missing-attribute]
-            model.layers.register_module(layer_id, transformer_block)
+            model.layers.register_module(layer_id, transformer_block)  # type: ignore
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

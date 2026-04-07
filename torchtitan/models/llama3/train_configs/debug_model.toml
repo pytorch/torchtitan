@@ -13,8 +13,6 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 disable_color_printing = false
-enable_tensorboard = false
-save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
@@ -22,7 +20,6 @@ name = "llama3"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
-# converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
@@ -67,11 +64,6 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 [compile]
 enable=false
 components = ["model", "loss"]
-
-[quantize.linear.float8]
-enable_fsdp_float8_all_gather = false
-precompute_float8_dynamic_scale_for_fsdp = false
-filter_fqns = ["output"]
 
 [validation]
 enable = false
