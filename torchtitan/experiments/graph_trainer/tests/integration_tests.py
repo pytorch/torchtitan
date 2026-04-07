@@ -284,6 +284,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === aot_fx_trace mode tests ===
+        # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         OverrideDefinitions(
             [
                 [
@@ -294,9 +295,10 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP",
+            "aot_fx_trace llama3 FSDP+TP+cudagraph",
             "aot_fx_trace_llama3_fsdp_tp",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -308,9 +310,10 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+FlexAttn",
+            "aot_fx_trace llama3 FSDP+TP+FlexAttn+cudagraph",
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
+            skip_rocm_test=True,
         ),
     ]
 
@@ -429,6 +432,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === aot_fx_trace mode tests ===
+        # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         OverrideDefinitions(
             [
                 [
@@ -441,9 +445,10 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
-            "aot_fx_trace deepseek_v3 FSDP+TP+EP",
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+cudagraph",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -457,9 +462,10 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
-            "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn+cudagraph",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
             ngpu=8,
+            skip_rocm_test=True,
         ),
     ]
 
