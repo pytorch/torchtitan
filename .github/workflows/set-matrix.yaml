@@ -30,7 +30,7 @@ jobs:
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
       # Default CUDA & ROCm runners
-      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.gfx942.8
+      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.ecosystem.gfx950.8.test
       DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
 
       # Input CUDA & ROCm runners
