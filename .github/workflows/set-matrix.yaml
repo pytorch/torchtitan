@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       runner-rocm:
-        description: 'Override default (linux.rocm.gpu.gfx942.8) ROCm runner label'
+        description: 'Override default (linux.rocm.gpu.ecosystem.gfx950.8) ROCm runner label'
         required: false
         type: string
       runner-cuda:
@@ -30,7 +30,7 @@ jobs:
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
       # Default CUDA & ROCm runners
-      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.ecosystem.gfx950.8.test
+      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.ecosystem.gfx950.8
       DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
 
       # Input CUDA & ROCm runners

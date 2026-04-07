@@ -32,7 +32,6 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner-rocm: linux.rocm.gpu.gfx942.8
       runner-cuda: linux.aws.h100.8
 
   # Step 2: Use the dynamic matrix in the build-test job
