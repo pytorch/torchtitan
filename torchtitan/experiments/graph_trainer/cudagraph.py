@@ -160,11 +160,12 @@ class CUDAGraphWrapper:
     def _check_input_types(self, inputs) -> None:
         for i, inp in enumerate(inputs):
             if not (
-                isinstance(inp, (torch.Tensor, int, torch._C.Generator))
+                isinstance(inp, (torch.Tensor, int, float, torch._C.Generator))
                 or is_opaque_value(inp)
             ):
                 raise ValueError(
                     "args must be tensor, integer (for dynamic shapes), "
+                    "float (for scalar constants), "
                     "Generator (for random number generator), "
                     "or opaque object, "
                     f"but found {type(inp)} with value {inp!r} at index {i}"
