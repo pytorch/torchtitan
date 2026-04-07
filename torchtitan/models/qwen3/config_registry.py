@@ -7,7 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -48,6 +48,28 @@ def qwen3_debugmodel() -> Trainer.Config:
             mode="selective",
         ),
     )
+
+
+def qwen3_debugmodel_param_groups() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.optimizer = OptimizersContainer.Config(
+        lr=8e-4,
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r"tok_embeddings\.",
+                weight_decay_multiplier=0.0,
+            ),
+            ParamGroupConfig(
+                pattern=r"\.bias$",
+                weight_decay_multiplier=0.0,
+            ),
+            ParamGroupConfig(
+                pattern=r"(?:attention_norm|ffn_norm|norm)\.",
+                weight_decay_multiplier=0.0,
+            ),
+        ],
+    )
+    return config
 
 
 def qwen3_debugmodel_flex() -> Trainer.Config:
