@@ -613,11 +613,8 @@ class GQAttention(BaseAttention):
         self.rope_backend = config.rope_backend
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm: RMSNorm | None = None
-        self.k_norm: RMSNorm | None = None
-        if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build()
-            self.k_norm = config.k_norm.build()
+        self.q_norm = config.q_norm.build() if config.q_norm is not None else None
+        self.k_norm = config.k_norm.build() if config.k_norm is not None else None
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
