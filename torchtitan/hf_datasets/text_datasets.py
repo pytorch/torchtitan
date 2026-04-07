@@ -32,6 +32,7 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
     """Process C4 dataset sample text."""
     return sample["text"]
 
+
 # Add your dataset here - more information at docs/datasets.md
 DATASETS = {
     "c4": DatasetConfig(
@@ -114,8 +115,8 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
     def _normalize_positions(self, positions: list[int]) -> list[int]:
         offset = positions[0]
         if offset > 0:
-            for i,p in enumerate(positions):
-                if p == 0: 
+            for i, p in enumerate(positions):
+                if p == 0:
                     break
                 positions[i] = p - offset
         return positions
@@ -143,9 +144,11 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
                 while len(self._inputs_buffer) >= max_buffer_token_len:
                     x = torch.LongTensor(self._inputs_buffer[:max_buffer_token_len])
-                    pos = torch.LongTensor(self._normalize_positions(
-                        self._positions_buffer[:max_buffer_token_len]
-                    ))
+                    pos = torch.LongTensor(
+                        self._normalize_positions(
+                            self._positions_buffer[:max_buffer_token_len]
+                        )
+                    )
                     # update buffers to the remaining tokens
                     self._inputs_buffer = self._inputs_buffer[max_buffer_token_len:]
                     self._positions_buffer = self._positions_buffer[

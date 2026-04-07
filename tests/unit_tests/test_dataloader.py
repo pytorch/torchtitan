@@ -79,7 +79,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
         last_batch_input, last_batch_label = batches[-1]
         self.assertEqual(last_batch_input["input"].tolist(), [96, 97, 98, 99])
         self.assertEqual(last_batch_label.tolist(), [96, 97, 98, 99])
-        
+
     def test_validate_kwargs_rejects_invalid_kwargs(self):
         """Test that passing invalid kwargs raises ValueError."""
         dataset = DummyDataset()
@@ -154,11 +154,11 @@ class TestParallelAwareDataloader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=tokenizer,
-            seq_len=(seq_len:=512),
+            seq_len=(seq_len := 512),
             local_batch_size=8,
         )
 
-        for batch,_ in zip(map(lambda x:x[0], dataloader), range(10)):
+        for batch, _ in zip(map(lambda x: x[0], dataloader), range(10)):
             batch_input_ids = batch["input"]
             batch_positions = batch["positions"]
             for input_ids, positions in zip(batch_input_ids, batch_positions):
