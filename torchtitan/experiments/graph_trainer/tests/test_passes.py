@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
     reassign_to_pg_pass,
+    regional_inductor_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
@@ -409,6 +410,7 @@ class TestApplySACPass(TestCase):
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
 
 
+<<<<<<< HEAD
 class TestRemoveDetachPass(TestCase):
     """Unit tests for the remove_detach_pass graph pass."""
 
@@ -894,6 +896,59 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 2)
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
+
+
+class TestRegionalInductorPass(TestCase):
+    """Unit tests for regional_inductor_pass."""
+
+    def _build_traced_gm(self):
+        """Build a make_fx-traced graph with proper metadata."""
+        from torch._subclasses import FakeTensorMode
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        def fn(x):
+            return x * 2 + 1
+
+        fake_mode = FakeTensorMode()
+        with fake_mode:
+            fake_x = torch.randn(4, 4)
+        gm = make_fx(fn, tracing_mode="fake")(fake_x)
+        return gm, (fake_x,)
+
+    def test_noop_with_no_tagged_nodes(self):
+        """The pass should be a no-op when no nodes are tagged with compile_with_inductor."""
+        gm, example_inputs = self._build_traced_gm()
+        ops_before = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+
+        result = regional_inductor_pass(gm, example_inputs)
+
+        ops_after = [n.target for n in result.graph.nodes if n.op == "call_function"]
+        self.assertEqual(ops_before, ops_after)
+
+    def test_sets_division_rounding_config(self):
+        """The pass should set eager_numerics.division_rounding for bitwise correctness."""
+        import torch._inductor.config as ic
+
+        original = ic.eager_numerics.division_rounding
+        ic.eager_numerics.division_rounding = False
+
+        try:
+            gm, example_inputs = self._build_traced_gm()
+            regional_inductor_pass(gm, example_inputs)
+            self.assertTrue(ic.eager_numerics.division_rounding)
+        finally:
+            ic.eager_numerics.division_rounding = original
+
+    def test_graph_callable_after_pass(self):
+        """The graph should still be callable with positional args after the pass."""
+        gm, example_inputs = self._build_traced_gm()
+        result = regional_inductor_pass(gm, example_inputs)
+
+        # Verify the graph runs correctly with real tensors
+        x = torch.randn(4, 4)
+        output = result(x)
+        expected = x * 2 + 1
+        self.assertTrue(torch.equal(output, expected))
 
 
 if __name__ == "__main__":

@@ -17,12 +17,11 @@ Pass Types:
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import operator
 import sys
 from collections import defaultdict
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
@@ -183,39 +182,6 @@ def remove_identity_slice_pass(
     return gm
 
 
-@contextlib.contextmanager
-def tag_for_inductor(
-    g: torch.fx.Graph, inductor_configs: dict | None = None
-) -> Generator[None, None, None]:
-    """Tag nodes created within this context for ``regional_inductor`` compilation.
-
-    Nodes created inside the context manager are annotated with
-    ``compile_with_inductor`` in ``node.meta["custom"]`` so that
-    :func:`regional_inductor_pass` can identify and compile them as
-    fused regions.
-
-    Args:
-        g: The FX graph to annotate.
-        inductor_configs: Optional per-region inductor config overrides.
-            When provided, the annotation carries the config dict so
-            ``regional_inductor`` can apply region-specific settings.
-
-    Example::
-
-        with tag_for_inductor(gm.graph):
-            # nodes created here will be compiled by regional_inductor
-            ...
-    """
-    existing_nodes = set(g.nodes)
-    annotation: dict = {"compile_with_inductor": True}
-    if inductor_configs:
-        annotation["compile_with_inductor"] = {"inductor_configs": inductor_configs}
-    yield
-    for node in g.nodes:
-        if node not in existing_nodes and node.op == "call_function":
-            node.meta.setdefault("custom", {})
-            node.meta["custom"].update(annotation)
-
 
 def construct_default_graph_passes(
     traced_result: "TracedResult",
@@ -343,9 +309,9 @@ def regional_inductor_pass(
     """Compile tagged graph regions with ``regional_inductor``.
 
     Scans the graph for nodes whose ``node.meta["custom"]`` contains a
-    ``compile_with_inductor`` key (set by :func:`tag_for_inductor`) and
-    compiles those regions with TorchInductor.  Nodes without this tag
-    are left unchanged.  If no nodes are tagged the pass is a no-op.
+    ``compile_with_inductor`` key and compiles those regions with
+    TorchInductor.  Nodes without this tag are left unchanged.  If no
+    nodes are tagged the pass is a no-op.
 
     Inductor is configured for bitwise-equal numerics so that the
     compiled regions match eager execution exactly.
