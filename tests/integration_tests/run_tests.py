@@ -129,7 +129,9 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
 
                 # test
                 duration = time.perf_counter() - start
-                print(f"############ Duration for {test_flavor.test_name} test: {duration:.6f}s ############")
+                print(
+                    f"############ Duration for {test_flavor.test_name} test: {duration:.6f}s ############"
+                )
 
             except Exception as e:
                 logger.error(str(e))
@@ -146,7 +148,9 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
 
     # test
     total_duration = time.perf_counter() - total_start
-    print(f"************ Total duration for Features test: {total_duration:.6f}s ************")
+    print(
+        f"************ Total duration for Features test: {total_duration:.6f}s ************"
+    )
 
     if failed_tests:
         failure_summary = "\n".join(
