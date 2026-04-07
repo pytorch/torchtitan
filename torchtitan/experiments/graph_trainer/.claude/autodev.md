@@ -94,8 +94,24 @@ While working, the agent (or its subagent):
 - Makes focused commits (one logical change per commit).
 - If blocked by something external, or if investigation reveals the
   current approach won't work and requires a developer decision on
-  direction, moves the item to **Blocked** and adds a comment
-  explaining what's blocking it and what decision is needed.
+  direction, moves the item to **Blocked** and does all three:
+  1. Updates the item status to **Blocked**.
+  2. Updates the item body to append a `## Blocked` section with the
+     reason and what decision is needed. Preserve the original body
+     content — append after a `---` separator. Example body update:
+     ```
+     <original body>
+     ---
+     ## Blocked
+     Waiting on upstream fix for torch.compile issue #12345.
+     Need developer decision on whether to work around or wait.
+     ```
+  3. Adds a comment on any linked PR explaining the blocker.
+
+  When the developer later unblocks the item (moves it back to
+  In Progress), the agent must remove the `## Blocked` section
+  (and its preceding `---` separator) from the item body before
+  resuming work, so the body stays clean.
 - **NEVER push broken code.** Before every push, run the relevant test
   suite and verify it passes. When addressing review feedback that changes
   behavior, run tests *before* pushing. If a reviewer's suggestion breaks
@@ -179,6 +195,53 @@ gh project item-edit --project-id PVT_kwDOAUB9vs4BT6Cu \
 
 # Step 3: Verify the item moved to the right column
 gh project item-list 161 --owner pytorch --format json
+```
+
+### Update item body with blocked reason
+
+When moving an item to Blocked, append a `## Blocked` section to the
+existing body so the reason is visible directly on the card. Always
+read the current body first so you don't lose existing content.
+
+```bash
+# Step 1: Read current item body
+ITEM_JSON=$(gh project item-list 161 --owner pytorch --format json \
+  | jq -r '.items[] | select(.id == "<ITEM_ID>")')
+CURRENT_TITLE=$(echo "$ITEM_JSON" | jq -r '.title')
+CURRENT_BODY=$(echo "$ITEM_JSON" | jq -r '.content.body // ""')
+
+# Step 2: Append blocked section
+BLOCKED_REASON="Waiting on upstream fix for X. Need developer decision on Y."
+NEW_BODY="${CURRENT_BODY}
+---
+## Blocked
+${BLOCKED_REASON}"
+
+# Step 3: Update the item
+gh project item-edit --id <ITEM_ID> \
+    --title "$CURRENT_TITLE" \
+    --body "$NEW_BODY"
+
+# Step 4: Verify the body was updated
+gh project item-list 161 --owner pytorch --format json \
+  | jq '.items[] | select(.id == "<ITEM_ID>") | .content.body'
+```
+
+### Remove blocked section on unblock
+
+When a developer moves an item back to In Progress (unblocks it), the
+agent must strip the `## Blocked` section and its `---` separator from
+the item body before resuming work.
+
+```bash
+# Remove the blocked section (everything from the last "---\n## Blocked" onward)
+CLEAN_BODY=$(echo "$CURRENT_BODY" | sed '/^---$/,/^## Blocked/{/^---$/d;/^## Blocked/,$ d}' | sed '$ { /^$/d }')
+# Or more simply, if the blocked section is always at the end:
+CLEAN_BODY=$(echo "$CURRENT_BODY" | awk '/^---$/{found=1} !found{print}')
+
+gh project item-edit --id <ITEM_ID> \
+    --title "$CURRENT_TITLE" \
+    --body "$CLEAN_BODY"
 ```
 
 ---
