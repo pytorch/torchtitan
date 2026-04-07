@@ -33,6 +33,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
@@ -48,6 +49,7 @@ def apply_default_graph_passes(
     passes before execution. Individual passes are defined below.
     """
     gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
+    gm = cpu_offload_pass(gm, example_inputs)
 
     return gm
 
@@ -491,4 +493,5 @@ AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
     "apply_sac": apply_sac_pass,
+    "cpu_offload": cpu_offload_pass,
 }
