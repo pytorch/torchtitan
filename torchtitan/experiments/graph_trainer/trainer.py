@@ -115,21 +115,9 @@ class GraphTrainer(Trainer):
                     extra_kwargs,
                 )
 
-            # Parameters and buffers have stable tensor addresses across
-            # training steps (optimizer updates them in-place). Count the
-            # unwrapped (post-subclass-flattening) param/buffer tensors so
-            # the cudagraph pass can mark them as static inputs.
-            num_static = sum(
-                layout.num_tensors
-                for layout in self._traced_step.input_subclass_layouts[
-                    : self._traced_step.params_len
-                ]
-            )
-
             self._traced_step.gm = apply_default_graph_passes(
                 self._traced_step.gm,
                 self._traced_step.example_inputs,
-                static_input_indices=list(range(num_static)),
             )
         with self.train_context(), self.maybe_enable_amp:
             outputs = run_traced_train_step(
