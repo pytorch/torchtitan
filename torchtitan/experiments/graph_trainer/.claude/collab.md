@@ -55,10 +55,12 @@ gh project item-list 161 --owner pytorch --format json
 ```
 
 The agent should:
-1. Look at **Ready** items first — these are pre-approved work.
-2. Pick the highest-priority Ready item (or the one the human points to).
-3. Move it to **In Progress** before starting work.
-4. If no Ready items exist, ask the human what to work on.
+1. Check **In Progress** items first — these may have review feedback
+   that needs addressing (see §6).
+2. Look at **Ready** items next — these are pre-approved new work.
+3. Pick the highest-priority item (or the one the human points to).
+4. Move it to **In Progress** before starting work.
+5. If nothing actionable exists, ask the human what to work on.
 
 ### 3. Doing the Work
 
@@ -84,9 +86,23 @@ When the work is complete and self-reviewed:
 The human reviews the PR and either:
 - **Approves and merges** → moves the item to **Done**.
 - **Requests changes** → moves the item back to **In Progress** with
-  review comments. The agent picks it up in the next session (or the
-  current one if still active), addresses the feedback, pushes updates,
-  and moves back to **Need Review** when ready.
+  review comments.
+
+### 6. Addressing Review Feedback
+
+The agent learns about review feedback in two ways:
+
+- **Board poll (default)**: At session start, the agent checks for items
+  that are **In Progress** with a linked PR that has unresolved review
+  comments. These are prioritized over new Ready items.
+- **Human-initiated (urgent)**: The human starts a session and directly
+  points the agent to the PR or pastes the review comments.
+
+When addressing feedback, the agent:
+1. Reads all review comments on the PR (`gh pr view <N> --comments`).
+2. Addresses each comment — fix the code or reply explaining why not.
+3. Self-reviews the updated diff.
+4. Pushes and moves the item back to **Need Review**.
 
 ---
 
