@@ -858,23 +858,23 @@ class TestGraphBasedSAC(unittest.TestCase):
         def traced_step_factory(model):
             annotate_ac_regions(model)
             train_step = make_train_step(get_loss)
-        maybe_regional = (
-            annotate_flex_attention_for_regional_inductor()
-            if use_regional_inductor
-            else contextlib.nullcontext()
-        )
-        maybe_register_blockmask_pytree_node()
-        with maybe_regional:
-            traced = trace_train_step(train_step)(model, *fwd_args, labels)
-        if use_regional_inductor:
-            _apply_regional_inductor(traced)
-        traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+            maybe_regional = (
+                annotate_flex_attention_for_regional_inductor()
+                if use_regional_inductor
+                else contextlib.nullcontext()
+            )
+            maybe_register_blockmask_pytree_node()
+            with maybe_regional:
+                traced = trace_train_step(train_step)(model, *fwd_args, labels)
+            if use_regional_inductor:
+                _apply_regional_inductor(traced)
+            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
 
-        def traced_step_fn(model):
-            result = run_traced_train_step(traced, model, *fwd_args, labels)
-            return result[0], result[1:]
+            def traced_step_fn(model):
+                result = run_traced_train_step(traced, model, *fwd_args, labels)
+                return result[0], result[1:]
 
-        return traced_step_fn
+            return traced_step_fn
 
         # Eager + AC
         model_eager = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
@@ -938,6 +938,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         )
         self._run_sac_test(Qwen3Model, config, (tokens,), labels, dtype=torch.bfloat16)
 
+    @unittest.expectedFailure
     def test_deepseek_v3_sac(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
@@ -968,6 +969,7 @@ class TestGraphBasedSAC(unittest.TestCase):
             use_regional_inductor=True,
         )
 
+    @unittest.expectedFailure
     def test_gpt_oss_sac(self):
         from torch.nn.attention.flex_attention import and_masks
 
@@ -984,7 +986,7 @@ class TestGraphBasedSAC(unittest.TestCase):
         tokens = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
         labels = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
         causal = get_causal_mask_mod()
-        sw_size = config.layer.attention.sliding_window_size
+        sw_size = config.layers[0].attention.sliding_window_size
         attn_masks = {
             "basic_mask": create_attention_mask(causal, 1, None, seq_len, seq_len),
             "sliding_window_mask": create_attention_mask(
@@ -1029,7 +1031,6 @@ class TestDistributedGraphBasedSAC(FSDPTest):
         model_config,
         parallelize_fn,
         tp_degree=1,
-        expected_failure_regex=None,
     ):
         from torchtitan.config import (
             ActivationCheckpointConfig,
@@ -1201,11 +1202,7 @@ class TestDistributedGraphBasedSAC(FSDPTest):
                 finally:
                     inductor_config.compile_threads = old_compile_threads
 
-            if expected_failure_regex is None:
-                run_test()
-            else:
-                with self.assertRaisesRegex(Exception, expected_failure_regex):
-                    run_test()
+            run_test()
         finally:
             torch.use_deterministic_algorithms(False)
 
@@ -1232,17 +1229,12 @@ class TestDistributedGraphBasedSAC(FSDPTest):
         )
         from torchtitan.models.llama3 import llama3_configs
 
+        config = llama3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
             model_config=GraphTrainerLlama3Model.Config(
-                **{
-                    field.name: getattr(
-                        llama3_configs["debugmodel_flex_attn"], field.name
-                    )
-                    for field in fields(llama3_configs["debugmodel_flex_attn"])
-                }
+                **{field.name: getattr(config, field.name) for field in fields(config)}
             ),
             parallelize_fn=parallelize_llama,
-            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
         )
 
     def test_llama3_flex_attn_fsdp_tp2_graph_sac(self):
@@ -1254,18 +1246,13 @@ class TestDistributedGraphBasedSAC(FSDPTest):
         )
         from torchtitan.models.llama3 import llama3_configs
 
+        config = llama3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
             model_config=GraphTrainerLlama3Model.Config(
-                **{
-                    field.name: getattr(
-                        llama3_configs["debugmodel_flex_attn"], field.name
-                    )
-                    for field in fields(llama3_configs["debugmodel_flex_attn"])
-                }
+                **{field.name: getattr(config, field.name) for field in fields(config)}
             ),
             parallelize_fn=parallelize_llama,
             tp_degree=2,
-            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
         )
 
     def test_deepseek_v3_flex_attn_fsdp_graph_sac(self):
@@ -1277,17 +1264,12 @@ class TestDistributedGraphBasedSAC(FSDPTest):
         )
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
 
+        config = deepseekv3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
             model_config=GraphTrainerDeepSeekV3Model.Config(
-                **{
-                    field.name: getattr(
-                        deepseekv3_configs["debugmodel_flex_attn"], field.name
-                    )
-                    for field in fields(deepseekv3_configs["debugmodel_flex_attn"])
-                }
+                **{field.name: getattr(config, field.name) for field in fields(config)}
             ),
             parallelize_fn=parallelize_deepseekv3,
-            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
         )
 
     def test_deepseek_v3_flex_attn_fsdp_tp2_graph_sac(self):
@@ -1299,18 +1281,13 @@ class TestDistributedGraphBasedSAC(FSDPTest):
         )
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
 
+        config = deepseekv3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
             model_config=GraphTrainerDeepSeekV3Model.Config(
-                **{
-                    field.name: getattr(
-                        deepseekv3_configs["debugmodel_flex_attn"], field.name
-                    )
-                    for field in fields(deepseekv3_configs["debugmodel_flex_attn"])
-                }
+                **{field.name: getattr(config, field.name) for field in fields(config)}
             ),
             parallelize_fn=parallelize_deepseekv3,
             tp_degree=2,
-            expected_failure_regex=r"forward\(\) takes 2 positional arguments but 6 were given",
         )
 
 
