@@ -146,27 +146,92 @@ For each blocked TODO, check if the blocker has been resolved:
 
 ## 3. Test & CI Coverage Gap Analysis
 
-Look for things we should be testing but aren't, and things we test locally
-but CI doesn't pick up.
+Check the health of CI workflows. Look for things we should be testing but aren't, 
+things we test locally but CI doesn't pick up.
 
 **Prior report context:** If a coverage gap was already flagged in a prior
 report and the test file hasn't changed since, don't re-investigate — just
 carry it forward with "still open since YYYY-MM-DD." Focus fresh analysis on
 newly added code paths and passes since the last report.
 
-### CI workflow audit
+This section requires the `gh` CLI with appropriate permissions to access the
+GitHub Actions API. If you encounter an error like "api.github.com has not been
+allowlisted", skip the CI monitoring parts and note "skipped — gh API not
+allowlisted" in the report.
+
+### CI failure monitoring
 
 Graph_trainer has two GitHub Actions workflows:
 - `.github/workflows/integration_test_8gpu_graph_trainer.yaml` (A10 GPUs)
 - `.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml` (H100 GPUs)
 
-Check the CI status of the most recent runs on `main`:
+For each workflow, fetch the 5 most recent scheduled runs on `main`:
+
 ```bash
-gh run list --workflow integration_test_8gpu_graph_trainer.yaml --branch main --limit 3 --repo pytorch/torchtitan
-gh run list --workflow integration_test_8gpu_graph_trainer_h100.yaml --branch main --limit 3 --repo pytorch/torchtitan
+gh run list --workflow "<workflow_name>" --branch main --event schedule --limit 5
 ```
 
-Flag any failures or flaky runs that need attention.
+If the most recent run succeeded, note "CI green" and move on.
+If it failed, find the most recent **passing** run among the 5 (or note
+"no recent success in last 5 runs").
+
+For each failing workflow, pull the failed job logs:
+
+```bash
+gh run view <run_id> --log 2>&1
+```
+
+From the logs, extract:
+1. **Which test failed** — look for lines matching
+   `RuntimeError: N integration test(s) failed:` and the test name that follows,
+   or pytest `FAILED` summary lines.
+2. **The error message** — capture the root-cause exception (e.g.,
+   `torch._dynamo.exc.UserError`, `AssertionError`, `RuntimeError`) and its
+   message. Include a few lines of traceback context pointing to the
+   graph_trainer source file and line number.
+
+#### Identify PyTorch nightly regression range
+
+Extract the installed PyTorch version from both the failing and last-passing
+runs by searching for `Successfully installed.*torch-` in their logs.
+
+Then, for each nightly version, download the wheel and extract the git commit
+hash from `torch/version.py`:
+
+```bash
+pip download torch==<version> \
+    --index-url https://download.pytorch.org/whl/nightly/cu128 \
+    --no-deps -d /tmp/torch_wheel --python-version 3.12 --only-binary :all:
+
+unzip -p /tmp/torch_wheel/torch-<version>-cp312-cp312-manylinux_2_28_x86_64.whl \
+    torch/version.py | grep git_version
+```
+
+Report a table:
+
+| Nightly | Status | PyTorch Commit |
+|---------|--------|----------------|
+| `dev<good_date>` | Pass | `<commit>` |
+| `dev<bad_date>` | Fail | `<commit>` |
+
+#### Generate local repro command
+
+From the failed test's `Command:` line in the logs, produce a minimal local
+repro command. Strip the following from the original command:
+- `TORCH_TRACE=...` environment variable
+- `--dump_folder ...` flag and its value
+- `LOG_RANK=...` environment variable
+
+The result should look like:
+
+```bash
+NGPU=<n> ./run_train.sh \
+  --module <module> \
+  --config <config> \
+  [remaining flags...]
+```
+
+Include this repro command in the report under a "CI Failures" section.
 
 ### Tests missing from CI
 
@@ -265,6 +330,14 @@ Publish the report as a comment on the tracking issue
 ```bash
 gh issue comment 2856 --repo pytorch/torchtitan --body "$(cat <<'EOF'
 # Nightly Scout Report — YYYY-MM-DD
+
+## CI Failures
+- **Workflow**: name — status (green / N of last 5 failed)
+- **Failing test**: test name
+- **Error**: root-cause exception and message
+- **Regression range**: `dev<good>` (`<commit>`) → `dev<bad>` (`<commit>`)
+- **Repro**: `NGPU=... ./run_train.sh ...`
+(or "CI green, nothing to report")
 
 ## Action Items (new findings)
 - [ ] [P0/P1/P2] Description — why, what file/area
