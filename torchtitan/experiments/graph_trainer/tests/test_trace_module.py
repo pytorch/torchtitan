@@ -445,13 +445,7 @@ class TestMetadataPropagation(unittest.TestCase):
         _copy_fwd_metadata_to_bw_nodes(gm)
 
         def is_backward(node: torch.fx.Node) -> bool:
-            if node.meta.get("partitioner_tag") == "is_backward":
-                return True
-            if "partitioner_tag" not in node.meta:
-                return (
-                    node.meta.get("custom", {}).get("remat_pass_tag") == "is_backward"
-                )
-            return False
+            return node.meta.get("custom", {}).get("remat_pass_tag") == "is_backward"
 
         # Check that bwd nodes with shared seq_nr got the custom metadata
         for node in gm.graph.nodes:

@@ -259,11 +259,7 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     """Copy forward metadata to backward nodes across all nested FX subgraphs."""
 
     def _is_backward(node: torch.fx.Node) -> bool:
-        if node.meta.get("partitioner_tag") == "is_backward":
-            return True
-        if "partitioner_tag" not in node.meta:
-            return node.meta.get("custom", {}).get("remat_pass_tag") == "is_backward"
-        return False
+        return node.meta.get("custom", {}).get("remat_pass_tag") == "is_backward"
 
     seq_nr_to_fwd_node: dict[int, torch.fx.Node] = {}
 
