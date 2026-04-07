@@ -16,14 +16,14 @@ until the developer stops the session.
 
 ## Status Columns
 
-| Status          | Meaning                                                           | Who moves items here          |
-|-----------------|-------------------------------------------------------------------|-------------------------------|
-| **Backlog**   | Ideas, rough observations, not yet actionable                  | Developer or nightly scout    |
-| **Ready**     | Scoped and actionable — an agent can pick this up              | Developer                     |
-| **In Progress** | An agent or developer is actively working on it              | Agent (when starting work)    |
-| **Blocked**   | Work started but hit an external blocker                       | Agent or developer            |
-| **Need Review** | Code is written, branch is pushed, waiting for developer review | Agent (when work is ready) |
-| **Done**      | Merged or resolved                                             | Developer (after merge)       |
+| Status           | Meaning                                              | Who moves items here       |
+|------------------|------------------------------------------------------|----------------------------|
+| **Backlog**      | Ideas, rough observations, not yet actionable        | Developer or nightly scout |
+| **Ready**        | Scoped and actionable — an agent can pick this up    | Developer                  |
+| **In Progress**  | An agent or developer is actively working on it      | Agent (when starting work) |
+| **Blocked**      | Work started but hit an external blocker             | Agent or developer         |
+| **Need Review**  | Branch is pushed, waiting for developer review       | Agent (when work is ready) |
+| **Done**         | Merged or resolved                                   | Developer (after merge)    |
 
 ### Key rule: only developers move items to Ready, Done, and out of Blocked
 
