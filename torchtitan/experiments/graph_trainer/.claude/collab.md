@@ -7,6 +7,11 @@ and write to the same board.
 **Board**: https://github.com/orgs/pytorch/projects/161
 **CLI access**: `gh project` commands (requires `read:project` + `project` scopes)
 
+**Agent loop**: The agent runs in a continuous loop — poll the board for
+actionable items, do the work, then wait 10 minutes before checking again.
+If there is nothing to do, the agent waits and re-checks. The loop continues
+until the human stops the session.
+
 ---
 
 ## Status Columns
@@ -17,7 +22,7 @@ and write to the same board.
 | **Ready**     | Scoped and actionable — an agent can pick this up              | Human                      |
 | **In Progress** | An agent or human is actively working on it                  | Agent (when starting work) |
 | **Blocked**   | Work started but hit an external blocker                       | Agent or human             |
-| **Need Review** | Code is written, PR is up, waiting for human review          | Agent (when PR is ready)   |
+| **Need Review** | Code is written, branch is pushed, waiting for human review  | Agent (when work is ready) |
 | **Done**      | Merged or resolved                                             | Human (after merge)        |
 
 ### Key rule: only humans move items to Ready, Done, and out of Blocked
@@ -56,51 +61,62 @@ gh project item-list 161 --owner pytorch --format json
 ```
 
 The agent should:
-1. Check **In Progress** items first — these may have review feedback
+1. **Refresh option IDs** — run `gh project field-list 161 --owner pytorch --format json`
+   and parse the current Status option name→ID mappings. Never reuse IDs from
+   a previous session or from this document.
+2. Check **In Progress** items first — these may have review feedback
    that needs addressing (see §6).
-2. Look at **Ready** items next — these are pre-approved new work.
-3. Pick the highest-priority item (or the one the human points to).
-4. Move it to **In Progress** before starting work.
-5. If nothing actionable exists, ask the human what to work on.
+3. Look at **Ready** items next — these are pre-approved new work.
+4. Pick the highest-priority item (or the one the human points to).
+5. Move it to **In Progress** before starting work (using the fresh ID from step 1).
+   Then verify with `gh project item-list` that it landed in the right column.
+6. If nothing actionable exists, wait 10 minutes and re-check the board.
 
 ### 3. Doing the Work
 
-While working, the agent:
+The agent should spin up a **subagent with empty context** to do the actual
+implementation work. This keeps the main agent's context clean for board
+management and review coordination.
+
+While working, the agent (or its subagent):
+- Follows the development instructions in CLAUDE.md (root and graph_trainer).
 - Creates a feature branch: `graph_trainer/<topic>`
 - Makes focused commits (one logical change per commit).
 - If blocked by something external, moves the item to **Blocked** and
   adds a comment explaining what's blocking it.
 - Before requesting human review, the agent self-reviews its own changes:
   read the full diff, check for correctness, style, and adherence to
-  CLAUDE.md rules. Fix any issues found before proceeding.
+  CLAUDE.md rules. Ensure the change has good test coverage.
+  Fix any issues found before proceeding.
 
 ### 4. Requesting Review
 
 When the work is complete and self-reviewed:
-1. Push the branch and open a **draft PR** against `main`.
-2. Link the PR to the board item.
-3. Move the item to **Need Review**.
-4. Leave a brief comment on the item summarizing what was done.
+1. Push the branch but **do not open a PR** — the human will review the
+   branch and decide whether the work is worth a PR.
+2. Move the item to **Need Review**.
+3. Leave a brief comment on the item summarizing what was done and
+   which branch to look at.
 
 ### 5. Human Review
 
-The human reviews the PR and either:
-- **Approves and merges** → moves the item to **Done**.
+The human reviews the branch and either:
+- **Opens a PR, approves and merges** → moves the item to **Done**.
 - **Requests changes** → moves the item back to **In Progress** with
-  review comments.
+  review comments (on the branch or board item).
 
 ### 6. Addressing Review Feedback
 
 The agent learns about review feedback in two ways:
 
 - **Board poll (default)**: At session start, the agent checks for items
-  that are **In Progress** with a linked PR that has unresolved review
-  comments. These are prioritized over new Ready items.
+  that are **In Progress** with review comments on the board item.
+  These are prioritized over new Ready items.
 - **Human-initiated (urgent)**: The human starts a session and directly
-  points the agent to the PR or pastes the review comments.
+  points the agent to the branch or pastes the review comments.
 
 When addressing feedback, the agent:
-1. Reads all review comments on the PR (`gh pr view <N> --comments`).
+1. Reads all review comments on the board item (or PR if one exists).
 2. Addresses each comment — fix the code or reply explaining why not.
 3. Self-reviews the updated diff.
 4. Pushes and moves the item back to **Need Review**.
@@ -120,27 +136,26 @@ gh project item-create 161 --owner pytorch --title "Title here" --body "Descript
 ```
 
 ### Update item status
-```bash
-# Get the status field ID and option IDs
-gh project field-list 161 --owner pytorch --format json
 
-# Update status (use the actual field/option IDs)
+**MANDATORY**: Before every status update, run `gh project field-list` to get
+the current option IDs. Do NOT use cached/hardcoded IDs — they drift when
+columns are reordered on the web UI. After updating, verify with
+`gh project item-list` that the item landed in the expected column.
+
+```bash
+# Step 1: ALWAYS get fresh status field and option IDs
+gh project field-list 161 --owner pytorch --format json
+# Look for the "Status" field → its "options" array has current name→ID mappings
+
+# Step 2: Update status using the IDs from step 1
 gh project item-edit --project-id PVT_kwDOAUB9vs4BT6Cu \
     --id <ITEM_ID> \
     --field-id PVTSSF_lADOAUB9vs4BT6CuzhBFuQs \
-    --single-select-option-id <OPTION_ID>
+    --single-select-option-id <OPTION_ID_FROM_STEP_1>
+
+# Step 3: Verify the item moved to the right column
+gh project item-list 161 --owner pytorch --format json
 ```
-
-Status option IDs:
-- Backlog: `f75ad846`
-- Ready: `47fc9ee4`
-- In Progress: `ea6e9bcb`
-- Blocked: `98236657`
-- Need Review: (check field-list — may have changed)
-- Done: (check field-list — may have changed)
-
-> **Note**: Option IDs can drift if columns are reordered on the web UI.
-> Always verify with `gh project field-list` before scripting.
 
 ---
 
@@ -149,6 +164,6 @@ Status option IDs:
 - **Branch naming**: `graph_trainer/<topic>`
 - **Commit prefix**: `[graph_trainer]` for all graph_trainer commits.
   Add `[self_improve]` if the commit came from the nightly scout.
-- **One item = one PR** unless items are tightly coupled.
-- **Link everything**: PR description should reference the board item,
-  board item should link to the PR.
+- **One item = one branch** unless items are tightly coupled.
+- **Link everything**: board item should reference the branch name.
+  If the human opens a PR, link that too.
