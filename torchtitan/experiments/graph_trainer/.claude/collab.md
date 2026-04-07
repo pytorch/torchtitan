@@ -20,11 +20,12 @@ and write to the same board.
 | **Need Review** | Code is written, PR is up, waiting for human review          | Agent (when PR is ready)   |
 | **Done**      | Merged or resolved                                             | Human (after merge)        |
 
-### Key rule: only humans move items to Ready and Done
+### Key rule: only humans move items to Ready, Done, and out of Blocked
 
 Agents can propose items (as Backlog drafts) and advance them through
 In Progress → Blocked → Need Review. But the human decides what's worth
-doing (Backlog → Ready) and what's actually finished (Need Review → Done).
+doing (Backlog → Ready), what's actually finished (Need Review → Done),
+and when a blocker is resolved (Blocked → In Progress).
 
 ---
 
