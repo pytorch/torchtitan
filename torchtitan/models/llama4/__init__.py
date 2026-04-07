@@ -128,6 +128,7 @@ def _build_llama4_layers(
                 dim=dim,
                 hidden_dim=moe_hidden_dim,
                 num_experts=num_experts,
+                top_k=router.top_k,
                 param_init=_depth_experts_init(layer_id),
             )
             shared_experts = make_ffn_config(

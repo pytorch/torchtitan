@@ -11,7 +11,6 @@ fields set at config creation time.
 """
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Literal
 
 from torchtitan.models.common.attention import GQAttention, LocalMapInnerAttention
@@ -93,17 +92,7 @@ def make_moe_config(
     score_before_experts: bool = True,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
-    """Build a fully-specified MoE.Config.
-
-    Sets token_dispatcher on the experts config so that MoE.__init__
-    can build experts directly without needing to inject dispatcher config.
-    """
-    td_config = BaseTokenDispatcher.Config(
-        num_experts=num_experts,
-        top_k=router.top_k,
-        score_before_experts=score_before_experts,
-    )
-    experts = replace(experts, token_dispatcher=td_config)
+    """Build a fully-specified MoE.Config."""
     return MoE.Config(
         num_experts=num_experts,
         score_before_experts=score_before_experts,
@@ -150,7 +139,9 @@ def make_experts_config(
     dim: int,
     hidden_dim: int,
     num_experts: int,
+    top_k: int,
     param_init: dict[str, Callable],
+    score_before_experts: bool = True,
     use_grouped_mm: bool = True,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
@@ -160,4 +151,9 @@ def make_experts_config(
         num_experts=num_experts,
         use_grouped_mm=use_grouped_mm,
         param_init=param_init,
+        token_dispatcher=BaseTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        ),
     )

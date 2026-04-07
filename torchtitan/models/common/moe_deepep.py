@@ -17,12 +17,19 @@ from .moe import MoE
 
 
 class DeepEPMoE(MoE):
-    """
-    Mixture of Experts with DeepEP/HybridEP communication.
+    """Mixture of Experts with DeepEP communication.
 
-    Overrides forward() to insert shared_experts between the async combine
-    (inside experts.forward → token_dispatcher.combine) and sync_combine(),
-    overlapping shared_experts compute with combine communication.
+    Overrides forward() to overlap shared_experts computation with the
+    DeepEP combine communication. The forward pass proceeds as:
+
+    1. Router computes expert assignments
+    2. GroupedExperts.forward() runs the full pipeline via DeepEPTokenDispatcher:
+       a. dispatch — sends tokens to expert-owning ranks (sync)
+       b. expert computation
+       c. combine — starts sending results back (async, returns immediately)
+    3. shared_experts runs IN PARALLEL with the async combine communication
+    4. sync_combine() waits for combine to complete
+    5. Add shared_experts output and routed_output
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -33,11 +40,28 @@ class DeepEPMoE(MoE):
         super().__init__(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with DeepEP communication and overlapped shared_experts.
+
+        DeepEPTokenDispatcher inside GroupedExperts handles dispatch/combine
+        via deepep/hybridep functions. The combine operation runs
+        asynchronously, allowing shared_experts to overlap with the
+        combine all-to-all communication.
+        """
         # Convert DTensor to local tensor for MoE-internal computation.
         # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
         # in backward, so gradient reduction (reduce-scatter from Partial to
         # Shard(1)) happens once at the MoE boundary rather than being
         # duplicated inside the MoE.
+        #
+        # Why grad(x) is Partial on the tp_mesh across all parallelism:
+        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
+        #   w1/w3, Rowwise on w2) produce Partial output gradients.
+        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
+        #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
+        #   each rank's token positions(Partial).
+        #
+        # This holds for all MoE components (router.gate, routed experts, shared
+        # experts) and regardless of score_before_experts.
         if isinstance(x, DTensor):
             assert (
                 x.device_mesh.ndim == 1
@@ -58,16 +82,19 @@ class DeepEPMoE(MoE):
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # Dispatch + expert computation + async combine all inside experts.forward().
-        # DeepEPTokenDispatcher.combine() returns immediately (async),
-        # so routed_output is not yet ready to read.
+        # The combine operation returns asynchronously, allowing overlap with
+        # shared_experts computation below.
         routed_output = self.experts(
             x, num_tokens_per_expert, top_scores, selected_experts_indices
         )
 
-        # shared_experts runs in parallel with the async combine communication.
+        # shared_experts runs in parallel with combine communication.
+        # This is the key optimization - we overlap compute with communication.
         out = self.shared_experts(x) if self.shared_experts is not None else None
 
-        # Wait for the async combine to complete before using routed_output.
+        # Sync the combine operation before using routed_output.
+        # This inserts a CUDA stream wait, ensuring combine is complete before
+        # the subsequent addition or reshape operations read routed_output.
         sync_combine()
 
         if out is None:

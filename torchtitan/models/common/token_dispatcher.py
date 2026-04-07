@@ -315,13 +315,22 @@ class DeepEPDispatchMetadata:
 
 
 class DeepEPTokenDispatcher(BaseTokenDispatcher):
-    """Token dispatcher using DeepEP/HybridEP for efficient EP communication.
+    """Token dispatcher using DeepEP/HybridEP for efficient token dispatch/combine.
 
-    Delegates token permutation and all-to-all communication to the DeepEP or
-    HybridEP library. For the DeepEP backend, combine is asynchronous — callers
-    must call sync_combine() before using the result.
+    Uses DeepEP library kernels instead of standard all-to-all collectives for
+    token dispatch and combine. For the DeepEP backend, combine is asynchronous
+    — callers must call sync_combine() before using the result.
 
     ep_group is set by the parallelization code after construction.
+
+    Args:
+        comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
+        hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
+            float in (0, 1] = non-blocking mode; controls the fused-permute
+            output tensor size (num_permuted_tokens). Only used with hybridep.
+        pad_multiple: Alignment size for token groups needed by quantized grouped
+            GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
+            None means no padding.
     """
 
     def __init__(
