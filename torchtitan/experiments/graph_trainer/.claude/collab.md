@@ -63,24 +63,30 @@ The agent should:
 ### 3. Doing the Work
 
 While working, the agent:
-- Creates a feature branch: `graph_trainer/<topic>/<YYYY-MM-DD>`
+- Creates a feature branch: `graph_trainer/<topic>`
 - Makes focused commits (one logical change per commit).
 - If blocked by something external, moves the item to **Blocked** and
   adds a comment explaining what's blocking it.
+- Before requesting human review, the agent self-reviews its own changes:
+  read the full diff, check for correctness, style, and adherence to
+  CLAUDE.md rules. Fix any issues found before proceeding.
 
 ### 4. Requesting Review
 
-When the work is complete:
-1. Push the branch and open a PR against `main`.
+When the work is complete and self-reviewed:
+1. Push the branch and open a **draft PR** against `main`.
 2. Link the PR to the board item.
 3. Move the item to **Need Review**.
 4. Leave a brief comment on the item summarizing what was done.
 
-### 5. Completion
+### 5. Human Review
 
-The human reviews the PR. After merge, the human moves the item to **Done**.
-If changes are requested, the human moves it back to **In Progress** (or
-the agent picks it up in the next session).
+The human reviews the PR and either:
+- **Approves and merges** → moves the item to **Done**.
+- **Requests changes** → moves the item back to **In Progress** with
+  review comments. The agent picks it up in the next session (or the
+  current one if still active), addresses the feedback, pushes updates,
+  and moves back to **Need Review** when ready.
 
 ---
 
@@ -135,7 +141,7 @@ human judgment call.
 
 ## Conventions
 
-- **Branch naming**: `graph_trainer/<topic>/<YYYY-MM-DD>`
+- **Branch naming**: `graph_trainer/<topic>`
 - **Commit prefix**: `[graph_trainer]` for all graph_trainer commits.
   Add `[self_improve]` if the commit came from the nightly scout.
 - **One item = one PR** unless items are tightly coupled.
