@@ -9,7 +9,6 @@ import torch.nn.functional as F
 
 from torchtitan.models.common.attention import VarlenMetadata
 
-
 # TODO We should either unify all the mask creation for RL, or move them to a
 #      single file.
 def build_varlen_metadata(

@@ -13,19 +13,24 @@ claude -p "$(cat torchtitan/experiments/graph_trainer/.claude/nightly.md)"
 
 ## 0. Prerequisites
 
-Ensure you are on the torchtitan `main` branch:
+Ensure you are on the torchtitan `main` branch with the latest upstream
+changes:
 
 ```bash
 git checkout main
+git pull origin main
 ```
 
 ### 0a. Read Prior Reports
 
-Read all reports from the past 7 days:
+Reports are published as comments on the tracking issue
+[pytorch/torchtitan#2856](https://github.com/pytorch/torchtitan/issues/2856).
+Fetch them with:
 
 ```bash
-# List reports from the past 7 days
-find torchtitan/experiments/graph_trainer/reports/ -name "*.md" -mtime -7 | sort
+# Fetch all comments, filter to nightly reports from the past 7 days
+gh api repos/pytorch/torchtitan/issues/2856/comments --paginate \
+  --jq '.[] | select(.body | startswith("# Nightly Scout Report")) | {date: .created_at, body: .body}'
 ```
 
 Read each report found. Build a mental summary of:
@@ -127,10 +132,14 @@ deep-dive. Just note "still blocked, no upstream change since YYYY-MM-DD."
 
 For TODOs NOT mentioned in prior reports (i.e., newly added), investigate fully.
 
-### 2c. Check upstream progress (local only)
+### 2c. Check upstream progress
 
-For each blocked TODO, check if the installed torch package now has the
-relevant fix or API:
+For each blocked TODO, check if the blocker has been resolved:
+- If a TODO references a PyTorch PR (e.g., `pytorch/pytorch/pull/NNNNN`),
+  check if that PR has been merged:
+  ```bash
+  gh pr view NNNNN --repo pytorch/pytorch --json state,mergedAt
+  ```
 - If a TODO mentions a specific API or feature, grep the installed torch
   package for it.
 - If a TODO names an owner, note that — just flag them as "owned by X."
@@ -145,11 +154,21 @@ report and the test file hasn't changed since, don't re-investigate — just
 carry it forward with "still open since YYYY-MM-DD." Focus fresh analysis on
 newly added code paths and passes since the last report.
 
-### Tests missing from CI
+### CI workflow audit
 
 Graph_trainer has two GitHub Actions workflows:
 - `.github/workflows/integration_test_8gpu_graph_trainer.yaml` (A10 GPUs)
 - `.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml` (H100 GPUs)
+
+Check the CI status of the most recent runs on `main`:
+```bash
+gh run list --workflow integration_test_8gpu_graph_trainer.yaml --branch main --limit 3 --repo pytorch/torchtitan
+gh run list --workflow integration_test_8gpu_graph_trainer_h100.yaml --branch main --limit 3 --repo pytorch/torchtitan
+```
+
+Flag any failures or flaky runs that need attention.
+
+### Tests missing from CI
 
 Compare every `test_*.py` file under
 `torchtitan/experiments/graph_trainer/tests/` against the pytest/torchrun
@@ -214,14 +233,37 @@ Check if graph_trainer's docs match reality.
 
 Output: specific inaccuracies found, or "docs are current."
 
+## 6. Open Work Tracking
+
+Check the state of in-flight work. Use the prior report's PR/issue state as a
+baseline — highlight what **changed** (new PRs, newly stale PRs, recently
+merged) rather than re-listing everything.
+
+```bash
+# PRs touching graph_trainer
+gh pr list --search "graph_trainer" --state open --repo pytorch/torchtitan
+
+# Recent merged PRs (last 7 days)
+gh pr list --search "graph_trainer" --state merged --limit 10 --repo pytorch/torchtitan
+
+# Issues mentioning graph_trainer
+gh issue list --search "graph_trainer" --state open --repo pytorch/torchtitan
+```
+
+Flag:
+- Open PRs that have been waiting >5 days without review
+- Merged PRs in the last 24h that might need follow-up (doc updates, new tests)
+- Issues that have been open >14 days without activity
+
 ---
 
-## 6. Write Report
+## 7. Publish Report
 
-Write the report to `torchtitan/experiments/graph_trainer/reports/YYYY-MM-DD.md`
-(create the `reports/` directory if it doesn't exist). Use the following template:
+Publish the report as a comment on the tracking issue
+[pytorch/torchtitan#2856](https://github.com/pytorch/torchtitan/issues/2856).
 
-```markdown
+```bash
+gh issue comment 2856 --repo pytorch/torchtitan --body "$(cat <<'EOF'
 # Nightly Scout Report — YYYY-MM-DD
 
 ## Action Items (new findings)
@@ -241,6 +283,8 @@ Write the report to `torchtitan/experiments/graph_trainer/reports/YYYY-MM-DD.md`
 
 ## All Clear
 - Areas with nothing to report
+EOF
+)"
 ```
 
 Keep it short. If a section has nothing, say "nothing to report" and move on.
@@ -257,11 +301,11 @@ notice without actively looking.
 
 ---
 
-## 7. Implement Action Items
+## 8. Implement Action Items
 
 After writing the report, implement every action item from the report.
 
-### 7a. Create a feature branch
+### 8a. Create a feature branch
 
 Before making any code changes, create a dedicated branch off `main`:
 
@@ -271,7 +315,7 @@ git checkout -b graph_trainer/self_improve/YYYY-MM-DD
 
 All commits in this section go on this branch. Do NOT commit to `main` directly.
 
-### 7b. Implementation rules
+### 8b. Implementation rules
 
 - **One commit per action item.** Do not bundle multiple items into one commit.
 - **Priority order.** Work through P0 items first, then P1, then P2.
@@ -291,4 +335,33 @@ All commits in this section go on this branch. Do NOT commit to `main` directly.
   (new findings)" section. Carried-forward items should only be implemented if
   the situation has materially changed (e.g., an upstream blocker was removed).
 
-The resulting commits are ready for morning review on the feature branch.
+### 8c. Push the branch
+
+After all commits are done, push the branch to origin:
+
+```bash
+git push origin graph_trainer/self_improve/YYYY-MM-DD
+```
+
+Do NOT open a PR — leave that for the human reviewer to decide.
+
+### 8d. Update the report comment
+
+Edit the report comment (from Section 7) to link each action item to its
+fix commit on the pushed branch. Use the GitHub commit URL format:
+
+```
+- [x] [P0] Description — [fix](https://github.com/pytorch/torchtitan/commit/<sha>)
+```
+
+To edit the comment, find its ID and use:
+
+```bash
+# Find the comment ID for today's report
+COMMENT_ID=$(gh api repos/pytorch/torchtitan/issues/2856/comments --paginate \
+  --jq '.[] | select(.body | startswith("# Nightly Scout Report — YYYY-MM-DD")) | .id')
+
+# Update the comment body with commit links
+gh api repos/pytorch/torchtitan/issues/comments/$COMMENT_ID \
+  --method PATCH --field body="<updated report body>"
+```
