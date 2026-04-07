@@ -73,6 +73,10 @@ def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     return model
 
 
+def copy_config_fields(config_cls, config):
+    return config_cls(**{field.name: getattr(config, field.name) for field in fields(config)})
+
+
 def _apply_regional_inductor(traced_result):
     """Apply regional_inductor to compile annotated HOP regions in the traced graph."""
     from torch.fx.graph import CodeGen
@@ -92,6 +96,18 @@ def _apply_regional_inductor(traced_result):
 
     traced_result.gm.graph.set_codegen(CodeGen())
     traced_result.gm.recompile()
+
+
+def _strip_flex_bwd_compile_annotations(gm: torch.fx.GraphModule) -> None:
+    for node in gm.graph.nodes:
+        name = getattr(node.target, "__name__", "") if node.op == "call_function" else ""
+        is_bwd_hop = name == "flex_attention_backward"
+        is_bwd_getattr = node.op == "get_attr" and isinstance(node.target, str) and any(
+            node.target.startswith(prefix)
+            for prefix in ("fw_graph", "joint_graph", "mask_graph")
+        )
+        if is_bwd_hop or is_bwd_getattr:
+            node.meta.get("custom", {}).pop("compile_with_inductor", None)
 
 
 class SimpleMLP(nn.Module):
@@ -735,6 +751,36 @@ class TestTraceModels(unittest.TestCase):
             lr=self.LR,
         )
 
+    def test_deepseek_v3_flex_regional_inductor_corruption(self):
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+
+        config = deepseekv3_configs["debugmodel_flex_attn"]()
+        config = dataclasses.replace(config, layers=config.layers[:1])
+        model = create_model(DeepSeekV3Model, config, self.DEVICE, torch.bfloat16)
+
+        tokens = torch.randint(2, config.vocab_size, (1, 64), device=self.DEVICE)
+        tokens[:, 15::16] = 1
+        labels = torch.zeros_like(tokens)
+        attn_masks = model.get_attention_masks(tokens, SimpleNamespace(eos_id=1))
+
+        def train_step(model, tokens, attn_masks, labels):
+            del labels
+            logits = model(tokens, attention_masks=attn_masks)
+            loss = logits.float().sum()
+            grads = torch.autograd.grad(loss, list(model.parameters()))
+            return [loss] + list(grads)
+
+        maybe_register_blockmask_pytree_node()
+        with annotate_flex_attention_for_regional_inductor():
+            traced = trace_train_step(train_step)(model, tokens, attn_masks, labels)
+
+        _strip_flex_bwd_compile_annotations(traced.gm)
+        _apply_regional_inductor(traced)
+
+        with self.assertRaises(TypeError, msg="forward\\(\\) takes 2 positional arguments"):
+            run_traced_train_step(traced, model, tokens, attn_masks, labels)
+
     def test_flex_attention_annotations(self):
         from torch.nn.attention.flex_attention import and_masks
 
@@ -799,15 +845,7 @@ class TestTraceModels(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestGraphBasedSAC(unittest.TestCase):
-    """Tests for graph-based selective AC across all decoder models.
-
-    Each test verifies:
-    1. Bitwise-identical loss between eager+AC and traced+graph SAC
-    2. Traced+AC peak memory within 10% of eager+AC
-    """
-
+class GraphBasedSACTestMixin:
     DEVICE = "cuda"
 
     def setUp(self):
@@ -816,6 +854,23 @@ class TestGraphBasedSAC(unittest.TestCase):
 
     def tearDown(self):
         torch.use_deterministic_algorithms(False)
+
+    def _measure_step_peak(self, model, step_fn):
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        loss, grads = step_fn(model)
+        torch.cuda.synchronize()
+        peak = (torch.cuda.max_memory_allocated() - baseline) / 1e9
+        return loss, grads, peak
+
+    def _clone_grads_to_cpu(self, grads):
+        return [g.detach().cpu().clone() for g in grads]
+
+    def _random_tokens_and_labels(self, vocab_size, shape):
+        tokens = torch.randint(0, vocab_size, shape, device=self.DEVICE)
+        labels = torch.randint(0, vocab_size, shape, device=self.DEVICE)
+        return tokens, labels
 
     def _run_sac_test(
         self,
@@ -826,6 +881,8 @@ class TestGraphBasedSAC(unittest.TestCase):
         dtype=torch.float32,
         num_steps=3,
         use_regional_inductor=False,
+        check_peak_memory=True,
+        check_grads=False,
     ):
         """Run eager+AC vs traced+graph SAC, assert bitwise-identical loss
         and similar peak memory.
@@ -853,18 +910,23 @@ class TestGraphBasedSAC(unittest.TestCase):
 
         def run_steps(step_fn, model):
             opt = torch.optim.Adam(model.parameters(), lr=1e-4)
-            losses = []
-            torch.cuda.reset_peak_memory_stats()
+            step_results = []
+            step_peaks = []
             for _ in range(num_steps):
-                loss, grads = step_fn(model)
-                losses.append(loss.detach().cpu())
+                loss, grads, peak = self._measure_step_peak(model, step_fn)
+                if check_grads:
+                    step_results.append(
+                        (loss.detach().cpu(), self._clone_grads_to_cpu(grads))
+                    )
+                else:
+                    step_results.append(loss.detach().cpu())
+                step_peaks.append(peak)
                 for p, g in zip(model.parameters(), grads, strict=True):
                     p.grad = g
                 opt.step()
                 opt.zero_grad()
-            peak = torch.cuda.max_memory_allocated() / 1e9
             del opt
-            return losses, peak
+            return step_results, max(step_peaks)
 
         def eager_step(model):
             logits = model(*fwd_args)
@@ -914,56 +976,133 @@ class TestGraphBasedSAC(unittest.TestCase):
         del model_traced
         torch.cuda.empty_cache()
 
-        for step, (el, tl) in enumerate(zip(eager_losses, traced_losses, strict=True)):
-            self.assertTrue(
-                torch.equal(el, tl),
-                f"Step {step}: eager loss={el.item():.6f} "
-                f"vs traced loss={tl.item():.6f}",
+        if check_grads:
+            for step, ((el, eg), (tl, tg)) in enumerate(
+                zip(eager_losses, traced_losses, strict=True)
+            ):
+                self.assertTrue(
+                    torch.equal(el, tl),
+                    f"Step {step}: eager loss={el.item():.6f} "
+                    f"vs traced loss={tl.item():.6f}",
+                )
+                for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
+                    self.assertTrue(
+                        torch.equal(ge, gt),
+                        f"Step {step}: grad[{i}] mismatch",
+                    )
+        else:
+            for step, (el, tl) in enumerate(zip(eager_losses, traced_losses, strict=True)):
+                self.assertTrue(
+                    torch.equal(el, tl),
+                    f"Step {step}: eager loss={el.item():.6f} "
+                    f"vs traced loss={tl.item():.6f}",
+                )
+
+        if check_peak_memory:
+            ratio = peak_traced / peak_eager
+            self.assertLess(
+                ratio,
+                1.1,
+                f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
+                f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
             )
 
-        ratio = peak_traced / peak_eager
-        self.assertLess(
-            ratio,
-            1.1,
-            f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
-            f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestGraphBasedSACSmoke(GraphBasedSACTestMixin, unittest.TestCase):
+    def test_llama3_debugmodel_sac_smoke(self):
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        config = llama3_configs["debugmodel"]()
+        tokens = torch.randint(0, config.vocab_size, (1, 128), device=self.DEVICE)
+        labels = torch.randint(0, config.vocab_size, (1, 128), device=self.DEVICE)
+        self._run_sac_test(
+            Llama3Model,
+            config,
+            (tokens,),
+            labels,
+            dtype=torch.bfloat16,
+            num_steps=1,
+            check_peak_memory=False,
+        )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestGraphBasedSAC(GraphBasedSACTestMixin, unittest.TestCase):
+    """Tests for graph-based selective AC across all decoder models.
+
+    Each test verifies:
+    1. Bitwise-identical loss between eager+AC and traced+graph SAC
+    2. Traced+AC peak memory within 10% of eager+AC
+    """
+
+    def _run_token_only_case(
+        self,
+        config_factory,
+        model_cls,
+        *,
+        shape,
+        dtype=torch.float32,
+    ):
+        config = config_factory()
+        tokens, labels = self._random_tokens_and_labels(config.vocab_size, shape)
+        self._run_sac_test(
+            model_cls,
+            config,
+            (tokens,),
+            labels,
+            dtype=dtype,
+        )
+
+    def _run_masked_case(
+        self,
+        config_factory,
+        model_cls,
+        *,
+        shape,
+        make_masks,
+        use_regional_inductor=False,
+    ):
+        config = config_factory()
+        tokens, labels = self._random_tokens_and_labels(config.vocab_size, shape)
+        self._run_sac_test(
+            model_cls,
+            config,
+            (tokens, make_masks(config, shape[1])),
+            labels,
+            use_regional_inductor=use_regional_inductor,
         )
 
     def test_llama3_sac(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["1B"]()
-        batch_size, seq_len = 2, 2048
-        tokens = torch.randint(
-            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
+        self._run_token_only_case(
+            llama3_configs["1B"],
+            Llama3Model,
+            shape=(2, 2048),
+            dtype=torch.bfloat16,
         )
-        labels = torch.randint(
-            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
-        )
-        self._run_sac_test(Llama3Model, config, (tokens,), labels, dtype=torch.bfloat16)
 
     def test_qwen3_sac(self):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["0.6B"]()
-        batch_size, seq_len = 2, 2048
-        tokens = torch.randint(
-            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
+        self._run_token_only_case(
+            qwen3_configs["0.6B"],
+            Qwen3Model,
+            shape=(2, 2048),
+            dtype=torch.bfloat16,
         )
-        labels = torch.randint(
-            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
-        )
-        self._run_sac_test(Qwen3Model, config, (tokens,), labels, dtype=torch.bfloat16)
 
     def test_deepseek_v3_sac(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        config = deepseekv3_configs["debugmodel"]()
-        tokens = torch.randint(0, config.vocab_size, (4, 256), device=self.DEVICE)
-        labels = torch.randint(0, config.vocab_size, (4, 256), device=self.DEVICE)
-        self._run_sac_test(DeepSeekV3Model, config, (tokens,), labels)
+        self._run_token_only_case(
+            deepseekv3_configs["debugmodel"],
+            DeepSeekV3Model,
+            shape=(4, 256),
+        )
 
     def test_llama4_sac(self):
         from torchtitan.models.common.attention import (
@@ -973,16 +1112,13 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
 
-        config = llama4_configs["debugmodel"]()
-        seq_len = 128
-        tokens = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
-        labels = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
-        mask = create_attention_mask(get_causal_mask_mod(), 1, None, seq_len, seq_len)
-        self._run_sac_test(
+        self._run_masked_case(
+            llama4_configs["debugmodel"],
             Llama4Model,
-            config,
-            (tokens, mask),
-            labels,
+            shape=(4, 128),
+            make_masks=lambda _config, seq_len: create_attention_mask(
+                get_causal_mask_mod(), 1, None, seq_len, seq_len
+            ),
             use_regional_inductor=True,
         )
 
@@ -997,27 +1133,27 @@ class TestGraphBasedSAC(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"]()
-        seq_len = 128
-        tokens = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
-        labels = torch.randint(0, config.vocab_size, (4, seq_len), device=self.DEVICE)
-        causal = get_causal_mask_mod()
-        sw_size = config.layers[0].attention.sliding_window_size
-        attn_masks = {
-            "basic_mask": create_attention_mask(causal, 1, None, seq_len, seq_len),
-            "sliding_window_mask": create_attention_mask(
-                and_masks(causal, get_sliding_window_mask_mod(sw_size)),
-                1,
-                None,
-                seq_len,
-                seq_len,
-            ),
-        }
-        self._run_sac_test(
+        self._run_masked_case(
+            gptoss_configs["debugmodel"],
             GptOssModel,
-            config,
-            (tokens, attn_masks),
-            labels,
+            shape=(4, 128),
+            make_masks=lambda config, seq_len: {
+                "basic_mask": create_attention_mask(
+                    get_causal_mask_mod(), 1, None, seq_len, seq_len
+                ),
+                "sliding_window_mask": create_attention_mask(
+                    and_masks(
+                        get_causal_mask_mod(),
+                        get_sliding_window_mask_mod(
+                            config.layers[0].attention.sliding_window_size
+                        ),
+                    ),
+                    1,
+                    None,
+                    seq_len,
+                    seq_len,
+                ),
+            },
             use_regional_inductor=True,
         )
 
@@ -1247,9 +1383,7 @@ class TestDistributedGraphBasedSAC(FSDPTest):
 
         config = llama3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
-            model_config=GraphTrainerLlama3Model.Config(
-                **{field.name: getattr(config, field.name) for field in fields(config)}
-            ),
+            model_config=copy_config_fields(GraphTrainerLlama3Model.Config, config),
             parallelize_fn=parallelize_llama,
         )
 
@@ -1264,9 +1398,7 @@ class TestDistributedGraphBasedSAC(FSDPTest):
 
         config = llama3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
-            model_config=GraphTrainerLlama3Model.Config(
-                **{field.name: getattr(config, field.name) for field in fields(config)}
-            ),
+            model_config=copy_config_fields(GraphTrainerLlama3Model.Config, config),
             parallelize_fn=parallelize_llama,
             tp_degree=2,
         )
@@ -1282,9 +1414,7 @@ class TestDistributedGraphBasedSAC(FSDPTest):
 
         config = deepseekv3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
-            model_config=GraphTrainerDeepSeekV3Model.Config(
-                **{field.name: getattr(config, field.name) for field in fields(config)}
-            ),
+            model_config=copy_config_fields(GraphTrainerDeepSeekV3Model.Config, config),
             parallelize_fn=parallelize_deepseekv3,
         )
 
@@ -1299,9 +1429,7 @@ class TestDistributedGraphBasedSAC(FSDPTest):
 
         config = deepseekv3_configs["debugmodel_flex_attn"]()
         self._run_distributed_flex_sac_trace_test(
-            model_config=GraphTrainerDeepSeekV3Model.Config(
-                **{field.name: getattr(config, field.name) for field in fields(config)}
-            ),
+            model_config=copy_config_fields(GraphTrainerDeepSeekV3Model.Config, config),
             parallelize_fn=parallelize_deepseekv3,
             tp_degree=2,
         )
@@ -1486,124 +1614,6 @@ class TestTraceFSDP(FSDPTest):
             config,
             attn_masks=attn_masks,
             use_regional_inductor=True,
-        )
-
-
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestGraphSACPeakMemory(unittest.TestCase):
-    DEVICE = "cuda"
-
-    def setUp(self):
-        torch.manual_seed(42)
-        torch.use_deterministic_algorithms(True)
-
-    def tearDown(self):
-        torch.use_deterministic_algorithms(False)
-
-    def test_llama_1b_peak_memory(self):
-        """Traced+AC peak memory stays within 10% of eager+AC for Llama 1B."""
-        from torchtitan.config import ActivationCheckpointConfig
-        from torchtitan.distributed.activation_checkpoint import apply_ac
-        from torchtitan.experiments.graph_trainer.common_utils import (
-            annotate_ac_regions,
-        )
-        from torchtitan.experiments.graph_trainer.passes import (
-            apply_ac_on_fwd_bwd_graph,
-        )
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
-
-        config = llama3_configs["1B"]()
-        batch_size, seq_len = 2, 2048
-        dtype = torch.bfloat16
-        num_steps = 3
-        tokens = torch.randint(
-            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
-        )
-        labels = torch.randint(
-            0, config.vocab_size, (batch_size, seq_len), device=self.DEVICE
-        )
-
-        ref_model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
-        with torch.no_grad():
-            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
-        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
-        del ref_model
-        torch.cuda.empty_cache()
-
-        def make_model():
-            model = Llama3Model(config).to(device=self.DEVICE, dtype=dtype)
-            with torch.no_grad():
-                model.init_weights(buffer_device=torch.device(self.DEVICE))
-            model.load_state_dict(state)
-            return model
-
-        def run_steps(model, step_fn):
-            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
-            step_results = []
-            torch.cuda.reset_peak_memory_stats()
-            for _ in range(num_steps):
-                loss, grads = step_fn(model)
-                step_results.append(
-                    (loss.detach().cpu(), [g.detach().cpu().clone() for g in grads])
-                )
-                for p, g in zip(model.parameters(), grads, strict=True):
-                    p.grad = g
-                opt.step()
-                opt.zero_grad()
-            peak = torch.cuda.max_memory_allocated() / 1e9
-            del opt
-            return step_results, peak
-
-        def eager_step(model):
-            logits = model(tokens)
-            loss = get_loss(logits, labels)
-            loss.backward()
-            grads = [p.grad.clone() for p in model.parameters()]
-            return loss, grads
-
-        def traced_step_factory(model):
-            annotate_ac_regions(model)
-            train_step = make_train_step(get_loss)
-            traced = trace_train_step(train_step)(model, tokens, labels)
-            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
-
-            def step(model):
-                result = run_traced_train_step(traced, model, tokens, labels)
-                return result[0], result[1:]
-
-            return step
-
-        model_eager = make_model()
-        apply_ac(model_eager, ActivationCheckpointConfig(mode="selective"))
-        eager_results, peak_eager = run_steps(model_eager, eager_step)
-        del model_eager
-        torch.cuda.empty_cache()
-
-        model_traced = make_model()
-        traced_step = traced_step_factory(model_traced)
-        traced_results, peak_traced = run_steps(model_traced, traced_step)
-        del model_traced
-        torch.cuda.empty_cache()
-
-        for step, ((el, eg), (tl, tg)) in enumerate(
-            zip(eager_results, traced_results, strict=True)
-        ):
-            self.assertTrue(
-                torch.equal(el, tl),
-                f"Step {step}: eager loss={el.item():.6f} vs traced loss={tl.item():.6f}",
-            )
-            for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
-                self.assertTrue(
-                    torch.equal(ge, gt),
-                    f"Step {step}: grad[{i}] mismatch",
-                )
-
-        ratio = peak_traced / peak_eager
-        self.assertLess(
-            ratio,
-            1.1,
-            f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
-            f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
         )
 
 
