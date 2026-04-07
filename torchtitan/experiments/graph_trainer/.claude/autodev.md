@@ -74,9 +74,12 @@ The agent should:
 
 ### 3. Doing the Work
 
-The agent should spin up a **subagent with empty context** to do the actual
-implementation work. This keeps the main agent's context clean for board
-management and review coordination.
+The main agent MUST spin up a **subagent** to do the actual implementation
+work. The main agent should only do board management (polling, status
+updates) and review coordination (reading comments, dispatching work).
+All code edits, test runs, commits, and pushes happen in the subagent.
+This keeps the main agent's context clean and prevents context exhaustion
+mid-task.
 
 While working, the agent (or its subagent):
 - Follows the development instructions in CLAUDE.md (root and graph_trainer).
@@ -91,6 +94,10 @@ While working, the agent (or its subagent):
 - Makes focused commits (one logical change per commit).
 - If blocked by something external, moves the item to **Blocked** and
   adds a comment explaining what's blocking it.
+- **NEVER push broken code.** Before every push, run the relevant test
+  suite and verify it passes. When addressing review feedback that changes
+  behavior, run tests *before* pushing. If a reviewer's suggestion breaks
+  tests, reply with the failure evidence instead of pushing broken code.
 - Before requesting review, the agent self-reviews its own changes:
   read the full diff, check for correctness, style, and adherence to
   CLAUDE.md rules. Ensure the change has good test coverage.
@@ -176,10 +183,9 @@ gh project item-list 161 --owner pytorch --format json
 ## Conventions
 
 - **Branch naming**: `graph_trainer/<topic>`
-- **Commit prefix**: `[GraphTrainer][AutoDev]` for all commits made by the agent.
-- **PR title prefix**: `[GraphTrainer][AutoDev]` — same prefix as commits.
-  The PR title must start with this prefix so it's immediately clear
-  the PR was created by the AutoDev agent.
+- **PR title prefix**: `[GraphTrainer][AutoDev]` — the PR title MUST start
+  with this prefix so it's immediately clear the PR was created by the
+  AutoDev agent. Commit messages don't need a specific prefix.
 - **GitHub comment prefix**: All replies to PR review comments or board
   item comments must start with `AutoDev: ` so readers can distinguish
   agent replies from human replies.
