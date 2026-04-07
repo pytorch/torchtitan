@@ -78,6 +78,7 @@ class GroupedExperts(Module):
         hidden_dim: int
         num_experts: int
         use_grouped_mm: bool = True
+        token_dispatcher: BaseTokenDispatcher.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -92,6 +93,8 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.use_grouped_mm = config.use_grouped_mm
+        if config.token_dispatcher is not None:
+            self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
 
     def _forward_experts(
         self,
@@ -125,12 +128,10 @@ class GroupedExperts(Module):
         selected_experts_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, and combine results."""
-        # pyrefly: ignore [missing-attribute]
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices, num_tokens_per_expert
         )
         routed_output = self._forward_experts(routed_input, num_tokens_local)
-        # pyrefly: ignore [missing-attribute]
         return self.token_dispatcher.combine(routed_output, metadata)
 
 
@@ -309,13 +310,6 @@ class MoE(Module):
 
         num_experts = config.num_experts
         self.experts = config.experts.build()
-        self.experts.token_dispatcher = LocalTokenDispatcher(
-            BaseTokenDispatcher.Config(
-                num_experts=num_experts,
-                top_k=config.router.top_k,
-                score_before_experts=config.score_before_experts,
-            )
-        )
         self.router = config.router.build()
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None

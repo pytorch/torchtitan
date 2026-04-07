@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,
@@ -37,11 +36,13 @@ class DispatchMetadata(LocalDispatchMetadata):
     output_splits: list[int]
 
 
-class BaseTokenDispatcher(nn.Module):
+class BaseTokenDispatcher:
     """Abstract base for token dispatchers in MoE.
 
     A token dispatcher handles the full token routing lifecycle:
     dispatch (reorder + optional EP all-to-all) and combine (reverse).
+
+    Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -51,7 +52,6 @@ class BaseTokenDispatcher(nn.Module):
         score_before_experts: bool
 
     def __init__(self, config: Config):
-        super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
@@ -164,18 +164,15 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
 
 
 class TokenDispatcher(BaseTokenDispatcher):
-    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine."""
+    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseTokenDispatcher.Config):
-        ep_group: dist.ProcessGroup
-        num_local_experts: int
+    ep_group and ep_degree are set by the parallelization code after construction.
+    """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: BaseTokenDispatcher.Config):
         super().__init__(config)
-        self.ep_group = config.ep_group
-        self.num_local_experts = config.num_local_experts
-        self.ep_degree = dist.get_world_size(config.ep_group)
+        # Set by parallelization code (e.g. apply_moe_ep_tp)
+        self.ep_group: dist.ProcessGroup
 
     def dispatch(
         self,
@@ -184,6 +181,8 @@ class TokenDispatcher(BaseTokenDispatcher):
         selected_experts_indices: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
+        ep_degree = dist.get_world_size(self.ep_group)
+
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
@@ -224,13 +223,13 @@ class TokenDispatcher(BaseTokenDispatcher):
                 num_tokens_per_expert_group
             )
             input_splits = (
-                num_tokens_per_expert.view(self.ep_degree, -1)
+                num_tokens_per_expert.view(ep_degree, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=True)
             )
             # NOTE: this incurs a device-to-host sync
             output_splits = (
-                num_tokens_per_expert_group.view(self.ep_degree, -1)
+                num_tokens_per_expert_group.view(ep_degree, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=False)
             )
@@ -246,6 +245,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         )
 
         # Reorder tokens from rank-major to expert-major layout for grouped_mm
+        num_local_experts = num_tokens_per_expert_group.shape[0] // ep_degree
         (
             input_shape,
             routed_input,
@@ -254,8 +254,8 @@ class TokenDispatcher(BaseTokenDispatcher):
         ) = _permute(
             routed_input,
             num_tokens_per_expert_group,
-            self.ep_degree,
-            self.num_local_experts,
+            ep_degree,
+            num_local_experts,
         )
 
         metadata = DispatchMetadata(

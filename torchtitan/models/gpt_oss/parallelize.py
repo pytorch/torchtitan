@@ -332,16 +332,19 @@ def apply_moe_ep_tp(
 
         # Replace token dispatcher for EP>1
         if ep_mesh is not None:
-            from torchtitan.models.common.token_dispatcher import TokenDispatcher
+            from torchtitan.models.common.token_dispatcher import (
+                BaseTokenDispatcher,
+                TokenDispatcher,
+            )
 
             # pyrefly: ignore [missing-attribute]
             moe = transformer_block.moe
-            moe.experts.token_dispatcher = TokenDispatcher(
-                TokenDispatcher.Config(
+            token_dispatcher = TokenDispatcher(
+                BaseTokenDispatcher.Config(
                     num_experts=moe.experts.num_experts,
                     top_k=moe.router.top_k,
                     score_before_experts=moe.score_before_experts,
-                    ep_group=ep_mesh.get_group(),
-                    num_local_experts=moe.experts.num_experts // ep_mesh.size(),
                 )
             )
+            token_dispatcher.ep_group = ep_mesh.get_group()
+            moe.experts.token_dispatcher = token_dispatcher

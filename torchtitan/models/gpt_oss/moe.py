@@ -14,6 +14,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe import GroupedExperts, MoE
+from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.protocols.module import Module
 
 
@@ -149,6 +150,9 @@ class GptOssGroupedExperts(Module):
         )  # (num_experts, out_dim, in_dim)
         self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
 
+        if config.token_dispatcher is not None:
+            self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
+
     def _forward_experts(
         self,
         x: torch.Tensor,
@@ -212,36 +216,21 @@ class GptOssGroupedExperts(Module):
         selected_experts_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, and combine results."""
-        # pyrefly: ignore [missing-attribute]
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices, num_tokens_per_expert
         )
         routed_output = self._forward_experts(routed_input, num_tokens_local)
-        # pyrefly: ignore [missing-attribute]
         return self.token_dispatcher.combine(routed_output, metadata)
 
 
 class GptOssMoE(MoE):
-    """GptOss MoE implementation that inherits from the base MoE class."""
+    """GptOss MoE implementation that inherits from the base MoE class.
+
+    Uses GptOssGroupedExperts (with swiglu activation and bias terms) instead
+    of the standard GroupedExperts. The experts config type is set by the config
+    registry (_make_gptoss_experts_config).
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):
-        swiglu_limit: float = 7.0
-
-    def __init__(self, config: Config):
-        # Initialize the base MoE class
-        super().__init__(config)
-
-        # Override the base GroupedExperts with GptOssGroupedExperts
-        gptoss_experts_config = GptOssGroupedExperts.Config(
-            dim=config.experts.dim,
-            hidden_dim=config.experts.hidden_dim,
-            num_experts=config.experts.num_experts,
-            swiglu_limit=config.swiglu_limit,
-            use_grouped_mm=config.experts.use_grouped_mm,
-            param_init=config.experts.param_init,
-        )
-        token_dispatcher = self.experts.token_dispatcher
-        # pyrefly: ignore [bad-assignment]
-        self.experts = gptoss_experts_config.build()
-        self.experts.token_dispatcher = token_dispatcher
+        pass

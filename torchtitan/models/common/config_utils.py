@@ -11,6 +11,7 @@ fields set at config creation time.
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Literal
 
 from torchtitan.models.common.attention import GQAttention, LocalMapInnerAttention
@@ -18,6 +19,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.token_dispatcher import BaseTokenDispatcher
 
 
 def make_gqa_config(
@@ -91,7 +93,17 @@ def make_moe_config(
     score_before_experts: bool = True,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
-    """Build a fully-specified MoE.Config."""
+    """Build a fully-specified MoE.Config.
+
+    Sets token_dispatcher on the experts config so that MoE.__init__
+    can build experts directly without needing to inject dispatcher config.
+    """
+    td_config = BaseTokenDispatcher.Config(
+        num_experts=num_experts,
+        top_k=router.top_k,
+        score_before_experts=score_before_experts,
+    )
+    experts = replace(experts, token_dispatcher=td_config)
     return MoE.Config(
         num_experts=num_experts,
         score_before_experts=score_before_experts,
