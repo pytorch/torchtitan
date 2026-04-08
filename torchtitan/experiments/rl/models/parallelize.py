@@ -26,7 +26,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import apply_compile_dense
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.tensor_parallel import NoParallel
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def parallelize_qwen3(
         and compile_config.enable
         and "model" in compile_config.components
     ):
-        apply_compile_dense(model, compile_config)
+        apply_compile(model, compile_config)
 
     return model
 

@@ -34,7 +34,7 @@ def _run_experts_for_loop(
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
+        x,
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
