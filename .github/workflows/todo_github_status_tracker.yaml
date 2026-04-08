@@ -1,0 +1,31 @@
+name: Check GitHub PR/Issue status mentioned in TODO
+on:
+  schedule:
+    - cron: '0 0 * * *' # Every 24 hours
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  todo_github_status_tracker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # read access to issues and pull-requests to allow the gh api calls to work
+      # against private repositories or to fetch metadata like titles.
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          # Fetch all history so git blame can identify authors correctly
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Generate TODO Status Report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/scripts/todo_github_status_tracker.py
