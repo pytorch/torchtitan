@@ -1,0 +1,39 @@
+# Optimization Ideas
+
+- [x] **Graph inspection**: Dump and study the FX graph structure to understand ops, collectives, and patterns before attempting optimizations.
+  - @claude, 2026-04-05 22:25 — Graph has 11381 nodes, 421 AG, 421 RS, 68 AR, 675 mm, 842 _to_copy, 32 SDPA, 65 rmsnorm. Heavy collective traffic.
+- [x] **Dead code elimination**: Remove unused nodes from the traced graph (e.g. CPU shadow chains, unused outputs).
+  - @claude, 2026-04-05 23:10 — DCE removes 167 nodes but hurts bucketing heuristics when applied before, and is neutral when applied after. Not worth it alone.
+- [x] **Comm/compute overlap via autobucketing**: Reorder ops to overlap collective communication (all-gather, reduce-scatter) with compute.
+  - @claude, 2026-04-05 22:30 — Applied schedule_overlap_bucketing to full traced graph. +3.3% tps (4247→4387 avg). Kept.
+- [ ] **Op fusion**: Fuse sequences of element-wise ops (e.g. rmsnorm components, activation functions) to reduce kernel launch overhead.
+- [~] **Bucketing collectives**: Bucket small all-gather/reduce-scatter ops to reduce collective launch overhead.
+  - @claude, 2026-04-05 22:30 — Autobucketing includes collective bucketing. Could try manual transformer-block-level bucketing for more targeted control.
+- [ ] **Selective recomputation tuning**: Tune SAC policy to find better save/recompute tradeoffs for this specific model size and parallelism config.
+- [ ] **Memory planning**: Optimize tensor lifetime and memory allocation patterns to reduce peak memory and improve cache locality.
+- [x] **Remove redundant _to_copy ops**: 842 dtype conversion ops in graph — investigate if some are unnecessary.
+  - @claude, 2026-04-05 22:37 — All 842 are real fp32↔bf16 conversions for mixed precision. No no-ops.
+- [ ] **Transformer block bucketing**: Use manual_overlap_bucketing with per-transformer-block bucket plans for more structured overlap.
+- [x] **Regional Inductor compilation**: Apply Inductor kernel codegen (triton) to fuse element-wise ops within regions.
+  - @claude, 2026-04-05 23:14 — No-op in aot_fx_trace mode (no compile_with_inductor annotations). Full inductor crashes without decomp pass.
+- [x] **CUDAGraph wrapping**: Crash — float scalar inputs not supported by CUDAGraphWrapper. Would need to modify cudagraph.py.
+  - @claude, 2026-04-06 01:12 — aot_fx_trace lifts scalar constants as graph inputs (e.g. 32768.0).
+- [x] **Aggressive overlap scheduling**: compute_overlap_multipler=2.0. +1.7% tps (5079→5165). Crossed 30% MFU.
+  - @claude, 2026-04-06 01:24 — Default 1.0× is too conservative for this workload.
+- [x] **Remove identity view/reshape ops**: Removed 1522 identity view/reshape/_unsafe_view nodes (shape_in == shape_out). +9.5% tps (4427→4849). Major win.
+  - @claude, 2026-04-06 00:08 — Way more than expected 225 _unsafe_view: view.default and reshape.default also had many identity instances.
+- [x] **Remove identity slice ops**: Removed 453 identity slices (all of them!) where full dimension is selected. +2.2% tps (4849→4959).
+  - @claude, 2026-04-06 00:22 — Every slice in the traced graph selects the full dimension. Common pattern from eager dispatch tracing.
+- [ ] **Fuse _to_copy into all_gather**: Communicate in bf16 instead of fp32 to halve FSDP communication volume. Would change numerics.
+- [ ] **Annotate regions for regional_inductor**: Manually annotate compute-heavy subgraphs (rmsnorm, silu, attention) for Inductor compilation.
+- [x] **Collapse consecutive view chains**: Collapsed 323 chains. +1.5% tps (4959→5018). Broke 5000 tps barrier.
+  - @claude, 2026-04-06 00:33 — Only collapses single-use intermediates to preserve semantics.
+- [x] **Remove transpose pairs**: Removed 225 pairs (450 nodes). +1.2% tps (5018→5079).
+  - @claude, 2026-04-06 00:42 — 40% of transposes are canceling pairs from fwd/bwd graph.
+- [ ] **Remove identity clone ops**: 68 clone ops — some may be removable in traced graph where in-place mutation is not possible.
+- [x] **Split-cat cancellation**: Remove split→cat identity pairs. No-op — 0 pairs found in FSDP/TP graph.
+  - @claude, 2026-04-06 02:18 — 131 split + 130 cat ops serve different structural purposes, not invertible pairs.
+- [x] **CUDAGraph with float constant folding**: Inline scalar float inputs as constants, then wrap with CUDAGraph. **+35% tps (5165→6971). Crossed 40% MFU.**
+  - @claude, 2026-04-06 02:35 — Only 1 float input (32768.0 at index 585). Detach trick fixes requires_grad issue.
+- [ ] **CUDAGraph static input optimization**: Mark parameter inputs as static in CUDAGraph to skip copying ~294 tensors per step.
+- [ ] **Op fusion via triton**: Write custom triton kernels for SwiGLU (silu*mul, 32 instances) or RMSNorm patterns.
