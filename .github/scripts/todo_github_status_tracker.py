@@ -4,6 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+This code automatically scans the codebase for comment blocks that start with `TODO`
+and contain a link to a GitHub Pull Request or Issue.
+It tracks the current status of those references (Open, Closed, or Merged) to help identify
+technical debt that is ready to be addressed.
+"""
+
 import json
 import os
 import re
