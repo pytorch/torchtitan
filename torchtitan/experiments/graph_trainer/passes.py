@@ -21,12 +21,8 @@ import functools
 import operator
 from collections import defaultdict
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
-
-if TYPE_CHECKING:
-    from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torch._functorch.aot_autograd import JointWithDescriptors
 from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.fx_passes.bucketing import (
@@ -41,6 +37,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
@@ -67,19 +64,9 @@ def construct_default_graph_passes(
     ]
 
     # cudagraph should be the last pass.
-    # Skip when the graph contains CUDA→CPU transfers (e.g. MoE load-balancing
-    # counters) which are incompatible with CUDA graph capture.
-    # Lazy import to avoid circular dependency (cudagraph.py imports at module
-    # level only torch internals; passes.py is imported by trainer.py which
-    # also imports cudagraph_teardown).
-    from torchtitan.experiments.graph_trainer.cudagraph import has_cuda_to_cpu_transfers
+    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    if has_cuda_to_cpu_transfers(traced_result.gm):
-        logger.info(
-            "Skipping cudagraph: graph contains CUDA-to-CPU device transfers "
-            "incompatible with CUDA graph capture"
-        )
-    else:
+    if is_cudagraph_compatible(traced_result.gm):
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(

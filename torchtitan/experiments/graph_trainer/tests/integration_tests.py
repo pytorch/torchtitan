@@ -310,10 +310,9 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+FlexAttn+cudagraph",
+            "aot_fx_trace llama3 FSDP+TP+FlexAttn",
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
-            skip_rocm_test=True,
         ),
     ]
 

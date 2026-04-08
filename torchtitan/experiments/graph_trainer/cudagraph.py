@@ -226,14 +226,29 @@ class CUDAGraphWrapper:
         self._output = None
 
 
-def has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
-    """Check if the graph contains CUDA-to-CPU device transfers.
+_FLEX_ATTENTION_OPS = {
+    torch.ops.higher_order.flex_attention,
+    torch.ops.higher_order.flex_attention_backward,
+}
 
-    CUDA graph capture does not support unpinned CPU↔CUDA copies.  This
-    function conservatively returns True if any ``call_function`` node
-    produces a CPU tensor while consuming a CUDA tensor input, without
-    checking whether the CPU tensor is pinned.
+
+def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
+    """Check whether the graph can be safely captured by CUDA graph.
+
+    Returns False (with a warning) when the graph contains patterns
+    incompatible with CUDA graph capture:
+
+    - **CUDA→CPU transfers**: e.g. MoE load-balancing counters that copy
+      tensors from CUDA to CPU.  CUDA graph capture does not support
+      unpinned CPU↔CUDA copies.
+    - **flex_attention HOPs**: flex_attention higher-order ops require
+      torch.compile (e.g. regional_inductor) to lower them into fused
+      Triton kernels.  Without compilation they fall back to an unfused
+      Math implementation that is incompatible with CUDA graph capture.
+      The expected workflow is to apply regional_inductor first to compile
+      flex_attention regions, then apply cudagraph.
     """
+    # Check for CUDA→CPU device transfers
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
@@ -243,8 +258,22 @@ def has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
         for inp in node.all_input_nodes:
             inp_val = inp.meta.get("val")
             if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cuda":
-                return True
-    return False
+                logger.warning(
+                    "Skipping cudagraph: graph contains CUDA-to-CPU device "
+                    "transfers incompatible with CUDA graph capture"
+                )
+                return False
+
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
+            logger.warning(
+                "Skipping cudagraph: graph contains flex_attention higher-order "
+                "ops that require regional_inductor to compile before cudagraph "
+                "can capture"
+            )
+            return False
+
+    return True
 
 
 def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:
