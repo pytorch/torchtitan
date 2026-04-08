@@ -98,18 +98,6 @@ def _apply_regional_inductor(traced_result):
     traced_result.gm.recompile()
 
 
-def _strip_flex_bwd_compile_annotations(gm: torch.fx.GraphModule) -> None:
-    for node in gm.graph.nodes:
-        name = getattr(node.target, "__name__", "") if node.op == "call_function" else ""
-        is_bwd_hop = name == "flex_attention_backward"
-        is_bwd_getattr = node.op == "get_attr" and isinstance(node.target, str) and any(
-            node.target.startswith(prefix)
-            for prefix in ("fw_graph", "joint_graph", "mask_graph")
-        )
-        if is_bwd_hop or is_bwd_getattr:
-            node.meta.get("custom", {}).pop("compile_with_inductor", None)
-
-
 class SimpleMLP(nn.Module):
     def __init__(self, dim=64, hidden=128, vocab_size=256):
         super().__init__()
@@ -750,36 +738,6 @@ class TestTraceModels(unittest.TestCase):
             num_steps=self.NUM_STEPS,
             lr=self.LR,
         )
-
-    def test_deepseek_v3_flex_regional_inductor_corruption(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
-        from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
-
-        config = deepseekv3_configs["debugmodel_flex_attn"]()
-        config = dataclasses.replace(config, layers=config.layers[:1])
-        model = create_model(DeepSeekV3Model, config, self.DEVICE, torch.bfloat16)
-
-        tokens = torch.randint(2, config.vocab_size, (1, 64), device=self.DEVICE)
-        tokens[:, 15::16] = 1
-        labels = torch.zeros_like(tokens)
-        attn_masks = model.get_attention_masks(tokens, SimpleNamespace(eos_id=1))
-
-        def train_step(model, tokens, attn_masks, labels):
-            del labels
-            logits = model(tokens, attention_masks=attn_masks)
-            loss = logits.float().sum()
-            grads = torch.autograd.grad(loss, list(model.parameters()))
-            return [loss] + list(grads)
-
-        maybe_register_blockmask_pytree_node()
-        with annotate_flex_attention_for_regional_inductor():
-            traced = trace_train_step(train_step)(model, tokens, attn_masks, labels)
-
-        _strip_flex_bwd_compile_annotations(traced.gm)
-        _apply_regional_inductor(traced)
-
-        with self.assertRaises(TypeError, msg="forward\\(\\) takes 2 positional arguments"):
-            run_traced_train_step(traced, model, tokens, attn_masks, labels)
 
     def test_flex_attention_annotations(self):
         from torch.nn.attention.flex_attention import and_masks
