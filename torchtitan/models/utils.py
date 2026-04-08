@@ -47,7 +47,7 @@ class MoEStateDictAdapter(BaseStateDictAdapter):
         model_config: Decoder.Config,
         hf_assets_path: str | None,
     ):
-        super().__init__(hf_assets_path)
+        super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
         # Store metadata for GroupedExperts <-> individual experts conversion
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}

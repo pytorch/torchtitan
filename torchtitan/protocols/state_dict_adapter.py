@@ -25,18 +25,18 @@ class BaseStateDictAdapter(ABC):
     conversions — each adapter reads one function and sees every key rename
     and value transform for that model.
 
-    The base class constructor is lightweight — it only handles
-    ``hf_assets_path`` and ``fqn_to_index_mapping``. Model-specific
-    concerns like ``model_config`` are handled by subclasses.
+    The base class constructor handles ``model_config``,
+    ``hf_assets_path``, and ``fqn_to_index_mapping``.
 
     Args:
+        model_config: model-specific configuration object.
         hf_assets_path: path to HF assets folder containing tokenizer, model weights, etc.
     """
 
     fqn_to_index_mapping: dict[Any, int] | None
     hf_assets_path: str | None
 
-    def __init__(self, hf_assets_path: str | None = None):
+    def __init__(self, model_config: Any, hf_assets_path: str | None = None):
         self.hf_assets_path = hf_assets_path
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
