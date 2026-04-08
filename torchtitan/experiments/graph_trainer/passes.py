@@ -39,8 +39,31 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
+def _has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
+    """Check if the graph contains CUDA-to-CPU device transfers.
+
+    These transfers are incompatible with CUDA graph capture (which requires
+    pinned memory for cross-device copies). Returns True if any call_function
+    node produces a CPU tensor while consuming a CUDA tensor input.
+    """
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        val = node.meta.get("val")
+        if not isinstance(val, torch.Tensor) or val.device.type != "cpu":
+            continue
+        for inp in node.all_input_nodes:
+            inp_val = inp.meta.get("val")
+            if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cuda":
+                return True
+    return False
+
+
 def apply_default_graph_passes(
-    gm: torch.fx.GraphModule, example_inputs: tuple
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    static_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """Entry point for optimizing the traced fwd+bwd graph.
 
@@ -50,9 +73,27 @@ def apply_default_graph_passes(
     Args:
         gm: The traced forward+backward graph module.
         example_inputs: Example (fake) inputs matching the graph signature.
+        static_input_indices: Indices of graph inputs whose tensor addresses
+            are stable across training steps (e.g. parameters and buffers).
+            Passed to cudagraph_pass to avoid redundant copies during replay.
     """
     gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
-    gm = cudagraph_pass(gm, example_inputs, is_forward=True)
+
+    # cudagraph should be the last pass.
+    # Skip when the graph contains CUDA→CPU transfers (e.g. MoE load-balancing
+    # counters) which are incompatible with CUDA graph capture.
+    if _has_cuda_to_cpu_transfers(gm):
+        logger.info(
+            "Skipping cudagraph: graph contains CUDA-to-CPU device transfers "
+            "incompatible with CUDA graph capture"
+        )
+    else:
+        gm = cudagraph_pass(
+            gm,
+            example_inputs,
+            is_forward=True,
+            static_input_indices=static_input_indices,
+        )
 
     return gm
 
@@ -133,7 +174,11 @@ def regional_inductor_pass(
 
 
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple, *, is_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    is_forward: bool,
+    static_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -148,7 +193,10 @@ def cudagraph_pass(
         gm: The graph module to wrap.
         example_inputs: Example inputs for warmup/recording.
         is_forward: Whether this is a forward graph (True) or backward graph
-            (False). Used to infer which inputs have stable tensor addresses.
+            (False). Used to infer which inputs have stable tensor addresses
+            when ``static_input_indices`` is not provided.
+        static_input_indices: Explicit list of input indices with stable tensor
+            addresses. When provided, ``is_forward`` is not used for inference.
     """
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
@@ -157,7 +205,8 @@ def cudagraph_pass(
         get_static_input_indices,
     )
 
-    static_input_indices = get_static_input_indices(gm, is_forward)
+    if static_input_indices is None:
+        static_input_indices = get_static_input_indices(gm, is_forward)
     gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
 
