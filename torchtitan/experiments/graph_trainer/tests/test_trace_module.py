@@ -1065,7 +1065,6 @@ class TestGraphBasedSAC(GraphBasedSACTestMixin, unittest.TestCase):
             dtype=torch.bfloat16,
         )
 
-    @unittest.expectedFailure
     def test_deepseek_v3_sac(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
@@ -1094,7 +1093,6 @@ class TestGraphBasedSAC(GraphBasedSACTestMixin, unittest.TestCase):
             use_regional_inductor=True,
         )
 
-    @unittest.expectedFailure
     def test_gpt_oss_sac(self):
         from torch.nn.attention.flex_attention import and_masks
 
