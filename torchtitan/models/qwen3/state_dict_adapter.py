@@ -4,189 +4,136 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-This script is adapted from torchtitan/models/llama3/model/state_dict_adapter.py.
-
-We can use this script to adapt the checkpoint from HF to the format that we can load into the torchtitan model and vice versa.
-This can enable us to do a parity test with the HF implementation and make sure that our results are
-aligned with the HF implementation.
-
-"""
 import re
 from typing import Any
-
-from torch.distributed.tensor import DTensor
 
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import Qwen3Model
 
+_LAYER_RE = re.compile(r"^layers\.(\d+)\.")
+_HF_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+
 
 class Qwen3StateDictAdapter(MoEStateDictAdapter):
+    _HF_EXPERT_RE = re.compile(
+        r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
+    )
+    _PROJ_TO_HF = {
+        "moe.experts.w1": "gate_proj",
+        "moe.experts.w3": "up_proj",
+        "moe.experts.w2": "down_proj",
+    }
+    _PROJ_FROM_HF = {
+        "gate_proj": "moe.experts.w1",
+        "up_proj": "moe.experts.w3",
+        "down_proj": "moe.experts.w2",
+    }
+
     def __init__(self, model_config: Qwen3Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
-        self.from_hf_map = {
+
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert torchtitan state dict to HF format.
+
+        Renames FQNs and splits 3D GroupedExperts weights into individual
+        2D per-expert weights.
+        """
+        RENAME = {
+            "tok_embeddings.weight": "model.embed_tokens.weight",
+            "norm.weight": "model.norm.weight",
+            "output.weight": "lm_head.weight",
+        }
+        LAYER_RENAME = {
+            "attention.wq.weight": "self_attn.q_proj.weight",
+            "attention.wk.weight": "self_attn.k_proj.weight",
+            "attention.wv.weight": "self_attn.v_proj.weight",
+            "attention.wo.weight": "self_attn.o_proj.weight",
+            "attention.q_norm.weight": "self_attn.q_norm.weight",
+            "attention.k_norm.weight": "self_attn.k_norm.weight",
+            "feed_forward.w1.weight": "mlp.gate_proj.weight",
+            "feed_forward.w3.weight": "mlp.up_proj.weight",
+            "feed_forward.w2.weight": "mlp.down_proj.weight",
+            "attention_norm.weight": "input_layernorm.weight",
+            "ffn_norm.weight": "post_attention_layernorm.weight",
+            "moe.router.gate.weight": "mlp.gate.weight",
+        }
+
+        hf: dict[str, Any] = {}
+
+        for key, value in state_dict.items():
+            # Skip output.weight when weight tying is enabled
+            # pyrefly: ignore [missing-attribute]
+            if self.model_config.enable_weight_tying and key == "output.weight":
+                continue
+
+            if key in RENAME:
+                hf[RENAME[key]] = value
+            elif m := _LAYER_RE.match(key):
+                layer = m.group(1)
+                suffix = key[m.end() :]
+
+                if suffix in LAYER_RENAME:
+                    hf[f"model.layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+                # MoE experts (3D GroupedExperts → individual 2D experts)
+                elif suffix in self._PROJ_TO_HF:
+                    self._experts_to_hf(suffix, layer, value, hf)
+
+        return hf
+
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert HF state dict to torchtitan format.
+
+        Renames FQNs and concatenates individual 2D per-expert weights
+        back into 3D GroupedExperts weights.
+        """
+        RENAME = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
-            # Attention module
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
-            "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
-            "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-            # MLP module for non-MoE
-            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            # Transformer layer
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
-            "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+        LAYER_RENAME = {
+            "self_attn.q_proj.weight": "attention.wq.weight",
+            "self_attn.k_proj.weight": "attention.wk.weight",
+            "self_attn.v_proj.weight": "attention.wv.weight",
+            "self_attn.o_proj.weight": "attention.wo.weight",
+            "self_attn.q_norm.weight": "attention.q_norm.weight",
+            "self_attn.k_norm.weight": "attention.k_norm.weight",
+            "self_attn.rotary_emb.inv_freq": None,  # drop
+            "mlp.gate_proj.weight": "feed_forward.w1.weight",
+            "mlp.up_proj.weight": "feed_forward.w3.weight",
+            "mlp.down_proj.weight": "feed_forward.w2.weight",
+            "input_layernorm.weight": "attention_norm.weight",
+            "post_attention_layernorm.weight": "ffn_norm.weight",
+            "mlp.gate.weight": "moe.router.gate.weight",
+        }
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into separate expert's wegiht.
-        """
-        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
-        hf_state_dict = {}
+        sd: dict[str, Any] = {}
+        expert_weights_by_layer: dict[str, dict[str, dict[int, Any]]] = {}
 
-        for key, value in state_dict.items():
-            if "moe.experts" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_abstract_key = to_hf_map[abstract_key]
+        for key, value in hf_state_dict.items():
+            # Check for MoE expert keys first
+            if self._experts_from_hf(key, value, sd, expert_weights_by_layer):
+                continue
 
-                # Store the GroupedExperts Weight metadata for from_hf()
-                if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
-                    self.grouped_expert_weight_shape[abstract_key] = value.shape
-                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
+            if key in RENAME:
+                sd[RENAME[key]] = value
+            elif m := _HF_LAYER_RE.match(key):
+                layer = m.group(1)
+                suffix = key[m.end() :]
 
-                    # Split GroupedExperts weight to local individual expert weights
-                    local_expert_fqn = self._get_local_experts_weights(
-                        new_abstract_key,
-                        abstract_key,
-                        layer_num,
-                        value,
-                    )
-                    hf_state_dict.update(local_expert_fqn)
+                if suffix in LAYER_RENAME:
+                    target = LAYER_RENAME[suffix]
+                    if target is not None:
+                        sd[f"layers.{layer}.{target}"] = value
 
-                else:
-                    # keep this path for offline conversion
-                    moe_layer = next(
-                        l for l in self.model_config.layers if l.moe is not None
-                    )
-                    split_values = self._split_experts_weights(
-                        value,
-                        moe_layer.moe.num_experts,
-                    )
-
-                    for expert_num in range(moe_layer.moe.num_experts):
-                        new_key = new_abstract_key.format(layer_num, expert_num)
-                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
-
-            elif "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_key = to_hf_map[abstract_key]
-                new_key = new_key.format(layer_num)
-                hf_state_dict[new_key] = value
-
-            else:
-                if key not in to_hf_map:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                if self.model_config.enable_weight_tying and key == "output.weight":
-                    continue
-                new_key = to_hf_map[key]
-                hf_state_dict[new_key] = value
-
-        return hf_state_dict
-
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        1. Convert between the HF shape and the torchtitan shape.
-        2. Concate separate expert's wegiht into GroupedExperts' weight.
-        """
-
-        state_dict = {}
-        expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
-
+        # Weight tying: copy embedding as output if lm_head absent
         if (
             # pyrefly: ignore [missing-attribute]
             self.model_config.enable_weight_tying
-            and "lm_head.weight" not in hf_state_dict
+            and "output.weight" not in sd
+            and "tok_embeddings.weight" in sd
         ):
-            assert "model.embed_tokens.weight" in hf_state_dict
-            hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
+            sd["output.weight"] = sd["tok_embeddings.weight"]
 
-        for key, value in hf_state_dict.items():
-            if "mlp.experts" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
-                layer_num, expert_num = re.findall(r"\d+", key)
-                titan_abstract_key = self.from_hf_map[abstract_key]
-                assert titan_abstract_key is not None
-                new_key = titan_abstract_key.format(layer_num)
-
-                # Store the expert's weight in expert_weights_by_layer for concatenating later.
-                if layer_num not in expert_weights_by_layer:
-                    expert_weights_by_layer[layer_num] = {}
-                if titan_abstract_key not in expert_weights_by_layer[layer_num]:
-                    expert_weights_by_layer[layer_num][titan_abstract_key] = {}
-                expert_weights_by_layer[layer_num][titan_abstract_key][
-                    int(expert_num)
-                ] = value
-
-                # Use stored metadata to decide path (online vs offline)
-                # Online mode: local_experts_indices was populated during to_hf()
-                if titan_abstract_key in self.local_experts_indices:
-                    stacked_value = self._concatenate_expert_weights_dtensor(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                    )
-                else:  # keep this path to be compatible with offline conversion
-                    stacked_value = self._concatenate_expert_weights(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                        next(
-                            l for l in self.model_config.layers if l.moe is not None
-                        ).moe.num_experts,
-                    )
-
-                if stacked_value is not None:
-                    state_dict[new_key] = stacked_value
-
-            elif "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_key = self.from_hf_map[abstract_key]
-                # pyrefly: ignore [missing-attribute]
-                new_key = new_key.format(layer_num)
-                state_dict[new_key] = value
-
-            else:
-                new_key = self.from_hf_map[key]
-                # pyrefly: ignore [unsupported-operation]
-                state_dict[new_key] = value
-
-        return state_dict
+        return sd
