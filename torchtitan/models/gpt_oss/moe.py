@@ -14,7 +14,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe import GroupedExperts, MoE
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.protocols.module import Module
 
 
@@ -150,7 +149,7 @@ class GptOssGroupedExperts(Module):
         )  # (num_experts, out_dim, in_dim)
         self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
 
-        self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
+        self.token_dispatcher = config.token_dispatcher.build()
 
     def _experts_forward(
         self,

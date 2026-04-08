@@ -137,7 +137,6 @@ def parallelize_llama(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=pad_multiple,
         )
 
@@ -521,7 +520,6 @@ def apply_moe_ep_tp(
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -628,33 +626,11 @@ def apply_moe_ep_tp(
             parallelize_plan=experts_plan,
         )
 
-        # Replace token dispatcher for EP>1
+        # Set ep_group and pad_multiple on the token dispatcher.
+        # The dispatcher type was already selected at config time
         if ep_mesh is not None:
-            from torchtitan.models.common.token_dispatcher import BaseTokenDispatcher
-
             # pyrefly: ignore [missing-attribute]
-            moe = transformer_block.moe
-            td_config = BaseTokenDispatcher.Config(
-                num_experts=moe.experts.num_experts,
-                top_k=moe.router.top_k,
-                score_before_experts=moe.score_before_experts,
-            )
-
-            if comm_backend in ("deepep", "hybridep"):
-                from torchtitan.models.common.token_dispatcher import (
-                    DeepEPTokenDispatcher,
-                )
-
-                token_dispatcher = DeepEPTokenDispatcher(
-                    td_config,
-                    comm_backend=comm_backend,
-                    hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-                    pad_multiple=pad_multiple,
-                )
-            else:
-                from torchtitan.models.common.token_dispatcher import TokenDispatcher
-
-                token_dispatcher = TokenDispatcher(td_config)
-
-            token_dispatcher.ep_group = ep_mesh.get_group()
-            moe.experts.token_dispatcher = token_dispatcher
+            td = transformer_block.moe.experts.token_dispatcher
+            td.ep_group = ep_mesh.get_group()
+            if pad_multiple is not None:
+                td.pad_multiple = pad_multiple

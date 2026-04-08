@@ -18,7 +18,12 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.models.common.token_dispatcher import BaseTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    BaseTokenDispatcher,
+    DeepEPTokenDispatcher,
+    LocalTokenDispatcher,
+    TokenDispatcher,
+)
 
 
 def make_gqa_config(
@@ -134,6 +139,44 @@ def make_router_config(
     )
 
 
+def make_token_dispatcher_config(
+    *,
+    num_experts: int,
+    top_k: int,
+    score_before_experts: bool = True,
+    comm_backend: str = "standard",
+    ep_degree: int = 1,
+    hybridep_non_blocking_expert_capacity_factor: float | None = None,
+) -> BaseTokenDispatcher.Config:
+    """Build the appropriate token dispatcher config.
+
+    Returns the right Config subclass based on parallelism settings:
+    - EP=1 (default): LocalTokenDispatcher.Config → LocalTokenDispatcher
+    - EP>1, standard: TokenDispatcher.Config → TokenDispatcher
+    - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
+    """
+    if ep_degree > 1 and comm_backend in ("deepep", "hybridep"):
+        return DeepEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            comm_backend=comm_backend,
+            hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
+        )
+    elif ep_degree > 1:
+        return TokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    else:
+        return LocalTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+
+
 def make_experts_config(
     *,
     dim: int,
@@ -151,7 +194,7 @@ def make_experts_config(
         num_experts=num_experts,
         use_grouped_mm=use_grouped_mm,
         param_init=param_init,
-        token_dispatcher=BaseTokenDispatcher.Config(
+        token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,

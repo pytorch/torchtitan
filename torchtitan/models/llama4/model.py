@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_fixed_block_mask_mod,
 )
+from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -149,6 +150,18 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+
+                    # Set dispatcher config based on EP comm backend
+                    td = layer_cfg.moe.experts.token_dispatcher
+                    layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
+                        num_experts=td.num_experts,
+                        top_k=td.top_k,
+                        score_before_experts=td.score_before_experts,
+                        ep_degree=parallelism.expert_parallel_degree,
+                        comm_backend=parallelism.expert_parallel_comm_backend,
+                        hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+                    )
+
                     if parallelism.expert_parallel_comm_backend == "deepep":
                         from torchtitan.models.common.moe_deepep import DeepEPMoE
 

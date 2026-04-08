@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
     LocalMapInnerAttention,
 )
+from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
@@ -217,6 +218,15 @@ class GptOssModel(Decoder):
                             "Failed to use grouped mm, which is only supported on SM90 or later",
                         )
                         layer_cfg.moe.experts.use_grouped_mm = False
+                    td = layer_cfg.moe.experts.token_dispatcher
+                    layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
+                        num_experts=td.num_experts,
+                        top_k=td.top_k,
+                        score_before_experts=td.score_before_experts,
+                        ep_degree=parallelism.expert_parallel_degree,
+                        comm_backend=parallelism.expert_parallel_comm_backend,
+                        hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+                    )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:

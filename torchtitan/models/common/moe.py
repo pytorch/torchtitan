@@ -17,7 +17,7 @@ from torchtitan.models.common.linear import Linear
 
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import BaseTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import BaseTokenDispatcher
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -93,7 +93,7 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.use_grouped_mm = config.use_grouped_mm
-        self.token_dispatcher = LocalTokenDispatcher(config.token_dispatcher)
+        self.token_dispatcher = config.token_dispatcher.build()
 
     def _experts_forward(
         self,

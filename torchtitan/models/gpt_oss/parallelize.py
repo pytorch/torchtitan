@@ -330,21 +330,12 @@ def apply_moe_ep_tp(
             parallelize_plan=experts_plan,
         )
 
-        # Replace token dispatcher for EP>1
+        # Set ep_group and pad_multiple on the token dispatcher.
+        # The dispatcher type was already selected at config time
+        # (update_from_config → make_token_dispatcher_config).
         if ep_mesh is not None:
-            from torchtitan.models.common.token_dispatcher import (
-                BaseTokenDispatcher,
-                TokenDispatcher,
-            )
-
             # pyrefly: ignore [missing-attribute]
-            moe = transformer_block.moe
-            token_dispatcher = TokenDispatcher(
-                BaseTokenDispatcher.Config(
-                    num_experts=moe.experts.num_experts,
-                    top_k=moe.router.top_k,
-                    score_before_experts=moe.score_before_experts,
-                )
-            )
-            token_dispatcher.ep_group = ep_mesh.get_group()
-            moe.experts.token_dispatcher = token_dispatcher
+            td = transformer_block.moe.experts.token_dispatcher
+            td.ep_group = ep_mesh.get_group()
+            if pad_multiple is not None:
+                td.pad_multiple = pad_multiple

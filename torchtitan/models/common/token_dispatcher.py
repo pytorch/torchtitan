@@ -51,6 +51,12 @@ class BaseTokenDispatcher:
         top_k: int
         score_before_experts: bool
 
+        def build(self):
+            raise NotImplementedError(
+                f"{type(self).__name__}.build() is abstract. "
+                "Use a concrete Config subclass (e.g. LocalTokenDispatcher.Config)."
+            )
+
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
@@ -97,6 +103,11 @@ class BaseTokenDispatcher:
 
 class LocalTokenDispatcher(BaseTokenDispatcher):
     """Token dispatcher for EP=1. Handles local token reordering only."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenDispatcher.Config):
+        def build(self) -> "LocalTokenDispatcher":
+            return LocalTokenDispatcher(self)
 
     def dispatch(
         self,
@@ -166,10 +177,15 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
 class TokenDispatcher(BaseTokenDispatcher):
     """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
 
-    ep_group and ep_degree are set by the parallelization code after construction.
+    ep_group is set by the parallelization code after construction.
     """
 
-    def __init__(self, config: BaseTokenDispatcher.Config):
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenDispatcher.Config):
+        def build(self) -> "TokenDispatcher":
+            return TokenDispatcher(self)
+
+    def __init__(self, config: Config):
         super().__init__(config)
         # Set by parallelization code (e.g. apply_moe_ep_tp)
         self.ep_group: dist.ProcessGroup
@@ -322,37 +338,42 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
     — callers must call sync_combine() before using the result.
 
     ep_group is set by the parallelization code after construction.
-
-    Args:
-        comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
-        hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
-            float in (0, 1] = non-blocking mode; controls the fused-permute
-            output tensor size (num_permuted_tokens). Only used with hybridep.
-        pad_multiple: Alignment size for token groups needed by quantized grouped
-            GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
-            None means no padding.
     """
 
-    def __init__(
-        self,
-        config: BaseTokenDispatcher.Config,
-        *,
-        comm_backend: str,
-        hybridep_non_blocking_expert_capacity_factor: float | None = None,
-        pad_multiple: int | None = None,
-    ):
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenDispatcher.Config):
+        """Config for DeepEP/HybridEP token dispatcher.
+
+        Args:
+            comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
+            hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
+                float in (0, 1] = non-blocking mode; controls the fused-permute
+                output tensor size (num_permuted_tokens). Only used with hybridep.
+            pad_multiple: Alignment size for token groups needed by quantized grouped
+                GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
+                None means no padding.
+        """
+
+        comm_backend: str
+        hybridep_non_blocking_expert_capacity_factor: float | None = None
+        pad_multiple: int | None = None
+
+        def build(self) -> "DeepEPTokenDispatcher":
+            return DeepEPTokenDispatcher(self)
+
+    def __init__(self, config: Config):
         super().__init__(config)
-        self.comm_backend = comm_backend
+        self.comm_backend = config.comm_backend
         self.hybridep_non_blocking_expert_capacity_factor = (
-            hybridep_non_blocking_expert_capacity_factor
+            config.hybridep_non_blocking_expert_capacity_factor
         )
-        self.pad_multiple = pad_multiple
+        self.pad_multiple = config.pad_multiple
         # Set by parallelization code (e.g. apply_moe_ep_tp)
         self.ep_group: dist.ProcessGroup
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
-        if comm_backend == "hybridep":
+        if config.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep  # noqa: F401
         else:
             from torchtitan.distributed.deepep import deepep  # noqa: F401
