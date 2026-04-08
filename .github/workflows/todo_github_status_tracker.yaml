@@ -1,4 +1,4 @@
-name: Check GitHub PR/Issue status mentioned in TODO
+name: Track GitHub TODOs
 
 on:
   # 1. Manual trigger
@@ -15,7 +15,8 @@ on:
       - .github/scripts/todo_github_status_tracker.py
 
 jobs:
-  todo_github_status_tracker:
+  check_todos:
+    name: Generate Report
     runs-on: ubuntu-latest
     permissions:
       contents: read
