@@ -198,8 +198,9 @@ def joint_graph_builder(
         on_compile(fn, joint_with_descriptors.out_spec)
 
     def wrapper_fn(args, kwargs):
+        params = [p for _, p in model.named_parameters(remove_duplicate=False)]
         inputs = [
-            *model.parameters(),
+            *params,
             *model.buffers(),
             *args,
         ]
