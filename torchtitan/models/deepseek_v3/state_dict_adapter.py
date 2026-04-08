@@ -4,24 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 import re
 from typing import Any
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torch.distributed.tensor import DTensor
-
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import DeepSeekV3Model
 
+_LAYER_RE = re.compile(r"^layers\.(\d+)\.")
+_HF_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
-    """
-    StateDictAdapter for DeepSeekV3 model.
-    """
+    _HF_EXPERT_RE = re.compile(
+        r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
+    )
+    _PROJ_TO_HF = {
+        "moe.experts.w1": "gate_proj",
+        "moe.experts.w3": "up_proj",
+        "moe.experts.w2": "down_proj",
+    }
+    _PROJ_FROM_HF = {
+        "gate_proj": "moe.experts.w1",
+        "up_proj": "moe.experts.w3",
+        "down_proj": "moe.experts.w2",
+    }
 
     def __init__(
         self,
@@ -29,62 +39,20 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
-        self.from_hf_map = {
-            "model.embed_tokens.weight": "tok_embeddings.weight",
-            # Attention Module
-            "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
-            "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
-            "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            # MLP Module
-            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            # Transformer Layer
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE Module
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
-            "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
-            "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
-            "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
-            "model.layers.{}.mlp.shared_experts.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
-            "model.layers.{}.mlp.gate.e_score_correction_bias": "layers.{}.moe.expert_bias",
-            "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
-        }
-
-        # Adjustments for from_hf_map based on model architecture
-        if model_config.layers[0].attention.q_lora_rank != 0:
-            self.from_hf_map.update(
-                {
-                    "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
-                    "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
-                    "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
-                }
-            )
-        else:
-            self.from_hf_map.update(
-                {
-                    "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-                }
-            )
+        self.model_config = model_config
+        # pyrefly: ignore [missing-attribute]
+        self._has_q_lora = model_config.layers[0].attention.q_lora_rank != 0
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
-        """
-        Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
-        """
+        # NOTE: Now we use Quantized HF storage reader to read DeepSeek-V3 671B model.
+        # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
         if from_quantized:
             from torch.distributed.checkpoint.quantized_hf_storage import (
                 QuantizedHuggingFaceStorageReader,
             )
 
-            # NOTE: Now we use Quantized HF storage reader to read DeepSeek-V3 671B model.
-            # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
             BLOCK_SIZE = 128
             return QuantizedHuggingFaceStorageReader(
                 path=path,
@@ -96,123 +64,112 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             return HuggingFaceStorageReader(path)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into separate expert's weight.
-        """
-        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
+        """Convert torchtitan state dict to HF format.
 
-        hf_state_dict = {}
+        Renames FQNs and splits 3D GroupedExperts weights into individual
+        2D per-expert weights.
+        """
+        RENAME = {
+            "tok_embeddings.weight": "model.embed_tokens.weight",
+            "norm.weight": "model.norm.weight",
+            "output.weight": "lm_head.weight",
+        }
+        LAYER_RENAME = {
+            "attention.wkv_a.weight": "self_attn.kv_a_proj_with_mqa.weight",
+            "attention.kv_norm.weight": "self_attn.kv_a_layernorm.weight",
+            "attention.wkv_b.weight": "self_attn.kv_b_proj.weight",
+            "attention.wo.weight": "self_attn.o_proj.weight",
+            "feed_forward.w1.weight": "mlp.gate_proj.weight",
+            "feed_forward.w3.weight": "mlp.up_proj.weight",
+            "feed_forward.w2.weight": "mlp.down_proj.weight",
+            "attention_norm.weight": "input_layernorm.weight",
+            "ffn_norm.weight": "post_attention_layernorm.weight",
+            "moe.router.gate.weight": "mlp.gate.weight",
+            "moe.expert_bias": "mlp.gate.e_score_correction_bias",
+            "moe.shared_experts.w1.weight": "mlp.shared_experts.gate_proj.weight",
+            "moe.shared_experts.w3.weight": "mlp.shared_experts.up_proj.weight",
+            "moe.shared_experts.w2.weight": "mlp.shared_experts.down_proj.weight",
+        }
+
+        hf: dict[str, Any] = {}
 
         for key, value in state_dict.items():
-            if "moe.experts" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_abstract_key = to_hf_map[abstract_key]
+            if key in RENAME:
+                hf[RENAME[key]] = value
+            elif m := _LAYER_RE.match(key):
+                layer = m.group(1)
+                suffix = key[m.end() :]
 
-                # Store the GroupedExperts Weight metadata for from_hf()
-                if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
-                    self.grouped_expert_weight_shape[abstract_key] = value.shape
-                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
+                if suffix in LAYER_RENAME:
+                    hf[f"model.layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+                # Attention — Q projection (depends on q_lora_rank)
+                elif suffix == "attention.wq_a.weight" and self._has_q_lora:
+                    hf[f"model.layers.{layer}.self_attn.q_a_proj.weight"] = value
+                elif suffix == "attention.q_norm.weight" and self._has_q_lora:
+                    hf[f"model.layers.{layer}.self_attn.q_a_layernorm.weight"] = value
+                elif suffix == "attention.wq_b.weight" and self._has_q_lora:
+                    hf[f"model.layers.{layer}.self_attn.q_b_proj.weight"] = value
+                elif suffix == "attention.wq.weight" and not self._has_q_lora:
+                    hf[f"model.layers.{layer}.self_attn.q_proj.weight"] = value
+                # MoE experts (3D GroupedExperts → individual 2D experts)
+                elif suffix in self._PROJ_TO_HF:
+                    self._experts_to_hf(suffix, layer, value, hf)
 
-                    # Split GroupedExperts weight to local individual expert weights
-                    local_expert_fqn = self._get_local_experts_weights(
-                        new_abstract_key,
-                        abstract_key,
-                        layer_num,
-                        value,
-                    )
-                    hf_state_dict.update(local_expert_fqn)
-
-                else:
-                    # keep this path for offline conversion
-                    moe_layer = next(
-                        l for l in self.model_config.layers if l.moe is not None
-                    )
-                    split_values = self._split_experts_weights(
-                        value,
-                        moe_layer.moe.num_experts,
-                    )
-
-                    for expert_num in range(0, moe_layer.moe.num_experts):
-                        new_key = new_abstract_key.format(layer_num, expert_num)
-                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
-
-            elif "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_key = to_hf_map[abstract_key]
-                new_key = new_key.format(layer_num)
-                hf_state_dict[new_key] = value
-
-            else:
-                new_key = to_hf_map[key]
-                hf_state_dict[new_key] = value
-
-        return hf_state_dict
+        return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
-        2. Convert between the HF shape and the torchtitan shape.
-        3. Concat separate expert's weight into GroupedExperts' weight.
-        """
+        """Convert HF state dict to torchtitan format.
 
-        state_dict = {}
-        expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
+        Renames FQNs and concatenates individual 2D per-expert weights
+        back into 3D GroupedExperts weights. Dequantization (if needed) is
+        handled by QuantizedHuggingFaceStorageReader during load.
+        """
+        RENAME = {
+            "model.embed_tokens.weight": "tok_embeddings.weight",
+            "model.norm.weight": "norm.weight",
+            "lm_head.weight": "output.weight",
+        }
+        LAYER_RENAME = {
+            "self_attn.kv_a_proj_with_mqa.weight": "attention.wkv_a.weight",
+            "self_attn.kv_a_layernorm.weight": "attention.kv_norm.weight",
+            "self_attn.kv_b_proj.weight": "attention.wkv_b.weight",
+            "self_attn.o_proj.weight": "attention.wo.weight",
+            "mlp.gate_proj.weight": "feed_forward.w1.weight",
+            "mlp.up_proj.weight": "feed_forward.w3.weight",
+            "mlp.down_proj.weight": "feed_forward.w2.weight",
+            "input_layernorm.weight": "attention_norm.weight",
+            "post_attention_layernorm.weight": "ffn_norm.weight",
+            "mlp.gate.weight": "moe.router.gate.weight",
+            "mlp.gate.e_score_correction_bias": "moe.expert_bias",
+            "mlp.shared_experts.gate_proj.weight": "moe.shared_experts.w1.weight",
+            "mlp.shared_experts.up_proj.weight": "moe.shared_experts.w3.weight",
+            "mlp.shared_experts.down_proj.weight": "moe.shared_experts.w2.weight",
+        }
+
+        sd: dict[str, Any] = {}
+        expert_weights_by_layer: dict[str, dict[str, dict[int, Any]]] = {}
 
         for key, value in hf_state_dict.items():
-            if "mlp.experts" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
-                layer_num, expert_num = re.findall(r"\d+", key)
-                titan_abstract_key = self.from_hf_map[abstract_key]
-                new_key = titan_abstract_key.format(layer_num)
+            # Check for MoE expert keys first
+            if self._experts_from_hf(key, value, sd, expert_weights_by_layer):
+                continue
 
-                # Store the expert's weight in expert_weights_by_layer for concatenating later.
-                if layer_num not in expert_weights_by_layer:
-                    expert_weights_by_layer[layer_num] = {}
-                if titan_abstract_key not in expert_weights_by_layer[layer_num]:
-                    expert_weights_by_layer[layer_num][titan_abstract_key] = {}
-                expert_weights_by_layer[layer_num][titan_abstract_key][
-                    int(expert_num)
-                ] = value
+            if key in RENAME:
+                sd[RENAME[key]] = value
+            elif m := _HF_LAYER_RE.match(key):
+                layer = m.group(1)
+                suffix = key[m.end() :]
 
-                # Use stored metadata to decide path (online vs offline)
-                # Online mode: local_experts_indices was populated during to_hf()
-                if titan_abstract_key in self.local_experts_indices:
-                    stacked_value = self._concatenate_expert_weights_dtensor(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                    )
-                else:  # keep this path to be compatible with offline conversion
-                    stacked_value = self._concatenate_expert_weights(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                        next(
-                            l for l in self.model_config.layers if l.moe is not None
-                        ).moe.num_experts,
-                    )
+                if suffix in LAYER_RENAME:
+                    sd[f"layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+                # Attention — Q projection (depends on q_lora_rank)
+                elif suffix == "self_attn.q_a_proj.weight" and self._has_q_lora:
+                    sd[f"layers.{layer}.attention.wq_a.weight"] = value
+                elif suffix == "self_attn.q_a_layernorm.weight" and self._has_q_lora:
+                    sd[f"layers.{layer}.attention.q_norm.weight"] = value
+                elif suffix == "self_attn.q_b_proj.weight" and self._has_q_lora:
+                    sd[f"layers.{layer}.attention.wq_b.weight"] = value
+                elif suffix == "self_attn.q_proj.weight" and not self._has_q_lora:
+                    sd[f"layers.{layer}.attention.wq.weight"] = value
 
-                if stacked_value is not None:
-                    state_dict[new_key] = stacked_value
-
-            elif "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_key = self.from_hf_map[abstract_key]
-                new_key = new_key.format(layer_num)
-                state_dict[new_key] = value
-
-            else:
-                new_key = self.from_hf_map[key]
-                state_dict[new_key] = value
-
-        return state_dict
+        return sd
