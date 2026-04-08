@@ -226,6 +226,27 @@ class CUDAGraphWrapper:
         self._output = None
 
 
+def has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
+    """Check if the graph contains CUDA-to-CPU device transfers.
+
+    CUDA graph capture does not support unpinned CPU↔CUDA copies.  This
+    function conservatively returns True if any ``call_function`` node
+    produces a CPU tensor while consuming a CUDA tensor input, without
+    checking whether the CPU tensor is pinned.
+    """
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        val = node.meta.get("val")
+        if not isinstance(val, torch.Tensor) or val.device.type != "cpu":
+            continue
+        for inp in node.all_input_nodes:
+            inp_val = inp.meta.get("val")
+            if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cuda":
+                return True
+    return False
+
+
 def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:
     """
     Get indices of gm inputs that are static input tensors whose tensor addresses do not

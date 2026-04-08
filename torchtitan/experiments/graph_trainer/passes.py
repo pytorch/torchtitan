@@ -47,34 +47,13 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
-def _has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
-    """Check if the graph contains CUDA-to-CPU device transfers.
-
-    CUDA graph capture does not support unpinned CPU↔CUDA copies.  This
-    function conservatively returns True if any ``call_function`` node
-    produces a CPU tensor while consuming a CUDA tensor input, without
-    checking whether the CPU tensor is pinned.
-    """
-    for node in gm.graph.nodes:
-        if node.op != "call_function":
-            continue
-        val = node.meta.get("val")
-        if not isinstance(val, torch.Tensor) or val.device.type != "cpu":
-            continue
-        for inp in node.all_input_nodes:
-            inp_val = inp.meta.get("val")
-            if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cuda":
-                return True
-    return False
-
-
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
     """Build the default pass list for the aot_fx_trace compile path.
 
     Per-pass configuration (e.g. ``static_input_indices`` for cudagraph) is
-    bound here via ``functools.partial`` so that ``apply_default_graph_passes``
+    bound here via ``functools.partial`` so that ``apply_graph_passes``
     stays a generic pass runner with no pass-specific parameters.
 
     Args:
@@ -90,7 +69,12 @@ def construct_default_graph_passes(
     # cudagraph should be the last pass.
     # Skip when the graph contains CUDA→CPU transfers (e.g. MoE load-balancing
     # counters) which are incompatible with CUDA graph capture.
-    if _has_cuda_to_cpu_transfers(traced_result.gm):
+    # Lazy import to avoid circular dependency (cudagraph.py imports at module
+    # level only torch internals; passes.py is imported by trainer.py which
+    # also imports cudagraph_teardown).
+    from torchtitan.experiments.graph_trainer.cudagraph import has_cuda_to_cpu_transfers
+
+    if has_cuda_to_cpu_transfers(traced_result.gm):
         logger.info(
             "Skipping cudagraph: graph contains CUDA-to-CPU device transfers "
             "incompatible with CUDA graph capture"
@@ -108,7 +92,7 @@ def construct_default_graph_passes(
     return passes
 
 
-def apply_default_graph_passes(
+def apply_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
     passes: list[Callable],

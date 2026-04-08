@@ -21,7 +21,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import (
-    apply_default_graph_passes,
+    apply_graph_passes,
     construct_default_graph_passes,
 )
 from torchtitan.trainer import Trainer
@@ -119,7 +119,7 @@ class GraphTrainer(Trainer):
                 )
 
             passes = construct_default_graph_passes(self._traced_step)
-            self._traced_step.gm = apply_default_graph_passes(
+            self._traced_step.gm = apply_graph_passes(
                 self._traced_step.gm,
                 self._traced_step.example_inputs,
                 passes,

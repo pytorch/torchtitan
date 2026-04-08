@@ -19,7 +19,7 @@ def my_pass(gm: torch.fx.GraphModule, example_inputs, *, other_kwargs) -> torch.
 
 Per-pass configuration (e.g. `static_input_indices` for cudagraph) must be
 bound during pass construction in `construct_default_graph_passes` via
-`functools.partial`, **not** threaded through `apply_default_graph_passes` as
+`functools.partial`, **not** threaded through `apply_graph_passes` as
 parameters. The apply function is a generic pass runner and must not contain
 pass-specific arguments.
 
