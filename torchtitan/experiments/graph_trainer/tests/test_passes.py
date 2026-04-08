@@ -485,22 +485,21 @@ class TestCpuOffloadPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
         return gm, fwd_nodes, bwd_nodes
 
-    def test_tag_offloadable_activations_basic(self):
-        """Forward nodes with backward consumers should be tagged MUST_OFFLOAD."""
+    def test_tag_all_offloadable_activations_basic(self):
+        """Forward nodes with backward consumers should be tagged MUST_CPU_OFFLOAD."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            OffloadPolicy,
-            tag_offloadable_activations,
+            tag_all_offloadable_activations,
         )
 
         gm, fwd_nodes, bwd_nodes = self._build_joint_graph(num_layers=3)
-        tag_offloadable_activations(gm)
+        tag_all_offloadable_activations(gm)
 
         # Last layer (layer 2) should NOT be tagged (skipped)
         # Layers 0 and 1 should have some tagged nodes
         tagged_nodes = [
             n
             for n in gm.graph.nodes
-            if n.meta.get("recompute") is OffloadPolicy.MUST_OFFLOAD
+            if n.meta.get("recompute") is CheckpointPolicy.MUST_CPU_OFFLOAD
         ]
         self.assertGreater(len(tagged_nodes), 0, "Expected some nodes to be tagged")
 
@@ -514,8 +513,7 @@ class TestCpuOffloadPass(TestCase):
     def test_tag_no_backward_consumers(self):
         """Forward nodes without backward consumers should NOT be tagged."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            OffloadPolicy,
-            tag_offloadable_activations,
+            tag_all_offloadable_activations,
         )
 
         # Build a graph with only forward nodes (no backward)
@@ -536,12 +534,12 @@ class TestCpuOffloadPass(TestCase):
         graph.output(node2)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        tag_offloadable_activations(gm)
+        tag_all_offloadable_activations(gm)
 
         tagged = [
             n
             for n in gm.graph.nodes
-            if n.meta.get("recompute") is OffloadPolicy.MUST_OFFLOAD
+            if n.meta.get("recompute") is CheckpointPolicy.MUST_CPU_OFFLOAD
         ]
         self.assertEqual(
             len(tagged), 0, "No nodes should be tagged without bwd consumers"
@@ -561,7 +559,7 @@ class TestCpuOffloadPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         node_count_before = len(list(gm.graph.nodes))
-        gm = cpu_offload_pass(gm, device=torch.device("cuda"))
+        gm = cpu_offload_pass(gm)
         node_count_after = len(list(gm.graph.nodes))
 
         self.assertEqual(
@@ -571,23 +569,22 @@ class TestCpuOffloadPass(TestCase):
     def test_offload_reload_ops_inserted(self):
         """Verify offload/reload/wait_tensor ops are inserted for tagged nodes."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            _apply_cpu_offload_pass,
-            OffloadPolicy,
-            tag_offloadable_activations,
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
         )
 
         gm, fwd_nodes, bwd_nodes = self._build_joint_graph(num_layers=3)
-        tag_offloadable_activations(gm)
+        tag_all_offloadable_activations(gm)
 
         # Count tagged nodes before applying offload pass
         tagged_count = sum(
             1
             for n in gm.graph.nodes
-            if n.meta.get("recompute") is OffloadPolicy.MUST_OFFLOAD
+            if n.meta.get("recompute") is CheckpointPolicy.MUST_CPU_OFFLOAD
         )
         self.assertGreater(tagged_count, 0)
 
-        gm = _apply_cpu_offload_pass(gm, torch.device("cuda"))
+        gm = apply_cpu_offload_pass(gm)
 
         # Verify offload, reload, and wait_tensor ops were inserted
         offload_ops = [
@@ -618,8 +615,7 @@ class TestCpuOffloadPass(TestCase):
     def test_view_ops_not_tagged(self):
         """View ops should never be tagged for offload."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            OffloadPolicy,
-            tag_offloadable_activations,
+            tag_all_offloadable_activations,
         )
 
         graph = torch.fx.Graph()
@@ -652,7 +648,7 @@ class TestCpuOffloadPass(TestCase):
         graph.output(bwd)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        tag_offloadable_activations(gm)
+        tag_all_offloadable_activations(gm)
 
         # The view node should not be tagged
         view_node = [
@@ -663,15 +659,14 @@ class TestCpuOffloadPass(TestCase):
         self.assertEqual(len(view_node), 1)
         self.assertIsNot(
             view_node[0].meta.get("recompute"),
-            OffloadPolicy.MUST_OFFLOAD,
+            CheckpointPolicy.MUST_CPU_OFFLOAD,
             "View ops should not be tagged for offload",
         )
 
     def test_small_tensors_not_tagged(self):
         """Tensors smaller than _MIN_OFFLOAD_BYTES should not be tagged."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            OffloadPolicy,
-            tag_offloadable_activations,
+            tag_all_offloadable_activations,
         )
 
         graph = torch.fx.Graph()
@@ -698,29 +693,28 @@ class TestCpuOffloadPass(TestCase):
         graph.output(bwd)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        tag_offloadable_activations(gm)
+        tag_all_offloadable_activations(gm)
 
         tagged = [
             n
             for n in gm.graph.nodes
-            if n.meta.get("recompute") is OffloadPolicy.MUST_OFFLOAD
+            if n.meta.get("recompute") is CheckpointPolicy.MUST_CPU_OFFLOAD
         ]
         self.assertEqual(len(tagged), 0, "Small tensors should not be tagged")
 
     def test_single_layer_not_tagged(self):
         """With only one layer, no nodes should be tagged (last layer skipped)."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            OffloadPolicy,
-            tag_offloadable_activations,
+            tag_all_offloadable_activations,
         )
 
         gm, _, _ = self._build_joint_graph(num_layers=1)
-        tag_offloadable_activations(gm)
+        tag_all_offloadable_activations(gm)
 
         tagged = [
             n
             for n in gm.graph.nodes
-            if n.meta.get("recompute") is OffloadPolicy.MUST_OFFLOAD
+            if n.meta.get("recompute") is CheckpointPolicy.MUST_CPU_OFFLOAD
         ]
         # With a single layer, last_layer_id is None, so no layers are skipped.
         # Actually, with single layer, last_layer_id = None (not max), so nodes
