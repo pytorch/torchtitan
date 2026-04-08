@@ -106,8 +106,7 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
     Distributed ops (e.g. _get_submesh, mesh_get_process_group) produce
     opaque values (DeviceMesh, ProcessGroup) in node.meta["val"] and
     node.meta["eager_input_vals"] that cannot be pickled.  We strip
-    both — they are not needed at load time since the ops will produce
-    fresh outputs when re-executed.
+    both — they are not needed at runtime.
     """
     if key in ("val", "eager_input_vals"):
         return False
