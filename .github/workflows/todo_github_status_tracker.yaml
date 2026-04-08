@@ -11,8 +11,8 @@ on:
   # 3. Triggered if the script or the action configuration is changed
   push:
     paths:
-      - '.github/workflows/todo_github_status_tracker.yaml'
-      - '.github/scripts/todo_github_status_tracker.py'
+      - .github/workflows/todo_github_status_tracker.yaml
+      - .github/scripts/todo_github_status_tracker.py
 
 jobs:
   todo_github_status_tracker:

@@ -235,8 +235,14 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
             output += "| Author | TODO Description | Issue/PR Title | File Location |\n"
             output += "| :--- | :--- | :--- | :--- |\n"
             for item in groups[status]:
-                # <wbr> allows the browser to wrap the path at slashes, preventing table stretching
-                file_location_label = item["file_location_label"].replace("/", "/<wbr>")
+                label = item["file_location_label"]
+                # 1. Reverse the string
+                # 2. Replace the first '/' (originally the last one) with '>rb<' plus the slash
+                # 3. Reverse it back to normal
+                if "/" in label:
+                    file_location_label = label[::-1].replace("/", ">rb</", 1)[::-1]
+                else:
+                    file_location_label = label
                 # Escape underscores to prevent Markdown from bolding '__init__'
                 file_location_label = file_location_label.replace("__", r"\_\_")
 
