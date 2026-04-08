@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from torchtitan.models.common.attention import (
     AttentionMasksType,
-    BaseGQAttention,
+    GQAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -140,7 +140,7 @@ class Qwen3Model(Decoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
 
-            assert isinstance(self.layers[0].attention, BaseGQAttention.Config)
+            assert isinstance(self.layers[0].attention, GQAttention.Config)
             assert self.layers[0].attention.head_dim is not None
             return get_moe_model_nparams_and_flops(
                 self,

@@ -13,7 +13,7 @@ import torch
 
 logger = logging.getLogger()
 
-from torchtitan.models.common.attention import FusedGQAttention
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from .model import Llama4Model
 
@@ -25,7 +25,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         self.fuse_qkv = isinstance(
-            model_config.layers[0].attention, FusedGQAttention.Config
+            model_config.layers[0].attention.qkv, FusedQKVLinear.Config
         )
 
         if self.fuse_qkv:
@@ -36,9 +36,9 @@ class Llama4StateDictAdapter(StateDictAdapter):
             }
         else:
             qkv_map = {
-                "language_model.model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-                "language_model.model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-                "language_model.model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+                "language_model.model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv.wq.weight",
+                "language_model.model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv.wk.weight",
+                "language_model.model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv.wv.weight",
             }
 
         self.from_hf_map = {
@@ -89,7 +89,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
             else:
                 layer_num = None
 
-            if self.fuse_qkv and key == "layers.{}.attention.wqkv.weight":
+            if self.fuse_qkv and key == "layers.{}.attention.qkv.wqkv.weight":
                 wq, wk, wv = self.fused_to_separate_qkv(
                     value,
                     n_heads,  # pyrefly: ignore [unbound-name]
@@ -189,7 +189,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
                         n_kv_heads,  # pyrefly: ignore [unbound-name]
                         head_dim,  # pyrefly: ignore [unbound-name]
                     )
-                    state_dict[f"layers.{layer_num}.attention.wqkv.weight"] = fused
+                    state_dict[f"layers.{layer_num}.attention.qkv.wqkv.weight"] = fused
                     # pyrefly: ignore [unsupported-operation]
                     del pending_qkv[layer_num]
             elif key in self.from_hf_map:

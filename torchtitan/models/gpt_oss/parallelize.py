@@ -212,9 +212,9 @@ def apply_non_moe_tp(
                 input_layouts=(sp_layout, Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
+            "attention.qkv.wq": ColwiseParallel(use_local_output=False),
+            "attention.qkv.wk": ColwiseParallel(use_local_output=False),
+            "attention.qkv.wv": ColwiseParallel(use_local_output=False),
             "attention.wo": rowwise_output_plan,
             "ffn_norm": norm_plan,
         }

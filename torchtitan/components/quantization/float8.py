@@ -46,7 +46,7 @@ class Float8LinearConverter(QuantizationConverter):
         """
         List of fully qualified names of modules to skip applying float8 training to.
         nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-        Example: filter_fqns=["attention.wq", "attention.wk", "attention.wv", "output"]
+        Example: filter_fqns=["attention.qkv.wq", "attention.qkv.wk", "attention.qkv.wv", "output"]
         """
 
         emulate: bool = False

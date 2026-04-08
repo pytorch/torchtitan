@@ -228,22 +228,22 @@ def apply_non_moe_tp(
     # pyrefly: ignore [not-callable]
     first_block = next(iter(model.layers.values()))
     use_fused_qkv = hasattr(
-        first_block.attention, "wqkv"  # pyrefly: ignore [missing-attribute]
+        first_block.attention.qkv, "wqkv"  # pyrefly: ignore [missing-attribute]
     )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         if use_fused_qkv:
             qkv_plan = {
-                "attention.wqkv": colwise_parallel(use_local_output=False),
+                "attention.qkv.wqkv": colwise_parallel(use_local_output=False),
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }
         else:
             qkv_plan = {
-                "attention.wq": colwise_parallel(use_local_output=False),
-                "attention.wk": colwise_parallel(use_local_output=False),
-                "attention.wv": colwise_parallel(use_local_output=False),
+                "attention.qkv.wq": colwise_parallel(use_local_output=False),
+                "attention.qkv.wk": colwise_parallel(use_local_output=False),
+                "attention.qkv.wv": colwise_parallel(use_local_output=False),
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }

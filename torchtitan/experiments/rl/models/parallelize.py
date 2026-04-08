@@ -139,9 +139,9 @@ def apply_non_moe_tp(
                     positions_layout,
                 ),
             ),
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
+            "attention.qkv.wq": ColwiseParallel(use_local_output=False),
+            "attention.qkv.wk": ColwiseParallel(use_local_output=False),
+            "attention.qkv.wv": ColwiseParallel(use_local_output=False),
             "attention.q_norm": qk_norm_plan,
             "attention.k_norm": qk_norm_plan,
             "attention.wo": RowwiseParallel(

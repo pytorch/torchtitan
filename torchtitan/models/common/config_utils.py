@@ -14,9 +14,10 @@ from collections.abc import Callable
 from typing import Literal
 
 from torchtitan.models.common.attention import (
-    FusedGQAttention,
+    FusedQKVLinear,
     GQAttention,
     LocalMapInnerAttention,
+    QKVLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -33,6 +34,7 @@ def make_gqa_config(
     inner_attention: LocalMapInnerAttention.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
+    fuse_qkv: bool = False,
     use_rope: bool = True,
     mask_type: str = "causal",
     rope_backend: str = "complex",
@@ -41,63 +43,42 @@ def make_gqa_config(
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     hd = head_dim if head_dim is not None else dim // n_heads
+
+    if fuse_qkv:
+        heads_per_kv = n_heads // n_kv
+        r_dim = heads_per_kv + 2  # Q-heads-per-KV-group + K + V
+        qkv: FusedQKVLinear.Config | QKVLinear.Config = FusedQKVLinear.Config(
+            wqkv=Linear.Config(
+                in_features=dim,
+                out_features=n_kv * r_dim * hd,
+                param_init=wqkv_param_init,
+            ),
+            heads_per_kv=heads_per_kv,
+        )
+    else:
+        qkv = QKVLinear.Config(
+            wq=Linear.Config(
+                in_features=dim,
+                out_features=n_heads * hd,
+                param_init=wqkv_param_init,
+            ),
+            wkv=Linear.Config(
+                in_features=dim,
+                out_features=n_kv * hd,
+                param_init=wqkv_param_init,
+            ),
+        )
+
     return GQAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        wq=Linear.Config(
-            in_features=dim, out_features=n_heads * hd, param_init=wqkv_param_init
-        ),
-        wkv=Linear.Config(
-            in_features=dim, out_features=n_kv * hd, param_init=wqkv_param_init
-        ),
+        qkv=qkv,
         wo=Linear.Config(
             in_features=n_heads * hd, out_features=dim, param_init=wo_param_init
         ),
         qk_norm=qk_norm,
-        use_rope=use_rope,
-        inner_attention=inner_attention,
-        mask_type=mask_type,
-        rope_backend=rope_backend,
-    )
-
-
-def make_fused_qkv_gqa_config(
-    *,
-    dim: int,
-    n_heads: int,
-    wqkv_param_init: dict[str, Callable],
-    wo_param_init: dict[str, Callable],
-    inner_attention: LocalMapInnerAttention.Config,
-    n_kv_heads: int | None = None,
-    head_dim: int | None = None,
-    use_rope: bool = True,
-    mask_type: str = "causal",
-    rope_backend: str = "complex",
-    q_norm: RMSNorm.Config | None = None,
-    k_norm: RMSNorm.Config | None = None,
-) -> FusedGQAttention.Config:
-    """Build a fully-specified FusedGQAttention.Config."""
-    n_kv = n_kv_heads if n_kv_heads is not None else n_heads
-    hd = head_dim if head_dim is not None else dim // n_heads
-    heads_per_kv = n_heads // n_kv
-    r_dim = heads_per_kv + 2  # Q-heads-per-KV-group + K + V
-    return FusedGQAttention.Config(
-        n_heads=n_heads,
-        n_kv_heads=n_kv_heads,
-        head_dim=head_dim,
-        dim=dim,
-        wqkv=Linear.Config(
-            in_features=dim,
-            out_features=n_kv * r_dim * hd,
-            param_init=wqkv_param_init,
-        ),
-        wo=Linear.Config(
-            in_features=n_heads * hd, out_features=dim, param_init=wo_param_init
-        ),
-        q_norm=q_norm,
-        k_norm=k_norm,
         use_rope=use_rope,
         inner_attention=inner_attention,
         mask_type=mask_type,

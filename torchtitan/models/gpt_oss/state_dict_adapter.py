@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torchtitan.models.common.attention import FusedGQAttention
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import GptOssModel
 
@@ -19,7 +19,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.fuse_qkv = isinstance(
-            model_config.layers[0].attention, FusedGQAttention.Config
+            model_config.layers[0].attention.qkv, FusedQKVLinear.Config
         )
 
         if self.fuse_qkv:
@@ -33,12 +33,12 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             }
         else:
             qkv_map = {
-                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-                "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
-                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-                "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
-                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-                "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
+                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv.wq.weight",
+                "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.qkv.wq.bias",
+                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv.wk.weight",
+                "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.qkv.wk.bias",
+                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv.wv.weight",
+                "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.qkv.wv.bias",
             }
 
         self.from_hf_map = {
@@ -95,6 +95,40 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         )
         return n_heads, n_kv_heads, head_dim
 
+    @staticmethod
+    def _fused_to_separate_qkv_bias(
+        fused_bias: torch.Tensor,
+        n_heads: int,
+        n_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split fused wqkv bias [n_kv * R * hd] into separate Q, K, V biases."""
+        heads_per_kv = n_heads // n_kv_heads
+        r_dim = heads_per_kv + 2
+        b = fused_bias.view(n_kv_heads, r_dim, head_dim)
+        bq = b[:, :heads_per_kv, :].reshape(n_heads * head_dim)
+        bk = b[:, heads_per_kv, :].reshape(n_kv_heads * head_dim)
+        bv = b[:, heads_per_kv + 1, :].reshape(n_kv_heads * head_dim)
+        return bq, bk, bv
+
+    @staticmethod
+    def _separate_to_fused_qkv_bias(
+        bq: torch.Tensor,
+        bk: torch.Tensor,
+        bv: torch.Tensor,
+        n_heads: int,
+        n_kv_heads: int,
+        head_dim: int,
+    ) -> torch.Tensor:
+        """Combine separate Q, K, V biases into fused wqkv layout."""
+        heads_per_kv = n_heads // n_kv_heads
+        r_dim = heads_per_kv + 2
+        q = bq.view(n_kv_heads, heads_per_kv, head_dim)
+        k = bk.view(n_kv_heads, 1, head_dim)
+        v = bv.view(n_kv_heads, 1, head_dim)
+        fused = torch.cat([q, k, v], dim=1)
+        return fused.reshape(n_kv_heads * r_dim * head_dim)
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         Convert from a tt model state dict to a hf format state dict.
@@ -119,22 +153,35 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 # pyrefly: ignore
                 layer_num = re.search(r"\d+", key).group(0)
 
-                if self.fuse_qkv and abstract_key == "layers.{}.attention.wqkv.weight":
-                    wq, wk, wv = self.fused_to_separate_qkv(
-                        value,
-                        n_heads,  # pyrefly: ignore [unbound-name]
-                        n_kv_heads,  # pyrefly: ignore [unbound-name]
-                        head_dim,  # pyrefly: ignore [unbound-name]
-                    )
+                if self.fuse_qkv and abstract_key in (
+                    "layers.{}.attention.qkv.wqkv.weight",
+                    "layers.{}.attention.qkv.wqkv.bias",
+                ):
+                    is_bias = abstract_key.endswith("bias")
+                    if is_bias:
+                        bq, bk, bv = self._fused_to_separate_qkv_bias(
+                            value,
+                            n_heads,  # pyrefly: ignore [unbound-name]
+                            n_kv_heads,  # pyrefly: ignore [unbound-name]
+                            head_dim,  # pyrefly: ignore [unbound-name]
+                        )
+                    else:
+                        bq, bk, bv = self.fused_to_separate_qkv(
+                            value,
+                            n_heads,  # pyrefly: ignore [unbound-name]
+                            n_kv_heads,  # pyrefly: ignore [unbound-name]
+                            head_dim,  # pyrefly: ignore [unbound-name]
+                        )
+                    suffix = "bias" if is_bias else "weight"
                     hf_state_dict[
-                        f"model.layers.{layer_num}.self_attn.q_proj.weight"
-                    ] = wq
+                        f"model.layers.{layer_num}.self_attn.q_proj.{suffix}"
+                    ] = bq
                     hf_state_dict[
-                        f"model.layers.{layer_num}.self_attn.k_proj.weight"
-                    ] = wk
+                        f"model.layers.{layer_num}.self_attn.k_proj.{suffix}"
+                    ] = bk
                     hf_state_dict[
-                        f"model.layers.{layer_num}.self_attn.v_proj.weight"
-                    ] = wv
+                        f"model.layers.{layer_num}.self_attn.v_proj.{suffix}"
+                    ] = bv
                     continue
 
                 if abstract_key not in to_hf_map:
@@ -157,7 +204,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
         state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
-        pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
+        # Separate dicts for weight and bias since they arrive independently
+        pending_qkv_weight: dict[str, dict[str, torch.Tensor]] = {}
+        pending_qkv_bias: dict[str, dict[str, torch.Tensor]] = {}
 
         if self.fuse_qkv:
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -172,22 +221,40 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                     "model.layers.{}.self_attn.q_proj.weight",
                     "model.layers.{}.self_attn.k_proj.weight",
                     "model.layers.{}.self_attn.v_proj.weight",
+                    "model.layers.{}.self_attn.q_proj.bias",
+                    "model.layers.{}.self_attn.k_proj.bias",
+                    "model.layers.{}.self_attn.v_proj.bias",
                 ):
-                    if layer_num not in pending_qkv:
-                        pending_qkv[layer_num] = {}
+                    is_bias = abstract_key.endswith("bias")
+                    pending = pending_qkv_bias if is_bias else pending_qkv_weight
+                    if layer_num not in pending:
+                        pending[layer_num] = {}
                     proj = abstract_key.split(".")[-2]  # q_proj, k_proj, v_proj
-                    pending_qkv[layer_num][proj] = value
-                    if len(pending_qkv[layer_num]) == 3:
-                        fused = self.separate_to_fused_qkv(
-                            pending_qkv[layer_num]["q_proj"],
-                            pending_qkv[layer_num]["k_proj"],
-                            pending_qkv[layer_num]["v_proj"],
-                            n_heads,  # pyrefly: ignore [unbound-name]
-                            n_kv_heads,  # pyrefly: ignore [unbound-name]
-                            head_dim,  # pyrefly: ignore [unbound-name]
-                        )
-                        state_dict[f"layers.{layer_num}.attention.wqkv.weight"] = fused
-                        del pending_qkv[layer_num]
+                    pending[layer_num][proj] = value
+                    if len(pending[layer_num]) == 3:
+                        if is_bias:
+                            fused = self._separate_to_fused_qkv_bias(
+                                pending[layer_num]["q_proj"],
+                                pending[layer_num]["k_proj"],
+                                pending[layer_num]["v_proj"],
+                                n_heads,  # pyrefly: ignore [unbound-name]
+                                n_kv_heads,  # pyrefly: ignore [unbound-name]
+                                head_dim,  # pyrefly: ignore [unbound-name]
+                            )
+                        else:
+                            fused = self.separate_to_fused_qkv(
+                                pending[layer_num]["q_proj"],
+                                pending[layer_num]["k_proj"],
+                                pending[layer_num]["v_proj"],
+                                n_heads,  # pyrefly: ignore [unbound-name]
+                                n_kv_heads,  # pyrefly: ignore [unbound-name]
+                                head_dim,  # pyrefly: ignore [unbound-name]
+                            )
+                        suffix = "bias" if is_bias else "weight"
+                        state_dict[
+                            f"layers.{layer_num}.attention.qkv.wqkv.{suffix}"
+                        ] = fused
+                        del pending[layer_num]
                     continue
 
                 tt_key = self.from_hf_map.get(abstract_key)
@@ -199,9 +266,13 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 tt_key = self.from_hf_map[key]
                 state_dict[tt_key] = value
 
-        if self.fuse_qkv and pending_qkv:
+        if self.fuse_qkv and pending_qkv_weight:
             raise ValueError(
-                f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
+                f"Incomplete Q/K/V weight projections for layers: {list(pending_qkv_weight.keys())}"
+            )
+        if self.fuse_qkv and pending_qkv_bias:
+            raise ValueError(
+                f"Incomplete Q/K/V bias projections for layers: {list(pending_qkv_bias.keys())}"
             )
 
         return state_dict

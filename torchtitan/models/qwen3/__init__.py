@@ -22,7 +22,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.config_utils import (
     make_experts_config,
     make_ffn_config,
-    make_fused_qkv_gqa_config,
     make_gqa_config,
     make_moe_config,
     make_router_config,
@@ -93,14 +92,13 @@ def _build_qwen3_layers(
     fuse_qkv: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
-    make_attn = make_fused_qkv_gqa_config if fuse_qkv else make_gqa_config
     layers = []
     for layer_id in range(n_layers):
         layers.append(
             Qwen3TransformerBlock.Config(
                 attention_norm=_qwen3_norm(dim),
                 ffn_norm=_qwen3_norm(dim),
-                attention=make_attn(
+                attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
                     n_kv_heads=n_kv_heads,
@@ -112,6 +110,7 @@ def _build_qwen3_layers(
                         if inner_attention is not None
                         else ScaledDotProductAttention.Config()
                     ),
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="cos_sin",
                     qk_norm=_qwen3_norm(head_dim),

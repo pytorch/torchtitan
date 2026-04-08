@@ -25,11 +25,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
-from torchtitan.models.common.config_utils import (
-    make_ffn_config,
-    make_fused_qkv_gqa_config,
-    make_gqa_config,
-)
+from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -80,7 +76,6 @@ def _build_llama3_layers(
     fuse_qkv: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
-    make_attn = make_fused_qkv_gqa_config if fuse_qkv else make_gqa_config
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -89,7 +84,7 @@ def _build_llama3_layers(
                     normalized_shape=dim, param_init=_NORM_INIT
                 ),
                 ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-                attention=make_attn(
+                attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
                     n_kv_heads=n_kv_heads,
@@ -100,6 +95,7 @@ def _build_llama3_layers(
                         if inner_attention is not None
                         else ScaledDotProductAttention.Config()
                     ),
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="complex",
                 ),
