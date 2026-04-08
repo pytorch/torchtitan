@@ -438,6 +438,28 @@ def reassign_to_pg_pass(
     return gm
 
 
+def remove_detach_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """Remove ``aten.detach.default`` nodes from the graph.
+
+    In traced fwd+bwd graphs there is no autograd context, so detach is a
+    semantic no-op.  Removing these nodes simplifies the graph for downstream
+    passes and reduces memory overhead.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op == "call_function" and node.target == torch.ops.aten.detach.default:
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
+            count += 1
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} detach nodes")
+    return gm
+
+
 def tlparse_log_graph_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -478,6 +500,7 @@ def tlparse_log_graph_pass(
 
 # Registry mapping pass names to pass functions (for AOT mode fwd/bwd passes)
 AVAILABLE_COMPILER_PASSES = {
+    "remove_detach": remove_detach_pass,
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,

@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
     reassign_to_pg_pass,
+    remove_detach_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.linear import Linear
@@ -404,6 +405,65 @@ class TestApplySACPass(TestCase):
         for node, (target, policy) in zip(nodes, expected):
             self.assertEqual(node.target, target)
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
+
+
+class TestRemoveDetachPass(TestCase):
+    """Unit tests for the remove_detach_pass graph pass."""
+
+    def _build_gm_with_detach(self):
+        """Build a GraphModule with detach nodes interleaved with compute ops.
+
+        Graph: placeholder(x) -> relu -> detach -> neg -> detach -> output
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        detach1 = graph.call_function(torch.ops.aten.detach.default, args=(relu,))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(detach1,))
+        detach2 = graph.call_function(torch.ops.aten.detach.default, args=(neg,))
+        graph.output(detach2)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _count_detach_nodes(self, gm):
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target == torch.ops.aten.detach.default
+        )
+
+    def test_detach_nodes_removed(self):
+        """All aten.detach.default nodes should be erased from the graph."""
+        gm = self._build_gm_with_detach()
+        self.assertEqual(self._count_detach_nodes(gm), 2)
+
+        remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(gm), 0)
+
+    def test_output_unchanged(self):
+        """The graph should produce the same output after removing detach nodes."""
+        gm = self._build_gm_with_detach()
+        x = torch.randn(4, 4)
+        expected = gm(x)
+
+        remove_detach_pass(gm)
+
+        result = gm(x)
+        torch.testing.assert_close(result, expected)
+
+    def test_noop_when_no_detach(self):
+        """When there are no detach nodes, the pass should be a no-op."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        node_count_before = len(list(gm.graph.nodes))
+        remove_detach_pass(gm)
+        node_count_after = len(list(gm.graph.nodes))
+
+        self.assertEqual(node_count_before, node_count_after)
 
 
 if __name__ == "__main__":
