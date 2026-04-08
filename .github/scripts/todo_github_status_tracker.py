@@ -131,10 +131,10 @@ def parse_comment_block(
     match = LINK_REGEX.search(full_text)
 
     if "TODO" in full_text and match:
-        url, owner, repo_name, item_type, number = match.groups()
+        url, owner, repo_name, item_type, number_str = match.groups()
         api_type = "pulls" if item_type == "pull" else "issues"
 
-        status, title = get_github_data(owner, repo_name, api_type, number)
+        status, title = get_github_data(owner, repo_name, api_type, number_str)
         repo_path, ref = get_git_info()
         author = get_line_author(file_path, start_line_no)
 
@@ -153,6 +153,7 @@ def parse_comment_block(
             "author": author,
             "file_location_label": f"{file_path}:{start_line_no}",
             "file_location_url": location_url,
+            "number": int(number_str),  # Store as int for numerical sorting
         }
     return None
 
@@ -234,7 +235,11 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
             output += f"### {emojis[status]}\n"
             output += "| Author | TODO Description | Issue/PR Title | File Location |\n"
             output += "| :--- | :--- | :--- | :--- |\n"
-            for item in groups[status]:
+
+            # Sort items numerically by the GitHub Issue/PR number
+            sorted_items = sorted(groups[status], key=lambda x: x["number"])
+
+            for item in sorted_items:
                 label = item["file_location_label"]
                 # 1. Reverse the string
                 # 2. Replace the first '/' (originally the last one) with '>rb<' plus the slash
