@@ -238,9 +238,12 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
     Returns False (with a warning) when the graph contains patterns
     incompatible with CUDA graph capture:
 
-    - **CUDA→CPU transfers**: e.g. MoE load-balancing counters that copy
-      tensors from CUDA to CPU.  CUDA graph capture does not support
-      unpinned CPU↔CUDA copies.
+    - **Unpinned CPU↔CUDA copies** (``aten.copy_``, ``aten._to_copy``):
+      e.g. MoE load-balancing counters that copy tensors between CPU and
+      CUDA.  CUDA graph capture requires pinned CPU memory for such copies.
+    - **``aten._grouped_mm`` with CPU inputs**: MoE routing indices on CPU
+      fed to a CUDA grouped matmul trigger an implicit device transfer
+      during capture.
     - **flex_attention HOPs**: flex_attention higher-order ops require
       torch.compile (e.g. regional_inductor) to lower them into fused
       Triton kernels.  Without compilation they fall back to an unfused
@@ -248,21 +251,42 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
       The expected workflow is to apply regional_inductor first to compile
       flex_attention regions, then apply cudagraph.
     """
-    # Check for CUDA→CPU device transfers
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
-        val = node.meta.get("val")
-        if not isinstance(val, torch.Tensor) or val.device.type != "cpu":
-            continue
-        for inp in node.all_input_nodes:
-            inp_val = inp.meta.get("val")
-            if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cuda":
-                logger.warning(
-                    "Skipping cudagraph: graph contains CUDA-to-CPU device "
-                    "transfers incompatible with CUDA graph capture"
-                )
-                return False
+
+        # Check for aten.copy_ / aten._to_copy between CPU and CUDA
+        # without pin_memory (MoE load-balancing counters).
+        if node.target in (
+            torch.ops.aten.copy_.default,
+            torch.ops.aten._to_copy.default,
+        ):
+            val = node.meta.get("val")
+            if not isinstance(val, torch.Tensor):
+                continue
+            for inp in node.all_input_nodes:
+                inp_val = inp.meta.get("val")
+                if (
+                    isinstance(inp_val, torch.Tensor)
+                    and inp_val.device.type != val.device.type
+                ):
+                    logger.warning(
+                        "Skipping cudagraph: graph contains unpinned CPU↔CUDA "
+                        f"copy ({node.target})"
+                    )
+                    return False
+
+        # Check for aten._grouped_mm with CPU tensor inputs
+        # (MoE routing indices on CPU fed to a CUDA op).
+        if node.target == torch.ops.aten._grouped_mm.default:
+            for inp in node.all_input_nodes:
+                inp_val = inp.meta.get("val")
+                if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cpu":
+                    logger.warning(
+                        "Skipping cudagraph: graph contains aten._grouped_mm "
+                        "with CPU tensor inputs (MoE routing indices)"
+                    )
+                    return False
 
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
