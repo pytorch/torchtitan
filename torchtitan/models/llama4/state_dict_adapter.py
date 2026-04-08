@@ -47,7 +47,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
             "language_model.model.embed_tokens.weight": "tok_embeddings.weight",
             "language_model.model.norm.weight": "norm.weight",
             "language_model.lm_head.weight": "output.weight",
-            **qkv_map,
+            **qkv_map,  # pyrefly: ignore [invalid-argument]
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "language_model.model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "language_model.model.layers.{}.feed_forward.router.weight": "layers.{}.moe.router.gate.weight",
@@ -93,17 +93,18 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
             if self.fuse_qkv and key == "layers.{}.attention.wqkv.weight":
                 wq, wk, wv = self.fused_to_separate_qkv(
+                    # pyrefly: ignore [unbound-name]
                     value, n_heads, n_kv_heads, head_dim
                 )
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.q_proj.weight"
-                ] = wq
+                ] = wq  # pyrefly: ignore [unsupported-operation]
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.k_proj.weight"
-                ] = wk
+                ] = wk  # pyrefly: ignore [unsupported-operation]
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.v_proj.weight"
-                ] = wv
+                ] = wv  # pyrefly: ignore [unsupported-operation]
             elif key in to_hf_map:
                 # do direct mapping
                 if key in "layers.{}.moe.experts.w2":
@@ -171,21 +172,21 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 "language_model.model.layers.{}.self_attn.k_proj.weight",
                 "language_model.model.layers.{}.self_attn.v_proj.weight",
             ):
-                if layer_num not in pending_qkv:
-                    pending_qkv[layer_num] = {}
+                if layer_num not in pending_qkv:  # pyrefly: ignore [unsupported-operation]
+                    pending_qkv[layer_num] = {}  # pyrefly: ignore [unsupported-operation]
                 proj = key.split(".")[-2]  # q_proj, k_proj, v_proj
-                pending_qkv[layer_num][proj] = value
-                if len(pending_qkv[layer_num]) == 3:
+                pending_qkv[layer_num][proj] = value  # pyrefly: ignore [bad-index]
+                if len(pending_qkv[layer_num]) == 3:  # pyrefly: ignore [bad-index]
                     fused = self.separate_to_fused_qkv(
-                        pending_qkv[layer_num]["q_proj"],
-                        pending_qkv[layer_num]["k_proj"],
-                        pending_qkv[layer_num]["v_proj"],
-                        n_heads,
-                        n_kv_heads,
-                        head_dim,
+                        pending_qkv[layer_num]["q_proj"],  # pyrefly: ignore [bad-index]
+                        pending_qkv[layer_num]["k_proj"],  # pyrefly: ignore [bad-index]
+                        pending_qkv[layer_num]["v_proj"],  # pyrefly: ignore [bad-index]
+                        n_heads,  # pyrefly: ignore [unbound-name]
+                        n_kv_heads,  # pyrefly: ignore [unbound-name]
+                        head_dim,  # pyrefly: ignore [unbound-name]
                     )
                     state_dict[f"layers.{layer_num}.attention.wqkv.weight"] = fused
-                    del pending_qkv[layer_num]
+                    del pending_qkv[layer_num]  # pyrefly: ignore [unsupported-operation]
             elif key in self.from_hf_map:
                 # do direct mapping
                 if (

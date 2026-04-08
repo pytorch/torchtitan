@@ -47,7 +47,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
-            **qkv_map,
+            **qkv_map,  # pyrefly: ignore [invalid-argument]
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
             "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
@@ -139,6 +139,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
                 if self.fuse_qkv and abstract_key == "layers.{}.attention.wqkv.weight":
                     wq, wk, wv = self.fused_to_separate_qkv(
+                        # pyrefly: ignore [unbound-name]
                         value, n_heads, n_kv_heads, head_dim
                     )
                     hf_state_dict[
@@ -248,9 +249,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                             pending_qkv[layer_num]["q_proj"],
                             pending_qkv[layer_num]["k_proj"],
                             pending_qkv[layer_num]["v_proj"],
-                            n_heads,
-                            n_kv_heads,
-                            head_dim,
+                            n_heads,  # pyrefly: ignore [unbound-name]
+                            n_kv_heads,  # pyrefly: ignore [unbound-name]
+                            head_dim,  # pyrefly: ignore [unbound-name]
                         )
                         state_dict[f"layers.{layer_num}.attention.wqkv.weight"] = fused
                         del pending_qkv[layer_num]
