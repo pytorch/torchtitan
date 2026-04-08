@@ -8,6 +8,8 @@ import os
 
 import torch
 
+if not hasattr(torch, "set_vital"):
+    torch.set_vital = lambda *args, **kwargs: None
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer
