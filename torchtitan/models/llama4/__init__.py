@@ -124,6 +124,12 @@ def _build_llama4_layers(
                 num_experts=num_experts,
                 gate_param_init=_depth_init(layer_id),
             )
+            # Currently create experts with LocalTokenDispatcher (EP=1) by default.
+            # The dispatcher is replaced in update_from_config() which has
+            # access to the training config's EP degree and comm backend.
+            # TODO: Once parallelism info is available at config time, pass
+            # ep_degree/comm_backend here to create the correct dispatcher
+            # directly.
             experts = make_experts_config(
                 dim=dim,
                 hidden_dim=moe_hidden_dim,

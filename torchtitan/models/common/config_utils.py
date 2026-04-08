@@ -186,6 +186,9 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
+    ep_degree: int = 1,
+    comm_backend: str = "standard",
+    hybridep_non_blocking_expert_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -198,5 +201,8 @@ def make_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
+            ep_degree=ep_degree,
+            comm_backend=comm_backend,
+            hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
         ),
     )

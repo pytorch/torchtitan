@@ -84,8 +84,12 @@ class DeepEPMoE(MoE):
         # Dispatch + expert computation + async combine all inside experts.forward().
         # The combine operation returns asynchronously, allowing overlap with
         # shared_experts computation below.
+        # NOTE: We pass zeros here (not shared experts output) because shared_experts
+        # must run in parallel with the async combine — it hasn't computed yet.
+        outputs = torch.zeros_like(x)
         routed_output = self.experts(
-            x, num_tokens_per_expert, top_scores, selected_experts_indices
+            x, num_tokens_per_expert, top_scores, selected_experts_indices,
+            outputs=outputs,
         )
 
         # shared_experts runs in parallel with combine communication.

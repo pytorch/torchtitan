@@ -88,12 +88,15 @@ class BaseTokenDispatcher:
         self,
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
+        *,
+        outputs: torch.Tensor,
     ) -> torch.Tensor:
         """Combine expert outputs back to original token order.
 
         Args:
             routed_output: (R, dim) expert outputs
             metadata: state from dispatch()
+            outputs: (num_tokens, dim) pre-allocated output tensor to accumulate into
 
         Returns:
             output: (num_tokens, dim) combined output
@@ -154,8 +157,9 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
+        *,
+        outputs: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = metadata.token_indices_experts_sorted.shape[0] // self.top_k
         dim = routed_output.shape[1]
 
         if not self.score_before_experts:
@@ -164,11 +168,8 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
                 * metadata.top_scores_experts_sorted.reshape(-1, 1)
             ).to(routed_output.dtype)
 
-        out = torch.zeros(
-            num_tokens, dim, dtype=routed_output.dtype, device=routed_output.device
-        )
         return deterministic_scatter_add(
-            out,
+            outputs,
             metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
             routed_output,
         )
@@ -290,8 +291,9 @@ class TokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: DispatchMetadata,
+        *,
+        outputs: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = metadata.token_indices_experts_sorted.shape[0] // self.top_k
         dim = routed_output.shape[1]
 
         # Reverse expert-major reordering
@@ -313,11 +315,8 @@ class TokenDispatcher(BaseTokenDispatcher):
                 * metadata.top_scores_experts_sorted.reshape(-1, 1)
             ).to(routed_output.dtype)
 
-        out = torch.zeros(
-            num_tokens, dim, dtype=routed_output.dtype, device=routed_output.device
-        )
         return deterministic_scatter_add(
-            out,
+            outputs,
             metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
             routed_output,
         )
@@ -424,11 +423,13 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
+        *,
+        outputs: torch.Tensor,
     ) -> torch.Tensor:
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep
 
-            return hybridep.combine_tokens(
+            return outputs + hybridep.combine_tokens(
                 routed_output,
                 metadata.state,  # pyrefly: ignore [bad-argument-type]
                 pad_multiple=self.pad_multiple,
@@ -437,4 +438,4 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
             from torchtitan.distributed.deepep.deepep import combine_tokens
 
             # pyrefly: ignore [bad-argument-type]
-            return combine_tokens(routed_output, metadata.state)
+            return outputs + combine_tokens(routed_output, metadata.state)

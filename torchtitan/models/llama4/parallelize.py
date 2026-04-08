@@ -553,7 +553,7 @@ def apply_moe_ep_tp(
                 # the new token dispatcher.
                 raise NotImplementedError(
                     "EP>1 with ETP=1 and TP>1 requires ReordererSequenceParallel, "
-                    "which is not yet supported with the new token dispatcher."
+                    "which is not yet supported yet with the new token dispatcher."
                 )
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:

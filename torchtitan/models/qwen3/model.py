@@ -109,6 +109,12 @@ class Qwen3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+                    # Replace the default LocalTokenDispatcher config with the
+                    # correct dispatcher for the chosen parallelism strategy.
+                    # Layer builders (e.g. _build_qwen3_layers) create configs
+                    # without parallelism info, so the dispatcher defaults to
+                    # LocalTokenDispatcher (EP=1). Here we rebuild it with the
+                    # actual EP degree and comm backend from the training config.
                     td = layer_cfg.moe.experts.token_dispatcher
                     layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
                         num_experts=td.num_experts,

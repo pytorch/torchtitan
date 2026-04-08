@@ -151,7 +151,12 @@ class Llama4Model(Decoder):
                         debug.moe_force_load_balance
                     )
 
-                    # Set dispatcher config based on EP comm backend
+                    # Replace the default LocalTokenDispatcher config with the
+                    # correct dispatcher for the chosen parallelism strategy.
+                    # Layer builders (e.g. _build_llama4_layers) create configs
+                    # without parallelism info, so the dispatcher defaults to
+                    # LocalTokenDispatcher (EP=1). Here we rebuild it with the
+                    # actual EP degree and comm backend from the training config.
                     td = layer_cfg.moe.experts.token_dispatcher
                     layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
                         num_experts=td.num_experts,

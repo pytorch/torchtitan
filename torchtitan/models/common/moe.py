@@ -125,13 +125,15 @@ class GroupedExperts(Module):
         num_tokens_per_expert: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
+        *,
+        outputs: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, and combine results."""
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices, num_tokens_per_expert
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata)
+        return self.token_dispatcher.combine(routed_output, metadata, outputs=outputs)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -386,16 +388,13 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Dispatch tokens to experts, compute, and combine
-        out_experts = self.experts(
-            x, num_tokens_per_expert, top_scores, selected_experts_indices
-        )
+        outputs = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
 
-        if self.shared_experts is not None:
-            out = self.shared_experts(x)
-            return (out + out_experts).reshape(bs, slen, dim)
-        else:
-            return out_experts.reshape(bs, slen, dim)
+        # Dispatch tokens to experts, compute, and combine into outputs
+        return self.experts(
+            x, num_tokens_per_expert, top_scores, selected_experts_indices,
+            outputs=outputs,
+        ).reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
