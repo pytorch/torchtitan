@@ -29,9 +29,13 @@ from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
+from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
+    annotate_deepseekv3,
+)
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
+from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
@@ -82,6 +86,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
     """
 
     model_registry: Callable
+    annotate_model: Callable
 
     def setUp(self):
         if not hasattr(self, "model_registry"):
@@ -107,6 +112,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self, model: nn.Module, trainer_cls: type
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
+        # Annotate after deepcopy: annotate_fn wrappers capture bound methods
+        # that don't rebind correctly through copy.deepcopy.
+        self.annotate_model(model)
         trainer = _build_trainer(model, self.model_config, trainer_cls)
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -154,6 +162,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 debug model."""
 
     model_registry = staticmethod(llama3_model_registry)
+    annotate_model = staticmethod(annotate_llama)
 
     # TODO: Re-enable once upstream PyTorch numerical change is resolved.
     # Broken by https://github.com/pytorch/pytorch/pull/160509
@@ -181,6 +190,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
     model_registry = staticmethod(dsv3_model_registry)
+    annotate_model = staticmethod(annotate_deepseekv3)
 
     # TODO: Re-enable once upstream PyTorch numerical change is resolved.
     # Broken by https://github.com/pytorch/pytorch/pull/160509
