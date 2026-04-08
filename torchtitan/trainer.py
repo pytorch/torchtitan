@@ -689,13 +689,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-            loss = (
-                # Rescale PP loss to be "local loss sum / global valid tokens)
-                # because each microbathes could have different number of valid tokens
-                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
-                if self.pp_has_last_stage
-                else torch.tensor([-1.0], device=self.device)
-            )
+            if self.pp_has_last_stage:
+                assert losses is not None
+                # Rescale PP loss to be "local loss sum / global valid tokens"
+                # because each microbatch could have different number of valid tokens
+                loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
+                    self.device
+                )
+            else:
+                loss = torch.tensor([-1.0], device=self.device)
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
