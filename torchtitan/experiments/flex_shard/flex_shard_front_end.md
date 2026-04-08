@@ -1285,22 +1285,32 @@ FlexShard Core (always parametrization-based)
 - [x] **Blocking gate**: validated under `FakeTensorMode` that byte buffer `view(dtype).view(shape)` operations trace correctly — all three patterns pass (basic view, byte offset slice, mixed-dtype regions)
 - [x] Unit tests in `test_flex_shard_tracing.py`: FakeTensorMode byte buffer tests, FX graph structure tests (verify `all_gather_into_tensor`/`wait_tensor`/`chunk`/`cat`/`view` nodes), init validation tests, distributed correctness tests
 
-### Phase 2: Parametrization and API
+### Phase 2a: Core parametrization ✓
 
-- [ ] Implement unified `flex_shard()` entry point with `shard_placement_fn`, `buckets`, and `reshard_after_forward` parameters (see "Unified API" section)
+- [x] Replace hook-based unshard/reduce_grad with parametrization pattern using `ShardParametrization` and `FlatShardParametrization` — property-based param access triggers `_c10d_functional` all-gather; backward autograd generates reduce-scatter
+- [x] Use SimpleFSDP's custom property-based registration (`_register_parametrization()` in `flex_shard.py`) — dynamic subclass creation with property getters, not `nn.utils.parametrize`, to avoid `state_dict()` key mangling
+- [x] Implement `_active_parametrization` guard (`disable_active_parametrization()` context manager) to disable parametrization during init and `state_dict()` calls
+- [x] Default `register_hooks=False` in `flex_shard()` — parametrization is now the default path; `register_hooks=True` is a backward-compat escape hatch for hook-based flow
+- [x] `flex_shard()` creates per-param parametrization instances grouped by leaf module, wiring `Shard` → `ShardParametrization`, `FlatShard` → `FlatShardParametrization`
+- [x] Unit tests in `test_flex_shard_parametrization.py`: guard behavior (disable/restore/exception safety), property registration (dynamic subclass, state_dict bypass, multi-param), distributed correctness (param access triggers all-gather, state_dict returns sharded, guard disables all-gather, forward correctness)
+
+### Phase 2b: BucketSpec and bucket validation
+
 - [ ] Implement `BucketSpec` dataclass with `patterns`, `mp_policy`, `offload_policy`
 - [ ] Implement bucket validation: reject orphan params, overlapping params, mismatched placement type/dimension within a bucket; emit coverage summary at `logger.debug` level
+- [ ] Implement fnmatch-based `shard_placement_fn` dict form (see "Unified API" section)
 - [ ] Create per-bucket DStorage instances from bucket spec
-- [ ] Replace hook-based unshard/reduce_grad with parametrization pattern using `ShardParametrization` and `FlatShardParametrization`
-- [ ] Use SimpleFSDP's custom property-based registration (not `nn.utils.parametrize`) to avoid `state_dict()` key mangling
-- [ ] Implement `_active_parametrization` guard to disable parametrization during init and `state_dict()` calls
+- [ ] Implement auto-bucket generation (`_auto_buckets()`) for `buckets=None` default
+- [ ] Unit tests: bucket validation catches orphans and overlaps
+
+### Phase 2c: Memory management and mixed precision
+
 - [ ] Support `reshard_after_forward` via checkpoint policy annotations (like SimpleFSDP)
 - [ ] Implement `no_sync()` context manager for eager mode gradient accumulation (see Gap #8)
 - [ ] Ensure parametrization traces cleanly both with and without reduce-scatter for graph mode gradient accumulation
 - [ ] Implement mixed precision cast in parametrization forward (see Gap #11); `BucketSpec.mp_policy` controls per-bucket dtype
 - [ ] Implement CPU offloading device transfer in parametrization forward (see Gap #12); `BucketSpec.offload_policy` controls per-bucket offload
-- [ ] Implement auto-bucket generation (`_auto_buckets()`) for `buckets=None` default
-- [ ] Unit tests: FlexShard model traces correctly with `make_fx`; bucket validation catches orphans and overlaps
+- [ ] Unit tests: FlexShard model traces correctly with `make_fx`; mixed precision numerics
 
 ### Phase 3: Graph pass compatibility
 
