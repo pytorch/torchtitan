@@ -1,4 +1,4 @@
-name: Track GitHub TODOs
+name: TODO Debt Tracker
 
 on:
   # 1. Manual trigger
@@ -11,8 +11,8 @@ on:
   # 3. Triggered if the script or the action configuration is changed
   push:
     paths:
-      - .github/workflows/todo_github_status_tracker.yaml
-      - .github/scripts/todo_github_status_tracker.py
+      - .github/workflows/todo_debt_tracker.yaml
+      - .github/scripts/todo_debt_tracker.py
 
 jobs:
   check_todos:
@@ -39,4 +39,4 @@ jobs:
       - name: Generate TODO Status Report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python .github/scripts/todo_github_status_tracker.py
+        run: python .github/scripts/todo_debt_tracker.py
