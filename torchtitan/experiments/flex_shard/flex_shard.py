@@ -457,6 +457,7 @@ __all__ = [
     "DStorage",
     "flat_shard_placements",
     "FlatShard",
+    "FlatShardParametrization",
     "flex_shard",
     "FlexShardModule",
     "get_global_shape",
@@ -469,6 +470,7 @@ __all__ = [
     "RaggedShard",
     "set_sharding_info",
     "Shard",
+    "ShardParametrization",
 ]
 
 
@@ -480,6 +482,62 @@ _PLACEMENTS_ATTR = "_placements"
 _GLOBAL_SHAPE_ATTR = "_global_shape"
 _GLOBAL_STRIDE_ATTR = "_global_stride"
 _MESH_ATTR = "_mesh"
+
+
+def _validate_placements_for_tracing(
+    param_placements: dict[str, tuple[Placement, ...]],
+    named_params: list[tuple[str, nn.Parameter]],
+    mesh: DeviceMesh,
+) -> None:
+    """Validate that placements are compatible with FX tracing (Phase 1).
+
+    Raises ValueError if any placement uses features not yet supported by
+    the traceable parametrization classes (Owned, RaggedShard, uneven splits,
+    or multi-dimensional meshes).
+    """
+    if mesh.ndim != 1:
+        raise ValueError(
+            f"Traceable FlexShard requires a 1D mesh, got {mesh.ndim}D. "
+            "Multi-dimensional mesh support is planned for Phase 5+."
+        )
+
+    param_dict = dict(named_params)
+    world_size = mesh.size()
+
+    for fqn, placements in param_placements.items():
+        for placement in placements:
+            if isinstance(placement, Owned):
+                raise ValueError(
+                    f"Parameter '{fqn}' uses Owned placement, which is not "
+                    "supported for tracing. Owned placement requires "
+                    "rank-dependent control flow that cannot be captured in "
+                    "an FX graph. Support is planned for Phase 5+."
+                )
+            if isinstance(placement, RaggedShard):
+                raise ValueError(
+                    f"Parameter '{fqn}' uses RaggedShard placement, which is "
+                    "not supported for tracing. RaggedShard requires "
+                    "variable-size collectives that cannot be traced. "
+                    "Support is planned for Phase 5+."
+                )
+            if isinstance(placement, Shard):
+                param = param_dict[fqn]
+                dim_size = param.shape[placement.dim]
+                if dim_size % world_size != 0:
+                    raise ValueError(
+                        f"Parameter '{fqn}' has shape {tuple(param.shape)} with "
+                        f"dim {placement.dim} size {dim_size}, which is not "
+                        f"evenly divisible by world_size={world_size}. "
+                        "Use FlatShard or pad the parameter."
+                    )
+            if isinstance(placement, FlatShard):
+                param = param_dict[fqn]
+                if param.numel() % world_size != 0:
+                    raise ValueError(
+                        f"Parameter '{fqn}' has {param.numel()} elements, "
+                        f"which is not evenly divisible by "
+                        f"world_size={world_size}. Pad the parameter."
+                    )
 
 
 def set_sharding_info(
@@ -786,6 +844,56 @@ class RaggedShard(Placement):
             )
             results.append(flat_output.view(local_shape))
         return results
+
+
+class ShardParametrization(nn.Module):
+    """FX-traceable parametrization for Shard placement.
+
+    Reconstructs the full parameter from a local shard using _c10d_functional
+    ops that are visible to make_fx and torch.compile. The backward pass
+    (reduce_scatter) is autograd-generated.
+
+    For dim != 0, all_gather_into_tensor concatenates along dim 0, so we
+    chunk and re-cat along the correct shard_dim.
+    """
+
+    def __init__(self, shard_dim: int, group_name: str, world_size: int):
+        super().__init__()
+        self.shard_dim = shard_dim
+        self.group_name = group_name
+        self.world_size = world_size
+
+    def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
+        full = torch.ops._c10d_functional.all_gather_into_tensor(
+            local_shard, self.world_size, self.group_name
+        )
+        full = torch.ops._c10d_functional.wait_tensor(full)
+        if self.shard_dim != 0:
+            chunks = full.chunk(self.world_size, dim=0)
+            full = torch.cat(chunks, dim=self.shard_dim)
+        return full
+
+
+class FlatShardParametrization(nn.Module):
+    """FX-traceable parametrization for FlatShard placement.
+
+    Reconstructs the full parameter from a flat 1D shard using
+    _c10d_functional ops. The flat shard has shape (numel // world_size,).
+    After all-gather, the result is reshaped to the original parameter shape.
+    """
+
+    def __init__(self, group_name: str, world_size: int, original_shape: torch.Size):
+        super().__init__()
+        self.group_name = group_name
+        self.world_size = world_size
+        self.original_shape = original_shape
+
+    def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
+        full_flat = torch.ops._c10d_functional.all_gather_into_tensor(
+            flat_shard, self.world_size, self.group_name
+        )
+        full_flat = torch.ops._c10d_functional.wait_tensor(full_flat)
+        return full_flat.view(self.original_shape)
 
 
 class ShardedState(Enum):
@@ -1506,10 +1614,11 @@ PlacementFn = Callable[
 #         else:
 #             reutrn {Shard(0)}
 
-# model: nn.Module, top-level fqn, 
+# model: nn.Module, top-level fqn,
 # shard_placement_fn: specify [module/param_fqn] : [placement]
 # bukceting: [[embedding], [layer1_fqn], [layer2_fqn], [output, output_norm]] 1:1 mapping to DStorage
 # flex_shard(backend="parameter_server")
+
 
 def flex_shard(
     module: nn.Module,
@@ -1605,6 +1714,7 @@ def flex_shard(
 
     # Create parameter infos with local shapes and byte offsets
     param_placements = shard_placement_fn(named_params, mesh)
+    _validate_placements_for_tracing(param_placements, named_params, mesh)
     param_infos, total_bytes, total_unsharded_bytes = _create_param_infos(
         named_params, mesh, param_placements
     )
