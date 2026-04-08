@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.validate import Validator
 from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
+from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
@@ -42,7 +42,7 @@ def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
             steps=100,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=FTCheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
         ),

@@ -112,16 +112,8 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             enable_cpu_backend=config.training.enable_cpu_offload,
         )
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = config.parallelism
-        self.parallel_dims = parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
+        self.parallel_dims = parallel_dims = ParallelDims.from_config(
+            config.parallelism, world_size
         )
 
         if parallel_dims.dp_enabled:

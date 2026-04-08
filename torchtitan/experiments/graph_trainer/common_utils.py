@@ -72,7 +72,7 @@ def register_blockmask_pytree_node():
 
 def maybe_register_blockmask_pytree_node() -> None:
     """Register flex-attention pytree helpers if they are missing."""
-    from torch.nn.attention.flex_attention import BlockMask, _MaskModWrapper
+    from torch.nn.attention.flex_attention import _MaskModWrapper, BlockMask
 
     if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
         register_blockmask_pytree_node()

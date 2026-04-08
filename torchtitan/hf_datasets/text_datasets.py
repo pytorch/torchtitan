@@ -112,6 +112,15 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
         return iter(self._data)
 
+    def _normalize_positions(self, positions: list[int]) -> list[int]:
+        offset = positions[0]
+        if offset > 0:
+            for i, p in enumerate(positions):
+                if p == 0:
+                    break
+                positions[i] = p - offset
+        return positions
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
 
@@ -122,6 +131,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 sample_tokens = self._tokenizer.encode(
                     sample_text, add_bos=True, add_eos=True
                 )
+
                 self._inputs_buffer.extend(sample_tokens)
                 # Per-document positions reset at document boundaries,
                 # matching inference frameworks (e.g. vLLM) that start
@@ -129,21 +139,22 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 # to stay within the RoPE cache, effectively chunking
                 # long documents into seq_len-sized segments.
                 # TODO: make overflow policy configurable (chunk / truncate / drop).
-                self._positions_buffer.extend(
-                    i % self.seq_len for i in range(len(sample_tokens))
-                )
+                self._positions_buffer.extend(range(len(sample_tokens)))
                 self._sample_idx += 1
 
                 while len(self._inputs_buffer) >= max_buffer_token_len:
                     x = torch.LongTensor(self._inputs_buffer[:max_buffer_token_len])
                     pos = torch.LongTensor(
-                        self._positions_buffer[:max_buffer_token_len]
+                        self._normalize_positions(
+                            self._positions_buffer[:max_buffer_token_len]
+                        )
                     )
                     # update buffers to the remaining tokens
                     self._inputs_buffer = self._inputs_buffer[max_buffer_token_len:]
                     self._positions_buffer = self._positions_buffer[
                         max_buffer_token_len:
                     ]
+
                     input = x[:-1]
                     label = x[1:]
                     positions = pos[:-1]

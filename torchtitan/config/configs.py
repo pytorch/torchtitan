@@ -192,14 +192,6 @@ class ParallelismConfig:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
-    pipeline_parallel_expert_parallel_overlap: bool = True
-    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
-    communication. This is only effective when the pipeline parallel schedule is DualPipeV and
-    pipeline_parallel_degree > 1 and expert_parallel_degree > 1.
-
-    TODO: Does not support activation_checkpoint, set mode="none"
-    """
-
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -416,6 +408,10 @@ class DebugConfig:
     detect_anomaly: bool = False
     """Enable torch.autograd anomaly detection to help track down NaN/Inf gradients.
     Note: incurs significant overhead; for debugging only."""
+
+    batch_invariant: bool = False
+    """Enable batch-invariant mode to use batch-invariant ops in model
+    forward and deterministic NCCL collective reduction order"""
 
     print_config: bool = False
     """Print the job configs to terminal"""

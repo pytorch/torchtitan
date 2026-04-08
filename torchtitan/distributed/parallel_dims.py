@@ -4,10 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
+from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -28,6 +31,21 @@ class ParallelDims:
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
+
+    @classmethod
+    def from_config(
+        cls, parallelism_config: ParallelismConfig, world_size: int
+    ) -> ParallelDims:
+        return cls(
+            dp_replicate=parallelism_config.data_parallel_replicate_degree,
+            dp_shard=parallelism_config.data_parallel_shard_degree,
+            cp=parallelism_config.context_parallel_degree,
+            tp=parallelism_config.tensor_parallel_degree,
+            pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
+            etp=parallelism_config.expert_tensor_parallel_degree,
+            world_size=world_size,
+        )
 
     def __post_init__(self):
         self._validate()
