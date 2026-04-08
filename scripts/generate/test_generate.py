@@ -50,9 +50,9 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
     # pyrefly: ignore [missing-attribute]
     for _, transformer_block in model.layers.items():
         layer_plan = {
-            "attention.wq": ColwiseParallel(),
-            "attention.wk": ColwiseParallel(),
-            "attention.wv": ColwiseParallel(),
+            "attention.qkv.wq": ColwiseParallel(),
+            "attention.qkv.wk": ColwiseParallel(),
+            "attention.qkv.wv": ColwiseParallel(),
             "attention.wo": RowwiseParallel(),
             "feed_forward.w1": ColwiseParallel(),
             "feed_forward.w2": RowwiseParallel(),
