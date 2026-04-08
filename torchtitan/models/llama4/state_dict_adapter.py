@@ -14,9 +14,7 @@ import torch
 logger = logging.getLogger()
 
 from torchtitan.models.common.attention import FusedGQAttention
-
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from .model import Llama4Model
 
 
@@ -93,8 +91,10 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
             if self.fuse_qkv and key == "layers.{}.attention.wqkv.weight":
                 wq, wk, wv = self.fused_to_separate_qkv(
-                    # pyrefly: ignore [unbound-name]
-                    value, n_heads, n_kv_heads, head_dim
+                    value,
+                    n_heads,  # pyrefly: ignore [unbound-name]
+                    n_kv_heads,  # pyrefly: ignore [unbound-name]
+                    head_dim,  # pyrefly: ignore [unbound-name]
                 )
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.q_proj.weight"
@@ -172,11 +172,15 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 "language_model.model.layers.{}.self_attn.k_proj.weight",
                 "language_model.model.layers.{}.self_attn.v_proj.weight",
             ):
-                if layer_num not in pending_qkv:  # pyrefly: ignore [unsupported-operation]
-                    pending_qkv[layer_num] = {}  # pyrefly: ignore [unsupported-operation]
+                # pyrefly: ignore [unsupported-operation]
+                if layer_num not in pending_qkv:
+                    # pyrefly: ignore [unsupported-operation]
+                    pending_qkv[layer_num] = {}
                 proj = key.split(".")[-2]  # q_proj, k_proj, v_proj
-                pending_qkv[layer_num][proj] = value  # pyrefly: ignore [bad-index]
-                if len(pending_qkv[layer_num]) == 3:  # pyrefly: ignore [bad-index]
+                # pyrefly: ignore [bad-index]
+                pending_qkv[layer_num][proj] = value
+                # pyrefly: ignore [bad-index]
+                if len(pending_qkv[layer_num]) == 3:
                     fused = self.separate_to_fused_qkv(
                         pending_qkv[layer_num]["q_proj"],  # pyrefly: ignore [bad-index]
                         pending_qkv[layer_num]["k_proj"],  # pyrefly: ignore [bad-index]
@@ -186,7 +190,8 @@ class Llama4StateDictAdapter(StateDictAdapter):
                         head_dim,  # pyrefly: ignore [unbound-name]
                     )
                     state_dict[f"layers.{layer_num}.attention.wqkv.weight"] = fused
-                    del pending_qkv[layer_num]  # pyrefly: ignore [unsupported-operation]
+                    # pyrefly: ignore [unsupported-operation]
+                    del pending_qkv[layer_num]
             elif key in self.from_hf_map:
                 # do direct mapping
                 if (

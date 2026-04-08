@@ -260,7 +260,9 @@ def apply_non_moe_tp(
     # Detect whether fused QKV is used by checking the first layer
     # pyrefly: ignore [not-callable]
     first_block = next(iter(model.layers.values()))
-    use_fused_qkv = hasattr(first_block.attention, "wqkv")  # pyrefly: ignore [missing-attribute]
+    use_fused_qkv = hasattr(
+        first_block.attention, "wqkv"  # pyrefly: ignore [missing-attribute]
+    )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():

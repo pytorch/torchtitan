@@ -15,7 +15,6 @@ import torch.nn as nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseGQAttention,
-    GQAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock

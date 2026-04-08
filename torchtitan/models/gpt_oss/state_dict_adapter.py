@@ -12,7 +12,6 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.models.common.attention import FusedGQAttention
 from torchtitan.models.utils import MoEStateDictAdapter
-
 from .model import GptOssModel
 
 
@@ -122,8 +121,10 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
                 if self.fuse_qkv and abstract_key == "layers.{}.attention.wqkv.weight":
                     wq, wk, wv = self.fused_to_separate_qkv(
-                        # pyrefly: ignore [unbound-name]
-                        value, n_heads, n_kv_heads, head_dim
+                        value,
+                        n_heads,  # pyrefly: ignore [unbound-name]
+                        n_kv_heads,  # pyrefly: ignore [unbound-name]
+                        head_dim,  # pyrefly: ignore [unbound-name]
                     )
                     hf_state_dict[
                         f"model.layers.{layer_num}.self_attn.q_proj.weight"
