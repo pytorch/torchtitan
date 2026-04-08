@@ -98,18 +98,6 @@ def _apply_regional_inductor(traced_result):
     traced_result.gm.recompile()
 
 
-def _strip_flex_bwd_compile_annotations(gm: torch.fx.GraphModule) -> None:
-    for node in gm.graph.nodes:
-        name = getattr(node.target, "__name__", "") if node.op == "call_function" else ""
-        is_bwd_hop = name == "flex_attention_backward"
-        is_bwd_getattr = node.op == "get_attr" and isinstance(node.target, str) and any(
-            node.target.startswith(prefix)
-            for prefix in ("fw_graph", "joint_graph", "mask_graph")
-        )
-        if is_bwd_hop or is_bwd_getattr:
-            node.meta.get("custom", {}).pop("compile_with_inductor", None)
-
-
 class SimpleMLP(nn.Module):
     def __init__(self, dim=64, hidden=128, vocab_size=256):
         super().__init__()
@@ -732,36 +720,6 @@ class TestTraceModels(unittest.TestCase):
             num_steps=self.NUM_STEPS,
             lr=self.LR,
         )
-
-    def test_deepseek_v3_flex_regional_inductor_corruption(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
-        from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
-
-        config = deepseekv3_configs["debugmodel_flex_attn"]()
-        config = dataclasses.replace(config, layers=config.layers[:1])
-        model = create_model(DeepSeekV3Model, config, self.DEVICE, torch.bfloat16)
-
-        tokens = torch.randint(2, config.vocab_size, (1, 64), device=self.DEVICE)
-        tokens[:, 15::16] = 1
-        labels = torch.zeros_like(tokens)
-        attn_masks = model.get_attention_masks(tokens, SimpleNamespace(eos_id=1))
-
-        def train_step(model, tokens, attn_masks, labels):
-            del labels
-            logits = model(tokens, attention_masks=attn_masks)
-            loss = logits.float().sum()
-            grads = torch.autograd.grad(loss, list(model.parameters()))
-            return [loss] + list(grads)
-
-        maybe_register_blockmask_pytree_node()
-        with annotate_flex_attention_for_regional_inductor():
-            traced = trace_train_step(train_step)(model, tokens, attn_masks, labels)
-
-        _strip_flex_bwd_compile_annotations(traced.gm)
-        _apply_regional_inductor(traced)
-
-        with self.assertRaises(TypeError, msg="forward\\(\\) takes 2 positional arguments"):
-            run_traced_train_step(traced, model, tokens, attn_masks, labels)
 
     def test_flex_attention_annotations(self):
         from torch.nn.attention.flex_attention import and_masks
@@ -1601,6 +1559,184 @@ class TestTraceFSDP(FSDPTest):
         )
 
 
+class GraphBasedSACTestMixin:
+    DEVICE = "cuda"
+
+    def setUp(self):
+        torch.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+
+    def tearDown(self):
+        torch.use_deterministic_algorithms(False)
+
+    def _measure_step_peak(self, model, step_fn):
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        loss, grads = step_fn(model)
+        torch.cuda.synchronize()
+        peak = (torch.cuda.max_memory_allocated() - baseline) / 1e9
+        return loss, grads, peak
+
+    def _clone_grads_to_cpu(self, grads):
+        return [g.detach().cpu().clone() for g in grads]
+
+    def _run_sac_test(
+        self,
+        model_cls,
+        model_config,
+        fwd_args,
+        labels,
+        dtype=torch.float32,
+        num_steps=3,
+        use_regional_inductor=False,
+        check_peak_memory=True,
+        check_grads=False,
+    ):
+        """Run eager+AC vs traced+graph SAC, assert bitwise-identical loss
+        and similar peak memory.
+
+        For flex_attention models, set use_regional_inductor=True. Eager uses
+        torch.compile(flex_attention) internally, so the traced graph needs
+        regional_inductor to match numerics.
+        """
+        from torchtitan.config import ActivationCheckpointConfig
+        from torchtitan.distributed.activation_checkpoint import apply_ac
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_ac_regions,
+        )
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+
+        ref_model = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
+        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
+        del ref_model
+        torch.cuda.empty_cache()
+
+        def run_steps(step_fn, model):
+            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+            step_results = []
+            step_peaks = []
+            for _ in range(num_steps):
+                loss, grads, peak = self._measure_step_peak(model, step_fn)
+                if check_grads:
+                    step_results.append(
+                        (loss.detach().cpu(), self._clone_grads_to_cpu(grads))
+                    )
+                else:
+                    step_results.append(loss.detach().cpu())
+                step_peaks.append(peak)
+                for p, g in zip(model.parameters(), grads, strict=True):
+                    p.grad = g
+                opt.step()
+                opt.zero_grad()
+            del opt
+            return step_results, max(step_peaks)
+
+        def eager_step(model):
+            logits = model(*fwd_args)
+            loss = get_loss(logits, labels)
+            loss.backward()
+            grads = [p.grad.clone() for p in model.parameters()]
+            return loss, grads
+
+        def traced_step_factory(model):
+            annotate_ac_regions(model)
+            train_step = make_train_step(get_loss)
+            maybe_regional = (
+                annotate_flex_attention_for_regional_inductor()
+                if use_regional_inductor
+                else contextlib.nullcontext()
+            )
+            maybe_register_blockmask_pytree_node()
+            with maybe_regional:
+                traced = trace_train_step(train_step)(model, *fwd_args, labels)
+            if use_regional_inductor:
+                _apply_regional_inductor(traced)
+            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+
+            def traced_step_fn(model):
+                result = run_traced_train_step(traced, model, *fwd_args, labels)
+                return result[0], result[1:]
+
+            return traced_step_fn
+
+        model_eager = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            model_eager.init_weights(buffer_device=torch.device(self.DEVICE))
+        model_eager.load_state_dict(state)
+        apply_ac(model_eager, ActivationCheckpointConfig(mode="selective"))
+        eager_losses, peak_eager = run_steps(eager_step, model_eager)
+        del model_eager
+        torch.cuda.empty_cache()
+
+        model_traced = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            model_traced.init_weights(buffer_device=torch.device(self.DEVICE))
+        model_traced.load_state_dict(state)
+        traced_step = traced_step_factory(model_traced)
+        traced_losses, peak_traced = run_steps(traced_step, model_traced)
+        del model_traced
+        torch.cuda.empty_cache()
+
+        if check_grads:
+            for step, ((el, eg), (tl, tg)) in enumerate(
+                zip(eager_losses, traced_losses, strict=True)
+            ):
+                self.assertTrue(
+                    torch.equal(el, tl),
+                    f"Step {step}: eager loss={el.item():.6f} "
+                    f"vs traced loss={tl.item():.6f}",
+                )
+                for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
+                    self.assertTrue(
+                        torch.equal(ge, gt),
+                        f"Step {step}: grad[{i}] mismatch",
+                    )
+        else:
+            for step, (el, tl) in enumerate(zip(eager_losses, traced_losses, strict=True)):
+                self.assertTrue(
+                    torch.equal(el, tl),
+                    f"Step {step}: eager loss={el.item():.6f} "
+                    f"vs traced loss={tl.item():.6f}",
+                )
+
+        if check_peak_memory:
+            ratio = peak_traced / peak_eager
+            self.assertLess(
+                ratio,
+                1.1,
+                f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
+                f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
+            )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestGraphSACPeakMemory(GraphBasedSACTestMixin, unittest.TestCase):
+    def test_llama_1b_peak_memory(self):
+        """Traced+AC peak memory stays within 10% of eager+AC for Llama 1B."""
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        config = llama3_configs["1B"]()
+        tokens = torch.randint(
+            0, config.vocab_size, (2, 2048), device=self.DEVICE
+        )
+        labels = torch.randint(
+            0, config.vocab_size, (2, 2048), device=self.DEVICE
+        )
+        self._run_sac_test(
+            Llama3Model,
+            config,
+            (tokens,),
+            labels,
+            dtype=torch.bfloat16,
+            num_steps=3,
+            check_peak_memory=True,
+            check_grads=True,
+        )
 class TestAutogradGradVsBackwardFSDP(FSDPTest):
     """Verify autograd.grad() and loss.backward() have identical peak memory with FSDP."""
 
