@@ -522,7 +522,7 @@ open question. If it doesn't, this is a shared infrastructure gap — FlexShard 
 follow whatever solution Graph Trainer adopts rather than inventing its own.
 
 **FlexShard's responsibility is narrow**:
-- Eager: provide a `no_sync()` context manager
+- Eager: ~~provide a `no_sync()` context manager~~ **Done (Phase 2c)**: `DStorage.no_sync()` and `FlexShardModule.no_sync()` context managers skip `reduce_grad()` in `_post_backward` when `_require_gradient_sync=False`. Only affects hooks-based flow (`register_hooks=True`). In parametrization mode, reduce-scatter is autograd-generated and always runs — gradient accumulation uses "always sync" (each backward does reduce-scatter, caller accumulates `param.grad`).
 - Graph: ensure the parametrization traces cleanly in both "with reduce-scatter"
   and "without reduce-scatter" configurations, so the training loop can compose either
   variant
@@ -628,29 +628,38 @@ FlexShard supports per-bucket policies via `BucketSpec`.
   shards)
 - **Compute dtype**: what forward/backward uses (e.g., bf16)
 
-Two options for where master weights live:
+~~Two options for where master weights live:~~
 
-A. **Store fp32, cast during unshard**: the byte buffer holds fp32 master weights.
-   The parametrization all-gathers the fp32 shard, then casts to bf16 for compute.
-   The backward produces bf16 gradients, reduce-scatter produces bf16 local grad
-   shards, and the optimizer applies them to fp32 master weights. This is the
-   standard FSDP2 mixed-precision pattern.
+~~A. **Store fp32, cast during unshard**~~ **Implemented (Phase 2c)**: the byte buffer
+holds fp32 master weights. The parametrization all-gathers the fp32 shard, then casts
+to bf16 for compute via `_MixedPrecisionCast.apply()`. The backward casts the grad
+to `reduce_dtype` before reduce-scatter. This is the "gather-then-cast" pattern,
+matching SimpleFSDP/FSDP2 semantics.
 
 B. **Store bf16, optimizer holds fp32**: the byte buffer holds bf16 shards. The
    optimizer maintains separate fp32 state. Simpler for DStorage (no dtype mismatch),
-   but fp32 optimizer state lives outside the byte buffer.
+   but fp32 optimizer state lives outside the byte buffer. (Not implemented — option A
+   is the standard pattern.)
 
-The parametrization handles the cast transparently:
+**Implementation**: `_MixedPrecisionCast` is a custom `torch.autograd.Function` that
+decouples forward and backward dtype control. Forward casts to `param_dtype`, backward
+casts grad to `reduce_dtype`. Both `ShardParametrization` and `FlatShardParametrization`
+apply the cast after all-gather + reshape:
 
 ```python
-def forward(self, param: Tensor) -> Tensor:
-    full = all_gather(param)           # fp32 all-gather
-    return full.to(self.compute_dtype)  # cast to bf16 for compute
+def forward(self, local_shard: Tensor) -> Tensor:
+    full = all_gather(local_shard)      # storage dtype (e.g., fp32)
+    full = wait_tensor(full)
+    # ... dim-fix (chunk+cat for Shard(dim!=0), view for FlatShard) ...
+    if self.param_dtype is not None or self.reduce_dtype is not None:
+        full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
+    return full                          # compute dtype (e.g., bf16)
 ```
 
 **Cast location** is a bandwidth vs memory trade-off: cast-then-gather sends less
 data but requires bf16 storage; gather-then-cast sends more data but preserves fp32
-master weights in the buffer. This is controlled by `MixedPrecisionPolicy.param_dtype`
+master weights in the buffer. The current implementation uses gather-then-cast.
+This is controlled by `MixedPrecisionPolicy.param_dtype`
 and `reduce_dtype`, specified per bucket via `BucketSpec`:
 
 ```python
@@ -669,11 +678,12 @@ flex_shard(
 )
 ```
 
-### 12. CPU offloading
+### 12. CPU offloading (deferred to Phase 2d)
 
 FSDP2 supports per-module CPU offloading; FlexShard supports per-bucket offloading
 via `BucketSpec`. The bucket is the natural offload unit — it maps to one DStorage
-buffer and one CPU→GPU transfer.
+buffer and one CPU→GPU transfer. `BucketSpec.offload_policy` is typed as `Any` — a
+placeholder with no behavior until Phase 2d implements it.
 
 **Bucket-level offloading**: the entire bucket buffer lives on CPU. Before a bucket's
 params are needed, the buffer is transferred to GPU, all-gather runs on GPU, and the
@@ -713,7 +723,8 @@ Both mixed precision and CPU offloading are handled inside the parametrization.
 Neither requires changes to the compilation story — compiled graphs see the same
 `_c10d_functional` ops regardless of storage dtype or device. `BucketSpec` policies
 compose naturally: offloaded fp32 params on CPU → transfer to GPU → all-gather →
-cast to bf16 → compute.
+cast to bf16 → compute. Mixed precision is implemented (Phase 2c); CPU offloading
+is deferred to Phase 2d.
 
 ### 13. Tensor parallelism composition
 
@@ -1313,14 +1324,21 @@ FlexShard Core (always parametrization-based)
 - [x] `flex_shard()` signature updated: `shard_placement_fn` accepts `PlacementFn | dict[str, Placement] | None`; `buckets`, `reshard_after_forward`, `register_hooks`, `module_fqn` are keyword-only
 - [x] Unit tests in `test_flex_shard_buckets.py`: fnmatch placement dict (5 tests), bucket assignment (6 tests), placement validation (5 tests), auto_buckets (3 tests), BucketSpec (2 tests), distributed per-bucket DStorage (4 tests)
 
-### Phase 2c: Memory management and mixed precision
+### Phase 2c: Mixed precision and no_sync ✓
+
+- [x] Implement `MixedPrecisionPolicy` frozen dataclass (`param_dtype`, `reduce_dtype`) matching SimpleFSDP's definition
+- [x] Implement `_MixedPrecisionCast` custom autograd function for decoupled forward/backward dtype control — forward casts to `param_dtype`, backward casts grad to `reduce_dtype`, traceable by `torch.compile` and `make_fx`
+- [x] Update `ShardParametrization` and `FlatShardParametrization` to apply gather-then-cast pattern: all-gather in storage dtype, then cast to compute dtype via `_MixedPrecisionCast.apply()`
+- [x] Wire per-bucket `mp_policy` from `BucketSpec` → parametrization instances via `fqn_to_mp_policy` dict built during per-bucket loop in `flex_shard()`
+- [x] Type `BucketSpec.mp_policy` as `MixedPrecisionPolicy | None` (was `Any`); `offload_policy` stays `Any` (CPU offloading deferred to Phase 2d)
+- [x] Implement `no_sync()` context manager on `DStorage` (sets `_require_gradient_sync=False`, guards `_post_backward` reduce-scatter) and `FlexShardModule` (propagates to all storages) — hooks mode only; parametrization mode uses "always sync" gradient accumulation (see Gap #8)
+- [x] Unit tests in `test_flex_shard_mixed_precision.py`: MixedPrecisionPolicy (4 tests), _MixedPrecisionCast (6 tests), BucketSpec mp_policy wiring (4 tests), no_sync (3 tests), distributed mixed precision (6 tests), distributed no_sync (2 tests)
+
+### Phase 2d: Memory management (TODO)
 
 - [ ] Support `reshard_after_forward` via checkpoint policy annotations (like SimpleFSDP)
-- [ ] Implement `no_sync()` context manager for eager mode gradient accumulation (see Gap #8)
 - [ ] Ensure parametrization traces cleanly both with and without reduce-scatter for graph mode gradient accumulation
-- [ ] Implement mixed precision cast in parametrization forward (see Gap #11); `BucketSpec.mp_policy` controls per-bucket dtype
 - [ ] Implement CPU offloading device transfer in parametrization forward (see Gap #12); `BucketSpec.offload_policy` controls per-bucket offload
-- [ ] Unit tests: FlexShard model traces correctly with `make_fx`; mixed precision numerics
 
 ### Phase 3: Graph pass compatibility
 
