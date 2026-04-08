@@ -13,106 +13,117 @@ from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import GptOssModel
 
+_LAYER_RE = re.compile(r"^layers\.(\d+)\.")
+_HF_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
+    """Pure FQN rename — no value transforms needed.
+
+    Warning: Conversion does not support saving to MXFP4 quantization format.
+    One can save into unquantized HF checkpoints with ``last_save_in_hf = true``.
+    For loading from quantized checkpoints, the QuantizedHuggingFaceStorageReader
+    handles dequantization during load.
+    """
+
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
-        self.from_hf_map = {
+        self.model_config = model_config
+
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        RENAME = {
+            "tok_embeddings.weight": "model.embed_tokens.weight",
+            "norm.weight": "model.norm.weight",
+            "output.weight": "lm_head.weight",
+        }
+        LAYER_RENAME = {
+            "attention.wq.weight": "self_attn.q_proj.weight",
+            "attention.wq.bias": "self_attn.q_proj.bias",
+            "attention.wk.weight": "self_attn.k_proj.weight",
+            "attention.wk.bias": "self_attn.k_proj.bias",
+            "attention.wv.weight": "self_attn.v_proj.weight",
+            "attention.wv.bias": "self_attn.v_proj.bias",
+            "attention.wo.weight": "self_attn.o_proj.weight",
+            "attention.wo.bias": "self_attn.o_proj.bias",
+            "attention.sinks": "self_attn.sinks",
+            "attention_norm.weight": "input_layernorm.weight",
+            "ffn_norm.weight": "post_attention_layernorm.weight",
+            "moe.experts.mlp1_weight": "mlp.experts.gate_up_proj_blocks",
+            "moe.experts.mlp1_bias": "mlp.experts.gate_up_proj_bias",
+            "moe.experts.mlp2_weight": "mlp.experts.down_proj_blocks",
+            "moe.experts.mlp2_bias": "mlp.experts.down_proj_bias",
+            "moe.router.gate.weight": "mlp.router.weight",
+            "moe.router.gate.bias": "mlp.router.bias",
+        }
+
+        hf: dict[str, Any] = {}
+
+        for key, value in state_dict.items():
+            if key in RENAME:
+                hf[RENAME[key]] = value
+            elif m := _LAYER_RE.match(key):
+                layer = m.group(1)
+                suffix = key[m.end() :]
+
+                if suffix in LAYER_RENAME:
+                    hf[f"model.layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+
+        return hf
+
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        RENAME = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
-            # Attention module
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-            "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            "model.layers.{}.self_attn.o_proj.bias": "layers.{}.attention.wo.bias",
-            "model.layers.{}.self_attn.sinks": "layers.{}.attention.sinks",
-            # Transformer layer
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE
-            "model.layers.{}.mlp.experts.gate_up_proj_blocks": "layers.{}.moe.experts.mlp1_weight",
-            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.experts.mlp1_bias",
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.experts.mlp2_weight",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.experts.mlp2_bias",
-            "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
-            "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+        LAYER_RENAME = {
+            "self_attn.q_proj.weight": "attention.wq.weight",
+            "self_attn.q_proj.bias": "attention.wq.bias",
+            "self_attn.k_proj.weight": "attention.wk.weight",
+            "self_attn.k_proj.bias": "attention.wk.bias",
+            "self_attn.v_proj.weight": "attention.wv.weight",
+            "self_attn.v_proj.bias": "attention.wv.bias",
+            "self_attn.o_proj.weight": "attention.wo.weight",
+            "self_attn.o_proj.bias": "attention.wo.bias",
+            "self_attn.sinks": "attention.sinks",
+            "input_layernorm.weight": "attention_norm.weight",
+            "post_attention_layernorm.weight": "ffn_norm.weight",
+            "mlp.experts.gate_up_proj_blocks": "moe.experts.mlp1_weight",
+            "mlp.experts.gate_up_proj_bias": "moe.experts.mlp1_bias",
+            "mlp.experts.down_proj_blocks": "moe.experts.mlp2_weight",
+            "mlp.experts.down_proj_bias": "moe.experts.mlp2_bias",
+            "mlp.router.weight": "moe.router.gate.weight",
+            "mlp.router.bias": "moe.router.gate.bias",
+        }
+
+        sd: dict[str, Any] = {}
+
+        for key, value in hf_state_dict.items():
+            if key in RENAME:
+                sd[RENAME[key]] = value
+            elif m := _HF_LAYER_RE.match(key):
+                layer = m.group(1)
+                suffix = key[m.end() :]
+
+                if suffix in LAYER_RENAME:
+                    sd[f"layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+
+        return sd
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
-        """
-        Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
-        """
+        # NOTE: Now we use Quantized HF storage reader to read GPT-OSS model where
+        # expert weights are saved in MXFP4 format.
+        # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
         if from_quantized:
             from torch.distributed.checkpoint.quantized_hf_storage import (
                 QuantizedHuggingFaceStorageReader,
             )
 
-            # NOTE: Now we use Quantized HF storage reader to read GPT-OSS model where
-            # expert weights are saved in MXFP4 format.
-            # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
             return QuantizedHuggingFaceStorageReader(
                 path=path,
                 thread_count=4,
             )
         else:
             return HuggingFaceStorageReader(path)
-
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Convert from a tt model state dict to a hf format state dict.
-
-        Only map keys without changing shapes to the same as MXFP4 checkpoint.
-        For loading from quantized checkpoints, the QuantizedHuggingFaceStorageReader
-            will handle dequantization during load.
-
-        Warning: Conversion does not support saving to mxfp4 quantization format.
-                 One can save into unquantized hf checkpoints with last_save_in_hf = true.
-        """
-        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
-        hf_state_dict = {}
-
-        for key, value in state_dict.items():
-            if "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
-                # pyrefly: ignore
-                layer_num = re.search(r"\d+", key).group(0)
-                hf_key = to_hf_map[abstract_key]
-                hf_key = hf_key.format(layer_num)
-                hf_state_dict[hf_key] = value
-            else:
-                if key not in to_hf_map:
-                    continue
-                hf_key = to_hf_map[key]
-                hf_state_dict[hf_key] = value
-
-        return hf_state_dict
-
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Convert from hf format state dict to tt model state dict.
-        """
-
-        state_dict = {}
-
-        for key, value in hf_state_dict.items():
-            if "layers" in key:
-                # pyrefly: ignore
-                layer_num = re.search(r"\d+", key).group(0)
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                tt_key = self.from_hf_map[abstract_key]
-                tt_key = tt_key.format(layer_num)
-                state_dict[tt_key] = value
-            else:
-                tt_key = self.from_hf_map[key]
-                state_dict[tt_key] = value
-
-        return state_dict

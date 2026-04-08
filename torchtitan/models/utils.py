@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
+from typing import Any
+
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -11,34 +14,144 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
 from torchtitan.tools.logging import logger
 
 
-class MoEStateDictAdapter(StateDictAdapter):
+class MoEStateDictAdapter(BaseStateDictAdapter):
+    """StateDictAdapter for MoE models.
+
+    Provides DTensor-aware utilities for converting between torchtitan's 3D
+    GroupedExperts weights (``[num_experts, ...]``) and HuggingFace formats.
+
+    Different HF models store experts differently:
+    - Per-expert 2D weights (Qwen3, DeepSeekV3): needs 3D↔2D split/concat
+    - 3D tensors with transforms (Llama4): transpose + concat, no decomposition
+    - 3D block renames (GptOss): pure key renames
+
+    Subclasses that need 3D↔2D decomposition override ``_HF_EXPERT_RE``,
+    ``_PROJ_TO_HF``, and ``_PROJ_FROM_HF``, then call ``_experts_to_hf`` /
+    ``_experts_from_hf``. Models that don't need decomposition keep the
+    empty defaults and handle expert keys in their own ``to_hf`` / ``from_hf``.
     """
-    StateDictAdapter for MoE models.
-    HF MoE models store experts as a module list each with 2D weights. In torchtitan, we
-    store experts as a 3D param with the first dimension being num_experts. The functions
-    in this class help convert 3D param into list of 2D params so that the checkpoint
-    can be loaded without incurring local memory overhead, and then concatenate
-    the results back to 3D param.
-    """
+
+    # Subclasses that need 3D↔2D expert decomposition override these.
+    # Models with 3D↔3D expert formats (Llama4, GptOss) keep the defaults.
+    _HF_EXPERT_RE: re.Pattern | None = None
+    _PROJ_TO_HF: dict[str, str] = {}
+    _PROJ_FROM_HF: dict[str, str] = {}
 
     def __init__(
         self,
         model_config: Decoder.Config,
         hf_assets_path: str | None,
     ):
-        super().__init__(model_config, hf_assets_path)
+        super().__init__(hf_assets_path)
         self.model_config = model_config
-        self.hf_assets_path = hf_assets_path
         # Store metadata for GroupedExperts <-> individual experts conversion
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
         self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
         self.grouped_expert_weight_mesh = {}  # {titan_abstract_key: device_mesh}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
+
+    # ------------------------------------------------------------------
+    # Shared helpers for 3D GroupedExperts <-> individual 2D HF experts
+    # ------------------------------------------------------------------
+
+    def _experts_to_hf(
+        self,
+        suffix: str,
+        layer: str,
+        value: Any,
+        hf: dict[str, Any],
+        *,
+        hf_layer_prefix: str = "model.layers",
+    ) -> None:
+        """Convert a 3D GroupedExperts weight to individual 2D HF expert weights.
+
+        Handles both DTensor (distributed) and plain tensor (offline) cases.
+        Results are written directly into *hf*.
+        """
+        hf_proj = self._PROJ_TO_HF[suffix]
+        titan_abstract_key = f"layers.{{}}.{suffix}"
+        hf_abstract_key = f"{hf_layer_prefix}.{{}}.mlp.experts.{{}}.{hf_proj}.weight"
+
+        if isinstance(value, DTensor):
+            self.grouped_expert_weight_placements[titan_abstract_key] = value.placements
+            self.grouped_expert_weight_shape[titan_abstract_key] = value.shape
+            self.grouped_expert_weight_mesh[titan_abstract_key] = value.device_mesh
+            local_expert_fqn = self._get_local_experts_weights(
+                hf_abstract_key,
+                titan_abstract_key,
+                layer,
+                value,
+            )
+            hf.update(local_expert_fqn)
+        else:
+            # pyrefly: ignore [missing-attribute]
+            moe_layer = next(
+                l for l in self.model_config.layers if l.moe is not None
+            )
+            num_experts = moe_layer.moe.num_experts
+            split_values = self._split_experts_weights(value, num_experts)
+            for expert_num in range(num_experts):
+                hf[
+                    f"{hf_layer_prefix}.{layer}.mlp.experts.{expert_num}.{hf_proj}.weight"
+                ] = split_values[expert_num].squeeze()
+
+    def _experts_from_hf(
+        self,
+        key: str,
+        value: Any,
+        sd: dict[str, Any],
+        expert_weights_by_layer: dict[str, dict[str, dict[int, Any]]],
+    ) -> bool:
+        """Collect an individual HF expert weight and concatenate when complete.
+
+        Returns True if *key* matched an expert pattern (handled), False otherwise.
+        """
+        if self._HF_EXPERT_RE is None:
+            return False
+        em = self._HF_EXPERT_RE.match(key)
+        if em is None:
+            return False
+
+        layer = em.group(1)
+        expert_num = int(em.group(2))
+        proj = em.group(3)
+        titan_suffix = self._PROJ_FROM_HF[proj]
+        titan_abstract_key = f"layers.{{}}.{titan_suffix}"
+        new_key = f"layers.{layer}.{titan_suffix}"
+
+        if layer not in expert_weights_by_layer:
+            expert_weights_by_layer[layer] = {}
+        if titan_abstract_key not in expert_weights_by_layer[layer]:
+            expert_weights_by_layer[layer][titan_abstract_key] = {}
+        expert_weights_by_layer[layer][titan_abstract_key][expert_num] = value
+
+        # Concatenate when all experts are collected
+        if titan_abstract_key in self.local_experts_indices:
+            stacked = self._concatenate_expert_weights_dtensor(
+                expert_weights_by_layer,
+                titan_abstract_key,
+                layer,
+            )
+        else:
+            # pyrefly: ignore [missing-attribute]
+            moe_layer = next(
+                l for l in self.model_config.layers if l.moe is not None
+            )
+            stacked = self._concatenate_expert_weights(
+                expert_weights_by_layer,
+                titan_abstract_key,
+                layer,
+                moe_layer.moe.num_experts,
+            )
+        if stacked is not None:
+            sd[new_key] = stacked
+
+        return True
 
     def _calculate_strided_shard_shard_indices(
         self,
