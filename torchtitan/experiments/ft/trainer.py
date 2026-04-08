@@ -303,20 +303,33 @@ class FaultTolerantTrainer(Trainer):
         self.step = 0
         self.ntokens_seen = 0
 
-        # FT addition: pass ft_manager to CheckpointManager
-        self.checkpointer = config.checkpoint.build(
-            dataloader=self.dataloader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
+        from torchtitan.components.state_dict_transforms import StateDictTransforms
+
+        # FT addition: use FTCheckpointManager for fault tolerance support
+        from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
+
+        sd_transforms = StateDictTransforms(
+            export_dtype=TORCH_DTYPE_MAP[config.checkpoint.export_dtype],
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter
                 else None
             ),
+        )
+
+        self.checkpointer = FTCheckpointManager(
+            config.checkpoint,
+            dataloader=self.dataloader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states={"train_state": self},
+            sd_transforms=sd_transforms,
             base_folder=config.dump_folder,
             ft_manager=self.ft_manager,
+            key_filter=model_converters.key_filter(),
+            state_dict_transform=model_converters.state_dict_transform(),
+            converter_sd_adapters=model_converters.converter_sd_adapters(),
         )
 
         loss_parallel_enabled = (
