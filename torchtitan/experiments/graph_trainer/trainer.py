@@ -20,7 +20,10 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     trace_train_step,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import apply_default_graph_passes
+from torchtitan.experiments.graph_trainer.passes import (
+    apply_default_graph_passes,
+    construct_default_graph_passes,
+)
 from torchtitan.trainer import Trainer
 
 
@@ -115,20 +118,11 @@ class GraphTrainer(Trainer):
                     extra_kwargs,
                 )
 
-            # Parameters and buffers have stable tensor addresses across
-            # training steps, so they are static inputs for cudagraph.
-            # Each param/buffer may expand to multiple plain tensors after
-            # subclass unwrapping (e.g. DTensor -> inner tensors).
-            num_static = sum(
-                layout.num_tensors
-                for layout in self._traced_step.input_subclass_layouts[
-                    : self._traced_step.params_len
-                ]
-            )
+            passes = construct_default_graph_passes(self._traced_step)
             self._traced_step.gm = apply_default_graph_passes(
                 self._traced_step.gm,
                 self._traced_step.example_inputs,
-                static_input_indices=list(range(num_static)),
+                passes,
             )
         with self.train_context(), self.maybe_enable_amp:
             outputs = run_traced_train_step(

@@ -15,10 +15,18 @@ Pass Types:
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
 
+from __future__ import annotations
+
+import functools
 import operator
 from collections import defaultdict
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torch._functorch.aot_autograd import JointWithDescriptors
 from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.fx_passes.bucketing import (
@@ -42,9 +50,10 @@ from torchtitan.tools.logging import logger
 def _has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
     """Check if the graph contains CUDA-to-CPU device transfers.
 
-    These transfers are incompatible with CUDA graph capture (which requires
-    pinned memory for cross-device copies). Returns True if any call_function
-    node produces a CPU tensor while consuming a CUDA tensor input.
+    CUDA graph capture does not support unpinned CPU↔CUDA copies.  This
+    function conservatively returns True if any ``call_function`` node
+    produces a CPU tensor while consuming a CUDA tensor input, without
+    checking whether the CPU tensor is pinned.
     """
     for node in gm.graph.nodes:
         if node.op != "call_function":
@@ -59,42 +68,61 @@ def _has_cuda_to_cpu_transfers(gm: torch.fx.GraphModule) -> bool:
     return False
 
 
-def apply_default_graph_passes(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple,
-    *,
-    static_input_indices: list[int] | None = None,
-) -> torch.fx.GraphModule:
-    """Entry point for optimizing the traced fwd+bwd graph.
+def construct_default_graph_passes(
+    traced_result: "TracedResult",
+) -> list[Callable]:
+    """Build the default pass list for the aot_fx_trace compile path.
 
-    Called by GraphTrainer after tracing to apply graph-level optimization
-    passes before execution. Individual passes are defined below.
+    Per-pass configuration (e.g. ``static_input_indices`` for cudagraph) is
+    bound here via ``functools.partial`` so that ``apply_default_graph_passes``
+    stays a generic pass runner with no pass-specific parameters.
 
     Args:
-        gm: The traced forward+backward graph module.
-        example_inputs: Example (fake) inputs matching the graph signature.
-        static_input_indices: Indices of graph inputs whose tensor addresses
-            are stable across training steps (e.g. parameters and buffers).
-            Passed to cudagraph_pass to avoid redundant copies during replay.
+        traced_result: The traced graph and metadata from ``trace_train_step``.
+
+    Returns:
+        An ordered list of graph passes ready to apply.
     """
-    gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
+    passes: list[Callable] = [
+        functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
+    ]
 
     # cudagraph should be the last pass.
     # Skip when the graph contains CUDA→CPU transfers (e.g. MoE load-balancing
     # counters) which are incompatible with CUDA graph capture.
-    if _has_cuda_to_cpu_transfers(gm):
+    if _has_cuda_to_cpu_transfers(traced_result.gm):
         logger.info(
             "Skipping cudagraph: graph contains CUDA-to-CPU device transfers "
             "incompatible with CUDA graph capture"
         )
     else:
-        gm = cudagraph_pass(
-            gm,
-            example_inputs,
-            is_forward=True,
-            static_input_indices=static_input_indices,
+        static_input_indices = list(range(traced_result.num_static_inputs))
+        passes.append(
+            functools.partial(
+                cudagraph_pass,
+                is_forward=True,
+                static_input_indices=static_input_indices,
+            )
         )
 
+    return passes
+
+
+def apply_default_graph_passes(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    passes: list[Callable],
+) -> torch.fx.GraphModule:
+    """Apply graph passes to the traced fwd+bwd graph.
+
+    Args:
+        gm: The traced forward+backward graph module.
+        example_inputs: Example (fake) inputs matching the graph signature.
+        passes: Ordered list of pass callables, each with signature
+            ``(gm, example_inputs, **kwargs) -> gm``.
+    """
+    for pass_fn in passes:
+        gm = pass_fn(gm, example_inputs)
     return gm
 
 

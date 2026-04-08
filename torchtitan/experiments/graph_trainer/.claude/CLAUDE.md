@@ -15,6 +15,14 @@ def my_pass(gm: torch.fx.GraphModule, example_inputs, *, other_kwargs) -> torch.
 - The pass must return the (possibly transformed) `GraphModule`.
 - Passes that don't need `example_inputs` should still accept it (use `example_inputs=None`).
 
+## Pass Configuration
+
+Per-pass configuration (e.g. `static_input_indices` for cudagraph) must be
+bound during pass construction in `construct_default_graph_passes` via
+`functools.partial`, **not** threaded through `apply_default_graph_passes` as
+parameters. The apply function is a generic pass runner and must not contain
+pass-specific arguments.
+
 ## Don't Modify Core for This Experiment
 
 Do not add `if graph_trainer:` branches to `torchtitan/train.py`
