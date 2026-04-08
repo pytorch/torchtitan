@@ -3,14 +3,16 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch.nn as nn
 
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 
 
@@ -30,6 +32,64 @@ class ModelConverter(Protocol):
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
         ...
+
+    def key_filter(self) -> Callable[[str], bool] | None:
+        """Return a filter that identifies state dict keys owned by this converter.
+
+        The returned callable takes a key name and returns ``True`` if the
+        key belongs to this converter.  Return ``None`` if the converter
+        doesn't introduce new keys.
+
+        Used by ``ModelWrapper`` to split state dicts:
+        - ``mode="base"`` excludes all converter-owned keys (for HF containers)
+        - Per-converter load containers in multi-source loading
+        - Partial load planning when converter keys are present
+        """
+        return None
+
+    def state_dict_transform(
+        self,
+    ) -> Callable[[dict[str, Any]], dict[str, Any]] | None:
+        """Return a transform applied to the model state dict for export saves.
+
+        The returned callable takes a full state dict and returns a
+        (possibly filtered or modified) state dict.  Return ``None`` to
+        indicate no transform (the full state dict is used as-is).
+
+        This is only called for last-step / model-only saves, not for
+        interval resume checkpoints.
+
+        The transform output determines which FQN adapter is used during
+        HF-format saves.  The checkpoint manager splits the export state dict
+        by each converter's ``key_filter``: matched keys go through that
+        converter's ``state_dict_adapter``; remaining (base) keys go through
+        the model's HF adapter.  Examples:
+
+        - **Drop converter keys**: transform removes converter keys from the
+          state dict → no keys match any converter filter → model's HF
+          adapter maps all.
+        - **Keep converter keys**: converter keys go through converter's
+          ``state_dict_adapter``, base keys through model's HF adapter —
+          both are saved together.
+        - **Filter to converter keys only**: transform filters to converter
+          keys only → all keys match converter filter → converter adapter
+          maps them; no base keys remain.
+        """
+        return None
+
+    def state_dict_adapter(self) -> BaseStateDictAdapter | None:
+        """Return a format adapter for converter-specific checkpoint saves/loads.
+
+        The adapter defines FQN mapping (``to_hf`` / ``from_hf``) between the
+        converter's native key names and its checkpoint format (e.g. PEFT
+        safetensors).  The checkpoint manager uses this adapter to save/load
+        converter-specific checkpoints (additional paths) in the same way it
+        handles HF format for the base model.
+
+        Return ``None`` (default) if the converter doesn't have its own
+        checkpoint format.
+        """
+        return None
 
 
 class ModelConvertersContainer(Configurable, ModelConverter):
@@ -79,6 +139,67 @@ class ModelConvertersContainer(Configurable, ModelConverter):
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
+
+    def state_dict_transform(
+        self,
+    ) -> Callable[[dict[str, Any]], dict[str, Any]] | None:
+        """Compose state_dict_transform from all converters."""
+        transforms = [
+            t for c in self.converters if (t := c.state_dict_transform()) is not None
+        ]
+        if not transforms:
+            return None
+        if len(transforms) == 1:
+            return transforms[0]
+
+        def composed(sd: dict[str, Any]) -> dict[str, Any]:
+            for t in reversed(transforms):
+                sd = t(sd)
+            return sd
+
+        return composed
+
+    def key_filter(self) -> Callable[[str], bool] | None:
+        """Compose key_filter from all converters (union / OR)."""
+        filters = [f for c in self.converters if (f := c.key_filter()) is not None]
+        if not filters:
+            return None
+        if len(filters) == 1:
+            return filters[0]
+
+        def composed(key: str) -> bool:
+            return any(f(key) for f in filters)
+
+        return composed
+
+    def converter_sd_adapters(
+        self,
+    ) -> list[tuple[BaseStateDictAdapter, Callable[[str], bool]]]:
+        """Return (adapter, key_filter) pairs from converters, in converter order.
+
+        Each converter's adapter is paired with its own ``key_filter`` so the
+        checkpoint manager can create per-converter state dict containers
+        during load.
+
+        Converters that provide a ``state_dict_adapter`` without a
+        ``key_filter`` are skipped with a warning — without a filter the
+        checkpoint manager cannot route keys to the adapter.
+        """
+        result = []
+        for c in self.converters:
+            a = c.state_dict_adapter()
+            if a is None:
+                continue
+            kf = c.key_filter()
+            if kf is None:
+                logger.warning(
+                    f"Converter {type(c).__name__} provides a state_dict_adapter "
+                    "but no key_filter — its adapter will not be used for "
+                    "checkpoint saves/loads."
+                )
+                continue
+            result.append((a, kf))
+        return result
 
 
 def _validate_quantization(converters: list[Configurable.Config]):
