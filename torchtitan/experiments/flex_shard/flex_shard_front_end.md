@@ -592,24 +592,20 @@ compatible.
 placement type and shard dimension. `Shard(0)` + `Shard(0)` is safe. `Shard(0)` +
 `Shard(1)` is not. `Shard` + `FlatShard` is not.
 
-**Why the current `reshard_after_forward` heuristic must be replaced, not
-supplemented.** `reshard_after_forward.py` currently uses `is_wait_tensor_from_fsdp()`,
-which identifies FSDP all-gathers by walking the input chain backward from
-`wait_tensor` nodes looking for `placeholder` (graph input) nodes. This heuristic
-breaks with FlexShard for two reasons: (1) for `Shard(dim != 0)`, the unshard output
-is the `cat` node after `chunk` + `cat`, not the `wait_tensor` — the pass would
-annotate the wrong node and miss that the post-gather reshape ops must also be
-recomputed; (2) the walk is fragile — any intermediate ops in the parametrization
-(mixed precision cast, CPU-to-GPU transfer) break the single-input-chain assumption.
-The metadata-driven approach below eliminates both problems.
+**Implemented in `flex_shard/reshard_after_forward.py`.** The generalized pass
+`annotate_flex_shard_all_gather` reuses `is_wait_tensor_from_fsdp()` for detection
+(it already handles FlexShard — the backward walk through single-input ops to
+`placeholder` works for all patterns including `.to()` for offloading). It then
+walks FORWARD from `wait_tensor` to annotate the full unshard sequence:
+`chunk` + `getitem` + `cat` for `Shard(dim != 0)`, `view` for `FlatShard`,
+`slice` for SimpleFSDP, and `convert_element_type` for mixed precision. It also
+walks BACKWARD from `all_gather` to annotate pre-processing ops (`.to()` for
+offloading, `convert_element_type` for SimpleFSDP mixed precision). The terminal
+node is tagged with `node.meta["flex_shard_placement"] = True`.
 
-**`reshard_after_forward` uses the placement metadata instead.** The pass needs to
-identify which nodes are FlexShard parameter unshard outputs (to annotate them with
-`CheckpointPolicy.MUST_RECOMPUTE`) vs. other all-gathers in the model (e.g., from
-tensor parallelism). The pass checks for `flex_shard_placement` in `node.meta` —
-nodes with this key are FlexShard parameter unshard outputs; nodes without it are
-left alone. This replaces the SimpleFSDP-specific `is_wait_tensor_from_fsdp()`
-heuristic with a metadata-driven approach that works for both backends.
+The pass is registered as `flex_shard_reshard_after_fwd` in `graph_trainer/passes.py`.
+It is a superset of `fsdp_reshard_after_fwd` — handles both SimpleFSDP and FlexShard
+patterns. Users working with FlexShard should use this pass instead of the original.
 Selective activation checkpointing (SAC) composes naturally: when SAC recomputes
 forward ops during backward, it re-triggers the parametrization's all-gathers — this
 is the intended FSDP memory model, not a bug. The two passes are independent
@@ -678,34 +674,45 @@ flex_shard(
 )
 ```
 
-### 12. CPU offloading (deferred to Phase 2d)
+### 12. CPU offloading
 
 FSDP2 supports per-module CPU offloading; FlexShard supports per-bucket offloading
 via `BucketSpec`. The bucket is the natural offload unit — it maps to one DStorage
-buffer and one CPU→GPU transfer. `BucketSpec.offload_policy` is typed as `Any` — a
-placeholder with no behavior until Phase 2d implements it.
+buffer and one CPU→GPU transfer.
 
-**Bucket-level offloading**: the entire bucket buffer lives on CPU. Before a bucket's
-params are needed, the buffer is transferred to GPU, all-gather runs on GPU, and the
-unsharded params are used for compute. After `reshard_after_forward`, the GPU buffer
-is freed. Bucket granularity controls prefetch granularity: the training loop (or a
-prefetch hook) transfers the next bucket's buffer to GPU while the current bucket
-computes, overlapping CPU→GPU transfer with computation.
+~~`BucketSpec.offload_policy` is typed as `Any` — a placeholder with no behavior
+until Phase 2d implements it.~~ **Implemented (Phase 2d)**: `OffloadPolicy` frozen
+dataclass with `pin_memory: bool = True`, matching FSDP2's `CPUOffloadPolicy`
+semantics. `BucketSpec.offload_policy` typed as `OffloadPolicy | None`.
 
-The parametrization handles device transfer before the all-gather:
+**Bucket-level offloading**: the entire bucket buffer lives on CPU (optionally
+pinned). The parametrization handles H2D transfer before all-gather via
+`.to(compute_device, non_blocking=True)`. Backward autograd handles D2H
+automatically (`.to()` is differentiable — its backward generates `.to(cpu)`).
+Gradients end up on CPU; optimizer runs on CPU.
+
+```
+Forward:  CPU param → .to(cuda) → GPU shard → all_gather → full param (GPU)
+Backward: full grad → reduce_scatter → GPU grad → .to(cpu) → CPU grad
+```
+
+**Implementation**: `ShardParametrization` and `FlatShardParametrization` accept a
+`compute_device` kwarg. When set (non-None), the forward does H2D before all-gather:
 
 ```python
-def forward(self, param: Tensor) -> Tensor:
-    if param.device.type == "cpu":
-        param = param.to(self.compute_device, non_blocking=True)
-    full = all_gather(param)
-    return full
+def forward(self, local_shard: Tensor) -> Tensor:
+    if not _active_parametrization:
+        return local_shard
+    if self.compute_device is not None and local_shard.device != self.compute_device:
+        local_shard = local_shard.to(self.compute_device, non_blocking=True)
+    full = all_gather(local_shard)
+    ...
 ```
 
 Per-bucket offloading via `BucketSpec`:
 
 ```python
-offload = OffloadPolicy(offload_device="cpu", pin_memory=True)
+offload = OffloadPolicy(pin_memory=True)
 
 flex_shard(
     model, mesh,
@@ -719,12 +726,23 @@ flex_shard(
 )
 ```
 
+CPU offloading is only supported in parametrization mode (`register_hooks=False`).
+Using `offload_policy` with `register_hooks=True` raises `ValueError`.
+
 Both mixed precision and CPU offloading are handled inside the parametrization.
 Neither requires changes to the compilation story — compiled graphs see the same
 `_c10d_functional` ops regardless of storage dtype or device. `BucketSpec` policies
 compose naturally: offloaded fp32 params on CPU → transfer to GPU → all-gather →
-cast to bf16 → compute. Mixed precision is implemented (Phase 2c); CPU offloading
-is deferred to Phase 2d.
+cast to bf16 → compute.
+
+**Not yet implemented**: prefetch optimization (overlap H2D of next bucket with
+compute of current bucket), optimizer state offloading.
+
+**Implemented**: `reshard_after_forward` graph pass integration — `flex_shard_reshard_after_fwd_pass`
+in `flex_shard/reshard_after_forward.py` annotates all FlexShard unshard sequence nodes
+(including chunk+cat, view, .to(), convert_element_type) with `CheckpointPolicy.MUST_RECOMPUTE`
+or `MUST_SAVE`, and tags terminal nodes with `node.meta["flex_shard_placement"]`.
+Registered as `flex_shard_reshard_after_fwd` in `graph_trainer/passes.py`.
 
 ### 13. Tensor parallelism composition
 
@@ -1330,20 +1348,26 @@ FlexShard Core (always parametrization-based)
 - [x] Implement `_MixedPrecisionCast` custom autograd function for decoupled forward/backward dtype control — forward casts to `param_dtype`, backward casts grad to `reduce_dtype`, traceable by `torch.compile` and `make_fx`
 - [x] Update `ShardParametrization` and `FlatShardParametrization` to apply gather-then-cast pattern: all-gather in storage dtype, then cast to compute dtype via `_MixedPrecisionCast.apply()`
 - [x] Wire per-bucket `mp_policy` from `BucketSpec` → parametrization instances via `fqn_to_mp_policy` dict built during per-bucket loop in `flex_shard()`
-- [x] Type `BucketSpec.mp_policy` as `MixedPrecisionPolicy | None` (was `Any`); `offload_policy` stays `Any` (CPU offloading deferred to Phase 2d)
+- [x] Type `BucketSpec.mp_policy` as `MixedPrecisionPolicy | None` (was `Any`); `offload_policy` typed in Phase 2d
 - [x] Implement `no_sync()` context manager on `DStorage` (sets `_require_gradient_sync=False`, guards `_post_backward` reduce-scatter) and `FlexShardModule` (propagates to all storages) — hooks mode only; parametrization mode uses "always sync" gradient accumulation (see Gap #8)
 - [x] Unit tests in `test_flex_shard_mixed_precision.py`: MixedPrecisionPolicy (4 tests), _MixedPrecisionCast (6 tests), BucketSpec mp_policy wiring (4 tests), no_sync (3 tests), distributed mixed precision (6 tests), distributed no_sync (2 tests)
 
-### Phase 2d: Memory management (TODO)
+### Phase 2d: CPU offloading ✓
 
-- [ ] Support `reshard_after_forward` via checkpoint policy annotations (like SimpleFSDP)
-- [ ] Ensure parametrization traces cleanly both with and without reduce-scatter for graph mode gradient accumulation
-- [ ] Implement CPU offloading device transfer in parametrization forward (see Gap #12); `BucketSpec.offload_policy` controls per-bucket offload
+- [x] Implement `OffloadPolicy` frozen dataclass (`pin_memory: bool = True`) matching FSDP2's `CPUOffloadPolicy` semantics
+- [x] Type `BucketSpec.offload_policy` as `OffloadPolicy | None` (was `Any`)
+- [x] Update `ShardParametrization` and `FlatShardParametrization` with `compute_device` kwarg — H2D transfer via `.to(device, non_blocking=True)` before all-gather; backward autograd handles D2H automatically (`.to()` is differentiable)
+- [x] Wire per-bucket `offload_policy` from `BucketSpec` → CPU byte_storage allocation + parametrization `compute_device` via `fqn_to_offload_policy` dict in `flex_shard()`
+- [x] Validate offload + hooks incompatibility: `offload_policy` with `register_hooks=True` raises `ValueError`
+- [x] Unit tests in `test_flex_shard_offload.py`: OffloadPolicy (3 tests), BucketSpec offload_policy wiring (6 tests), H2D transfer (2 tests), distributed offloading (6 tests)
+- [x] `reshard_after_forward` graph pass: `flex_shard_reshard_after_fwd_pass` in `reshard_after_forward.py` — generalizes `annotate_fsdp_all_gather` to handle all FlexShard unshard patterns (Shard(0), Shard(dim!=0) chunk+cat, FlatShard view) plus offload `.to()` and mixed precision `convert_element_type`; tags terminal nodes with `node.meta["flex_shard_placement"]`; registered in `graph_trainer/passes.py` as `flex_shard_reshard_after_fwd`
+- [x] Unit tests in `test_flex_shard_reshard.py`: pattern detection (8 tests across Shard(0)/Shard(dim!=0)/FlatShard/SimpleFSDP with offload and mp variants), recompute policy (2 tests), metadata tagging (4 tests), pass signature (2 tests)
+- [ ] Prefetch optimization (overlap H2D of next bucket with compute of current) — deferred
 
 ### Phase 3: Graph pass compatibility
 
-- [ ] Attach placement metadata (`node.meta["flex_shard_placement"]`) to final output node of each parametrization's unshard sequence (see Gap #10)
-- [ ] Replace `is_wait_tensor_from_fsdp()` with metadata-driven check in `reshard_after_forward.py`
+- [x] Attach placement metadata (`node.meta["flex_shard_placement"]`) to final output node of each parametrization's unshard sequence (see Gap #10) — implemented in `flex_shard/reshard_after_forward.py`
+- [x] Generalize `annotate_fsdp_all_gather` for FlexShard — `annotate_flex_shard_all_gather` in `flex_shard/reshard_after_forward.py` handles all patterns; registered as `flex_shard_reshard_after_fwd` in `graph_trainer/passes.py`
 - [ ] Update `auto_bucketing` to respect placement metadata: only fuse nodes with matching placement type and shard dimension
 - [ ] Ensure bucketing passes (`auto_bucketing`, `transformer_block_bucketing`) recognize FlexShard comm patterns
 - [ ] Verify `apply_sac_pass` works with FlexShard's node patterns (hardcoded `wait_tensor` logic must handle `chunk`/`cat` nodes for `Shard(dim != 0)`)
@@ -1407,8 +1431,8 @@ failure narrows the bug to one specific concern.
 1. ~~Should DStorage emit one batched collective per bucket, or per-parameter collectives?~~ **Resolved**: Hybrid approach — DStorage emits per-parameter `_c10d_functional` ops during tracing; compiler re-buckets via `auto_bucketing` pass.
 2. ~~How to handle `Owned` placement under tracing? Broadcast is structurally different from all-gather/reduce-scatter.~~ **Resolved**: Scoped out of Phases 1-3 (rejected at init with clear error). Phase 5 adds `Owned` graph mode via `_c10d_functional.broadcast` / `all_reduce` with `OwnedParametrization`. See Gap #4 for full design.
 3. ~~Should FlexShard reuse SimpleFSDP's `ReplicateComputation` parametrization class, or implement its own?~~ **Resolved**: Implement its own for Phases 1-3 (1D mesh, `Shard`/`FlatShard` only). Reusing `ReplicateComputation` would require representing FlexShard placements as DTensor placements, which is unnatural for `FlatShard` (DTensor has no equivalent) and constrains future placement types. Own parametrization is straightforward for the 1D-mesh case — `ShardParametrization` and `FlatShardParametrization` use raw `_c10d_functional` ops directly. The registration mechanism and `_active_parametrization` guard are reused from SimpleFSDP (same pattern, shared code). For Phase 5+ multi-mesh composition (FSDP + TP/EP), revisit: either extend the custom parametrization to handle nested DTensors, or delegate the outer-mesh redistribution to `ReplicateComputation` while keeping FlexShard-specific logic in the inner parametrization. See Gap #13.
-6. Mixed precision: should the byte buffer store fp32 master weights (cast during unshard) or bf16 shards (optimizer holds fp32)? Cast before or after all-gather? Per-bucket policy via `BucketSpec`. See Gap #11.
-7. ~~CPU offloading: bucket-level or per-param offloading?~~ **Resolved**: per-bucket offloading via `BucketSpec`. Bucket is the natural offload unit (one DStorage buffer, one CPU→GPU transfer). See Gap #12.
+6. ~~Mixed precision: should the byte buffer store fp32 master weights (cast during unshard) or bf16 shards (optimizer holds fp32)? Cast before or after all-gather?~~ **Resolved (Phase 2c)**: gather-then-cast — all-gather in storage dtype (fp32), then cast to compute dtype (bf16) via `_MixedPrecisionCast`. Per-bucket policy via `BucketSpec.mp_policy`. See Gap #11.
+7. ~~CPU offloading: bucket-level or per-param offloading?~~ **Resolved (Phase 2d)**: per-bucket offloading via `BucketSpec.offload_policy`. `OffloadPolicy(pin_memory=True)`. H2D via `.to()` in parametrization; D2H via autograd `.to()` backward. See Gap #12.
 4. ~~How to handle mixed placement types within a single DStorage?~~ **Resolved**: Enforce one placement type per bucket. Different placements → different buckets. Validated at init.
 5. ~~How does `FlatShard` interact with buckets?~~ **Resolved**: The bucket IS the FlatShard scope. `flex_shard` computes flat offsets internally from bucket contents. User's placement fn returns `FlatShard()` as a marker with no offsets.
 
