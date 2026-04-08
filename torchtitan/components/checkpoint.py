@@ -866,7 +866,10 @@ class CheckpointManager(Configurable):
             raise ValueError(
                 "from_hf is True but sd_adapter or hf_assets_path is not provided."
             )
+
+        if from_hf:
             checkpoint_id = self.sd_transforms.hf_assets_path
+            assert checkpoint_id is not None  # guarded above
             if not os.path.isdir(checkpoint_id):
                 raise ValueError(
                     "model.hf_assets_path is being used to load HF weights but the path is not valid. "
