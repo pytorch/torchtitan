@@ -17,8 +17,6 @@ Pass Types:
 
 import operator
 from collections import defaultdict
-from collections.abc import Sequence
-from typing import Any
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
@@ -28,6 +26,7 @@ from torch._inductor.fx_passes.bucketing import (
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch._inductor.output_code import OutputCode
 from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
@@ -62,7 +61,7 @@ def apply_default_graph_passes(
 
 
 def autobucketing_reordering_pass(
-    gm: torch.fx.GraphModule, example_inputs=None
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """
     Apply autobucketing and reordering optimization.
@@ -76,7 +75,10 @@ def autobucketing_reordering_pass(
 
 
 def transformer_block_bucketing_reordering_pass(
-    gm: torch.fx.GraphModule, example_inputs, fsdp_manual_buckets
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    fsdp_manual_buckets,
 ) -> torch.fx.GraphModule:
     """
     Apply aten-level manual bucketing and reordering optimization.
@@ -105,7 +107,7 @@ def _ops_filter_with_distributed(name: str) -> bool:
 
 
 def regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs, *, serializable: bool = False
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
 ) -> torch.fx.GraphModule:
     """
     Apply regional inductor compilation based on user annotation.
@@ -134,7 +136,7 @@ def regional_inductor_pass(
 
 
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, is_forward: bool
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -158,7 +160,7 @@ def cudagraph_pass(
 
 
 def validate_flex_attn_annotation_pass(
-    gm: torch.fx.GraphModule,
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """Verify user annotations show up in the graph."""
     for node in gm.graph.nodes:
@@ -172,6 +174,8 @@ def validate_flex_attn_annotation_pass(
 
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
     op_list_to_save: set | None = None,
 ) -> torch.fx.GraphModule:
     """
@@ -295,7 +299,10 @@ def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 
 # Apply activation checkpointing on joint graph before partitioner
 def fsdp_reshard_after_fwd_pass(
-    gm: torch.fx.GraphModule, reshard_after_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    reshard_after_forward: bool,
 ) -> torch.fx.GraphModule:
     # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
     # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
@@ -309,6 +316,8 @@ def fsdp_reshard_after_fwd_pass(
 
 def inductor_decomposition_pass(
     gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
     joint_with_descriptors: JointWithDescriptors,
 ) -> torch.fx.GraphModule:
     """
@@ -405,8 +414,8 @@ def inductor_decomposition_pass(
 
 
 def full_inductor_compilation_pass(
-    gm: torch.fx.GraphModule, example_inputs
-) -> torch.fx.GraphModule:
+    gm: torch.fx.GraphModule, example_inputs: tuple
+) -> OutputCode:
     """
     Apply full Inductor compilation with code generation.
 
@@ -417,14 +426,17 @@ def full_inductor_compilation_pass(
         example_inputs: Example inputs for compilation
 
     Returns:
-        The compiled graph module
+        The compiled OutputCode from Inductor
     """
+    # TODO: This pass returns OutputCode instead of GraphModule, violating the
+    # unified graph pass signature convention. Should be addressed to comply.
     return compile_fx_inner(gm, example_inputs)
 
 
 def reassign_to_pg_pass(
     gm: torch.fx.GraphModule,
-    example_inputs,
+    example_inputs: tuple | None = None,
+    *,
     source_pg_name: str,
     target_pg_name: str,
 ) -> torch.fx.GraphModule:
@@ -463,7 +475,7 @@ def reassign_to_pg_pass(
 
 def tlparse_log_graph_pass(
     gm: torch.fx.GraphModule,
-    example_inputs: Sequence[Any],
+    example_inputs: tuple | None = None,
     *,
     graph_name: str,
 ) -> torch.fx.GraphModule:

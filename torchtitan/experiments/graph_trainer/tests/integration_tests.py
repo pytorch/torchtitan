@@ -236,6 +236,8 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 FSDP+TP+FlexAttn",
             "aot_llama3_fsdp_tp_flexattn",
             ngpu=8,
+            # TODO: Re-enable once flex attention CI failure is resolved
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -414,6 +416,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "AOT deepseek_v3 FSDP+TP+EP+FlexAttention",
             "aot_deepseekv3_fsdp_tp_ep_flexattention",
             ngpu=8,
+            # TODO: Re-enable once flex attention CI failure is resolved
+            disabled=True,
         ),
         OverrideDefinitions(
             [

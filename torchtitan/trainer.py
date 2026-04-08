@@ -106,6 +106,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
 
         def __post_init__(self):
+            if self.debug.batch_invariant:
+                raise ValueError(
+                    "Batch-invariant mode is not supported in pre-training."
+                )
             if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
                 if self.parallelism.expert_parallel_degree > 1:
                     raise NotImplementedError(
@@ -229,7 +233,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-
         # build tokenizer
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
@@ -518,17 +521,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        parallelism_config = config.parallelism
-        return ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        return ParallelDims.from_config(config.parallelism, world_size)
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -696,13 +689,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-            loss = (
-                # Rescale PP loss to be "local loss sum / global valid tokens)
-                # because each microbathes could have different number of valid tokens
-                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
-                if self.pp_has_last_stage
-                else torch.tensor([-1.0], device=self.device)
-            )
+            if self.pp_has_last_stage:
+                assert losses is not None
+                # Rescale PP loss to be "local loss sum / global valid tokens"
+                # because each microbatch could have different number of valid tokens
+                loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
+                    self.device
+                )
+            else:
+                loss = torch.tensor([-1.0], device=self.device)
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1

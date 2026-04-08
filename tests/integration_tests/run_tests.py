@@ -25,7 +25,9 @@ _TEST_SUITES_FUNCTION = {
 
 
 def _run_cmd(cmd):
-    return subprocess.run([cmd], text=True, shell=True, capture_output=True)
+    return subprocess.run(
+        [cmd], encoding="utf-8", errors="replace", shell=True, capture_output=True
+    )
 
 
 def run_single_test(
