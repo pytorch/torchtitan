@@ -36,7 +36,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
         # Flux needs custom index file resolution (multimodal subdirs,
         # diffusion_pytorch_model.safetensors.index.json), so skip the
         # base class index loading by passing hf_assets_path=None.
-        super().__init__()
+        super().__init__(model_config)
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
 
