@@ -111,13 +111,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module qwen3 --config qwen3_debugmodel",
+                    "--module qwen3 --config qwen3_debugmodel_param_groups",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "Qwen3 FSDP+TP",
-            "qwen3_fsdp+tp",
+            "Qwen3 FSDP+TP (param groups)",
+            "qwen3_fsdp+tp_param_groups",
             ngpu=4,
         ),
         OverrideDefinitions(
