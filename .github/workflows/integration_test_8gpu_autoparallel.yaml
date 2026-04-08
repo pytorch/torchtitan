@@ -76,6 +76,14 @@ jobs:
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+
+          # Ensure libdrm uses the up-to-date AMD GPU device ID database shipped by PyTorch.
+          TORCH_AMDGPU_IDS="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "share", "libdrm", "amdgpu.ids"))')"
+          if [[ -f "${TORCH_AMDGPU_IDS}" ]]; then
+            sudo cp "${TORCH_AMDGPU_IDS}" /usr/share/libdrm/amdgpu.ids
+          else
+            echo "Torch amdgpu.ids not found at ${TORCH_AMDGPU_IDS}"
+          fi
         fi
 
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu

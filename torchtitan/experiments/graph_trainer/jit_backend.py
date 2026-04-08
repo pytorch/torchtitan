@@ -147,7 +147,9 @@ def get_compile_backend_with_passes(
     def joint_ac_pass(
         gm: torch.fx.GraphModule, example_inputs: Any
     ) -> torch.fx.GraphModule:
-        return fsdp_reshard_after_fwd_pass(gm, fsdp_reshard_after_forward)
+        return fsdp_reshard_after_fwd_pass(
+            gm, example_inputs, reshard_after_forward=fsdp_reshard_after_forward
+        )
 
     def graph_trainer_custom_pass(*args, **kwargs):
         # the ac pass has to operate in a joint graph before partitioner for ac
