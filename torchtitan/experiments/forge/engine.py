@@ -261,17 +261,24 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             training_steps=config.training.steps,
         )
 
+        from torchtitan.components.state_dict_transforms import StateDictTransforms
+
+        sd_transforms = StateDictTransforms(
+            export_dtype=TORCH_DTYPE_MAP[config.checkpoint.export_dtype],
+            sd_adapter=(
+                self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
+                if self.train_spec.state_dict_adapter
+                else None
+            ),
+        )
+
         self.checkpointer = config.checkpoint.build(
             dataloader=None,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if self.train_spec.state_dict_adapter
-                else None
-            ),
+            sd_transforms=sd_transforms,
             base_folder=config.dump_folder,
         )
 
