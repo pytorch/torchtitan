@@ -38,7 +38,8 @@ def make_fwd_bwd_step(loss_fn):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
         loss = loss_fn(pred, labels) / global_valid_tokens
         params = [p for p in model.parameters() if p.requires_grad]
-        grads = torch.autograd.grad(loss, params)
+        with torch.fx.traceback.annotate({"phase": "backward"}):
+            grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
 
     return fwd_bwd_step
