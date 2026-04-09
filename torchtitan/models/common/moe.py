@@ -388,20 +388,23 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        outputs = (
-            self.shared_experts(x)
-            if self.shared_experts is not None
-            else torch.zeros_like(x)
-        )
-
-        # Dispatch tokens to experts, compute, and combine into outputs
-        return self.experts(
+        # Dispatch tokens to experts, compute, and combine results.
+        # Note: shared_experts runs AFTER routed experts to preserve the
+        # original backward execution order (expert gradients accumulate
+        # into x.grad before shared_expert gradients).
+        out = self.experts(
             x,
             num_tokens_per_expert,
             top_scores,
             selected_experts_indices,
-            outputs=outputs,
-        ).reshape(bs, slen, dim)
+            outputs=torch.zeros_like(x),
+        )
+
+        # shared expert
+        if self.shared_experts is not None:
+            out = out + self.shared_experts(x)
+
+        return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
