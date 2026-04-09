@@ -23,6 +23,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
     reassign_to_pg_pass,
     remove_detach_pass,
+    remove_identity_slice_pass,
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
@@ -753,6 +754,146 @@ class TestRemoveIdentityViewPass(TestCase):
 
         self.assertIs(result, gm)
         self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
+
+
+class TestRemoveIdentitySlicePass(TestCase):
+    """Unit tests for the remove_identity_slice_pass graph pass."""
+
+    def _build_slice_gm(self, input_shape, dim, start, end, step=1):
+        """Build a GraphModule with a single aten.slice.Tensor node.
+
+        Creates: placeholder(x) -> slice(x, dim, start, end, step) -> output.
+        The placeholder is annotated with fake tensor metadata of the given shape.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        sliced = graph.call_function(
+            torch.ops.aten.slice.Tensor, args=(x, dim, start, end, step)
+        )
+        graph.output(sliced)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # Annotate placeholder with fake tensor metadata
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode() as fake_mode:
+            fake_val = fake_mode.from_tensor(torch.empty(*input_shape))
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_val
+        return gm
+
+    def _count_slice_nodes(self, gm):
+        """Count aten.slice.Tensor nodes in the graph."""
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.slice.Tensor
+        )
+
+    def test_full_dim_slice_is_removed(self):
+        """A slice selecting the full dimension (start=0, end>=dim_size, step=1)
+        should be removed."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=0, end=8, step=1)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def test_full_dim_slice_large_end_is_removed(self):
+        """A slice with end > dim_size should also be removed (identity)."""
+        import sys
+
+        gm = self._build_slice_gm(
+            input_shape=(8, 16), dim=0, start=0, end=sys.maxsize, step=1
+        )
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def test_partial_slice_start_preserved(self):
+        """A slice with start > 0 is not an identity and should be preserved."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=2, end=8, step=1)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_partial_slice_end_preserved(self):
+        """A slice with end < dim_size is not an identity and should be preserved."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=0, end=4, step=1)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_partial_slice_step_preserved(self):
+        """A slice with step > 1 is not an identity and should be preserved."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=0, end=8, step=2)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_no_metadata_skipped(self):
+        """Slice nodes without fake tensor metadata should be skipped safely."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        sliced = graph.call_function(
+            torch.ops.aten.slice.Tensor, args=(x, 0, 0, 100, 1)
+        )
+        graph.output(sliced)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # No metadata set -- pass should not crash
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_multi_dim_slice(self):
+        """Identity slice on a non-zero dimension should be removed."""
+        gm = self._build_slice_gm(
+            input_shape=(8, 16, 32), dim=2, start=0, end=32, step=1
+        )
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def test_numerics_preserved(self):
+        """The pass should not change the numerical output of the graph."""
+        gm = self._build_slice_gm(input_shape=(4, 8), dim=0, start=0, end=4, step=1)
+
+        # Run before the pass
+        x = torch.randn(4, 8)
+        out_before = gm(x)
+
+        remove_identity_slice_pass(gm)
+
+        out_after = gm(x)
+        self.assertTrue(torch.equal(out_before, out_after))
+
+    def test_chained_identity_slices(self):
+        """Multiple chained identity slices should all be removed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        s1 = graph.call_function(torch.ops.aten.slice.Tensor, args=(x, 0, 0, 8, 1))
+        s2 = graph.call_function(torch.ops.aten.slice.Tensor, args=(s1, 1, 0, 16, 1))
+        graph.output(s2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode() as fake_mode:
+            fake_val = fake_mode.from_tensor(torch.empty(8, 16))
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_val
+
+        # Also annotate s1 with metadata so s2 can check its input's shape
+        for node in gm.graph.nodes:
+            if (
+                node.op == "call_function"
+                and node.target is torch.ops.aten.slice.Tensor
+            ):
+                node.meta["val"] = fake_val
+                break  # Only need the first slice node (s1)
+
+        self.assertEqual(self._count_slice_nodes(gm), 2)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import operator
+import sys
 from collections import defaultdict
 from collections.abc import Callable
 
@@ -127,6 +128,60 @@ def remove_identity_view_pass(
     return gm
 
 
+def remove_identity_slice_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity aten.slice.Tensor ops that select the full dimension.
+
+    An ``aten.slice.Tensor(input, dim, start, end, step)`` is a no-op when
+    ``start == 0``, ``end >= dim_size``, and ``step == 1``.  This pass
+    replaces such nodes with their input tensor, reducing graph noise from
+    decompositions and simplifying downstream passes.
+
+    Default args for ``aten.slice.Tensor``: dim=0, start=0, end=sys.maxsize,
+    step=1.
+    """
+    count = 0
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if node.target is not torch.ops.aten.slice.Tensor:
+            continue
+
+        args = node.args
+        input_node = args[0]
+
+        # Parse args with defaults matching aten.slice.Tensor signature
+        dim = args[1] if len(args) > 1 else 0
+        start = args[2] if len(args) > 2 else 0
+        end = args[3] if len(args) > 3 else sys.maxsize
+        step = args[4] if len(args) > 4 else 1
+
+        if start != 0 or step != 1:
+            continue
+
+        # Use fake tensor metadata to determine the actual dimension size.
+        # Skip nodes without metadata (e.g. from hand-built test graphs).
+        val = input_node.meta.get("val")
+        if val is None:
+            continue
+
+        shape = val.shape
+        dim_size = shape[dim]
+
+        if end >= dim_size:
+            node.replace_all_uses_with(input_node)
+            gm.graph.erase_node(node)
+            count += 1
+
+    if count > 0:
+        logger.info(f"Removed {count} identity slice node(s)")
+
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -146,6 +201,7 @@ def construct_default_graph_passes(
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
+        remove_identity_slice_pass,
     ]
 
     # cudagraph should be the last pass.
