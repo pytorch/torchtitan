@@ -162,23 +162,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "jit_optional_checkpoint",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    # Local batch size = 8, ngpu=4, so default
-                    # global batch size = 8 * 4 = 32.
-                    # To achieve 2 gradient accumulation steps,
-                    # multiply by 2: 32 * 2 = 64.
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "--training.local_batch_size 8",
-                    "--training.global_batch_size 64",
-                ],
-            ],
-            "JIT gradient accumulation",
-            "jit_gradient_accumulation",
-        ),
         # === AOT mode tests ===
         OverrideDefinitions(
             [
@@ -330,6 +313,23 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace llama3 FSDP+TP+FlexAttn",
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    # Local batch size = 8, ngpu=4, so default
+                    # global batch size = 8 * 4 = 32.
+                    # To achieve 2 gradient accumulation steps,
+                    # multiply by 2: 32 * 2 = 64.
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--training.local_batch_size 8",
+                    "--training.global_batch_size 64",
+                ],
+            ],
+            "aot_fx_trace gradient accumulation",
+            "aot_fx_trace_gradient_accumulation",
         ),
     ]
 
