@@ -157,6 +157,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             grad_hash_a, grad_hash_b, f"{msg_prefix}gradient hash mismatch"
         )
 
+
 class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 debug model."""
 
@@ -249,8 +250,14 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             copy.deepcopy(self.model), GraphTrainer
         )
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
-        assert_expected_inline(model_hash, """6d5b743db1c09f1ad3241eb450185e04d80e9cf2806861f26f875ff05f274c9e""")
-        assert_expected_inline(grad_hash, """18159ff30a8a18f40fb0d2d5e21a48b422551c971ea9f60bff97389747bff465""")
+        assert_expected_inline(
+            model_hash,
+            """6d5b743db1c09f1ad3241eb450185e04d80e9cf2806861f26f875ff05f274c9e""",
+        )
+        assert_expected_inline(
+            grad_hash,
+            """18159ff30a8a18f40fb0d2d5e21a48b422551c971ea9f60bff97389747bff465""",
+        )
 
 
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
@@ -275,8 +282,14 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             copy.deepcopy(self.model), GraphTrainer
         )
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
-        assert_expected_inline(model_hash, """ad64082a7ce5cc4149ebbe1c8bc733e5411bcbc66ba75313fa647d984b22afff""")
-        assert_expected_inline(grad_hash, """13c459deb2ab985f7e3f4faafb8d45ccb9a895cdd3451331133ee413c996e15b""")
+        assert_expected_inline(
+            model_hash,
+            """ad64082a7ce5cc4149ebbe1c8bc733e5411bcbc66ba75313fa647d984b22afff""",
+        )
+        assert_expected_inline(
+            grad_hash,
+            """13c459deb2ab985f7e3f4faafb8d45ccb9a895cdd3451331133ee413c996e15b""",
+        )
 
 
 if __name__ == "__main__":
