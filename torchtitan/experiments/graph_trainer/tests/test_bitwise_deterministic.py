@@ -38,6 +38,7 @@ from torchtitan.experiments.graph_trainer.llama3 import (
 )
 from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
 SEED = 42
@@ -57,7 +58,13 @@ def _set_deterministic(seed: int = SEED) -> None:
 _TOKENIZER_PATH = "./tests/assets/tokenizer"
 
 
-def _build_trainer(model: nn.Module, model_config, trainer_cls: type) -> Trainer:
+def _build_trainer(
+    model: nn.Module,
+    model_config,
+    trainer_cls: type,
+    *,
+    enable_passes: bool = True,
+) -> Trainer:
     """Build a minimal Trainer/GraphTrainer for single-GPU non-distributed testing.
 
     Uses object.__new__ to bypass __init__ because the full Trainer constructor
@@ -76,7 +83,12 @@ def _build_trainer(model: nn.Module, model_config, trainer_cls: type) -> Trainer
     trainer.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
 
     if trainer_cls is GraphTrainer:
-        trainer.config = SimpleNamespace(compile=SimpleNamespace(mode="aot_fx_trace"))
+        trainer.config = SimpleNamespace(
+            compile=SimpleNamespace(
+                mode="aot_fx_trace",
+                enable_passes=enable_passes,
+            )
+        )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
 
@@ -116,13 +128,15 @@ class BitwiseDeterministicBase(unittest.TestCase):
         pass
 
     def _run_steps(
-        self, model: nn.Module, trainer_cls: type
+        self, model: nn.Module, trainer_cls: type, *, enable_passes: bool = True
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
         # Annotate after deepcopy: annotate_fn wrappers capture bound methods
         # that don't rebind correctly through copy.deepcopy.
         self.annotate_model(model)
-        trainer = _build_trainer(model, self.model_config, trainer_cls)
+        trainer = _build_trainer(
+            model, self.model_config, trainer_cls, enable_passes=enable_passes
+        )
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
@@ -138,6 +152,18 @@ class BitwiseDeterministicBase(unittest.TestCase):
             optimizer.step()
 
         return loss.detach().clone(), hash_model(model), hash_gradient(model)
+
+    def test_graph_trainer_enable_passes_true_vs_false(self):
+        """aot_fx_trace with passes enabled vs disabled produces identical results."""
+        _set_deterministic()
+        run_with = self._run_steps(
+            copy.deepcopy(self.model), GraphTrainer, enable_passes=True
+        )
+        _set_deterministic()
+        run_without = self._run_steps(
+            copy.deepcopy(self.model), GraphTrainer, enable_passes=False
+        )
+        self._assert_runs_match(run_with, run_without, "enable_passes True vs False: ")
 
     def _assert_runs_match(
         self,
@@ -171,9 +197,9 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: Re-enable once upstream PyTorch numerical change is resolved.
-    # Broken by https://github.com/pytorch/pytorch/pull/160509
-    @unittest.skip("Upstream PyTorch change broke expected numerics")
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
     def test_eager_self_deterministic(self):
         """Eager mode: results match hardcoded expected values.
 
@@ -206,9 +232,9 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: Re-enable once upstream PyTorch numerical change is resolved.
-    # Broken by https://github.com/pytorch/pytorch/pull/160509
-    @unittest.skip("Upstream PyTorch change broke expected numerics")
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
     def test_eager_self_deterministic(self):
         """Eager mode: results match hardcoded expected values.
 
@@ -220,11 +246,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """08b5c3025949223b021de81a36c304ea3469a73ad5ce125834b44bbc13a97594""",
+            """7db9791ff6b1c22f64eee52e68f61f0119352528eac8683bf75a899268968edc""",
         )
         assert_expected_inline(
             grad_hash,
-            """c163466b7c4ff0320836e66ce249a7e214c22977adc2e104d373e25470171aeb""",
+            """30d87367fe7227032c71fe4fab7d5162bbc4b7311a4049711f2edd02442679f6""",
         )
 
 
@@ -241,7 +267,10 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel_flex_attn"
     annotate_model = staticmethod(annotate_llama)
 
-    def test_aot_fx_trace_self_consistent(self):
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
+    def test_aot_fx_trace_self_deterministic(self):
         """aot_fx_trace results match hardcoded expected values.
 
         Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` to update the inline expected values.
@@ -273,7 +302,10 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel_flex_attn"
     annotate_model = staticmethod(annotate_deepseekv3)
 
-    def test_aot_fx_trace_self_consistent(self):
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
+    def test_aot_fx_trace_self_deterministic(self):
         """aot_fx_trace results match hardcoded expected values.
 
         Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` to update the inline expected values.
