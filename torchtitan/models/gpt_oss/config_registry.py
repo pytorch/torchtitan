@@ -84,8 +84,6 @@ def gpt_oss_20b() -> Trainer.Config:
     )
 
 
-
-
 def gpt_oss_120b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/gpt-oss-120b",
