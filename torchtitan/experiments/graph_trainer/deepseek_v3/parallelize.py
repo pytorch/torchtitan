@@ -20,6 +20,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_ac_regions,
+    annotate_flex_for_regional_inductor,
     apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -51,7 +52,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     """
     from torchtitan.distributed.expert_parallel import ExpertParallel
-    from torchtitan.models.common.attention import FlexAttention
     from torchtitan.models.common.moe import MoE
 
     ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
@@ -62,10 +62,7 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
-    FlexAttention.forward = annotate_fn({"compile_with_inductor": "flex_attention"})(
-        FlexAttention.forward
-    )
-
+    annotate_flex_for_regional_inductor()
     annotate_ac_regions(model)
 
 

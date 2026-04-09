@@ -544,7 +544,9 @@ class TestTraceModels(unittest.TestCase):
         )
         maybe_register_blockmask_pytree_node()
         with maybe_regional_inductor:
-            traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
+            traced: TracedResult = trace_train_step(train_step)(
+                model_ref, *fwd_args, labels
+            )
 
         if check_collective_ops:
             ag = sum(
