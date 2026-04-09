@@ -39,6 +39,10 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
+def _is_backward_node(node: torch.fx.Node) -> bool:
+    return node.meta.get("custom", {}).get("autograd_backward", False)
+
+
 def apply_default_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -222,8 +226,7 @@ def apply_sac_pass(
 
         # Skip backward nodes — they must not carry recompute tags,
         # otherwise the remat pass would try to duplicate backward ops.
-        # TODO: pytorch/pytorch#179105 will remove the need for this tagging
-        if custom_meta.get("remat_pass_tag") == "is_backward":
+        if _is_backward_node(node):
             continue
 
         if node.target in (
@@ -280,14 +283,14 @@ def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
 
     Tags forward nodes with recompute policy via apply_sac_pass (backward
-    nodes are skipped automatically via the is_backward annotation), then
+    nodes are skipped automatically via the autograd_backward annotation), then
     applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
     PREFER_RECOMPUTE forward ops before backward and DCE originals.
 
     The model must have been annotated with annotate_ac_regions before
     tracing so that nodes have custom["ac_region_id"] metadata.
-    Backward nodes must be tagged with custom["remat_pass_tag"] (done by
-    _patch_engine_run_backward during tracing).
+    Backward nodes must be tagged with custom["autograd_backward"] (done by
+    ``torch.compiler._patch_autograd_grad()`` during tracing).
     """
     from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
         remat_using_tags_for_fwd_loss_bwd_graph,
