@@ -189,6 +189,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             window_size=sliding_window_size,
             block_table=block_table,
             seqused_k=seqused_k,
+            enable_gqa=True,
             **extra_kwargs,
         )
 
