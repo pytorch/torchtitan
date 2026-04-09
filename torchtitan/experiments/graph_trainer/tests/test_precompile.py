@@ -193,6 +193,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
 
         from torchtitan.experiments.graph_trainer.precompile import (
+            _ARTIFACT_KEY,
             precompile_load,
             precompile_save,
         )
@@ -214,7 +215,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
                     config_fingerprint="abc123",
                 )
 
-            self.assertTrue(storage.exists("default"))
+            self.assertTrue(storage.exists(_ARTIFACT_KEY))
 
             # Load should succeed with matching model
             wrapper = precompile_load(model, storage, expected_fingerprint="abc123")
@@ -222,6 +223,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
     def test_load_param_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
+            _ARTIFACT_KEY,
             precompile_load,
             PrecompiledArtifact,
         )
@@ -234,7 +236,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
+            storage.save(_ARTIFACT_KEY, pickle.dumps(artifact))
 
             # Model with different params should fail
             model = torch.nn.Linear(8, 8)
@@ -244,6 +246,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
     def test_load_buffer_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
+            _ARTIFACT_KEY,
             precompile_load,
             PrecompiledArtifact,
         )
@@ -256,7 +259,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
+            storage.save(_ARTIFACT_KEY, pickle.dumps(artifact))
 
             # nn.Linear has no buffers, so buffers_spec won't match
             model = torch.nn.Linear(4, 4)
@@ -265,6 +268,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
     def test_load_fingerprint_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
+            _ARTIFACT_KEY,
             precompile_load,
             PrecompiledArtifact,
         )
@@ -279,7 +283,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
+            storage.save(_ARTIFACT_KEY, pickle.dumps(artifact))
 
             with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
                 precompile_load(model, storage, expected_fingerprint="new_fingerprint")
@@ -290,6 +294,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
 
         from torchtitan.experiments.graph_trainer.precompile import (
+            _ARTIFACT_KEY,
             precompile_load,
             PrecompiledArtifact,
         )
@@ -307,7 +312,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
+            storage.save(_ARTIFACT_KEY, pickle.dumps(artifact))
 
             # Mock deserialize to return a fn that returns flat outputs
             def fake_compiled_fn(*args, **kwargs):
@@ -329,6 +334,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
 
     def test_load_legacy_artifact_warns(self):
         from torchtitan.experiments.graph_trainer.precompile import (
+            _ARTIFACT_KEY,
             precompile_load,
             PrecompiledArtifact,
         )
@@ -343,7 +349,7 @@ class TestPrecompileSaveLoad(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
+            storage.save(_ARTIFACT_KEY, pickle.dumps(artifact))
 
             with self.assertLogs(level="WARNING") as cm:
                 precompile_load(model, storage, expected_fingerprint="some_fp")
@@ -391,6 +397,239 @@ class TestPrecompileSaveValidation(unittest.TestCase):
 
         result = _unwrap_serializable(wrapper)
         self.assertIs(result, inner)
+
+
+class TestDeserializeWithCudagraph(unittest.TestCase):
+    """Test _deserialize_with_cudagraph patching and restore behavior."""
+
+    def test_without_cudagraph_calls_deserialize_directly(self):
+        """When cudagraph=False, calls deserialize_compile_artifacts unchanged."""
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _deserialize_with_cudagraph,
+        )
+
+        fake_fn = MagicMock()
+        with patch.object(
+            BundledAOTAutogradSerializableCallable,
+            "deserialize_compile_artifacts",
+            return_value=fake_fn,
+        ) as mock_deser:
+            result = _deserialize_with_cudagraph(b"fake_bytes", cudagraph=False)
+            mock_deser.assert_called_once_with(b"fake_bytes")
+            self.assertIs(result, fake_fn)
+
+    def test_with_cudagraph_restores_config_on_error(self):
+        """When cudagraph=True and deserialization fails, inductor config
+        and patched functions must still be restored to their original values."""
+        import torch._inductor.compile_fx as _compile_fx_mod
+        import torch._inductor.config as _inductor_config
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _deserialize_with_cudagraph,
+        )
+
+        orig_cudagraphs = _inductor_config.triton.cudagraphs
+        orig_graph_partition = _inductor_config.graph_partition
+        orig_cudagraphify = _compile_fx_mod.cudagraphify
+
+        with self.assertRaises((pickle.UnpicklingError, RuntimeError, ValueError)):
+            _deserialize_with_cudagraph(b"invalid_bytes", cudagraph=True)
+
+        self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
+        self.assertEqual(_inductor_config.graph_partition, orig_graph_partition)
+        self.assertIs(_compile_fx_mod.cudagraphify, orig_cudagraphify)
+
+    def test_with_cudagraph_patches_during_deserialize(self):
+        """When cudagraph=True, inductor config should be patched during
+        deserialization and restored afterwards."""
+        import torch._inductor.compile_fx as _compile_fx_mod
+        import torch._inductor.config as _inductor_config
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _deserialize_with_cudagraph,
+        )
+
+        orig_cudagraphs = _inductor_config.triton.cudagraphs
+        orig_cudagraphify = _compile_fx_mod.cudagraphify
+        captured = {}
+
+        def spy_deserialize(serialized_bytes):
+            captured["cudagraphs"] = _inductor_config.triton.cudagraphs
+            captured["graph_partition"] = _inductor_config.graph_partition
+            captured["cudagraphify_patched"] = (
+                _compile_fx_mod.cudagraphify is not orig_cudagraphify
+            )
+            return MagicMock()
+
+        with patch.object(
+            BundledAOTAutogradSerializableCallable,
+            "deserialize_compile_artifacts",
+            side_effect=spy_deserialize,
+        ):
+            _deserialize_with_cudagraph(b"fake_bytes", cudagraph=True)
+
+        self.assertTrue(captured["cudagraphs"])
+        self.assertFalse(captured["graph_partition"])
+        self.assertTrue(captured["cudagraphify_patched"])
+
+        # After the call, everything should be restored
+        self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
+        self.assertIs(_compile_fx_mod.cudagraphify, orig_cudagraphify)
+
+    def test_regional_restores_post_compile_on_error(self):
+        """When is_regional=True and deserialization fails,
+        BundledOutputCodeLoadable.post_compile must be restored."""
+        import torch._inductor.compile_fx as _compile_fx_mod
+        import torch._inductor.config as _inductor_config
+        from torch._functorch._aot_autograd.aot_autograd_result import (
+            BundledOutputCodeLoadable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _deserialize_with_cudagraph,
+        )
+
+        orig_cudagraphs = _inductor_config.triton.cudagraphs
+        orig_cudagraphify = _compile_fx_mod.cudagraphify
+        orig_post_compile = BundledOutputCodeLoadable.post_compile
+
+        with self.assertRaises((pickle.UnpicklingError, RuntimeError, ValueError)):
+            _deserialize_with_cudagraph(
+                b"invalid_bytes", cudagraph=True, is_regional=True
+            )
+
+        self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
+        self.assertIs(_compile_fx_mod.cudagraphify, orig_cudagraphify)
+        self.assertIs(BundledOutputCodeLoadable.post_compile, orig_post_compile)
+
+    def test_non_regional_does_not_patch_post_compile(self):
+        """BundledOutputCodeLoadable.post_compile should NOT be patched
+        for non-regional cudagraph deserialization — opaque-type support
+        in Inductor's cudagraph_tests (is_opaque_value) means
+        cudagraph_fail_reasons is empty at precompile time."""
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+        from torch._functorch._aot_autograd.aot_autograd_result import (
+            BundledOutputCodeLoadable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _deserialize_with_cudagraph,
+        )
+
+        orig_post_compile = BundledOutputCodeLoadable.post_compile
+        captured = {}
+
+        def spy_deserialize(serialized_bytes):
+            captured["post_compile_patched"] = (
+                BundledOutputCodeLoadable.post_compile is not orig_post_compile
+            )
+            return MagicMock()
+
+        with patch.object(
+            BundledAOTAutogradSerializableCallable,
+            "deserialize_compile_artifacts",
+            side_effect=spy_deserialize,
+        ):
+            _deserialize_with_cudagraph(
+                b"fake_bytes", cudagraph=True, is_regional=False
+            )
+
+        self.assertFalse(captured["post_compile_patched"])
+
+
+class TestWrapRegionalWithCudagraph(unittest.TestCase):
+    """Test _wrap_regional_with_cudagraph wrapping behavior."""
+
+    def test_wrapped_has_boxed_call(self):
+        """Wrapped result must have _boxed_call=True for the AOT runtime."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _wrap_regional_with_cudagraph,
+        )
+
+        fake_regional = MagicMock()
+        fake_regional._boxed_call = True
+        wrapped = _wrap_regional_with_cudagraph(fake_regional)
+        self.assertTrue(getattr(wrapped, "_boxed_call", False))
+        self.assertTrue(callable(wrapped))
+
+    def test_wrapped_is_lazy(self):
+        """CUDAGraphWrapper should not be created until first call."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _wrap_regional_with_cudagraph,
+        )
+
+        call_count = [0]
+
+        def fake_regional(inputs):
+            call_count[0] += 1
+            return [torch.zeros(1)]
+
+        fake_regional._boxed_call = True
+        wrapped = _wrap_regional_with_cudagraph(fake_regional)
+        # No calls to the original before first invocation
+        self.assertEqual(call_count[0], 0)
+
+
+class TestCudagraphFingerprintStripping(unittest.TestCase):
+    """Test that cudagraph is stripped from config before fingerprint computation,
+    so precompile (save) and load produce the same fingerprint."""
+
+    def test_stripped_config_matches_no_cudagraph_config(self):
+        """Stripping cudagraph from passes should produce the same fingerprint
+        as never having cudagraph in passes, since both precompile_main and
+        _apply_aot_compile strip it before computing the fingerprint."""
+        import dataclasses
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+
+        cfg_with = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
+        cfg_without = _StubCompileConfig(passes=["full_inductor_compilation"])
+
+        cfg_stripped = dataclasses.replace(
+            cfg_with,
+            passes=[p for p in cfg_with.passes if p != "cudagraph"],
+        )
+
+        fp_stripped = compute_config_fingerprint(_make_stub_model(), cfg_stripped, dims)
+        fp_without = compute_config_fingerprint(_make_stub_model(), cfg_without, dims)
+
+        self.assertEqual(fp_stripped, fp_without)
+
+    def test_regional_inductor_stripped_config_matches(self):
+        """Same stripping logic should work for regional_inductor + cudagraph."""
+        import dataclasses
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+
+        cfg_with = _StubCompileConfig(passes=["regional_inductor", "cudagraph"])
+        cfg_without = _StubCompileConfig(passes=["regional_inductor"])
+
+        cfg_stripped = dataclasses.replace(
+            cfg_with,
+            passes=[p for p in cfg_with.passes if p != "cudagraph"],
+        )
+
+        fp_stripped = compute_config_fingerprint(_make_stub_model(), cfg_stripped, dims)
+        fp_without = compute_config_fingerprint(_make_stub_model(), cfg_without, dims)
+
+        self.assertEqual(fp_stripped, fp_without)
 
 
 class TestConfigFingerprint(unittest.TestCase):

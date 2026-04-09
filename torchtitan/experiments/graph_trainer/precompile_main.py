@@ -71,6 +71,22 @@ def main():
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
 
+    # The custom cudagraph pass (CUDAGraphWrapper) wraps at compile time and
+    # can't be serialized. For precompile, we use Inductor's built-in cudagraph
+    # mechanism instead: setting triton.cudagraphs=True populates
+    # CudagraphCachedInfo in the artifact, and post_compile() applies the
+    # wrapping at load time on each rank.
+    if "cudagraph" in compile_config.passes:
+        torch._inductor.config.triton.cudagraphs = True
+        compile_config = dataclasses.replace(
+            compile_config,
+            passes=[p for p in compile_config.passes if p != "cudagraph"],
+        )
+        logger.info(
+            "Cudagraph pass replaced with Inductor built-in cudagraphs for "
+            "precompile (CudagraphCachedInfo will be serialized in the artifact)"
+        )
+
     parallelism = config.parallelism
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree

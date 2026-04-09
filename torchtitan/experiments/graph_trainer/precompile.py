@@ -148,10 +148,145 @@ def precompile_save(
     return path
 
 
+def _wrap_regional_with_cudagraph(regional_output_code: Any) -> Callable:
+    """Wrap a RegionalOutputCode with CUDAGraphWrapper.
+
+    RegionalOutputCode contains multiple inner CompiledFxGraph objects
+    (one per Inductor-compiled region), but these inner objects don't
+    go through CompiledFxGraph.post_compile() during deserialization —
+    so the cudagraphify patch never reaches them. Instead, wrap the
+    entire RegionalOutputCode at the outer level: a single CUDAGraph
+    captures the full fwd (or bwd) execution including all regions.
+    This matches the non-precompile path where the cudagraph pass
+    wraps the regional_inductor output as a whole.
+    """
+    from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
+
+    original = regional_output_code
+    cg: list[CUDAGraphWrapper | None] = [None]
+
+    def wrapped(inputs: list) -> Any:
+        if cg[0] is None:
+            cg[0] = CUDAGraphWrapper(original, inputs, ())
+            cg[0]._boxed_call_inner = True
+        return cg[0](inputs)
+
+    wrapped._boxed_call = True  # type: ignore[attr-defined]
+    logger.info("Wrapped RegionalOutputCode with CUDAGraphWrapper")
+    return wrapped
+
+
+def _deserialize_with_cudagraph(
+    serialized_fn_bytes: bytes,
+    cudagraph: bool,
+    is_regional: bool = False,
+) -> Callable:
+    """Deserialize a compiled artifact, optionally applying CUDAGraphWrapper.
+
+    When cudagraph=True, patches Inductor's deserialization pipeline so
+    that fwd/bwd compiled functions are wrapped with CUDAGraphWrapper
+    (from torchtitan) instead of Inductor's cudagraph_trees. This keeps
+    teardown behavior consistent with the non-precompile path (see
+    Note [explicit cudagraph teardown] in cudagraph.py).
+
+    Two patches are applied during deserialization:
+    1. Config: triton.cudagraphs=True, graph_partition=False so
+       post_compile enters the cudagraph wrapping branch.
+    2. cudagraphify redirect: Inductor's cudagraphify → CUDAGraphWrapper
+       for consistent lifecycle management (explicit teardown for NCCL).
+
+    For regional_inductor, a third patch on
+    BundledOutputCodeLoadable.post_compile wraps the entire
+    RegionalOutputCode at the outer level instead of individual inner
+    CompiledFxGraph objects.
+    """
+    if not cudagraph:
+        return BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
+            serialized_fn_bytes
+        )
+
+    import torch._inductor.compile_fx as _compile_fx_mod
+    import torch._inductor.config as _inductor_config
+
+    orig_cudagraphs_flag = _inductor_config.triton.cudagraphs
+    orig_graph_partition = _inductor_config.graph_partition
+    orig_cudagraphify = _compile_fx_mod.cudagraphify
+
+    # Enable triton.cudagraphs so post_compile enters the cudagraph
+    # wrapping branch. Disable graph_partition because the precompiled
+    # artifact has partition_maps=None.
+    _inductor_config.triton.cudagraphs = True
+    _inductor_config.graph_partition = False
+
+    # Redirect Inductor's cudagraphify to CUDAGraphWrapper so that
+    # all cudagraph lifecycle is managed by _CUDAGraphManager (which
+    # supports explicit teardown for NCCL cleanup).
+    def _patched_cudagraphify(model, static_input_idxs=(), **_kwargs):
+        from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
+
+        cg = [None]
+
+        def run(new_inputs):
+            if cg[0] is None:
+                cg[0] = CUDAGraphWrapper(model, new_inputs, tuple(static_input_idxs))
+                cg[0]._boxed_call_inner = True
+            return cg[0](new_inputs)
+
+        return run
+
+    _compile_fx_mod.cudagraphify = _patched_cudagraphify
+
+    # For regional_inductor: patch BundledOutputCodeLoadable.post_compile
+    # to disable inner cudagraph wrapping and wrap the entire
+    # RegionalOutputCode at the outer level instead.
+    orig_bundled_post_compile = None
+    if is_regional:
+        from torch._functorch._aot_autograd.aot_autograd_result import (
+            BundledOutputCodeLoadable,
+        )
+        from torch._inductor.output_code import RegionalOutputCode
+
+        orig_bundled_post_compile = BundledOutputCodeLoadable.post_compile
+
+        def _patched_bundled_post_compile(self, result, fx_config):
+            if isinstance(result, RegionalOutputCode):
+                _compile_fx_mod.cudagraphify = orig_cudagraphify
+                _inductor_config.triton.cudagraphs = False
+                try:
+                    result = orig_bundled_post_compile(self, result, fx_config)
+                finally:
+                    _compile_fx_mod.cudagraphify = _patched_cudagraphify
+                    _inductor_config.triton.cudagraphs = True
+                result = _wrap_regional_with_cudagraph(result)
+            else:
+                result = orig_bundled_post_compile(self, result, fx_config)
+            return result
+
+        BundledOutputCodeLoadable.post_compile = _patched_bundled_post_compile
+
+    try:
+        compiled_fn = (
+            BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
+                serialized_fn_bytes
+            )
+        )
+    finally:
+        _inductor_config.triton.cudagraphs = orig_cudagraphs_flag
+        _inductor_config.graph_partition = orig_graph_partition
+        _compile_fx_mod.cudagraphify = orig_cudagraphify
+        if orig_bundled_post_compile is not None:
+            BundledOutputCodeLoadable.post_compile = orig_bundled_post_compile
+
+    logger.info("Deserialized with CUDAGraphWrapper wrapping for fwd/bwd")
+    return compiled_fn
+
+
 def precompile_load(
     model: torch.nn.Module,
     storage: StorageAdapter,
     expected_fingerprint: ConfigFingerprint,
+    cudagraph: bool = False,
+    is_regional: bool = False,
 ) -> Callable:
     """
     Load a precompiled artifact and return a wrapper function that
@@ -244,10 +379,8 @@ def precompile_load(
                     "skipping CooR custom op pre-import"
                 )
 
-            compiled_fn = (
-                BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
-                    serialized_fn_bytes
-                )
+            compiled_fn = _deserialize_with_cudagraph(
+                serialized_fn_bytes, cudagraph, is_regional=is_regional
             )
 
         # Build the flat input tuple: params + buffers + user args.

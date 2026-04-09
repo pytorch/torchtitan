@@ -17,7 +17,6 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
-from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
@@ -129,6 +128,10 @@ class CUDAGraphWrapper:
         _cg_manager.register_wrapper(self)
 
         self._runnable = runnable
+        # Boxed-call functions (e.g. CompiledFxGraph from Inductor)
+        # take a single list argument instead of individual *args.
+        # We adapt our calling convention accordingly.
+        self._boxed_call_inner = getattr(runnable, "_boxed_call", False)
         self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
@@ -159,19 +162,28 @@ class CUDAGraphWrapper:
 
     def _check_input_types(self, inputs) -> None:
         for i, inp in enumerate(inputs):
-            if not (
-                isinstance(inp, (torch.Tensor, int, torch._C.Generator))
-                or is_opaque_value(inp)
-            ):
-                raise ValueError(
-                    "args must be tensor, integer (for dynamic shapes), "
-                    "Generator (for random number generator), "
-                    "or opaque object, "
-                    f"but found {type(inp)} with value {inp!r} at index {i}"
-                )
+            if isinstance(inp, (torch.Tensor, int, torch._C.Generator)):
+                continue
+            # Opaque inputs (e.g. DeviceMesh from SimpleFSDP/DTensor) are
+            # valid graph inputs. They are inherently static — their values
+            # don't change between iterations — so we treat them as static
+            # even if AOT Autograd didn't mark them. This ensures they are
+            # never included in _input_indices_to_copy (which already
+            # filters for torch.Tensor).
+            if is_opaque_value(inp):
+                self._static_input_indices.add(i)
+                continue
+            raise ValueError(
+                "args must be tensor, integer (for dynamic shapes), "
+                "Generator (for random number generator), "
+                "or opaque object, "
+                f"but found {type(inp)} with value {inp!r} at index {i}"
+            )
 
     def _check_static_inputs_address(self) -> None:
         for i in self._static_input_indices:
+            if not isinstance(self._args[i], torch.Tensor):
+                continue
             actual = self._args[i].data_ptr()
             expected = self._input_addresses[i]
             assert expected == actual, (
@@ -179,40 +191,57 @@ class CUDAGraphWrapper:
                 f"{expected} != {actual}"
             )
 
+    def _call_runnable(self, flat_args):
+        if self._boxed_call_inner:
+            return self._runnable(list(flat_args))
+        return self._runnable(*flat_args)
+
     def __call__(self, *args):
+        # Normalize boxed vs unboxed calling convention: internally we
+        # always work with a flat tuple of individual inputs.
+        if (
+            self._boxed_call_inner
+            and len(args) == 1
+            and isinstance(args[0], (list, tuple))
+        ):
+            flat_args = tuple(args[0])
+        else:
+            flat_args = args
+
         if not self._has_warmup:
             self._has_warmup = True
-            device = torch.cuda.current_device()
 
-            # warmup in cudagraph memory pool to avoid fragmentation
-            # across eager memory pool and cudagraph memory pool.
-            with _use_cuda_memory_pool_manager(
-                device, _cg_manager.graph_pool, _cg_manager.stream
-            ):
-                out = self._runnable(*args)
+            # Warmup: run the function once on the current stream to
+            # trigger lazy kernel compilation and workspace allocation.
+            # We stay on the current stream (rather than switching to
+            # _cg_manager.stream) so NCCL collectives execute normally.
+            # Recording (next call) uses _cg_manager.stream with the
+            # graph pool, where NCCL ops are captured, not executed.
+            torch.cuda.synchronize()
+            out = self._call_runnable(flat_args)
+            torch.cuda.synchronize()
             return out
 
         if self._cudagraph is None:
-            self._check_input_types(args)
-            self._args = args
+            self._check_input_types(flat_args)
+            self._args = flat_args
             self._input_addresses = [
-                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
+                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in flat_args
             ]
-
+            torch.cuda.synchronize()
             self._cudagraph = torch.cuda.CUDAGraph()
-
             with torch.cuda.graph(
                 self._cudagraph,
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
+                capture_error_mode="thread_local",
             ):
-                # `output` is managed by pytorch's cudagraph pool
-                self._output = self._runnable(*args)
+                self._output = self._call_runnable(flat_args)
 
         if self._should_check_address:
             self._check_static_inputs_address()
 
-        self._copy_non_static_inputs(*args)
+        self._copy_non_static_inputs(*flat_args)
         self._cudagraph.replay()
         return self._output
 
