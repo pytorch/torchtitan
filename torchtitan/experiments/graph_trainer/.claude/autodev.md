@@ -4,13 +4,30 @@ The GitHub Project board is the single source of truth for what needs doing,
 what's in flight, and what's waiting on review. Both developers and the
 AutoDev agent read and write to the same board.
 
-**Board**: https://github.com/orgs/pytorch/projects/161
 **CLI access**: `gh project` commands (requires `read:project` + `project` scopes)
 
 **AutoDev loop**: The agent runs in a continuous loop — poll the board for
 actionable items, do the work, then wait 10 minutes before checking again.
 If there is nothing to do, the agent waits and re-checks. The loop continues
 until the developer stops the session.
+
+---
+
+## Configuration
+
+All `gh project` commands in this document use two variables. At the start of
+every session, the agent MUST ask the user for these values (suggesting the
+defaults) before doing any board operations.
+
+| Variable         | Description                                 | Default     |
+|------------------|---------------------------------------------|-------------|
+| `<BOARD_NUMBER>` | GitHub project board number                 | `161`       |
+| `<BOARD_OWNER>`  | GitHub org or user that owns the board       | `pytorch`   |
+
+The board URL is: `https://github.com/orgs/<BOARD_OWNER>/projects/<BOARD_NUMBER>`
+
+If the user confirms the defaults, use `161` and `pytorch`. If they provide
+different values, substitute throughout.
 
 ---
 
@@ -57,11 +74,11 @@ issue when:
 At the start of a session, the agent reads the board:
 
 ```bash
-gh project item-list 161 --owner pytorch --format json
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 ```
 
 The agent should:
-1. **Refresh option IDs** — run `gh project field-list 161 --owner pytorch --format json`
+1. **Refresh option IDs** — run `gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json`
    and parse the current Status option name→ID mappings. Never reuse IDs from
    a previous session or from this document.
 2. Check **In Progress** items first — these may have review feedback
@@ -151,12 +168,12 @@ When addressing feedback, the agent:
 
 ### Read the board
 ```bash
-gh project item-list 161 --owner pytorch --format json
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 ```
 
 ### Create a draft issue on the board
 ```bash
-gh project item-create 161 --owner pytorch --title "Title here" --body "Description"
+gh project item-create <BOARD_NUMBER> --owner <BOARD_OWNER> --title "Title here" --body "Description"
 ```
 
 ### Update item status
@@ -167,18 +184,22 @@ columns are reordered on the web UI. After updating, verify with
 `gh project item-list` that the item landed in the expected column.
 
 ```bash
-# Step 1: ALWAYS get fresh status field and option IDs
-gh project field-list 161 --owner pytorch --format json
-# Look for the "Status" field → its "options" array has current name→ID mappings
+# Step 1: Get the project node ID
+PROJECT_ID=$(gh project list --owner <BOARD_OWNER> --format json \
+    | jq -r '.projects[] | select(.number == <BOARD_NUMBER>) | .id')
 
-# Step 2: Update status using the IDs from step 1
-gh project item-edit --project-id PVT_kwDOAUB9vs4BT6Cu \
+# Step 2: Get the Status field ID and its option IDs
+FIELDS=$(gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json)
+STATUS_FIELD_ID=$(echo "$FIELDS" | jq -r '.fields[] | select(.name == "Status") | .id')
+
+# Step 3: Update status using the IDs from steps 1-2
+gh project item-edit --project-id "$PROJECT_ID" \
     --id <ITEM_ID> \
-    --field-id PVTSSF_lADOAUB9vs4BT6CuzhBFuQs \
-    --single-select-option-id <OPTION_ID_FROM_STEP_1>
+    --field-id "$STATUS_FIELD_ID" \
+    --single-select-option-id <OPTION_ID_FROM_STEP_2>
 
-# Step 3: Verify the item moved to the right column
-gh project item-list 161 --owner pytorch --format json
+# Step 4: Verify the item moved to the right column
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 ```
 
 ---

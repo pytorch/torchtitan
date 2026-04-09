@@ -10,10 +10,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.fsdp._fully_shard._fsdp_common import (
-    FSDPMeshInfo,
-    ShardPlacementResult,
-)
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -344,7 +340,11 @@ def apply_fsdp(
             - "never" will disable `reshard_after_forward` for all forward passes.
 
     """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
@@ -430,6 +430,11 @@ def apply_fsdp(
                 )
             else:
                 # ep_degree > 1: per-param mesh
+                from torch.distributed.fsdp._fully_shard._fsdp_common import (
+                    FSDPMeshInfo,
+                    ShardPlacementResult,
+                )
+
                 assert edp_mesh is not None
                 edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
                 dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
