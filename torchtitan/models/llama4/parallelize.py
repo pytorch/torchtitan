@@ -261,8 +261,8 @@ def apply_non_moe_tp(
     # pyrefly: ignore [not-callable]
     first_block = next(iter(model.layers.values()))
     use_fused_qkv = isinstance(
-        first_block.attention.qkv_linear,
-        FusedQKVLinear,  # pyrefly: ignore [missing-attribute]
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
     )
 
     # pyrefly: ignore [not-callable]

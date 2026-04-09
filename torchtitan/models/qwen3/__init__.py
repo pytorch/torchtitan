@@ -682,7 +682,6 @@ qwen3_configs = {
     "4B": _4b,
     "8B": _8b,
     "8B_varlen": _8b_varlen,
-
     "14B": _14b,
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
