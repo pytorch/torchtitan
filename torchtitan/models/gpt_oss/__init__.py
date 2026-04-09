@@ -311,91 +311,9 @@ def _120b() -> GptOssModel.Config:
     )
 
 
-def _debugmodel_fused_qkv() -> GptOssModel.Config:
-    dim = 256
-    hidden_dim = 2880
-    n_layers = 4
-    return GptOssModel.Config(
-        vocab_size=2048,
-        dim=dim,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=2048,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_gptoss_layers(
-            dim=dim,
-            n_layers=n_layers,
-            hidden_dim=hidden_dim,
-            num_experts=8,
-            top_k=4,
-            score_before_experts=False,
-            load_balance_coeff=1e-3,
-            fuse_qkv=True,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
-            rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
-        ),
-    )
-
-
-def _20b_fused_qkv() -> GptOssModel.Config:
-    dim = 2880
-    hidden_dim = 2880
-    n_layers = 24
-    return GptOssModel.Config(
-        dim=dim,
-        vocab_size=201088,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=201088, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=201088,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_gptoss_layers(
-            dim=dim,
-            n_layers=n_layers,
-            hidden_dim=hidden_dim,
-            num_experts=32,
-            top_k=4,
-            score_before_experts=False,
-            load_balance_coeff=1e-3,
-            fuse_qkv=True,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
-            rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
-        ),
-    )
-
-
 gptoss_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "20b": _20b,
-    "20b_fused_qkv": _20b_fused_qkv,
     "120b": _120b,
 }
 
