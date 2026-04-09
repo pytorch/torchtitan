@@ -44,6 +44,37 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
+def remove_detach_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove ``aten.detach.default`` nodes from the graph.
+
+    In a traced fwd+bwd graph there is no autograd context, so detach is
+    semantically a no-op.  Removing these nodes simplifies the graph for
+    downstream passes.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with all detach nodes removed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op == "call_function" and node.target is torch.ops.aten.detach.default:
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} aten.detach.default node(s) from the graph")
+
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -61,6 +92,7 @@ def construct_default_graph_passes(
     """
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
+        remove_detach_pass,
     ]
 
     # cudagraph should be the last pass.
