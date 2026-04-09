@@ -240,9 +240,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             self.optimizers.append(optimizer_cls(param_groups))
             for group in param_groups:
                 all_params.extend(group["params"])
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-            all_params.extend(params)
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
         self._validate_length(len(self.model_parts))
