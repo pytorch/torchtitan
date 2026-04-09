@@ -216,6 +216,10 @@ class VarlenAttention(LocalMapInnerAttention):
                 # Only needed for FA3; FA2 is automatically batch-invariant.
                 varlen_kwargs["num_splits"] = 1
 
+        # Forward enable_gqa from GQAttention when Q and KV head counts differ
+        if kwargs.get("enable_gqa", False):
+            varlen_kwargs["enable_gqa"] = True
+
         out_packed = varlen_attn(
             xq_packed,
             xk_packed,
