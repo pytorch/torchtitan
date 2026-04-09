@@ -25,6 +25,7 @@ from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 
 from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
@@ -53,6 +54,9 @@ def _set_deterministic(seed: int = SEED) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+_TOKENIZER_PATH = "./tests/assets/tokenizer"
+
+
 def _build_trainer(model: nn.Module, model_config, trainer_cls: type) -> Trainer:
     """Build a minimal Trainer/GraphTrainer for single-GPU non-distributed testing.
 
@@ -69,6 +73,7 @@ def _build_trainer(model: nn.Module, model_config, trainer_cls: type) -> Trainer
     trainer.maybe_enable_amp = contextlib.nullcontext()
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
+    trainer.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(compile=SimpleNamespace(mode="aot_fx_trace"))
@@ -88,11 +93,13 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_registry: Callable
     annotate_model: Callable
 
+    model_flavor: str = "debugmodel"
+
     def setUp(self):
         if not hasattr(self, "model_registry"):
             self.skipTest("Base class")
         _set_deterministic()
-        model_spec = self.model_registry("debugmodel")
+        model_spec = self.model_registry(self.model_flavor)
         self.model_config = model_spec.model
         vocab_size = self.model_config.vocab_size
         with torch.device("meta"):
@@ -212,6 +219,60 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
             grad_hash,
             """c163466b7c4ff0320836e66ce249a7e214c22977adc2e104d373e25470171aeb""",
         )
+
+
+class TestLlama3FlexAttnSelfConsistent(BitwiseDeterministicBase):
+    """Self-consistency test for Llama3 with FlexAttention (debugmodel_flex_attn).
+
+    Eager vs aot_fx_trace is not bitwise identical here because eager uses the
+    unfused Math fallback while aot_fx_trace compiles FlexAttention HOPs via
+    regional_inductor into fused Triton kernels. Instead, we verify that two
+    aot_fx_trace runs produce identical results.
+    """
+
+    model_registry = staticmethod(llama3_model_registry)
+    model_flavor = "debugmodel_flex_attn"
+    annotate_model = staticmethod(annotate_llama)
+
+    def test_aot_fx_trace_vs_eager(self):
+        self.skipTest(
+            "FlexAttention eager (unfused) vs aot_fx_trace (fused Triton) "
+            "are numerically different by design"
+        )
+
+    def test_aot_fx_trace_self_consistent(self):
+        """Two aot_fx_trace runs produce bitwise identical results."""
+        run_a = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_b = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_a, run_b, "aot_fx_trace self-consistency: ")
+
+
+class TestDSv3FlexAttnSelfConsistent(BitwiseDeterministicBase):
+    """Self-consistency test for DSv3 with FlexAttention (debugmodel_flex_attn).
+
+    Eager vs aot_fx_trace is not bitwise identical here because eager uses the
+    unfused Math fallback while aot_fx_trace compiles FlexAttention HOPs via
+    regional_inductor into fused Triton kernels. Instead, we verify that two
+    aot_fx_trace runs produce identical results.
+    """
+
+    model_registry = staticmethod(dsv3_model_registry)
+    model_flavor = "debugmodel_flex_attn"
+    annotate_model = staticmethod(annotate_deepseekv3)
+
+    def test_aot_fx_trace_vs_eager(self):
+        self.skipTest(
+            "FlexAttention eager (unfused) vs aot_fx_trace (fused Triton) "
+            "are numerically different by design"
+        )
+
+    def test_aot_fx_trace_self_consistent(self):
+        """Two aot_fx_trace runs produce bitwise identical results."""
+        run_a = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_b = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_a, run_b, "aot_fx_trace self-consistency: ")
 
 
 if __name__ == "__main__":
