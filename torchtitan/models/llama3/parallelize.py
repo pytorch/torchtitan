@@ -10,7 +10,6 @@
 import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._composable.replicate_with_fsdp import replicate
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
@@ -118,36 +117,22 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile_dense(model, compile_config)
 
-    if parallel_dims.fsdp_enabled:
-        # dp_mesh is the mesh for FSDP/HSDP
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(names)
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        )
+    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    dp_mesh = parallel_dims.get_mesh(names)
+    apply_fsdp(
+        model,
+        dp_mesh,
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+    )
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
+    logger.info("Applied fully_shard to the model")
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
-    elif parallel_dims.dp_replicate_enabled:
-        apply_replicate(
-            model,
-            parallel_dims.get_mesh("dp_replicate"),
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        )
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
 
     return model
 
@@ -352,45 +337,3 @@ def apply_fsdp(
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
-
-
-def apply_replicate(
-    model: nn.Module,
-    dp_mesh: DeviceMesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-):
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=param_dtype,
-        reduce_dtype=reduce_dtype,
-        cast_forward_inputs=False,
-    )
-    replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-
-    if model.tok_embeddings is not None:
-        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
-        replicate(
-            model.tok_embeddings,
-            **replicate_config,
-        )
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.items():
-        # pyrefly: ignore [invalid-param-spec]
-        replicate(
-            transformer_block,
-            **replicate_config,
-        )
-
-    if model.norm is not None and model.output is not None:
-        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
-        replicate(
-            [model.norm, model.output],
-            **replicate_config,
-        )
-    # pyrefly: ignore [invalid-param-spec]
-    replicate(model, **replicate_config)
-
-    # Disable Replicate's automatic gradient division (ReplicateModule inherits from FSDPModule)
-    disable_fsdp_gradient_division(model)
-
-    logger.info("Applied replicate to the model")
