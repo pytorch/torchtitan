@@ -56,6 +56,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         }
 
         hf: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
 
         for key, value in state_dict.items():
             if key in RENAME:
@@ -66,7 +67,15 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
                 if suffix in LAYER_RENAME:
                     hf[f"model.layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.to_hf: unmapped keys: {unmapped_keys}"
+            )
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +105,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         }
 
         sd: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
 
         for key, value in hf_state_dict.items():
             if key in RENAME:
@@ -106,7 +116,15 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
                 if suffix in LAYER_RENAME:
                     sd[f"layers.{layer}.{LAYER_RENAME[suffix]}"] = value
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.from_hf: unmapped keys: {unmapped_keys}"
+            )
         return sd
 
     def get_hf_storage_reader(

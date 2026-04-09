@@ -60,6 +60,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         }
 
         hf: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
 
         for key, value in state_dict.items():
             # Skip output.weight when weight tying is enabled
@@ -78,7 +79,18 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 # MoE experts (3D GroupedExperts → individual 2D experts)
                 elif suffix in self._PROJ_TO_HF:
                     self._experts_to_hf(suffix, layer, value, hf)
+                # MoE expert bias — no HF equivalent, drop
+                elif suffix == "moe.expert_bias":
+                    pass
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.to_hf: unmapped keys: {unmapped_keys}"
+            )
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -109,6 +121,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         }
 
         sd: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
         expert_weights_by_layer: dict[str, dict[str, dict[int, Any]]] = {}
 
         for key, value in hf_state_dict.items():
@@ -126,6 +139,15 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     target = LAYER_RENAME[suffix]
                     if target is not None:
                         sd[f"layers.{layer}.{target}"] = value
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
+
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.from_hf: unmapped keys: {unmapped_keys}"
+            )
 
         # Weight tying: copy embedding as output if lm_head absent
         if (

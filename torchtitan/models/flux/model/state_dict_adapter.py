@@ -38,6 +38,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
         # base class index loading by passing hf_assets_path=None.
         super().__init__(model_config)
         self.model_config = model_config
+        # Set manually after bypassing base class index loading (see comment above)
         self.hf_assets_path = hf_assets_path
 
         if not hf_assets_path:
@@ -132,6 +133,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
         }
 
         hf: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
 
         for key, value in state_dict.items():
             if key in RENAME:
@@ -168,6 +170,8 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
                     hf[f"single_transformer_blocks.{layer}.attn.to_k.{param}"] = k
                     hf[f"single_transformer_blocks.{layer}.attn.to_v.{param}"] = v
                     hf[f"single_transformer_blocks.{layer}.proj_mlp.{param}"] = mlp
+                else:
+                    unmapped_keys.append(key)
 
             # -- Double blocks --
             elif m := _DOUBLE_BLOCK_RE.match(key):
@@ -195,7 +199,15 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
                         hf[f"transformer_blocks.{layer}.attn.to_q.{param}"] = q
                         hf[f"transformer_blocks.{layer}.attn.to_k.{param}"] = k
                         hf[f"transformer_blocks.{layer}.attn.to_v.{param}"] = v
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.to_hf: unmapped keys: {unmapped_keys}"
+            )
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -248,6 +260,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
         }
 
         sd: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
         # Collect combination keys: {tt_fqn: list of (order_index, value)}
         to_combine: dict[str, list[tuple[int, torch.Tensor]]] = {}
 
@@ -293,6 +306,8 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
                     _collect(f"single_blocks.{layer}.linear1.weight", 2, value)
                 elif suffix == "proj_mlp.weight":
                     _collect(f"single_blocks.{layer}.linear1.weight", 3, value)
+                else:
+                    unmapped_keys.append(key)
 
             # -- Double blocks --
             elif m := _HF_DOUBLE_BLOCK_RE.match(key):
@@ -327,10 +342,18 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
                     _collect(f"double_blocks.{layer}.img_attn.qkv.weight", 1, value)
                 elif suffix == "attn.to_v.weight":
                     _collect(f"double_blocks.{layer}.img_attn.qkv.weight", 2, value)
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
         # Concatenate combination groups in sorted order
         for tt_fqn, parts in to_combine.items():
             parts.sort(key=lambda x: x[0])
             sd[tt_fqn] = torch.cat([v for _, v in parts], dim=0)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.from_hf: unmapped keys: {unmapped_keys}"
+            )
         return sd

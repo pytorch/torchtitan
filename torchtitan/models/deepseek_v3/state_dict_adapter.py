@@ -20,7 +20,13 @@ _HF_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     _HF_EXPERT_RE = re.compile(
-        r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
+        r"""
+        ^model\.layers\.(\d+)           # layer index
+        \.mlp\.experts\.(\d+)            # expert index
+        \.(gate_proj|up_proj|down_proj)  # projection type
+        \.weight$
+        """,
+        re.VERBOSE,
     )
     _PROJ_TO_HF = {
         "moe.experts.w1": "gate_proj",
@@ -91,6 +97,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         hf: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
 
         for key, value in state_dict.items():
             if key in RENAME:
@@ -113,7 +120,15 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 # MoE experts (3D GroupedExperts → individual 2D experts)
                 elif suffix in self._PROJ_TO_HF:
                     self._experts_to_hf(suffix, layer, value, hf)
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.to_hf: unmapped keys: {unmapped_keys}"
+            )
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -146,6 +161,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         sd: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
         expert_weights_by_layer: dict[str, dict[str, dict[int, Any]]] = {}
 
         for key, value in hf_state_dict.items():
@@ -170,5 +186,13 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     sd[f"layers.{layer}.attention.wq_b.weight"] = value
                 elif suffix == "self_attn.q_proj.weight" and not self._has_q_lora:
                     sd[f"layers.{layer}.attention.wq.weight"] = value
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.from_hf: unmapped keys: {unmapped_keys}"
+            )
         return sd
