@@ -284,6 +284,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === aot_fx_trace mode tests ===
+        # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         OverrideDefinitions(
             [
                 [
@@ -294,9 +295,10 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP",
+            "aot_fx_trace llama3 FSDP+TP+cudagraph",
             "aot_fx_trace_llama3_fsdp_tp",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -429,6 +431,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === aot_fx_trace mode tests ===
+        # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
+        # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
         OverrideDefinitions(
             [
                 [
