@@ -22,7 +22,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
-    _patch_engine_run_backward,
+    _patch_autograd_grad,
     extract_module_state,
     minimal_fx_tracer,
     run_traced,
@@ -46,7 +46,8 @@ def make_train_step(loss_fn):
         logits = model(*fwd_args)
         loss = loss_fn(logits, labels)
         params = list(model.parameters())
-        grads = torch.autograd.grad(loss, params)
+        with torch.fx.traceback.annotate({"phase": "backward"}):
+            grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
 
     return train_step
@@ -60,7 +61,8 @@ def make_stateless_train_step(model, loss_fn):
         with torch.nn.utils.stateless._reparametrize_module(model, state):
             logits = model(*fwd_args)
         loss = loss_fn(logits, labels)
-        grads = torch.autograd.grad(loss, list(state.values()))
+        with torch.fx.traceback.annotate({"phase": "backward"}):
+            grads = torch.autograd.grad(loss, list(state.values()))
         return [loss] + list(grads)
 
     return train_step
@@ -92,7 +94,10 @@ def _apply_regional_inductor(traced_result):
                 break
 
     context = torch._guards.TracingContext(fake_mode)
-    with torch._guards.tracing(context):
+    with (
+        torch._guards.tracing(context),
+        torch._functorch.config.patch("remat_using_tags_for_fwd_loss_bwd_graph", False),
+    ):
         traced_result.gm = regional_inductor(traced_result.gm)
 
     traced_result.gm.graph.set_codegen(CodeGen())
@@ -108,6 +113,34 @@ class SimpleMLP(nn.Module):
 
     def forward(self, x):
         return self.fc2(torch.relu(self.fc1(self.embed(x))))
+
+
+class TinyFlexAttentionModel(nn.Module):
+    def __init__(self, dim=32, num_heads=2, vocab_size=128):
+        super().__init__()
+        assert dim % num_heads == 0
+        self.embed = nn.Embedding(vocab_size, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
+        self.v_proj = nn.Linear(dim, dim, bias=False)
+        from torchtitan.models.common.attention import FlexAttention
+
+        self.attn = FlexAttention(FlexAttention.Config())
+        self.out_proj = nn.Linear(dim, vocab_size, bias=False)
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+    def _project(self, x, layer):
+        proj = layer(x)
+        return proj.view(*proj.shape[:2], self.num_heads, self.head_dim)
+
+    def forward(self, tokens, attention_masks):
+        x = self.embed(tokens)
+        q = self._project(x, self.q_proj)
+        k = self._project(x, self.k_proj)
+        v = self._project(x, self.v_proj)
+        out = self.attn(q, k, v, attention_masks=attention_masks)
+        return self.out_proj(out.reshape(*out.shape[:2], -1))
 
 
 class TestGraphTrainerActivationCheckpointModes(unittest.TestCase):
@@ -402,7 +435,7 @@ class TestTraceDTensor(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMetadataPropagation(unittest.TestCase):
-    """Tests for _patch_engine_run_backward and _copy_fwd_metadata_to_bw_nodes."""
+    """Tests for _patch_autograd_grad and _copy_fwd_metadata_to_bw_nodes."""
 
     DEVICE = "cuda"
     DTYPE = torch.float32
@@ -411,7 +444,7 @@ class TestMetadataPropagation(unittest.TestCase):
         torch.manual_seed(42)
 
     def test_backward_nodes_have_seq_nr(self):
-        """Verify that backward FX nodes get seq_nr metadata via the patched engine."""
+        """Verify that backward FX nodes get seq_nr metadata via patched autograd.grad."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
@@ -462,7 +495,7 @@ class TestMetadataPropagation(unittest.TestCase):
         _copy_fwd_metadata_to_bw_nodes(gm)
 
         def is_backward(node: torch.fx.Node) -> bool:
-            return node.meta.get("custom", {}).get("remat_pass_tag") == "is_backward"
+            return node.meta.get("custom", {}).get("autograd_backward", False)
 
         # Check that bwd nodes with shared seq_nr got the custom metadata
         for node in gm.graph.nodes:
@@ -478,14 +511,14 @@ class TestMetadataPropagation(unittest.TestCase):
                 )
                 self.assertEqual(custom.get("test_key"), "test_value")
 
-    def test_copy_fwd_metadata_uses_remat_tag_fallback(self):
+    def test_copy_fwd_metadata_uses_backward_tagging(self):
         graph = torch.fx.Graph()
         fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(1, 2))
         fwd.meta["seq_nr"] = 7
         fwd.meta["custom"] = {"test_key": "test_value"}
         bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 3))
         bwd.meta["seq_nr"] = 7
-        bwd.meta["custom"] = {"remat_pass_tag": "is_backward"}
+        bwd.meta["custom"] = {"autograd_backward": True}
         graph.output(bwd)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
@@ -528,21 +561,17 @@ class TestMetadataPropagation(unittest.TestCase):
             f"Backward nodes missing stack_trace: {bwd_nodes_missing_stack_trace}",
         )
 
-    def test_patch_engine_restores_original(self):
-        """Verify that _patch_engine_run_backward restores the original function."""
+    def test_patch_autograd_grad_restores_original(self):
+        """Verify that the local autograd.grad wrapper restores the original function."""
         import torch.autograd
-        import torch.autograd.graph
 
-        orig_fn = torch.autograd.graph._engine_run_backward
+        orig_fn = torch.autograd.grad
 
-        with _patch_engine_run_backward():
-            # Inside the context, it should be patched
-            self.assertIsNot(torch.autograd.graph._engine_run_backward, orig_fn)
-            self.assertIsNot(torch.autograd._engine_run_backward, orig_fn)
+        with torch.compiler._non_strict_tracing_context():
+            with _patch_autograd_grad():
+                self.assertIsNot(torch.autograd.grad, orig_fn)
 
-        # After the context, it should be restored
-        self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
-        self.assertIs(torch.autograd._engine_run_backward, orig_fn)
+        self.assertIs(torch.autograd.grad, orig_fn)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -917,9 +946,9 @@ class GraphBasedSACTestMixin:
             maybe_register_blockmask_pytree_node()
             with maybe_regional:
                 traced = trace_train_step(train_step)(model, *fwd_args, labels)
+            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
             if use_regional_inductor:
                 _apply_regional_inductor(traced)
-            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
 
             def traced_step_fn(model):
                 result = run_traced_train_step(traced, model, *fwd_args, labels)
@@ -996,6 +1025,53 @@ class TestGraphBasedSACSmoke(GraphBasedSACTestMixin, unittest.TestCase):
             num_steps=1,
             check_peak_memory=False,
         )
+
+    def test_tiny_flex_attention_graph_sac_repro(self):
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            get_causal_mask_mod,
+        )
+
+        model_ref = TinyFlexAttentionModel().to(device=self.DEVICE, dtype=torch.bfloat16)
+        model_test = TinyFlexAttentionModel().to(device=self.DEVICE, dtype=torch.bfloat16)
+        model_test.load_state_dict(model_ref.state_dict())
+
+        tokens = torch.randint(0, 128, (1, 128), device=self.DEVICE)
+        labels = torch.randint(0, 128, (1, 128), device=self.DEVICE)
+        attention_mask = create_attention_mask(
+            get_causal_mask_mod(), 1, None, tokens.shape[1], tokens.shape[1]
+        )
+
+        train_step = make_train_step(get_loss)
+        maybe_register_blockmask_pytree_node()
+        traced = trace_train_step(train_step)(model_test, tokens, attention_mask, labels)
+
+        flex_nodes = [
+            node
+            for node in traced.gm.graph.nodes
+            if "flex_attention" in str(node.target) and "backward" not in str(node.target)
+        ]
+        self.assertGreater(len(flex_nodes), 0, "No flex_attention nodes found")
+
+        traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+
+        logits_ref = model_ref(tokens, attention_mask)
+        loss_ref = get_loss(logits_ref, labels)
+        grads_ref = torch.autograd.grad(loss_ref, tuple(model_ref.parameters()))
+
+        result = run_traced_train_step(traced, model_test, tokens, attention_mask, labels)
+        loss_tr = result[0]
+        grads_tr = result[1:]
+
+        # Intentional: eager FlexAttention goes through its compiled path while
+        # traced execution inlines the HOP under make_fx, so bf16 results are
+        # expected to be numerically close rather than bitwise identical.
+        torch.testing.assert_close(loss_ref, loss_tr, rtol=1e-4, atol=1e-3)
+        for grad_ref, grad_tr in zip(grads_ref, grads_tr, strict=True):
+            torch.testing.assert_close(grad_ref, grad_tr, rtol=3e-2, atol=2e-3)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -1273,11 +1349,12 @@ class TestDistributedGraphBasedSAC(FSDPTest):
                     del lbl
                     logits = mod(tok, attention_masks=masks)
                     loss = logits.float().sum()
-                    grads = torch.autograd.grad(
-                        loss,
-                        [p for p in mod.parameters() if p.requires_grad],
-                        allow_unused=True,
-                    )
+                    with torch.fx.traceback.annotate({"phase": "backward"}):
+                        grads = torch.autograd.grad(
+                            loss,
+                            [p for p in mod.parameters() if p.requires_grad],
+                            allow_unused=True,
+                        )
                     return [loss] + [grad for grad in grads if grad is not None]
 
                 maybe_register_blockmask_pytree_node()
@@ -1623,7 +1700,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"]
+        config = llama3_configs["debugmodel"]()
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         prev_deterministic = torch.are_deterministic_algorithms_enabled()
