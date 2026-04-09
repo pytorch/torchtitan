@@ -641,7 +641,8 @@ class GQAttention(BaseAttention):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None and self.k_norm is not None:
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
             xq = self.q_norm(xq)
             xk = self.k_norm(xk)
 
