@@ -85,15 +85,32 @@ def _ops_filter_with_distributed(name: str) -> bool:
 
     The default GraphPickler ops filter only allows aten and fbgemm ops.
     SimpleFSDP uses _c10d_functional collectives that must also be
-    allowed for the graph to serialize correctly.
+    allowed for the graph to serialize correctly.  The device_mesh ops
+    (e.g. _get_submesh) appear in the backward graph when DTensor
+    reconstructs submeshes from tracked ancestor meshes.
     """
     return name.startswith(
         (
             "torch.ops.aten",
             "torch.ops.fbgemm",
             "torch.ops._c10d_functional",
+            "torch.ops._dtensor",
+            "torch.ops.device_mesh",
         )
     )
+
+
+def _node_metadata_key_filter_distributed(key: str) -> bool:
+    """Metadata key filter for regional_inductor with distributed ops.
+
+    Distributed ops (e.g. _get_submesh, mesh_get_process_group) produce
+    opaque values (DeviceMesh, ProcessGroup) in node.meta["val"] and
+    node.meta["eager_input_vals"] that cannot be pickled.  We strip
+    both — they are not needed at runtime.
+    """
+    if key in ("val", "eager_input_vals"):
+        return False
+    return key not in ["source_fn_stack", "nn_module_stack", "fwd_source_fn_stack"]
 
 
 def regional_inductor_pass(
@@ -116,6 +133,7 @@ def regional_inductor_pass(
         # collective ops like _c10d_functional through GraphPickler.
         if isinstance(result, RegionalOutputCode):
             result._ops_filter = _ops_filter_with_distributed
+            result._node_metadata_key_filter = _node_metadata_key_filter_distributed
         else:
             logger.warning(
                 "regional_inductor with serializable=True did not produce "
