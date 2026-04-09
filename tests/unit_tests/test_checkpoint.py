@@ -713,7 +713,9 @@ class TestCheckpointManager(unittest.TestCase):
         from torch.distributed.checkpoint import HuggingFaceStorageWriter
 
         mock_adapter = mock.Mock()
-        mock_adapter.to_hf.side_effect = lambda sd: {f"hf_{k}": v for k, v in sd.items()}
+        mock_adapter.to_hf.side_effect = lambda sd: {
+            f"hf_{k}": v for k, v in sd.items()
+        }
         mock_adapter.fqn_to_index_mapping = None
         mock_adapter.hf_assets_path = None
 
