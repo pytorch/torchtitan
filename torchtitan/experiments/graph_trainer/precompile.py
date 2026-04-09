@@ -25,6 +25,7 @@ from torch._dynamo.aot_compile_types import BundledAOTAutogradSerializableCallab
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
+
 ConfigFingerprint = NewType("ConfigFingerprint", str)
 
 # Single artifact key — there is exactly one compiled artifact per
@@ -383,20 +384,21 @@ def precompile_load(
                 serialized_fn_bytes, cudagraph, is_regional=is_regional
             )
 
-        # Build the flat input tuple: params + buffers + user args.
-        # This mirrors the calling convention in joint_graph_builder's
-        # wrapper_fn (graph_utils.py).
-        inputs = (
-            *model.parameters(),
-            *model.buffers(),
-            *args,
-        )
+        # Build the flat input list matching the compile-time layout.
+        # AOT autograd's prepare_aot_module_simplified flattens via:
+        #   full_args = [*params, *buffers, *args]
+        #   flat_inputs = pytree.tree_flatten((full_args, kwargs))
+        # We must replicate that exact flattening here so dict key
+        # order and pytree-registered types (e.g. BlockMask → 8 leaf
+        # tensors) are expanded identically.
+        full_args = [*model.parameters(), *model.buffers(), *args]
+        inputs, _ = pytree.tree_flatten((full_args, kwargs))
         # The deserialized fn returns flat outputs. We need to
         # unflatten them using the saved out_spec to match the
         # original model output structure. See also graph_utils.py:wrapper_fn
         # which does NOT unflatten because the live-compiled fn already
         # handles it via unflattened_compiled_fn.
-        flat_outputs = compiled_fn(*inputs, **kwargs)
+        flat_outputs = compiled_fn(*inputs)
         if out_spec is not None:
             return pytree.tree_unflatten(flat_outputs, out_spec)
         return flat_outputs

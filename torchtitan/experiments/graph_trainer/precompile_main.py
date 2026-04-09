@@ -222,13 +222,24 @@ def main():
         model, compile_config, parallel_dims
     )
 
-    on_compile = _make_precompile_callback(
+    # Track whether the on_compile callback ran successfully.
+    # This lets us distinguish "compilation succeeded but execution
+    # failed on fake tensors" from "compilation itself failed."
+    compile_succeeded = False
+
+    def _on_compile_with_flag(compiled_fn, out_spec):
+        nonlocal compile_succeeded
+        _on_compile_inner(compiled_fn, out_spec)
+        compile_succeeded = True
+
+    _on_compile_inner = _make_precompile_callback(
         model,
         compile_config,
         parallel_dims,
         storage=storage,
         config_fingerprint=config_fingerprint,
     )
+    on_compile = _on_compile_with_flag
 
     model_joint_graph_builder = functools.partial(
         joint_graph_builder,
@@ -255,8 +266,45 @@ def main():
     dummy_input = torch.randint(
         0, vocab_size, (local_batch_size, seq_len), device=device
     )
+
+    # Build extra kwargs (positions, attention_masks) using the same
+    # shared function as the training path. A dummy tokenizer provides
+    # the eos_id needed by get_attention_masks(); the mask values don't
+    # matter for precompile — only the pytree structure must match.
+    class _DummyTokenizer:
+        eos_id = 0
+
+    from torchtitan.components.forward_utils import build_forward_extra_kwargs
+
+    extra_kwargs = build_forward_extra_kwargs(
+        model_config,
+        model,
+        dummy_input,
+        tokenizer=_DummyTokenizer(),
+        parallel_dims=parallel_dims,
+    )
+
     logger.info("Running forward pass to trigger AOT compilation...")
-    compiled_model(dummy_input)
+    try:
+        compiled_model(dummy_input, **extra_kwargs)
+    except RuntimeError as e:
+        # The on_compile callback saves the artifact during compilation,
+        # before the compiled code executes on the (fake) inputs. MoE
+        # models with dynamic shapes (e.g. expert-parallel all-to-all)
+        # produce Inductor shape guards that fail when executed on fake
+        # tensors, but the serialized artifact is still valid because it
+        # was saved before execution. Only suppress the error if the
+        # on_compile callback ran successfully; re-raise otherwise since
+        # it means compilation itself failed, not just execution.
+        if not compile_succeeded:
+            raise
+        logger.warning(
+            f"Forward execution on fake inputs raised RuntimeError "
+            f"(expected for MoE models with dynamic shapes under fake "
+            f"backend): {e}\n"
+            f"The precompile artifact was saved successfully before "
+            f"execution — this error is harmless."
+        )
 
     logger.info(
         f"Precompile complete. Artifact saved to "

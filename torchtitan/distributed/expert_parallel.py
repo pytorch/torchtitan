@@ -153,7 +153,7 @@ class ExpertParallel(BaseExpertParallel):
                 num_tokens_per_expert,
                 None,
                 None,
-                group=device_mesh.get_group(),
+                group=device_mesh,
             )
             # Need to wait explicitly because it is used by a triton kernel later
             # which doesn't realize that AsyncCollectiveTensor needs unwrapping
@@ -179,7 +179,7 @@ class ExpertParallel(BaseExpertParallel):
             routed_input,
             self.output_splits,
             self.input_splits,
-            device_mesh.get_group(),
+            device_mesh,
         )
 
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
@@ -212,7 +212,7 @@ class ExpertParallel(BaseExpertParallel):
             routed_output,
             self.input_splits,
             self.output_splits,
-            device_mesh.get_group(),
+            device_mesh,
         )
         return routed_output
 
@@ -299,7 +299,12 @@ class ReordererSequenceParallel(ParallelStyle):
                     "Requires EP degree dividing batch size * seq len."
                 )
             local_num_tokens = num_tokens // device_mesh.size()
-            local_rank = device_mesh.get_local_rank()
+            # Use _sym_get_coordinate instead of get_local_rank so that
+            # the rank coordinate is a SymInt when compile_on_one_rank
+            # is enabled. get_local_rank returns a concrete int that
+            # gets baked into the FX graph, causing CooR precompile
+            # to use rank 0's slice indices on all ranks.
+            local_rank = device_mesh._sym_get_coordinate(0)
             offset = local_rank * local_num_tokens
             output = x[offset : offset + local_num_tokens]
 
@@ -317,7 +322,8 @@ class ReordererSequenceParallel(ParallelStyle):
 
         # NOTE: As we shard routed tokens along bs*slen dim across the TP ranks,
         #       the MoE gather and scatter still require global token indices.
-        local_rank = device_mesh.get_local_rank()
+        # Use _sym_get_coordinate for CooR compatibility (see _split_along_first_dim).
+        local_rank = device_mesh._sym_get_coordinate(0)
         token_indices_experts_sorted = (
             token_indices_experts_sorted + top_scores.shape[0] * local_rank
         )
@@ -487,7 +493,7 @@ class TorchAOExpertParallel(ExpertParallel):
                 num_tokens_per_expert,
                 None,
                 None,
-                group=device_mesh.get_group(),
+                group=device_mesh,
             )
             # Need to wait explicitly because it is used by a triton kernel later
             # which doesn't realize that AsyncCollectiveTensor needs unwrapping
@@ -513,7 +519,7 @@ class TorchAOExpertParallel(ExpertParallel):
             routed_input,
             self.output_splits,
             self.input_splits,
-            device_mesh.get_group(),
+            device_mesh,
         )
 
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
@@ -565,6 +571,6 @@ class TorchAOExpertParallel(ExpertParallel):
             routed_output,
             self.input_splits,
             self.output_splits,
-            device_mesh.get_group(),
+            device_mesh,
         )
         return routed_output
