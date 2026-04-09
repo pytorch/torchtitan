@@ -583,19 +583,13 @@ class GQAttention(BaseAttention):
         wq: Linear.Config
         wkv: Linear.Config
         wo: Linear.Config
-        q_norm: RMSNorm.Config | None = None
-        k_norm: RMSNorm.Config | None = None
+        qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
-
-        def __post_init__(self):
-            BaseAttention.Config.__post_init__(self)
-            if (self.q_norm is None) != (self.k_norm is None):
-                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -613,8 +607,11 @@ class GQAttention(BaseAttention):
         self.rope_backend = config.rope_backend
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm = config.q_norm.build() if config.q_norm is not None else None
-        self.k_norm = config.k_norm.build() if config.k_norm is not None else None
+        self.q_norm: RMSNorm | None = None
+        self.k_norm: RMSNorm | None = None
+        if config.qk_norm is not None:
+            self.q_norm = config.qk_norm.build()
+            self.k_norm = config.qk_norm.build()
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
@@ -644,9 +641,8 @@ class GQAttention(BaseAttention):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None:
+        if self.q_norm is not None and self.k_norm is not None:
             xq = self.q_norm(xq)
-        if self.k_norm is not None:
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
