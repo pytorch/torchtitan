@@ -6,6 +6,7 @@
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,11 +31,13 @@ from torchtitan.config.configs import (
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
-    compute_policy_gradient_loss,
-    compute_token_log_probs,
+    compute_logprobs,
+    create_positions_from_seq_lens,
+    create_varlen_metadata,
+    extract_response_logprobs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -74,11 +77,13 @@ class PolicyTrainer(Actor, Configurable):
         self,
         config: Config,
         *,
+        loss_fn: Callable,
         model_spec: ModelSpec,
         hf_assets_path: str = "",
         transfer_dtype: str = "",
     ):
         self.config = config
+        self.loss_fn = loss_fn
         self.model_spec = model_spec
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -260,18 +265,14 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     @endpoint
-    async def step(self, episodes: list[Episode]) -> dict:
+    async def step(self, train_data: list[TrainBatch]) -> dict:
         """Perform one training step.
 
-        Expects a flat list of Episodes with ``advantage`` already computed
-        by the controller. Shards episodes across DP ranks so each rank
-        processes a unique slice of the data.
-
         Args:
-            episodes: Flat list of Episodes with advantages set.
+            train_data (list[TrainBatch]): List of batches, one per DP rank.
 
         Returns:
-            Training metrics
+            dict: Training metrics (loss, policy version, etc.).
         """
         # The policy and ref models share code objects, so dynamo's
         # per-code-object cache must hold entries for both grad modes
@@ -284,50 +285,44 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        advantages = torch.tensor([ep.advantage for ep in episodes])
+        local_batch = train_data[self.dp_rank]
+        device = self.device
 
-        all_token_ids: list[list[int]] = [ep.token_ids for ep in episodes]
-        all_prompt_token_ids: list[list[int]] = [ep.prompt_token_ids for ep in episodes]
-        all_token_log_probs: list[list[float]] = [ep.token_log_probs for ep in episodes]
+        token_ids = local_batch.token_ids.to(device)
+        seq_lens = local_batch.seq_lens
+        prompt_lens = local_batch.prompt_lens
+        response_lens = local_batch.response_lens
+        advantages = local_batch.advantages.to(device)
 
-        all_rewards_tensor = torch.tensor([ep.reward for ep in episodes])
+        attention_masks = create_varlen_metadata(seq_lens, device)
+        positions = create_positions_from_seq_lens(seq_lens, device)
 
-        # Shard flattened completions across DP ranks so each rank processes
-        # a unique subset of the data.
-        total_samples = len(all_token_ids)
-        my_indices = list(range(self.dp_rank, total_samples, self.dp_size))
-        my_token_ids = [all_token_ids[i] for i in my_indices]
-        my_prompt_token_ids = [all_prompt_token_ids[i] for i in my_indices]
-        my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
-        my_advantages = advantages[my_indices]
-
-        # Compute reference log probs using frozen ref_model (local shard only)
-        ref_token_log_probs = []
-        device = next(self.model.parameters()).device
-        with torch.no_grad():
-            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
-                token_lps = compute_token_log_probs(
-                    self.ref_model,
-                    prompt_toks,
-                    gen_toks,
-                    device,
-                )
-                ref_token_log_probs.append(token_lps)
-
-        # Compute loss on this rank's shard
-        loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
-            self.model,
-            my_token_ids,
-            my_prompt_token_ids,
-            my_advantages,
-            ref_token_log_probs,
-            kl_coef=0.1,
+        logits = self.model(
+            token_ids, attention_masks=attention_masks, positions=positions
+        )
+        all_policy_logprobs = compute_logprobs(logits, token_ids)
+        policy_logprobs = extract_response_logprobs(
+            all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        # Verify logprob identity (local shard)
+        with torch.no_grad():
+            ref_logits = self.ref_model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
+            all_ref_logprobs = compute_logprobs(ref_logits, token_ids)
+            ref_logprobs = extract_response_logprobs(
+                all_ref_logprobs, seq_lens, prompt_lens, response_lens
+            )
+
+        loss, loss_metrics = self.loss_fn(
+            policy_logprobs=policy_logprobs,
+            advantages=advantages,
+            ref_logprobs=ref_logprobs,
+        )
+
         verification_result = verify_logprob_identity(
-            my_token_log_probs,
-            batch_token_log_probs,
+            local_batch.token_logprobs,
+            policy_logprobs,
         )
 
         logger.debug(
@@ -358,11 +353,8 @@ class PolicyTrainer(Actor, Configurable):
         # Return metrics
         metrics = {
             "loss": loss.item(),
-            "reward_mean": all_rewards_tensor.mean().item(),
-            "reward_std": all_rewards_tensor.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": episodes[0].text[:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             # Trainer vs generator log prob divergence

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
+
 import torch
 import torch.nn.functional as F
 
@@ -11,23 +13,64 @@ from torchtitan.models.common.attention import VarlenMetadata
 
 # TODO We should either unify all the mask creation for RL, or move them to a
 #      single file.
-def build_varlen_metadata(
-    input_sequences: list[tuple[torch.Tensor, int, int]], device: torch.device
-) -> VarlenMetadata:
-    """Build VarlenMetadata for all sequences in a batch."""
-    cu_seqs = torch.cumsum(
-        torch.tensor(
-            [0] + [token_ids.shape[0] for token_ids, _, _ in input_sequences],
-            dtype=torch.int32,
-            device=device,
-        ),
-        0,
-        dtype=torch.int32,
+def create_varlen_metadata(seq_lens: list[int], device: torch.device) -> VarlenMetadata:
+    """Build VarlenMetadata from sequence lengths.
+
+    Example:
+        seq_lens = [3, 5, 2]
+        -> cu_seqs = [0, 3, 8, 10], max_len = 5
+    """
+    cu_seqs = torch.tensor(
+        [0] + list(itertools.accumulate(seq_lens)), dtype=torch.int32, device=device
     )
-    max_len = max(token_ids.shape[0] for token_ids, _, _ in input_sequences)
+    max_len = max(seq_lens)
     return VarlenMetadata(
         cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
     )
+
+
+def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+    """Compute per-token logprobs from logits.
+
+    Returns logprobs for positions 1..N (the predicted tokens).
+    Output shape is ``[batch, seq_len - 1]``.
+    """
+    shift_logits = logits[:, :-1, :].float()
+    shift_targets = token_ids[:, 1:]
+    logprobs = F.log_softmax(shift_logits, dim=-1)
+    return logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
+
+
+def extract_response_logprobs(
+    packed_logprobs: torch.Tensor,
+    seq_lens: list[int],
+    prompt_lens: list[int],
+    response_lens: list[int],
+) -> list[torch.Tensor]:
+    """Extract per-sample response logprobs from packed logprobs."""
+    seq_start = 0
+    result = []
+    for i in range(len(seq_lens)):
+        # Logprobs are shifted: position j holds logprob of token j+1,
+        # so response start (seq_start + prompt_len) maps to index
+        # (seq_start + prompt_len - 1) in the logprobs tensor.
+        s = seq_start + prompt_lens[i] - 1
+        e = s + response_lens[i]
+        result.append(packed_logprobs[0, s:e])
+        seq_start += seq_lens[i]
+    return result
+
+
+def create_positions_from_seq_lens(
+    seq_lens: list[int], device: torch.device
+) -> torch.Tensor:
+    """Build a ``[1, total_tokens]`` positions tensor that resets at each sequence boundary.
+
+    Example:
+        seq_lens = [3, 5, 2]
+        -> positions = [[0, 1, 2, 0, 1, 2, 3, 4, 0, 1]]
+    """
+    return torch.cat([torch.arange(l, device=device) for l in seq_lens]).unsqueeze(0)
 
 
 def compute_token_log_probs(
@@ -52,7 +95,8 @@ def compute_token_log_probs(
     token_ids = torch.tensor(prompt_ids + gen_ids, dtype=torch.long, device=device)
     prompt_len = len(prompt_ids)
     gen_len = len(gen_ids)
-    attention_masks = build_varlen_metadata([(token_ids, prompt_len, gen_len)], device)
+    seq_lens = [len(prompt_ids) + len(gen_ids)]
+    attention_masks = create_varlen_metadata(seq_lens, device)
 
     full_tensor = token_ids.unsqueeze(0)
 
