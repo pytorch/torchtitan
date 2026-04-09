@@ -55,6 +55,42 @@ python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_d
     --test_suite graph_trainer_default --ngpu 8
 ```
 
+### Dumping Graph Modules for Debugging
+
+To inspect a `GraphModule` at any point, dump it to a temporary file:
+
+```python
+from pathlib import Path
+import tempfile
+
+def dump_gm(gm: torch.fx.GraphModule, name: str) -> None:
+    output_path = Path(tempfile.gettempdir()) / f"{name}.txt"
+    output_path.write_text(
+        gm.print_readable(
+            print_output=False,
+            include_stride=True,
+            include_device=True,
+            expanded_def=True,
+        )
+    )
+    print(f"Dumped graph to {output_path}")
+```
+
+When debugging a graph pass, dump the graph before and after the pass and
+diff the two files to see exactly what changed:
+
+```python
+def my_pass(gm, example_inputs):
+    dump_gm(gm, "my_pass_before")
+    # ... transform gm ...
+    dump_gm(gm, "my_pass_after")
+    return gm
+```
+
+```bash
+diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
+```
+
 ### Bitwise Deterministic Guardrail
 
 Before submitting any change, run the bitwise deterministic test first:
