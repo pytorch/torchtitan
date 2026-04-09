@@ -6,7 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Tests for FlexShard Phase 2c: Mixed precision and no_sync.
+Tests for FlexShard Phase 2c: mixed precision.
 
 Usage:
     # Single-process tests (no GPU/NCCL required):
@@ -205,75 +205,6 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# no_sync tests (single-process, no NCCL)
-# ---------------------------------------------------------------------------
-
-
-class TestNoSync(unittest.TestCase):
-    """Test no_sync() context manager."""
-
-    def test_dstorage_no_sync_flag(self):
-        """no_sync() sets _require_gradient_sync=False on DStorage."""
-        from torchtitan.experiments.flex_shard.flex_shard import DStorage
-
-        # Create a minimal DStorage
-        module = nn.Linear(8, 4, bias=False)
-        byte_storage = torch.empty(64, dtype=torch.uint8)
-        storage = DStorage(
-            byte_storage, {}, None, 64, 128, module, register_hooks=False
-        )
-
-        self.assertTrue(storage._require_gradient_sync)
-        with storage.no_sync():
-            self.assertFalse(storage._require_gradient_sync)
-        self.assertTrue(storage._require_gradient_sync)
-
-    def test_dstorage_no_sync_restores_on_exception(self):
-        """Flag restores even on exception."""
-        from torchtitan.experiments.flex_shard.flex_shard import DStorage
-
-        module = nn.Linear(8, 4, bias=False)
-        byte_storage = torch.empty(64, dtype=torch.uint8)
-        storage = DStorage(
-            byte_storage, {}, None, 64, 128, module, register_hooks=False
-        )
-
-        try:
-            with storage.no_sync():
-                raise RuntimeError("test")
-        except RuntimeError:
-            pass
-        self.assertTrue(storage._require_gradient_sync)
-
-    def test_flexshardmodule_no_sync(self):
-        """FlexShardModule.no_sync() sets flag on all storages."""
-        from torchtitan.experiments.flex_shard.flex_shard import (
-            _DSTORAGES_ATTR,
-            DStorage,
-            FlexShardModule,
-        )
-
-        module = nn.Linear(8, 4, bias=False)
-        byte_storage1 = torch.empty(32, dtype=torch.uint8)
-        byte_storage2 = torch.empty(32, dtype=torch.uint8)
-        s1 = DStorage(byte_storage1, {}, None, 32, 64, module, register_hooks=False)
-        s2 = DStorage(byte_storage2, {}, None, 32, 64, module, register_hooks=False)
-
-        # Manually set up FlexShardModule
-        cls = type(module)
-        module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
-        setattr(module, _DSTORAGES_ATTR, [s1, s2])
-
-        self.assertTrue(s1._require_gradient_sync)
-        self.assertTrue(s2._require_gradient_sync)
-        with module.no_sync():
-            self.assertFalse(s1._require_gradient_sync)
-            self.assertFalse(s2._require_gradient_sync)
-        self.assertTrue(s1._require_gradient_sync)
-        self.assertTrue(s2._require_gradient_sync)
-
-
-# ---------------------------------------------------------------------------
 # Distributed mixed precision tests (torchrun only)
 # ---------------------------------------------------------------------------
 
@@ -298,27 +229,41 @@ class TestDistributedMixedPrecision(unittest.TestCase):
             torch.cuda.synchronize()
             torch.distributed.destroy_process_group()
 
-    def test_param_access_returns_param_dtype(self):
-        """Accessing module.weight returns tensor in param_dtype."""
+    def _init_mesh(self):
         from torch.distributed.device_mesh import init_device_mesh
 
+        return init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("fsdp",))
+
+    def _flex_shard(self, model, mesh, **kwargs):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
         from torchtitan.experiments.flex_shard import (
-            BucketSpec,
             flex_shard,
-            MixedPrecisionPolicy,
+            lift_params_to_global_spmd_mesh,
         )
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        lift_params_to_global_spmd_mesh(model, mesh)
+        return flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            **kwargs,
+        )
+
+    def test_param_access_returns_param_dtype(self):
+        """Accessing module.weight returns tensor in param_dtype."""
+        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
+
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
         mp = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], mp_policy=mp)],
-            register_hooks=False,
         )
 
         # Accessing weight triggers parametrization with mp cast
@@ -327,25 +272,18 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
     def test_state_dict_returns_storage_dtype(self):
         """state_dict returns raw sharded params in original (storage) dtype."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
 
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            MixedPrecisionPolicy,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
         mp = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], mp_policy=mp)],
-            register_hooks=False,
         )
 
         sd = model.state_dict()
@@ -354,25 +292,18 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
     def test_forward_output_in_param_dtype(self):
         """Forward output dtype matches param_dtype."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
 
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            MixedPrecisionPolicy,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
         mp = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], mp_policy=mp)],
-            register_hooks=False,
         )
 
         x = torch.randn(2, 8, device="cuda", dtype=torch.bfloat16)
@@ -382,15 +313,9 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
     def test_gradient_in_reduce_dtype(self):
         """After backward, param.grad is in reduce_dtype."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
 
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            MixedPrecisionPolicy,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
@@ -398,11 +323,10 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         mp = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32
         )
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], mp_policy=mp)],
-            register_hooks=False,
         )
 
         x = torch.randn(2, 8, device="cuda", dtype=torch.bfloat16)
@@ -419,17 +343,13 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
     def test_no_mp_matches_original(self):
         """Without mp_policy, output matches non-mp baseline."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
         ref_weight = model.weight.data.clone()
 
-        flex_shard(model, mesh, register_hooks=False)
+        self._flex_shard(model, mesh)
 
         x = torch.randn(2, 8, device="cuda")
         torch.distributed.broadcast(x, src=0)
@@ -440,15 +360,9 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
     def test_per_bucket_mp_policy(self):
         """Different mp_policy per bucket works correctly."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
 
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            MixedPrecisionPolicy,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         class TwoLayer(nn.Module):
             def __init__(self):
@@ -464,7 +378,7 @@ class TestDistributedMixedPrecision(unittest.TestCase):
             torch.distributed.broadcast(p.data, src=0)
 
         # linear1 in bf16, linear2 in fp32 (no mp)
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[
@@ -474,7 +388,6 @@ class TestDistributedMixedPrecision(unittest.TestCase):
                 ),
                 ["linear2.*"],  # no mp_policy
             ],
-            register_hooks=False,
         )
 
         # linear1 weight should be bf16 via parametrization
@@ -484,82 +397,5 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Distributed no_sync tests (torchrun only, hooks mode)
-# ---------------------------------------------------------------------------
-
-
-class TestDistributedNoSync(unittest.TestCase):
-    """Multi-process tests for no_sync() (hooks mode).
-
-    Run with: torchrun --nproc_per_node=2 test_flex_shard_mixed_precision.py
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
-        cls.rank = torch.distributed.get_rank()
-        cls.world_size = torch.distributed.get_world_size()
-        torch.cuda.set_device(cls.rank % torch.cuda.device_count())
-
-    @classmethod
-    def tearDownClass(cls):
-        if torch.distributed.is_initialized():
-            torch.cuda.synchronize()
-            torch.distributed.destroy_process_group()
-
-    def test_no_sync_skips_reduce(self):
-        """In no_sync, backward reshards without reduce-scatter."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
-
-        model = nn.Linear(8, 4, bias=False, device="cuda")
-        torch.distributed.broadcast(model.weight.data, src=0)
-
-        flex_shard(model, mesh, register_hooks=True)
-
-        x = torch.randn(2, 8, device="cuda")
-        torch.distributed.broadcast(x, src=0)
-
-        with model.no_sync():
-            output = model(x)
-            loss = output.sum()
-            loss.backward()
-
-        # After no_sync backward, params should be resharded (sharded shape)
-        sd = model.state_dict()
-        expected_rows = 4 // self.world_size
-        self.assertEqual(sd["weight"].shape, (expected_rows, 8))
-
-    def test_sync_step_reduces(self):
-        """After no_sync, a normal step reduces gradients."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
-
-        model = nn.Linear(8, 4, bias=False, device="cuda")
-        torch.distributed.broadcast(model.weight.data, src=0)
-
-        flex_shard(model, mesh, register_hooks=True)
-
-        x = torch.randn(2, 8, device="cuda")
-        torch.distributed.broadcast(x, src=0)
-
-        # Normal step (with sync)
-        output = model(x)
-        loss = output.sum()
-        loss.backward()
-
-        # After sync backward, weight should have gradient
-        sd = model.state_dict()
-        expected_rows = 4 // self.world_size
-        self.assertEqual(sd["weight"].shape, (expected_rows, 8))
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ from torchtitan.tools.logging import logger
 from .configs import GraphTrainerCompileConfig as CompileConfig
 from .passes import (
     autobucketing_reordering_pass,
-    fsdp_reshard_after_fwd_pass,
+    flex_shard_reshard_after_fwd_pass,
     transformer_block_bucketing_reordering_pass,
 )
 
@@ -147,7 +147,7 @@ def get_compile_backend_with_passes(
     def joint_ac_pass(
         gm: torch.fx.GraphModule, example_inputs: Any
     ) -> torch.fx.GraphModule:
-        return fsdp_reshard_after_fwd_pass(
+        return flex_shard_reshard_after_fwd_pass(
             gm, example_inputs, reshard_after_forward=fsdp_reshard_after_forward
         )
 

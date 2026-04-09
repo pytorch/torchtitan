@@ -25,13 +25,18 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointWrapper,
+)
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import DataParallelMeshDims
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torchtitan.experiments.flex_shard import (
     flat_shard_placements,
     flex_shard,
     FlexShardModule,
+    lift_params_to_global_spmd_mesh,
     per_param_placements,
 )
 
@@ -86,11 +91,21 @@ class MultiLayerMLP(nn.Module):
         return self.output(x)
 
 
+def _unwrap_checkpoint(module: nn.Module) -> nn.Module:
+    if isinstance(module, CheckpointWrapper):
+        return module._checkpoint_wrapped_module
+    return module
+
+
+def _init_flex_mesh(world_size):
+    return init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+
+
 def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
     """Test per-layer wrapping with DDP parity over multiple training steps."""
     rank, world_size = dist.get_rank(), dist.get_world_size()
     device = torch.device("cuda", torch.cuda.current_device())
-    mesh = init_device_mesh("cuda", (world_size,))
+    mesh = _init_flex_mesh(world_size)
 
     print_rank0(f"\n{'=' * 70}")
     print_rank0(f"Testing {name} (world_size={world_size})")
@@ -100,6 +115,7 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     model = MultiLayerMLP().to(device)
+    lift_params_to_global_spmd_mesh(model, mesh)
 
     # Create DDP reference
     torch.manual_seed(42)
@@ -108,12 +124,24 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
 
     # Per-layer wrapping: wrap each layer first, then root
     for layer in model.layers:
-        flex_shard(layer, mesh, shard_placement_fn=shard_placement_fn)
-    flex_shard(model, mesh, shard_placement_fn=shard_placement_fn)
+        flex_shard(
+            layer,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=shard_placement_fn,
+        )
+    flex_shard(
+        model,
+        mesh,
+        DataParallelMeshDims(shard="fsdp"),
+        shard_placement_fn=shard_placement_fn,
+    )
 
-    # Verify each layer has its own DStorage
+    # Root-level reshard checkpointing wraps FlexShard-managed layers in
+    # CheckpointWrapper; the FlexShardModule remains the wrapped inner module.
     for i, layer in enumerate(model.layers):
-        assert isinstance(layer, FlexShardModule), f"layers.{i} not wrapped"
+        inner_layer = _unwrap_checkpoint(layer)
+        assert isinstance(inner_layer, FlexShardModule), f"layers.{i} not wrapped"
     assert isinstance(model, FlexShardModule), "root not wrapped"
 
     # Print storage info
@@ -123,7 +151,7 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
         for fqn in root_ds.param_infos:
             print(f"    {fqn}")
         for i, layer in enumerate(model.layers):
-            layer_ds = layer.dstorage
+            layer_ds = _unwrap_checkpoint(layer).dstorage
             print(f"  Layer {i} DStorage: {len(layer_ds.param_infos)} params")
 
     # Optimizers

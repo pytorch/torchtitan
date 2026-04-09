@@ -21,6 +21,8 @@ Unshard sequences by placement type (brackets = optional):
                     → chunk → getitem(0..N) → cat → [convert_element_type]
     FlatShard:      placeholder → [_to_copy] → all_gather → wait_tensor
                     → view → [convert_element_type]
+    Owned:          placeholder → [_to_copy] → broadcast → wait_tensor
+                    → [convert_element_type]
     SimpleFSDP:     [convert_element_type] → all_gather → wait_tensor
                     → [slice]
 """
@@ -37,6 +39,9 @@ from torch.utils.checkpoint import CheckpointPolicy
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     is_wait_tensor_from_fsdp,
 )
+
+
+_RESHARD_AFTER_FORWARD_ATTR = "_flex_shard_reshard_after_forward"
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +91,39 @@ def _is_to_copy(node: torch.fx.Node) -> bool:
     )
 
 
+def _is_broadcast(node: torch.fx.Node) -> bool:
+    return node.op == "call_function" and node.target in (
+        torch.ops._c10d_functional.broadcast.default,
+    )
+
+
+def _is_all_reduce(node: torch.fx.Node) -> bool:
+    return node.op == "call_function" and node.target in (
+        torch.ops._c10d_functional.all_reduce.default,
+    )
+
+
+def _is_narrow(node: torch.fx.Node) -> bool:
+    return node.op == "call_function" and node.target in (
+        torch.ops.aten.narrow.default,
+        torch.ops.aten.narrow.Tensor,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core annotation logic
 # ---------------------------------------------------------------------------
+
+
+def _is_wait_tensor_from_owned(node: torch.fx.Node) -> bool:
+    """True if node is wait_tensor whose input is a broadcast from a placeholder."""
+    if is_wait_tensor(node) and _is_broadcast(node.args[0]):
+        n: torch.fx.Node = node.all_input_nodes[0]
+        while len(n.all_input_nodes) == 1:
+            if n.all_input_nodes[0].op == "placeholder":
+                return True
+            n = n.all_input_nodes[0]
+    return False
 
 
 def _force_recompute_node(node: torch.fx.Node, reshard_after_forward: bool) -> None:
@@ -101,6 +136,18 @@ def _force_recompute_node(node: torch.fx.Node, reshard_after_forward: bool) -> N
     # of a user-level activation checkpoint region. A large value ensures our
     # annotations aren't influenced by nearby ac_graph_id values.
     node.meta["ac_graph_id"] = 100000
+
+
+def _get_node_reshard_after_forward(
+    node: torch.fx.Node,
+    fallback: bool | None,
+) -> bool:
+    """Resolve per-bucket reshard policy from traced tensor metadata."""
+    val = node.meta.get("val")
+    value = getattr(val, _RESHARD_AFTER_FORWARD_ATTR, None)
+    if value is not None:
+        return bool(value)
+    return True if fallback is None else fallback
 
 
 def _annotate_unshard_sequence(
@@ -140,7 +187,7 @@ def _annotate_unshard_sequence(
     terminal = wait_node
     for user in wait_node.users:
         if _is_chunk(user):
-            # Shard(dim!=0): chunk → getitem(0..N) → cat
+            # Shard(dim!=0): chunk → getitem(0..N) → cat [→ narrow]
             force(user)
             for gi_user in user.users:
                 if _is_getitem(gi_user):
@@ -160,6 +207,18 @@ def _annotate_unshard_sequence(
             force(user)
             terminal = user
             break
+        elif _is_narrow(user):
+            # Uneven Shard(0): wait_tensor → narrow
+            force(user)
+            terminal = user
+            break
+
+    # 3b. Walk forward from terminal: narrow (uneven Shard(dim!=0) padding removal)
+    for user in terminal.users:
+        if _is_narrow(user) and terminal is not wait_node:
+            force(user)
+            terminal = user
+            break
 
     # 4. Walk forward from terminal: convert_element_type (mixed precision)
     for user in terminal.users:
@@ -172,22 +231,74 @@ def _annotate_unshard_sequence(
     terminal.meta["flex_shard_placement"] = True
 
 
+def _annotate_owned_sequence(
+    wait_node: torch.fx.Node,
+    reshard_after_forward: bool,
+) -> None:
+    """Annotate Owned unshard: broadcast -> wait_tensor -> [convert_element_type].
+
+    Simpler than _annotate_unshard_sequence — broadcast has no post-processing
+    ops (no chunk+cat, no view), only an optional convert_element_type for
+    mixed precision.
+    """
+
+    def force(node: torch.fx.Node) -> None:
+        _force_recompute_node(node, reshard_after_forward)
+
+    broadcast_node = wait_node.args[0]
+    assert _is_broadcast(broadcast_node)
+
+    # 1. Annotate broadcast + wait_tensor
+    force(broadcast_node)
+    force(wait_node)
+
+    # 2. Walk backward from broadcast: annotate .to() (offload H2D)
+    pre = broadcast_node.all_input_nodes[0]
+    while pre.op == "call_function":
+        if _is_to_copy(pre) or _is_convert_element_type(pre):
+            force(pre)
+        pre_inputs = pre.all_input_nodes
+        if len(pre_inputs) == 1:
+            pre = pre_inputs[0]
+        else:
+            break
+
+    # 3. Walk forward from wait_tensor: optional convert_element_type
+    terminal = wait_node
+    for user in wait_node.users:
+        if _is_convert_element_type(user):
+            force(user)
+            terminal = user
+            break
+
+    # 4. Tag the final output node with metadata for downstream passes
+    terminal.meta["flex_shard_placement"] = True
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
 def annotate_flex_shard_all_gather(
-    gm: torch.fx.GraphModule, reshard_after_forward: bool
+    gm: torch.fx.GraphModule, reshard_after_forward: bool | None = None
 ) -> torch.fx.GraphModule:
     """Annotate all FlexShard and SimpleFSDP unshard sequences in the graph.
 
     This is a superset of ``annotate_fsdp_all_gather`` — it handles all
-    unshard patterns (Shard(0), Shard(dim!=0), FlatShard, SimpleFSDP).
+    unshard patterns (Shard(0), Shard(dim!=0), FlatShard, Owned, SimpleFSDP).
     """
     for node in gm.graph.nodes:
         if is_wait_tensor_from_fsdp(node):
-            _annotate_unshard_sequence(node, reshard_after_forward)
+            node_reshard_after_forward = _get_node_reshard_after_forward(
+                node, reshard_after_forward
+            )
+            _annotate_unshard_sequence(node, node_reshard_after_forward)
+        elif _is_wait_tensor_from_owned(node):
+            node_reshard_after_forward = _get_node_reshard_after_forward(
+                node, reshard_after_forward
+            )
+            _annotate_owned_sequence(node, node_reshard_after_forward)
     return gm
 
 
@@ -195,12 +306,15 @@ def flex_shard_reshard_after_fwd_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    reshard_after_forward: bool,
+    reshard_after_forward: bool | None = None,
 ) -> torch.fx.GraphModule:
     """Graph pass: annotate FlexShard/SimpleFSDP all-gathers for reshard.
 
     Drop-in replacement for ``fsdp_reshard_after_fwd_pass`` that handles
     FlexShard's richer unshard patterns in addition to SimpleFSDP.
+
+    When a traced tensor carries FlexShard bucket metadata, that per-bucket
+    value is used. Otherwise, ``reshard_after_forward`` is the fallback.
 
     When ``reshard_after_forward=True``, all-gather nodes are marked
     ``MUST_RECOMPUTE`` so the compiler frees unsharded params after forward

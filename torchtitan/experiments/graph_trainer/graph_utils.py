@@ -547,7 +547,16 @@ def get_joint_custom_passes_from_config(
                 f"Available joint passes: {list(AVAILABLE_JOINT_PASSES.keys())}"
             )
 
-        joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
+        if pass_name == "flex_shard_reshard_after_fwd":
+            # flex_shard_reshard_after_fwd_pass requires reshard_after_forward kwarg
+            joint_custom_passes.append(
+                functools.partial(
+                    AVAILABLE_JOINT_PASSES[pass_name],
+                    reshard_after_forward=fsdp_reshard_after_forward,
+                )
+            )
+        else:
+            joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
 
     if joint_pass_names:
         logger.info(f"Using joint passes from config: {joint_pass_names}")

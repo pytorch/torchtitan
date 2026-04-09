@@ -75,6 +75,15 @@ class GraphTrainerCompileConfig(CompileConfig):
     path.
     """
 
+    shard_placement: str = "per_param"
+    """FlexShard placement policy. Options:
+        per_param: Shard(0) per parameter (FSDP2-style, default)
+        flat_shard: flatten all params into 1D tensor divided evenly (FSDP1-style)
+        param_boundary: Owned placement via greedy bin-packing (veScale-style)
+        ragged: RaggedShard with proportional local_units per rank
+    Only used by flex_shard_llama3 parallelize. Ignored by other experiments.
+    """
+
 
 def to_graph_trainer_config(
     base_config: Trainer.Config,

@@ -21,80 +21,102 @@ import unittest
 import torch
 import torch.nn as nn
 
+from torchtitan.experiments.flex_shard import BucketSpec
+
+
+class _FakeMesh:
+    """Minimal DeviceMesh stand-in for mesh-info unit tests."""
+
+    def __init__(self, mesh_dim_names):
+        self.mesh_dim_names = mesh_dim_names
+        self.ndim = len(mesh_dim_names) if mesh_dim_names is not None else 1
+
+    def __getitem__(self, names):
+        if isinstance(names, tuple):
+            return _FakeMesh(names)
+        return _FakeMesh((names,))
+
+    def _flatten(self, name):
+        return _FakeMesh((name,))
+
 
 # ---------------------------------------------------------------------------
-# fnmatch placement dict tests (single-process, no NCCL)
+# Global SPMD mesh metadata tests (single-process, no PG required)
 # ---------------------------------------------------------------------------
 
 
-class TestFnmatchPlacementFn(unittest.TestCase):
-    """Test _resolve_placement_fn with dict[str, Placement] input."""
+class TestFlexShardMeshInfo(unittest.TestCase):
+    """Test global SPMD mesh metadata derivation."""
 
-    def test_dict_resolves_first_match(self):
-        """First matching pattern wins."""
-        from torchtitan.experiments.flex_shard import Shard
-        from torchtitan.experiments.flex_shard.flex_shard import _resolve_placement_fn
+    def test_dp_mesh_dims_derives_shard_submesh(self):
+        from torch.distributed.fsdp import DataParallelMeshDims
 
-        fn = _resolve_placement_fn({"attn.*": Shard(1), "*": Shard(0)})
-        module = nn.Linear(8, 4, bias=False)
-        named_params = [("attn.weight", module.weight)]
-
-        # Mock mesh — we only need mesh for the function signature
-        from unittest.mock import MagicMock
-
-        mesh = MagicMock()
-        result = fn(named_params, mesh)
-        self.assertEqual(result["attn.weight"], (Shard(1),))
-
-    def test_dict_catchall_pattern(self):
-        """'*' catches unmatched params."""
-        from torchtitan.experiments.flex_shard import Shard
-        from torchtitan.experiments.flex_shard.flex_shard import _resolve_placement_fn
-
-        fn = _resolve_placement_fn({"attn.*": Shard(1), "*": Shard(0)})
-        module = nn.Linear(8, 4, bias=False)
-        named_params = [("ffn.weight", module.weight)]
-
-        from unittest.mock import MagicMock
-
-        mesh = MagicMock()
-        result = fn(named_params, mesh)
-        self.assertEqual(result["ffn.weight"], (Shard(0),))
-
-    def test_dict_no_match_raises(self):
-        """Unmatched param raises ValueError."""
-        from torchtitan.experiments.flex_shard import Shard
-        from torchtitan.experiments.flex_shard.flex_shard import _resolve_placement_fn
-
-        fn = _resolve_placement_fn({"attn.*": Shard(1)})
-        module = nn.Linear(8, 4, bias=False)
-        named_params = [("ffn.weight", module.weight)]
-
-        from unittest.mock import MagicMock
-
-        mesh = MagicMock()
-        with self.assertRaises(ValueError, msg="does not match any"):
-            fn(named_params, mesh)
-
-    def test_none_returns_per_param(self):
-        """None input returns per_param_placements."""
         from torchtitan.experiments.flex_shard.flex_shard import (
-            _resolve_placement_fn,
-            per_param_placements,
+            _get_flex_shard_mesh_info,
         )
 
-        result = _resolve_placement_fn(None)
-        self.assertIs(result, per_param_placements)
+        mesh = _FakeMesh(("fsdp", "tp"))
+        info = _get_flex_shard_mesh_info(mesh, DataParallelMeshDims(shard="fsdp"))
 
-    def test_callable_passthrough(self):
-        """Callable input is returned directly."""
-        from torchtitan.experiments.flex_shard.flex_shard import _resolve_placement_fn
+        self.assertIs(info.spmd_mesh, mesh)
+        self.assertEqual(info.dp_shard_mesh.mesh_dim_names, ("fsdp",))
+        self.assertEqual(info.dp_shard_dim_names, ("fsdp",))
+        self.assertEqual(info.dp_dim_indices, (0,))
+        self.assertTrue(info.is_spmd_mesh)
 
-        def my_fn(named_params, mesh):
-            return {}
+    def test_dp_mesh_dims_flattens_multiple_shard_dims(self):
+        from torch.distributed.fsdp import DataParallelMeshDims
 
-        result = _resolve_placement_fn(my_fn)
-        self.assertIs(result, my_fn)
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _get_flex_shard_mesh_info,
+        )
+
+        mesh = _FakeMesh(("dp0", "dp1", "tp"))
+        info = _get_flex_shard_mesh_info(
+            mesh, DataParallelMeshDims(shard=("dp0", "dp1"))
+        )
+
+        self.assertEqual(info.dp_shard_mesh.mesh_dim_names, ("dp0_dp1",))
+        self.assertEqual(info.dp_shard_dim_names, ("dp0", "dp1"))
+        self.assertEqual(info.dp_dim_indices, (0, 1))
+
+    def test_dp_mesh_dims_requires_named_mesh(self):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _get_flex_shard_mesh_info,
+        )
+
+        with self.assertRaisesRegex(ValueError, "mesh_dim_names"):
+            _get_flex_shard_mesh_info(
+                _FakeMesh(None), DataParallelMeshDims(shard="fsdp")
+            )
+
+    def test_dp_mesh_dims_rejects_missing_dim(self):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _get_flex_shard_mesh_info,
+        )
+
+        with self.assertRaisesRegex(ValueError, "not found"):
+            _get_flex_shard_mesh_info(
+                _FakeMesh(("fsdp", "tp")),
+                DataParallelMeshDims(shard="missing"),
+            )
+
+    def test_dp_mesh_dims_rejects_replicate_until_hsdp_supported(self):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _get_flex_shard_mesh_info,
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "replicate"):
+            _get_flex_shard_mesh_info(
+                _FakeMesh(("rep", "fsdp", "tp")),
+                DataParallelMeshDims(shard="fsdp", replicate="rep"),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +134,7 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight", "attn.bias", "ffn.weight", "ffn.bias"]
-        buckets = [["attn.*"], ["ffn.*"]]
+        buckets = [BucketSpec(["attn.*"]), BucketSpec(["ffn.*"])]
         result = _assign_params_to_buckets(fqns, buckets)
 
         self.assertEqual(result[0], ["attn.weight", "attn.bias"])
@@ -125,7 +147,7 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight", "norm.weight"]
-        buckets = [["attn.*"]]
+        buckets = [BucketSpec(["attn.*"])]
         with self.assertRaises(ValueError, msg="not covered by any bucket"):
             _assign_params_to_buckets(fqns, buckets)
 
@@ -136,7 +158,7 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight"]
-        buckets = [["attn.*"], ["*"]]
+        buckets = [BucketSpec(["attn.*"]), BucketSpec(["*"])]
         with self.assertRaises(ValueError, msg="matched multiple buckets"):
             _assign_params_to_buckets(fqns, buckets)
 
@@ -161,7 +183,7 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["a.weight", "b.bias", "c.weight"]
-        buckets = [["*"]]
+        buckets = [BucketSpec(["*"])]
         result = _assign_params_to_buckets(fqns, buckets)
 
         self.assertEqual(result[0], fqns)
@@ -173,7 +195,7 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight", "ffn.weight", "norm.weight"]
-        buckets = [["attn.*", "ffn.*"], ["norm.*"]]
+        buckets = [BucketSpec(["attn.*", "ffn.*"]), BucketSpec(["norm.*"])]
         result = _assign_params_to_buckets(fqns, buckets)
 
         self.assertEqual(result[0], ["attn.weight", "ffn.weight"])
@@ -200,7 +222,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (FlatShard(),),
         }
-        buckets = [["*"]]
+        buckets = [BucketSpec(["*"])]
         with self.assertRaises(ValueError, msg="mixed placement types"):
             _validate_bucket_placements(assignments, placements, buckets)
 
@@ -216,7 +238,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(1),),
         }
-        buckets = [["*"]]
+        buckets = [BucketSpec(["*"])]
         with self.assertRaises(ValueError, msg="mixed shard dimensions"):
             _validate_bucket_placements(assignments, placements, buckets)
 
@@ -232,7 +254,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(0),),
         }
-        buckets = [["*"]]
+        buckets = [BucketSpec(["*"])]
         # Should not raise
         _validate_bucket_placements(assignments, placements, buckets)
 
@@ -248,7 +270,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (FlatShard(),),
         }
-        buckets = [["a.*"], ["b.*"]]
+        buckets = [BucketSpec(["a.*"]), BucketSpec(["b.*"])]
         # Should not raise
         _validate_bucket_placements(assignments, placements, buckets)
 
@@ -260,7 +282,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
         assignments = [[], ["a.weight"]]
         placements = {"a.weight": (None,)}
-        buckets = [["x.*"], ["a.*"]]
+        buckets = [BucketSpec(["x.*"]), BucketSpec(["a.*"])]
         # Should not raise (first bucket is empty)
         _validate_bucket_placements(assignments, placements, buckets)
 
@@ -279,7 +301,7 @@ class TestAutoBuckets(unittest.TestCase):
 
         model = nn.Sequential(nn.Linear(8, 4), nn.Linear(4, 2))
         result = auto_buckets(model)
-        self.assertEqual(result, [["0.*"], ["1.*"]])
+        self.assertEqual([bucket.patterns for bucket in result], [["0.*"], ["1.*"]])
 
     def test_named_children_buckets(self):
         """Named children produce named patterns."""
@@ -295,7 +317,10 @@ class TestAutoBuckets(unittest.TestCase):
                 return self.ffn(self.attn(x))
 
         result = auto_buckets(Model())
-        self.assertEqual(result, [["attn.*"], ["ffn.*"]])
+        self.assertEqual(
+            [bucket.patterns for bucket in result],
+            [["attn.*"], ["ffn.*"]],
+        )
 
     def test_flat_module_returns_catchall(self):
         """Module with no children returns [['*']]."""
@@ -303,7 +328,7 @@ class TestAutoBuckets(unittest.TestCase):
 
         module = nn.Linear(8, 4)
         result = auto_buckets(module)
-        self.assertEqual(result, [["*"]])
+        self.assertEqual([bucket.patterns for bucket in result], [["*"]])
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +347,7 @@ class TestBucketSpec(unittest.TestCase):
         self.assertEqual(spec.patterns, ["attn.*", "ffn.*"])
         self.assertIsNone(spec.mp_policy)
         self.assertIsNone(spec.offload_policy)
+        self.assertTrue(spec.reshard_after_forward)
 
     def test_with_policies(self):
         """BucketSpec stores policy placeholders."""
@@ -334,6 +360,14 @@ class TestBucketSpec(unittest.TestCase):
         )
         self.assertEqual(spec.mp_policy, "placeholder")
         self.assertEqual(spec.offload_policy, "placeholder")
+        self.assertTrue(spec.reshard_after_forward)
+
+    def test_reshard_after_forward_policy(self):
+        """BucketSpec stores per-bucket reshard policy."""
+        from torchtitan.experiments.flex_shard import BucketSpec
+
+        spec = BucketSpec(patterns=["*"], reshard_after_forward=False)
+        self.assertFalse(spec.reshard_after_forward)
 
 
 # ---------------------------------------------------------------------------
@@ -361,13 +395,33 @@ class TestDistributedBuckets(unittest.TestCase):
             torch.cuda.synchronize()
             torch.distributed.destroy_process_group()
 
-    def test_multi_bucket_forward_correct(self):
-        """Model with explicit buckets produces correct forward output."""
+    def _init_mesh(self):
         from torch.distributed.device_mesh import init_device_mesh
 
-        from torchtitan.experiments.flex_shard import flex_shard
+        return init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("fsdp",))
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+    def _flex_shard(self, model, mesh, **kwargs):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard import (
+            flex_shard,
+            lift_params_to_global_spmd_mesh,
+            per_param_placements,
+        )
+
+        lift_params_to_global_spmd_mesh(model, mesh)
+        kwargs.setdefault("shard_placement_fn", per_param_placements)
+        kwargs.setdefault("buckets", [BucketSpec(["*"])])
+        return flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            **kwargs,
+        )
+
+    def test_multi_bucket_forward_correct(self):
+        """Model with explicit buckets produces correct forward output."""
+        mesh = self._init_mesh()
 
         class TwoLayer(nn.Module):
             def __init__(self):
@@ -388,11 +442,10 @@ class TestDistributedBuckets(unittest.TestCase):
         torch.distributed.broadcast(x, src=0)
         ref_output = model(x).clone()
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
-            buckets=[["linear1.*"], ["linear2.*"]],
-            register_hooks=False,
+            buckets=[BucketSpec(["linear1.*"]), BucketSpec(["linear2.*"])],
         )
 
         output = model(x)
@@ -400,11 +453,7 @@ class TestDistributedBuckets(unittest.TestCase):
 
     def test_multi_bucket_state_dict_sharded(self):
         """state_dict returns sharded params across all buckets."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Sequential(
             nn.Linear(8, 4, bias=False, device="cuda"),
@@ -413,11 +462,10 @@ class TestDistributedBuckets(unittest.TestCase):
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
-            buckets=[["0.*"], ["1.*"]],
-            register_hooks=False,
+            buckets=[BucketSpec(["0.*"]), BucketSpec(["1.*"])],
         )
 
         sd = model.state_dict()
@@ -425,24 +473,20 @@ class TestDistributedBuckets(unittest.TestCase):
         self.assertEqual(sd["0.weight"].shape, (4 // self.world_size, 8))
         self.assertEqual(sd["1.weight"].shape, (2 // self.world_size, 4))
 
-    def test_single_bucket_default_matches_no_buckets(self):
-        """buckets=None produces same result as explicit [['*']]."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+    def test_single_bucket_explicit_matches_helper_default(self):
+        """Explicit single bucket produces same result as the test helper default."""
+        mesh = self._init_mesh()
 
         # Model A: no buckets
         model_a = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model_a.weight.data, src=0)
         ref_weight = model_a.weight.data.clone()
-        flex_shard(model_a, mesh, register_hooks=False)
+        self._flex_shard(model_a, mesh)
 
-        # Model B: explicit [["*"]]
+        # Model B: explicit single bucket
         model_b = nn.Linear(8, 4, bias=False, device="cuda")
         model_b.weight.data.copy_(ref_weight)
-        flex_shard(model_b, mesh, buckets=[["*"]], register_hooks=False)
+        self._flex_shard(model_b, mesh, buckets=[BucketSpec(["*"])])
 
         x = torch.randn(2, 8, device="cuda")
         torch.distributed.broadcast(x, src=0)
@@ -453,11 +497,7 @@ class TestDistributedBuckets(unittest.TestCase):
 
     def test_multi_bucket_dstorages_count(self):
         """Module has one DStorage per non-empty bucket."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         class TwoLayer(nn.Module):
             def __init__(self):
@@ -472,15 +512,45 @@ class TestDistributedBuckets(unittest.TestCase):
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
-            buckets=[["linear1.*"], ["linear2.*"]],
-            register_hooks=False,
+            buckets=[BucketSpec(["linear1.*"]), BucketSpec(["linear2.*"])],
         )
 
         self.assertEqual(len(model.dstorages), 2)
         self.assertIs(model.dstorage, model.dstorages[0])
+
+    def test_bucket_spec_reshard_policy_wired_to_dstorages(self):
+        """Each bucket's reshard policy is stored on its DStorage."""
+        from torchtitan.experiments.flex_shard import BucketSpec
+
+        mesh = self._init_mesh()
+
+        class TwoLayer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear1 = nn.Linear(8, 4, bias=False, device="cuda")
+                self.linear2 = nn.Linear(4, 2, bias=False, device="cuda")
+
+            def forward(self, x):
+                return self.linear2(self.linear1(x))
+
+        model = TwoLayer()
+        for p in model.parameters():
+            torch.distributed.broadcast(p.data, src=0)
+
+        self._flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(["linear1.*"], reshard_after_forward=True),
+                BucketSpec(["linear2.*"], reshard_after_forward=False),
+            ],
+        )
+
+        self.assertTrue(model.dstorages[0]._reshard_after_forward)
+        self.assertFalse(model.dstorages[1]._reshard_after_forward)
 
 
 if __name__ == "__main__":

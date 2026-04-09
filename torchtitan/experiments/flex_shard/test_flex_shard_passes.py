@@ -44,9 +44,7 @@ def _build_mock_graph_with_pg(
         torch.ops._c10d_functional.all_gather_into_tensor.default,
         (cur, 2, pg_name),
     )
-    wait = graph.call_function(
-        torch.ops._c10d_functional.wait_tensor.default, (ag,)
-    )
+    wait = graph.call_function(torch.ops._c10d_functional.wait_tensor.default, (ag,))
 
     terminal = wait
     if base_pattern == "shard_dim0":
@@ -58,9 +56,7 @@ def _build_mock_graph_with_pg(
         cat = graph.call_function(torch.ops.aten.cat.default, ([gi0, gi1], 1))
         terminal = cat
     elif base_pattern == "flat_shard":
-        view = graph.call_function(
-            torch.ops.aten.view.default, (wait, [4, 8])
-        )
+        view = graph.call_function(torch.ops.aten.view.default, (wait, [4, 8]))
         terminal = view
 
     graph.output(terminal)
@@ -78,18 +74,14 @@ def _build_mixed_placement_graph(pg_name: str = "fake_pg") -> torch.fx.GraphModu
         torch.ops._c10d_functional.all_gather_into_tensor.default,
         (p0, 2, pg_name),
     )
-    wait0 = graph.call_function(
-        torch.ops._c10d_functional.wait_tensor.default, (ag0,)
-    )
+    wait0 = graph.call_function(torch.ops._c10d_functional.wait_tensor.default, (ag0,))
 
     # Shard(dim!=0): all_gather → wait_tensor → chunk → getitem → cat
     ag1 = graph.call_function(
         torch.ops._c10d_functional.all_gather_into_tensor.default,
         (p1, 2, pg_name),
     )
-    wait1 = graph.call_function(
-        torch.ops._c10d_functional.wait_tensor.default, (ag1,)
-    )
+    wait1 = graph.call_function(torch.ops._c10d_functional.wait_tensor.default, (ag1,))
     chunk = graph.call_function(torch.ops.aten.chunk.default, (wait1, 2, 0))
     gi0 = graph.call_function(operator.getitem, (chunk, 0))
     gi1 = graph.call_function(operator.getitem, (chunk, 1))
@@ -133,7 +125,9 @@ class TestReassignToPgComposition(unittest.TestCase):
                         # Post-gather ops should be untouched
                         self.assertTrue(
                             len(node.args) <= 3
-                            and not any(a == "new_pg" for a in node.args if isinstance(a, str)),
+                            and not any(
+                                a == "new_pg" for a in node.args if isinstance(a, str)
+                            ),
                             f"{node.target} should not have PG args",
                         )
 
@@ -169,16 +163,97 @@ class TestReassignToPgComposition(unittest.TestCase):
         ag_nodes = [n for n in gm.graph.nodes if is_all_gather(n)]
         self.assertEqual(ag_nodes[0].args[2], "my_pg")
 
+    def test_reassign_broadcast_nodes(self):
+        """reassign_to_pg_pass rewrites broadcast PG (Owned placement)."""
+        from torchtitan.experiments.graph_trainer.passes import reassign_to_pg_pass
+
+        # Build a graph with a broadcast node (Owned unshard pattern)
+        graph = torch.fx.Graph()
+        placeholder = graph.placeholder("param")
+        bc = graph.call_function(
+            torch.ops._c10d_functional.broadcast.default,
+            (placeholder, 0, "original_pg"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (bc,)
+        )
+        graph.output(wait)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        gm = reassign_to_pg_pass(
+            gm,
+            example_inputs=None,
+            source_pg_name="original_pg",
+            target_pg_name="new_pg",
+        )
+
+        # Verify broadcast PG was reassigned
+        bc_nodes = [
+            n
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+            and n.target == torch.ops._c10d_functional.broadcast.default
+        ]
+        self.assertEqual(len(bc_nodes), 1)
+        self.assertEqual(bc_nodes[0].args[2], "new_pg")
+
+    def test_reassign_mixed_all_gather_and_broadcast(self):
+        """reassign_to_pg_pass rewrites both all-gather and broadcast nodes."""
+        from torchtitan.experiments.graph_trainer.passes import reassign_to_pg_pass
+
+        graph = torch.fx.Graph()
+        p0 = graph.placeholder("param_shard")
+        p1 = graph.placeholder("param_owned")
+
+        # Shard(0) all-gather
+        ag = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            (p0, 2, "original_pg"),
+        )
+        wait0 = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (ag,)
+        )
+
+        # Owned broadcast
+        bc = graph.call_function(
+            torch.ops._c10d_functional.broadcast.default,
+            (p1, 0, "original_pg"),
+        )
+        wait1 = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (bc,)
+        )
+
+        add = graph.call_function(torch.ops.aten.add.Tensor, (wait0, wait1))
+        graph.output(add)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        gm = reassign_to_pg_pass(
+            gm,
+            example_inputs=None,
+            source_pg_name="original_pg",
+            target_pg_name="new_pg",
+        )
+
+        # Both should be reassigned
+        ag_nodes = [n for n in gm.graph.nodes if is_all_gather(n)]
+        self.assertEqual(len(ag_nodes), 1)
+        self.assertEqual(ag_nodes[0].args[2], "new_pg")
+
+        bc_nodes = [
+            n
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+            and n.target == torch.ops._c10d_functional.broadcast.default
+        ]
+        self.assertEqual(len(bc_nodes), 1)
+        self.assertEqual(bc_nodes[0].args[2], "new_pg")
+
 
 class TestPassOrdering(unittest.TestCase):
     """Test pass pipeline ordering with FlexShard."""
 
     def test_reshard_skipped_when_flex_shard_configured(self):
         """get_joint_custom_passes skips fsdp_reshard when flex_shard version present."""
-        from torchtitan.experiments.graph_trainer.passes import (
-            fsdp_reshard_after_fwd_pass,
-        )
-
         # Simulate what get_joint_custom_passes_from_config does:
         # When flex_shard_reshard_after_fwd is in joint_pass_names,
         # fsdp_reshard_after_fwd_pass should NOT be appended.
