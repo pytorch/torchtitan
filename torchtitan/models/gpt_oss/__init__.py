@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
+from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
@@ -56,6 +57,7 @@ def _make_gptoss_attn_config(
     n_kv_heads: int = 8,
     head_dim: int = 64,
     sliding_window_size: int = 128,
+    fuse_qkv: bool = False,
 ) -> Attention.Config:
     """Build a fully-specified GPT-OSS Attention.Config for a single layer.
 
@@ -66,23 +68,42 @@ def _make_gptoss_attn_config(
     sinks_init = {
         "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
     }
+
+    if fuse_qkv:
+        qkv = FusedQKVLinear.Config(
+            head_dim=head_dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            wqkv=Linear.Config(
+                in_features=dim,
+                out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+                bias=True,
+                param_init=_depth_init(layer_id),
+            ),
+        )
+    else:
+        qkv = QKVLinear.Config(
+            head_dim=head_dim,
+            wq=Linear.Config(
+                in_features=dim,
+                out_features=n_heads * head_dim,
+                bias=True,
+                param_init=_depth_init(layer_id),
+            ),
+            wkv=Linear.Config(
+                in_features=dim,
+                out_features=n_kv_heads * head_dim,
+                bias=True,
+                param_init=_depth_init(layer_id),
+            ),
+        )
+
     return Attention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        wq=Linear.Config(
-            in_features=dim,
-            out_features=n_heads * head_dim,
-            bias=True,
-            param_init=_depth_init(layer_id),
-        ),
-        wkv=Linear.Config(
-            in_features=dim,
-            out_features=n_kv_heads * head_dim,
-            bias=True,
-            param_init=_depth_init(layer_id),
-        ),
+        qkv_linear=qkv,
         wo=Linear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
@@ -126,6 +147,7 @@ def _build_gptoss_layers(
     top_k: int,
     score_before_experts: bool,
     load_balance_coeff: float,
+    fuse_qkv: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -134,7 +156,9 @@ def _build_gptoss_layers(
     """
     layers = []
     for layer_id in range(n_layers):
-        attn_cfg = _make_gptoss_attn_config(dim=dim, layer_id=layer_id)
+        attn_cfg = _make_gptoss_attn_config(
+            dim=dim, layer_id=layer_id, fuse_qkv=fuse_qkv
+        )
         experts_cfg = _make_gptoss_experts_config(
             dim=dim,
             hidden_dim=hidden_dim,
@@ -287,9 +311,91 @@ def _120b() -> GptOssModel.Config:
     )
 
 
+def _debugmodel_fused_qkv() -> GptOssModel.Config:
+    dim = 256
+    hidden_dim = 2880
+    n_layers = 4
+    return GptOssModel.Config(
+        vocab_size=2048,
+        dim=dim,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=2048,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_gptoss_layers(
+            dim=dim,
+            n_layers=n_layers,
+            hidden_dim=hidden_dim,
+            num_experts=8,
+            top_k=4,
+            score_before_experts=False,
+            load_balance_coeff=1e-3,
+            fuse_qkv=True,
+        ),
+        rope=RoPE.Config(
+            dim=64,
+            max_seq_len=131072,
+            theta=150000.0,
+            backend="cos_sin",
+            scaling="yarn",
+            rope_factor=32,
+            beta_slow=32.0,
+            beta_fast=1.0,
+            original_seq_len=4096,
+        ),
+    )
+
+
+def _20b_fused_qkv() -> GptOssModel.Config:
+    dim = 2880
+    hidden_dim = 2880
+    n_layers = 24
+    return GptOssModel.Config(
+        dim=dim,
+        vocab_size=201088,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=201088, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=201088,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_gptoss_layers(
+            dim=dim,
+            n_layers=n_layers,
+            hidden_dim=hidden_dim,
+            num_experts=32,
+            top_k=4,
+            score_before_experts=False,
+            load_balance_coeff=1e-3,
+            fuse_qkv=True,
+        ),
+        rope=RoPE.Config(
+            dim=64,
+            max_seq_len=131072,
+            theta=150000.0,
+            backend="cos_sin",
+            scaling="yarn",
+            rope_factor=32,
+            beta_slow=32.0,
+            beta_fast=1.0,
+            original_seq_len=4096,
+        ),
+    )
+
+
 gptoss_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "20b": _20b,
+    "20b_fused_qkv": _20b_fused_qkv,
     "120b": _120b,
 }
 

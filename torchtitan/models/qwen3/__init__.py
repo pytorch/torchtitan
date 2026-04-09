@@ -215,6 +215,44 @@ def _debugmodel() -> Qwen3Model.Config:
     )
 
 
+def _debugmodel_fused_qkv() -> Qwen3Model.Config:
+    dim = 256
+    head_dim = 128
+    n_layers = 8
+    vocab_size = 2048
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            hidden_dim=3072,
+            fuse_qkv=True,
+        ),
+    )
+
+
 def _debugmodel_flex() -> Qwen3Model.Config:
     config = _debugmodel()
     flex_cfg = FlexAttention.Config()
@@ -452,44 +490,6 @@ def _8b_varlen() -> Qwen3Model.Config:
     return config
 
 
-def _4b_fused_qkv() -> Qwen3Model.Config:
-    dim = 2560
-    head_dim = 128
-    n_layers = 36
-    vocab_size = 151936
-    return Qwen3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        norm=_qwen3_norm(dim),
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_SKIP_INIT,
-        ),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
-        layers=_build_qwen3_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=32,
-            n_kv_heads=8,
-            head_dim=head_dim,
-            hidden_dim=9728,
-            fuse_qkv=True,
-        ),
-    )
-
-
 def _14b() -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
@@ -524,41 +524,6 @@ def _14b() -> Qwen3Model.Config:
     )
 
 
-def _14b_fused_qkv() -> Qwen3Model.Config:
-    dim = 5120
-    head_dim = 128
-    n_layers = 40
-    vocab_size = 151936
-    return Qwen3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
-        layers=_build_qwen3_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=40,
-            n_kv_heads=8,
-            head_dim=head_dim,
-            hidden_dim=17408,
-            fuse_qkv=True,
-        ),
-    )
-
-
 def _32b() -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
@@ -589,41 +554,6 @@ def _32b() -> Qwen3Model.Config:
             n_kv_heads=8,
             head_dim=head_dim,
             hidden_dim=25600,
-        ),
-    )
-
-
-def _32b_fused_qkv() -> Qwen3Model.Config:
-    dim = 5120
-    head_dim = 128
-    n_layers = 64
-    vocab_size = 151936
-    return Qwen3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
-        layers=_build_qwen3_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=64,
-            n_kv_heads=8,
-            head_dim=head_dim,
-            hidden_dim=25600,
-            fuse_qkv=True,
         ),
     )
 
@@ -741,6 +671,7 @@ def _235b_a22b() -> Qwen3Model.Config:
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "debugmodel_flex": _debugmodel_flex,
     "debugmodel_flex_flash": _debugmodel_flex_flash,
     "debugmodel_varlen": _debugmodel_varlen,
@@ -751,11 +682,9 @@ qwen3_configs = {
     "4B": _4b,
     "8B": _8b,
     "8B_varlen": _8b_varlen,
-    "4B_fused_qkv": _4b_fused_qkv,
+
     "14B": _14b,
-    "14B_fused_qkv": _14b_fused_qkv,
     "32B": _32b,
-    "32B_fused_qkv": _32b_fused_qkv,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,
     "235B-A22B": _235b_a22b,

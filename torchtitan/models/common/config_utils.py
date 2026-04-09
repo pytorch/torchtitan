@@ -42,29 +42,30 @@ def make_gqa_config(
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
-    hd = head_dim if head_dim is not None else dim // n_heads
+    per_head_dim = head_dim if head_dim is not None else dim // n_heads
 
     if fuse_qkv:
-        heads_per_kv = n_heads // n_kv
-        r_dim = heads_per_kv + 2  # Q-heads-per-KV-group + K + V
-        qkv: FusedQKVLinear.Config | QKVLinear.Config = FusedQKVLinear.Config(
+        qkv = FusedQKVLinear.Config(
+            head_dim=per_head_dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv,
             wqkv=Linear.Config(
                 in_features=dim,
-                out_features=n_kv * r_dim * hd,
+                out_features=(n_heads + 2 * n_kv) * per_head_dim,
                 param_init=wqkv_param_init,
             ),
-            heads_per_kv=heads_per_kv,
         )
     else:
         qkv = QKVLinear.Config(
+            head_dim=per_head_dim,
             wq=Linear.Config(
                 in_features=dim,
-                out_features=n_heads * hd,
+                out_features=n_heads * per_head_dim,
                 param_init=wqkv_param_init,
             ),
             wkv=Linear.Config(
                 in_features=dim,
-                out_features=n_kv * hd,
+                out_features=n_kv * per_head_dim,
                 param_init=wqkv_param_init,
             ),
         )
@@ -74,9 +75,11 @@ def make_gqa_config(
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        qkv=qkv,
+        qkv_linear=qkv,
         wo=Linear.Config(
-            in_features=n_heads * hd, out_features=dim, param_init=wo_param_init
+            in_features=n_heads * per_head_dim,
+            out_features=dim,
+            param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
         use_rope=use_rope,

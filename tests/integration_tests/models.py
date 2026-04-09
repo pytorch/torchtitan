@@ -150,6 +150,18 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module qwen3 --config qwen3_debugmodel_fused_qkv",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Qwen3 FSDP+TP (fused QKV)",
+            "qwen3_fsdp+tp_fused_qkv",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module qwen3 --config qwen3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",

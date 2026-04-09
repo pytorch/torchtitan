@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torchtitan.models.common.attention import FusedQKVLinear, GQAttention
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import GptOssModel
 
@@ -19,8 +19,8 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.fuse_qkv = isinstance(
-            model_config.layers[0].attention, GQAttention.Config
-        ) and isinstance(model_config.layers[0].attention.qkv, FusedQKVLinear.Config)
+            model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
+        )
 
         if self.fuse_qkv:
             qkv_map = {
@@ -33,12 +33,12 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             }
         else:
             qkv_map = {
-                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-                "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
-                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-                "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
-                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-                "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
+                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+                "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.qkv_linear.wq.bias",
+                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+                "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.qkv_linear.wk.bias",
+                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
+                "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.qkv_linear.wv.bias",
             }
 
         self.from_hf_map = {
@@ -154,8 +154,8 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
 
                 if self.fuse_qkv and abstract_key in (
-                    "layers.{}.attention.qkv.wqkv.weight",
-                    "layers.{}.attention.qkv.wqkv.bias",
+                    "layers.{}.attention.qkv_linear.wqkv.weight",
+                    "layers.{}.attention.qkv_linear.wqkv.bias",
                 ):
                     is_bias = abstract_key.endswith("bias")
                     if is_bias:
@@ -252,7 +252,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                             )
                         suffix = "bias" if is_bias else "weight"
                         state_dict[
-                            f"layers.{layer_num}.attention.qkv.wqkv.{suffix}"
+                            f"layers.{layer_num}.attention.qkv_linear.wqkv.{suffix}"
                         ] = fused
                         del pending[layer_num]
                     continue

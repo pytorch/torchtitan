@@ -30,7 +30,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         self.fuse_qkv = isinstance(
-            model_config.layers[0].attention.qkv, FusedQKVLinear.Config
+            model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
         if self.fuse_qkv:
@@ -52,9 +52,9 @@ class Llama3StateDictAdapter(StateDictAdapter):
         else:
             self.from_hf_map = {
                 "model.embed_tokens.weight": "tok_embeddings.weight",
-                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv.wq.weight",
-                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv.wk.weight",
-                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv.wv.weight",
+                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
                 "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
                 "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
                 "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
@@ -115,7 +115,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
                 if (
                     self.fuse_qkv
-                    and abstract_key == "layers.{}.attention.qkv.wqkv.weight"
+                    and abstract_key == "layers.{}.attention.qkv_linear.wqkv.weight"
                 ):
                     # Split fused weight into separate Q, K, V for HF format
                     wq, wk, wv = self.fused_to_separate_qkv(
@@ -142,9 +142,9 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
                 if not self.fuse_qkv:
                     # Apply HF permutation for unfused Q/K weights
-                    if abstract_key == "layers.{}.attention.qkv.wq.weight":
+                    if abstract_key == "layers.{}.attention.qkv_linear.wq.weight":
                         value = self._permute(value, n_heads)
-                    if abstract_key == "layers.{}.attention.qkv.wk.weight":
+                    if abstract_key == "layers.{}.attention.qkv_linear.wk.weight":
                         # pyrefly: ignore [unsupported-operation]
                         key_value_dim = head_dim * n_kv_heads
                         value = self._permute(value, n_kv_heads, key_value_dim, dim)
@@ -215,7 +215,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
                             head_dim,
                         )
                         state_dict[
-                            f"layers.{layer_num}.attention.qkv.wqkv.weight"
+                            f"layers.{layer_num}.attention.qkv_linear.wqkv.weight"
                         ] = fused
                         del pending_qkv[layer_num]
                     continue

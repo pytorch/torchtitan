@@ -37,6 +37,7 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -207,21 +208,22 @@ def apply_tp(
     # Detect whether fused QKV is used by checking the first layer
     # pyrefly: ignore [not-callable]
     first_block = next(iter(model.layers.values()))
-    use_fused_qkv = hasattr(
-        first_block.attention.qkv, "wqkv"  # pyrefly: ignore [missing-attribute]
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,
+        FusedQKVLinear,  # pyrefly: ignore [missing-attribute]
     )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         if use_fused_qkv:
             qkv_plan = {
-                "attention.qkv.wqkv": colwise_parallel(),
+                "attention.qkv_linear.wqkv": colwise_parallel(),
             }
         else:
             qkv_plan = {
-                "attention.qkv.wq": colwise_parallel(),
-                "attention.qkv.wk": colwise_parallel(),
-                "attention.qkv.wv": colwise_parallel(),
+                "attention.qkv_linear.wq": colwise_parallel(),
+                "attention.qkv_linear.wk": colwise_parallel(),
+                "attention.qkv_linear.wv": colwise_parallel(),
             }
         # pyrefly: ignore [no-matching-overload]
         layer_plan = {

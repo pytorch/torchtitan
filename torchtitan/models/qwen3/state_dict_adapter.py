@@ -27,7 +27,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_config: Qwen3Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.fuse_qkv = isinstance(
-            model_config.layers[0].attention.qkv, FusedQKVLinear.Config
+            model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
         if self.fuse_qkv:
@@ -38,9 +38,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             }
         else:
             qkv_map = {
-                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv.wq.weight",
-                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv.wk.weight",
-                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv.wv.weight",
+                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
             }
 
         self.from_hf_map = {
@@ -138,7 +138,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
                 if (
                     self.fuse_qkv
-                    and abstract_key == "layers.{}.attention.qkv.wqkv.weight"
+                    and abstract_key == "layers.{}.attention.qkv_linear.wqkv.weight"
                 ):
                     wq, wk, wv = self.fused_to_separate_qkv(
                         value,
@@ -258,7 +258,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                             head_dim,  # pyrefly: ignore [unbound-name]
                         )
                         state_dict[
-                            f"layers.{layer_num}.attention.qkv.wqkv.weight"
+                            f"layers.{layer_num}.attention.qkv_linear.wqkv.weight"
                         ] = fused
                         del pending_qkv[layer_num]
                     continue

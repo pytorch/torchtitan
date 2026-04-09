@@ -33,6 +33,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -227,23 +228,24 @@ def apply_non_moe_tp(
     # Detect whether fused QKV is used by checking the first layer
     # pyrefly: ignore [not-callable]
     first_block = next(iter(model.layers.values()))
-    use_fused_qkv = hasattr(
-        first_block.attention.qkv, "wqkv"  # pyrefly: ignore [missing-attribute]
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,
+        FusedQKVLinear,  # pyrefly: ignore [missing-attribute]
     )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         if use_fused_qkv:
             qkv_plan = {
-                "attention.qkv.wqkv": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }
         else:
             qkv_plan = {
-                "attention.qkv.wq": colwise_parallel(use_local_output=False),
-                "attention.qkv.wk": colwise_parallel(use_local_output=False),
-                "attention.qkv.wv": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }
