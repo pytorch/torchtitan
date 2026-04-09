@@ -13,11 +13,15 @@ renaming, value permutations, etc.) from checkpoint orchestration
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.model_spec import ModelSpec
 
 
 class StateDictTransforms:
@@ -47,6 +51,24 @@ class StateDictTransforms:
         self._export_dtype = export_dtype
         self._sd_adapter = sd_adapter
 
+    @classmethod
+    def from_model_spec(
+        cls,
+        model_spec: ModelSpec,
+        model_config: Any,
+        export_dtype: str,
+        hf_assets_path: str | None,
+    ) -> StateDictTransforms:
+        """Build from a ModelSpec, resolving the adapter if available."""
+        return cls(
+            export_dtype=TORCH_DTYPE_MAP[export_dtype],
+            sd_adapter=(
+                model_spec.state_dict_adapter(model_config, hf_assets_path)
+                if model_spec.state_dict_adapter
+                else None
+            ),
+        )
+
     # -- Properties for checkpoint.py to access adapter capabilities --
 
     @property
@@ -74,7 +96,8 @@ class StateDictTransforms:
     def apply_dtype_convert(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Cast all tensors to the export dtype.
 
-        No-op when export_dtype is float32 (the training default).
+        No-op when export_dtype is float32 (the training default) — float32
+        is the native training dtype, so no conversion is needed.
         Assumes all values are tensors — this is guaranteed when called
         after ``ModelWrapper.state_dict()``, which only returns tensors.
         """

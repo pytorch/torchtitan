@@ -308,13 +308,11 @@ class FaultTolerantTrainer(Trainer):
         # FT addition: use FTCheckpointManager for fault tolerance support
         from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
 
-        sd_transforms = StateDictTransforms(
-            export_dtype=TORCH_DTYPE_MAP[config.checkpoint.export_dtype],
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+        sd_transforms = StateDictTransforms.from_model_spec(
+            model_spec,
+            model_config,
+            export_dtype=config.checkpoint.export_dtype,
+            hf_assets_path=config.hf_assets_path,
         )
 
         self.checkpointer = FTCheckpointManager(

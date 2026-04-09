@@ -702,6 +702,45 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch(
+        "torchtitan.components.checkpoint.get_model_state_dict",
+        side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
+    )
+    def test_last_save_in_hf_uses_hf_writer(self, mock_get_sd, mock_save, mock_rank):
+        """Regression: last_save_in_hf=True must reach HuggingFaceStorageWriter."""
+        from torch.distributed.checkpoint import HuggingFaceStorageWriter
+
+        mock_adapter = mock.Mock()
+        mock_adapter.to_hf.side_effect = lambda sd: {f"hf_{k}": v for k, v in sd.items()}
+        mock_adapter.fqn_to_index_mapping = None
+        mock_adapter.hf_assets_path = None
+
+        cfg = self.trainer_config.checkpoint
+        cfg.last_save_model_only = True
+        cfg.last_save_in_hf = True
+        cfg.keep_latest_k = 0
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_transforms=StateDictTransforms(sd_adapter=mock_adapter),
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=10, last_step=True)
+
+        mock_save.assert_called_once()
+        _, kw = mock_save.call_args
+        self.assertIsInstance(kw.get("storage_writer"), HuggingFaceStorageWriter)
+        self.assertIsNone(kw.get("checkpoint_id"))
+        mock_adapter.to_hf.assert_called_once()
+        manager.close()
+
 
 class TestModelWrapper(unittest.TestCase):
     """Tests for ModelWrapper state dict modes (full / base / export)."""

@@ -104,9 +104,16 @@ class ModelWrapper(Stateful):
         }
         return state_dict
 
+    @property
+    def has_key_filter(self) -> bool:
+        """Whether a converter key filter is configured."""
+        return self._key_filter is not None
+
     _VALID_MODES = frozenset({"full", "base", "export"})
 
-    def state_dict(self, mode: str = "full") -> dict[str, Any]:
+    def state_dict(
+        self, mode: Literal["full", "base", "export"] = "full"
+    ) -> dict[str, Any]:
         """Return the model state dict in the requested mode.
 
         Note: We intentionally do not cache the state dict.
@@ -503,10 +510,11 @@ class CheckpointManager(Configurable):
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
-        if to_hf and self.sd_transforms.sd_adapter is None:
-            raise ValueError(
-                "Trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
-            )
+        if to_hf:
+            if self.sd_transforms.sd_adapter is None:
+                raise ValueError(
+                    "Trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
+                )
             # The state_dict is already in HF format (content transform applied
             # by the caller).  Here we only set up the HF storage writer
             # (I/O concern).  The caller must pass the correct
@@ -528,7 +536,6 @@ class CheckpointManager(Configurable):
                     save_distributed=True,
                     enable_consolidation=True,
                 )
-
         else:
             checkpoint_save_id = checkpoint_id
 
@@ -583,7 +590,7 @@ class CheckpointManager(Configurable):
             from_hf (bool): Whether to load from HuggingFace safetensors format.
             from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
         """
-        has_converter_keys = self.states[MODEL]._key_filter is not None
+        has_converter_keys = self.states[MODEL].has_key_filter
         # Primary: partial when converter keys won't be in the checkpoint
         # (e.g. LoRA keys absent from a base model checkpoint).
         primary_planner = DefaultLoadPlanner(
@@ -663,7 +670,11 @@ class CheckpointManager(Configurable):
         """
         if adapter is None:
             adapter = self.sd_transforms.sd_adapter
-        assert adapter is not None
+        if adapter is None:
+            raise ValueError(
+                "_load_with_adapter requires an adapter, but neither one was "
+                "provided nor is sd_transforms.sd_adapter configured."
+            )
 
         if key_filter is not None:
             sd = {
@@ -859,6 +870,7 @@ class CheckpointManager(Configurable):
                 checkpoint_id, model_only, from_hf, from_quantized
             )
 
+        # Reached only when initial_load_path is not set (returned above).
         if from_hf and (
             self.sd_transforms.sd_adapter is None
             or self.sd_transforms.hf_assets_path is None
@@ -1001,11 +1013,13 @@ class CheckpointManager(Configurable):
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
             states = self._flattened_model_states_sd()
 
-        fqn_to_index_mapping = None
         if self.last_save_in_hf and not self.last_save_model_only:
             raise ValueError(
                 "Only model can be saved when saving in HF safetensors format."
             )
+
+        fqn_to_index_mapping = None
+        if self.last_save_in_hf:
             # Split by converter key_filters; each adapter maps its own keys.
             # Unmatched keys fall through to the model's HF adapter.
             # Reverse order so the last-applied converter claims its keys
@@ -1019,6 +1033,7 @@ class CheckpointManager(Configurable):
                     mapped.update(conv_adapter.to_hf(matched))
             if remaining:
                 model_adapter = self.sd_transforms.sd_adapter
+                # Guarded by init-time validation (last_save_in_hf requires sd_adapter)
                 assert model_adapter is not None
                 mapped.update(model_adapter.to_hf(remaining))
             states = mapped

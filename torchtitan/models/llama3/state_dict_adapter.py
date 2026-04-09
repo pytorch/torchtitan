@@ -82,6 +82,7 @@ class Llama3StateDictAdapter(BaseStateDictAdapter):
         }
 
         hf: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
         for key, value in state_dict.items():
             if self.model_config.enable_weight_tying and key == "output.weight":
                 continue
@@ -105,7 +106,15 @@ class Llama3StateDictAdapter(BaseStateDictAdapter):
                         self._key_value_dim,
                         self._dim,
                     )
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.to_hf: unmapped keys: {unmapped_keys}"
+            )
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -126,6 +135,7 @@ class Llama3StateDictAdapter(BaseStateDictAdapter):
         }
 
         sd: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
         for key, value in hf_state_dict.items():
             if key in RENAME:
                 sd[RENAME[key]] = value
@@ -148,6 +158,15 @@ class Llama3StateDictAdapter(BaseStateDictAdapter):
                         self._key_value_dim,
                         self._dim,
                     )
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
+
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.from_hf: unmapped keys: {unmapped_keys}"
+            )
 
         # Weight tying: copy embedding as output if lm_head absent
         if (
