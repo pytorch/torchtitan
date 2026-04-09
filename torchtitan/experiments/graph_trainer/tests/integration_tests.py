@@ -314,6 +314,22 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+CP",
+            "aot_fx_trace_llama3_fsdp_tp_cp",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
     ]
 
 
@@ -463,6 +479,20 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.context_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+CP",
+            "aot_fx_trace_deepseek_v3_fsdp_cp",
             ngpu=8,
         ),
     ]
