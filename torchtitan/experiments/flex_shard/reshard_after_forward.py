@@ -57,9 +57,7 @@ def _is_getitem(node: torch.fx.Node) -> bool:
 
 
 def _is_cat(node: torch.fx.Node) -> bool:
-    return node.op == "call_function" and node.target in (
-        torch.ops.aten.cat.default,
-    )
+    return node.op == "call_function" and node.target in (torch.ops.aten.cat.default,)
 
 
 def _is_view(node: torch.fx.Node) -> bool:
@@ -70,9 +68,7 @@ def _is_view(node: torch.fx.Node) -> bool:
 
 
 def _is_slice(node: torch.fx.Node) -> bool:
-    return node.op == "call_function" and node.target in (
-        torch.ops.aten.slice.Tensor,
-    )
+    return node.op == "call_function" and node.target in (torch.ops.aten.slice.Tensor,)
 
 
 def _is_convert_element_type(node: torch.fx.Node) -> bool:
@@ -95,9 +91,7 @@ def _is_to_copy(node: torch.fx.Node) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _force_recompute_node(
-    node: torch.fx.Node, reshard_after_forward: bool
-) -> None:
+def _force_recompute_node(node: torch.fx.Node, reshard_after_forward: bool) -> None:
     """Mark a node for recomputation or forced save."""
     if reshard_after_forward:
         node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
