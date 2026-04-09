@@ -40,7 +40,6 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
     TensorParallel,
-    TorchAOExpertParallel,
 )
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import (
@@ -594,21 +593,16 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
+            if comm_backend == "deepep" and pad_multiple is not None:
+                raise ValueError(
+                    "DeepEP does not support pad_multiple. "
+                    "Use hybridep or standard comm backend instead."
+                )
             if comm_backend in ("deepep", "hybridep"):
-                if comm_backend == "deepep" and pad_multiple is not None:
-                    raise ValueError(
-                        "DeepEP does not support pad_multiple. "
-                        "Use hybridep or standard comm backend instead."
-                    )
-                # Weight sharding only — dispatch/combine handled by
-                # DeepEPTokenDispatcher installed below.
-                experts_plan = ExpertParallel()
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            elif pad_multiple is not None:
-                experts_plan = TorchAOExpertParallel(pad_multiple)
-            else:
-                # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+            # Weight sharding only — dispatch/combine handled by
+            # the token dispatcher (selected at config time or rebuilt below).
+            experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
                 raise NotImplementedError(
@@ -626,11 +620,10 @@ def apply_moe_ep_tp(
             parallelize_plan=experts_plan,
         )
 
-        # Set ep_group and pad_multiple on the token dispatcher.
-        # The dispatcher type was already selected at config time
+        # Set ep_group on the token dispatcher so it can perform
+        # all-to-all communication. The dispatcher type (including
+        # TorchAoTokenDispatcher for pad_multiple) is already selected
+        # at config time in update_from_config.
         if ep_mesh is not None:
             # pyrefly: ignore [missing-attribute]
-            td = transformer_block.moe.experts.token_dispatcher
-            td.ep_group = ep_mesh.get_group()
-            if pad_multiple is not None:
-                td.pad_multiple = pad_multiple
+            transformer_block.moe.experts.token_dispatcher.ep_group = ep_mesh.get_group()

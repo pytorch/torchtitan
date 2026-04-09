@@ -12,9 +12,9 @@ import torch.nn as nn
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
+from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, GptOssModel, GptOssTransformerBlock
@@ -117,7 +117,7 @@ def _make_gptoss_experts_config(
         hidden_dim=hidden_dim,
         num_experts=num_experts,
         param_init=experts_init,
-        token_dispatcher=LocalTokenDispatcher.Config(
+        token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,

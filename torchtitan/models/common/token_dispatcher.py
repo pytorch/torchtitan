@@ -322,6 +322,166 @@ class TokenDispatcher(BaseTokenDispatcher):
         )
 
 
+class TorchAoTokenDispatcher(TokenDispatcher):
+    """Token dispatcher for EP>1 with padded permutation for quantized grouped GEMMs.
+
+    Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
+    reorder tokens into expert-major order and pad each expert's token group to
+    a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
+    quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
+
+    ep_group is set by the parallelization code after construction.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TokenDispatcher.Config):
+        pad_multiple: int
+
+        def build(self) -> "TorchAoTokenDispatcher":
+            return TorchAoTokenDispatcher(self)
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.pad_multiple = config.pad_multiple
+
+    # pyrefly: ignore [bad-override]
+    def dispatch(
+        self,
+        x: torch.Tensor,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
+        ep_degree = dist.get_world_size(self.ep_group)
+
+        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.view(-1),
+            bins=self.num_experts,
+            min=0,
+            max=self.num_experts,
+        )
+
+        # Reorder the token indices to match the order of the experts
+        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        token_indices_experts_sorted = torch.argsort(
+            selected_experts_indices.view(-1), stable=True
+        )
+
+        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
+
+        # shape (bs*slen*top_k, dim)
+        routed_input = x[token_indices_experts_sorted]
+
+        # Apply scores before expert computation if configured
+        if self.score_before_experts:
+            routed_input = (
+                routed_input.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
+            ).to(x.dtype)
+
+        # All-to-all of per-expert token counts
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=self.ep_group,
+            )
+            # Wait explicitly for use by triton kernel later
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
+            )
+            input_splits = (
+                num_tokens_per_expert.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this incurs a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            input_splits_list = input_splits.tolist()
+            output_splits_list = output_splits.tolist()
+
+        # All-to-all dispatch tokens to EP ranks
+        routed_input = all_to_all_single_autograd(
+            routed_input,
+            output_splits_list,
+            input_splits_list,
+            self.ep_group,
+        )
+
+        # Reorder tokens from rank-major to expert-major layout with padding
+        # for quantized grouped GEMMs (FP8/MXFP8)
+        num_local_experts = num_tokens_per_expert_group.shape[0] // ep_degree
+
+        from torchao.prototype.moe_training.ep.permute import permute_and_pad
+
+        (
+            input_shape,
+            routed_input,
+            permuted_indices,
+            num_tokens_per_expert_group_padded,
+            _group_offsets,
+        ) = permute_and_pad(
+            routed_input,
+            num_tokens_per_expert_group,
+            ep_degree,
+            num_local_experts,
+            self.pad_multiple,
+        )
+
+        metadata = DispatchMetadata(
+            token_indices_experts_sorted=token_indices_experts_sorted,
+            top_scores=top_scores,
+            top_scores_experts_sorted=top_scores_experts_sorted,
+            input_shape=input_shape,
+            permuted_indices=permuted_indices,
+            input_splits=input_splits_list,
+            output_splits=output_splits_list,
+        )
+        return routed_input, num_tokens_per_expert_group_padded, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output: torch.Tensor,
+        metadata: DispatchMetadata,
+        *,
+        outputs: torch.Tensor,
+    ) -> torch.Tensor:
+        dim = routed_output.shape[1]
+
+        # Reverse expert-major reordering, stripping the padding sentinel row
+        out_unpermuted = routed_output.new_empty(metadata.input_shape)
+        out_unpermuted[metadata.permuted_indices, :] = routed_output
+        routed_output = out_unpermuted[:-1]
+
+        # All-to-all combine: send tokens back to originating EP ranks
+        routed_output = all_to_all_single_autograd(
+            routed_output,
+            metadata.input_splits,
+            metadata.output_splits,
+            self.ep_group,
+        )
+
+        if not self.score_before_experts:
+            routed_output = (
+                routed_output.to(torch.float32)
+                * metadata.top_scores_experts_sorted.reshape(-1, 1)
+            ).to(routed_output.dtype)
+
+        return deterministic_scatter_add(
+            outputs,
+            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )
+
+
 @dataclass(frozen=True, kw_only=True)
 class DeepEPDispatchMetadata:
     """Metadata for DeepEP/HybridEP token dispatch."""

@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
     LocalMapInnerAttention,
 )
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -218,6 +219,13 @@ class GptOssModel(Decoder):
                             "Failed to use grouped mm, which is only supported on SM90 or later",
                         )
                         layer_cfg.moe.experts.use_grouped_mm = False
+                    # Replace the default LocalTokenDispatcher config with the
+                    # correct dispatcher for the chosen parallelism strategy.
+                    # Layer builders (e.g. _build_gptoss_layers) create configs
+                    # without parallelism info, so the dispatcher defaults to
+                    # LocalTokenDispatcher (EP=1). Here we rebuild it with the
+                    # actual EP degree, comm backend, and pad_multiple from the
+                    # training config.
                     td = layer_cfg.moe.experts.token_dispatcher
                     layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
                         num_experts=td.num_experts,
@@ -226,6 +234,7 @@ class GptOssModel(Decoder):
                         ep_degree=parallelism.expert_parallel_degree,
                         comm_backend=parallelism.expert_parallel_comm_backend,
                         hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+                        pad_multiple=find_pad_multiple(trainer_config.model_converters.converters),
                     )
 
             tp = parallelism.tensor_parallel_degree

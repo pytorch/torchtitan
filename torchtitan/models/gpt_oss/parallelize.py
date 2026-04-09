@@ -30,7 +30,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.expert_parallel import ExpertParallel, TorchAOExpertParallel
+from torchtitan.distributed.expert_parallel import ExpertParallel
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama3.parallelize import apply_replicate
@@ -309,11 +309,9 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            if pad_multiple is not None:
-                experts_plan = TorchAOExpertParallel(pad_multiple)
-            else:
-                # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+            # Weight sharding only — dispatch/combine handled by
+            # the token dispatcher (selected at config time or rebuilt below).
+            experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
                 raise NotImplementedError(
@@ -330,12 +328,10 @@ def apply_moe_ep_tp(
             parallelize_plan=experts_plan,
         )
 
-        # Set ep_group and pad_multiple on the token dispatcher.
-        # The dispatcher type was already selected at config time
-        # (update_from_config → make_token_dispatcher_config).
+        # Set ep_group on the token dispatcher so it can perform
+        # all-to-all communication. The dispatcher type (including
+        # TorchAoTokenDispatcher for pad_multiple) is already selected
+        # at config time in update_from_config.
         if ep_mesh is not None:
             # pyrefly: ignore [missing-attribute]
-            td = transformer_block.moe.experts.token_dispatcher
-            td.ep_group = ep_mesh.get_group()
-            if pad_multiple is not None:
-                td.pad_multiple = pad_multiple
+            transformer_block.moe.experts.token_dispatcher.ep_group = ep_mesh.get_group()

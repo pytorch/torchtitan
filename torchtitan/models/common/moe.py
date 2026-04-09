@@ -388,11 +388,18 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        outputs = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
+        outputs = (
+            self.shared_experts(x)
+            if self.shared_experts is not None
+            else torch.zeros_like(x)
+        )
 
         # Dispatch tokens to experts, compute, and combine into outputs
         return self.experts(
-            x, num_tokens_per_expert, top_scores, selected_experts_indices,
+            x,
+            num_tokens_per_expert,
+            top_scores,
+            selected_experts_indices,
             outputs=outputs,
         ).reshape(bs, slen, dim)
 

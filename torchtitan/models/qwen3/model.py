@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     GQAttention,
     VarlenAttention,
 )
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -114,7 +115,8 @@ class Qwen3Model(Decoder):
                     # Layer builders (e.g. _build_qwen3_layers) create configs
                     # without parallelism info, so the dispatcher defaults to
                     # LocalTokenDispatcher (EP=1). Here we rebuild it with the
-                    # actual EP degree and comm backend from the training config.
+                    # actual EP degree, comm backend, and pad_multiple from the
+                    # training config.
                     td = layer_cfg.moe.experts.token_dispatcher
                     layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
                         num_experts=td.num_experts,
@@ -123,6 +125,7 @@ class Qwen3Model(Decoder):
                         ep_degree=parallelism.expert_parallel_degree,
                         comm_backend=parallelism.expert_parallel_comm_backend,
                         hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+                        pad_multiple=find_pad_multiple(trainer_config.model_converters.converters),
                     )
 
             if parallelism.context_parallel_degree > 1 and isinstance(

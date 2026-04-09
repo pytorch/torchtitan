@@ -88,7 +88,10 @@ class DeepEPMoE(MoE):
         # must run in parallel with the async combine — it hasn't computed yet.
         outputs = torch.zeros_like(x)
         routed_output = self.experts(
-            x, num_tokens_per_expert, top_scores, selected_experts_indices,
+            x,
+            num_tokens_per_expert,
+            top_scores,
+            selected_experts_indices,
             outputs=outputs,
         )
 
