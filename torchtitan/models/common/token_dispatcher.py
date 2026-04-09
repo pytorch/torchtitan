@@ -344,10 +344,10 @@ class TokenDispatcher(BaseTokenDispatcher):
             num_tokens_per_expert,
         )
 
-    def _unpermute(self, routed_output, metadata):
+    def _unpermute(self, out, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
-        out_unpermuted = routed_output.new_empty(metadata.input_shape)
-        out_unpermuted[metadata.permuted_indices, :] = routed_output
+        out_unpermuted = out.new_empty(input_shape)
+        out_unpermuted[permuted_indices, :] = out
         return out_unpermuted
 
     # pyrefly: ignore [bad-override]
@@ -361,7 +361,9 @@ class TokenDispatcher(BaseTokenDispatcher):
         dim = routed_output.shape[1]
 
         # Reverse expert-major reordering
-        routed_output = self._unpermute(routed_output, metadata)
+        routed_output = self._unpermute(
+            routed_output, metadata.input_shape, metadata.permuted_indices
+        )
 
         # All-to-all combine: send tokens back to originating EP ranks
         routed_output = all_to_all_single_autograd(
@@ -437,10 +439,10 @@ class TorchAoTokenDispatcher(TokenDispatcher):
             num_tokens_per_expert_group_padded,
         )
 
-    def _unpermute(self, routed_output, metadata):
+    def _unpermute(self, out, input_shape, permuted_indices):
         # Strip the padding sentinel row added by permute_and_pad
-        out_unpermuted = routed_output.new_empty(metadata.input_shape)
-        out_unpermuted[metadata.permuted_indices, :] = routed_output
+        out_unpermuted = out.new_empty(input_shape)
+        out_unpermuted[permuted_indices, :] = out
         return out_unpermuted[:-1]
 
 
