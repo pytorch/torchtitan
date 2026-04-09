@@ -19,6 +19,19 @@ _HF_LAYER_RE = re.compile(r"^language_model\.model\.layers\.(\d+)\.")
 
 
 class Llama4StateDictAdapter(MoEStateDictAdapter):
+    """StateDictAdapter for Llama4 MoE model.
+
+    Inherits from MoEStateDictAdapter but handles expert conversion inline
+    rather than through the 3D-to-2D decomposition helpers (_experts_to_hf /
+    _experts_from_hf). Llama4's HF format stores experts as 3D tensors with
+    transpose + concatenation (gate_up_proj = cat(w1.T, w3.T)), whereas the
+    base class helpers split into per-expert 2D tensors (for Qwen3, DeepSeekV3).
+
+    The inline transpose/cat operations are DTensor-safe: since the output stays
+    3D (no expert dimension decomposition), standard DTensor ops preserve the
+    expert-dim sharding correctly.
+    """
+
     def __init__(self, model_config: Llama4Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
 
@@ -42,6 +55,7 @@ class Llama4StateDictAdapter(MoEStateDictAdapter):
         }
 
         hf: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
         # Collect w1/w3 per layer for gate_up_proj combination
         to_combine: dict[str, dict[str, torch.Tensor]] = defaultdict(dict)
 
@@ -68,6 +82,10 @@ class Llama4StateDictAdapter(MoEStateDictAdapter):
                 elif suffix in ("moe.experts.w1", "moe.experts.w3"):
                     hf_fqn = f"language_model.model.layers.{layer}.feed_forward.experts.gate_up_proj"
                     to_combine[hf_fqn][suffix] = value
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
         # Combine w1 + w3 → gate_up_proj (transposed, then concatenated)
         for hf_fqn, parts in to_combine.items():
@@ -75,6 +93,10 @@ class Llama4StateDictAdapter(MoEStateDictAdapter):
             w3 = parts["moe.experts.w3"].transpose(-1, -2)
             hf[hf_fqn] = torch.cat([w1, w3], dim=-1)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.to_hf: unmapped keys: {unmapped_keys}"
+            )
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -97,6 +119,7 @@ class Llama4StateDictAdapter(MoEStateDictAdapter):
         }
 
         sd: dict[str, Any] = {}
+        unmapped_keys: list[str] = []
 
         for key, value in hf_state_dict.items():
             if key in RENAME:
@@ -115,5 +138,13 @@ class Llama4StateDictAdapter(MoEStateDictAdapter):
                     w1, w3 = value.chunk(2, dim=-1)
                     sd[f"layers.{layer}.moe.experts.w1"] = w1.transpose(-1, -2)
                     sd[f"layers.{layer}.moe.experts.w3"] = w3.transpose(-1, -2)
+                else:
+                    unmapped_keys.append(key)
+            else:
+                unmapped_keys.append(key)
 
+        if unmapped_keys:
+            raise ValueError(
+                f"{type(self).__name__}.from_hf: unmapped keys: {unmapped_keys}"
+            )
         return sd

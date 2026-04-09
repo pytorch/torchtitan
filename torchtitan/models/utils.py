@@ -284,8 +284,8 @@ class MoEStateDictAdapter(BaseStateDictAdapter):
         - FSDP + ETP + EP: StridedShard(0)Shard(0)Shard(1/2) or StridedShard(1)Shard(0)Shard(1/2)
 
         Args:
-            abstract_key: HuggingFace templage key with {} placeholders for layer and expert IDs
-            titan_abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
+            abstract_key: HuggingFace template key with {} placeholders for layer and expert IDs
+            titan_abstract_key: TorchTitan template key with {} placeholders for layer and expert IDs
             layer_id: Layer identifier
             grouped_expert_weight: DTensor containing all experts' weights
 
@@ -397,7 +397,7 @@ class MoEStateDictAdapter(BaseStateDictAdapter):
                     }
                 }
                 Used to collect individual expert weights before concatenating them into GroupedExperts.
-            abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
+            abstract_key: TorchTitan template key with {} placeholders for layer and expert IDs
             layer_num: Layer identifier
 
         Returns:
@@ -472,7 +472,7 @@ class MoEStateDictAdapter(BaseStateDictAdapter):
                     }
                 }
                 Used to collect individual expert weights before concatenating them into GroupedExperts.
-            abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
+            abstract_key: TorchTitan template key with {} placeholders for layer and expert IDs
             layer_num: Layer identifier
             n_experts: Number of experts in the GroupedExperts module
 
