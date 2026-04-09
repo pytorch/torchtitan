@@ -63,6 +63,8 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
+        self.enable_gqa = self.num_heads > self.num_kv_heads
+
         # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
             # activate_flash_attention_impl() will restore internal global state
@@ -175,6 +177,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         # see https://github.com/pytorch/pytorch/pull/176905
         if is_in_batch_invariant_mode() and current_flash_attention_impl() == "FA3":
             extra_kwargs["num_splits"] = 1
+
+        if self.enable_gqa:
+            extra_kwargs["enable_gqa"] = True
 
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
