@@ -186,9 +186,7 @@ def compute_policy_gradient_loss(
     else:
         # No reference model: policy gradient loss without KL penalty
         all_token_lps = torch.cat(batch_token_log_probs)
-        per_sample_mean_lps = torch.stack(
-            [lps.mean() for lps in batch_token_log_probs]
-        )
+        per_sample_mean_lps = torch.stack([lps.mean() for lps in batch_token_log_probs])
         pg_loss = -(per_sample_mean_lps * advantages).mean()
 
         entropy = -all_token_lps.mean()
