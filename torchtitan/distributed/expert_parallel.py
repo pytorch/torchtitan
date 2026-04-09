@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
-from torch import Tensor
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
@@ -16,63 +15,6 @@ from torch.distributed.tensor import (
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
-
-
-def _generate_permute_indices(
-    tokens_per_expert_group: torch.Tensor,
-    experts_per_rank: int,
-    num_ranks: int,
-):
-    """Generate indices to reorder tokens from rank-major to expert-major layout.
-
-    Args:
-        tokens_per_expert_group: shape ``[num_ranks * experts_per_rank]``.
-
-    Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
-    Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
-    """
-    device = tokens_per_expert_group.device
-    total = tokens_per_expert_group.sum()
-
-    # [R, E] matrix of token counts per (rank, expert)
-    t_mat = tokens_per_expert_group.view(num_ranks, experts_per_rank)
-
-    # Where each (r, e) segment starts in the input (rank-major order)
-    input_starts = (tokens_per_expert_group.cumsum(0) - tokens_per_expert_group).view(
-        num_ranks, experts_per_rank
-    )
-
-    # Transpose to expert-major [E, R] and flatten
-    segment_lens = t_mat.t().reshape(-1)
-    input_starts = input_starts.t().reshape(-1)
-
-    # For each output position, find its input position:
-    #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
-    seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
-        segment_lens
-    )
-    output_starts = segment_lens.cumsum(0) - segment_lens
-    permuted_indices = (
-        input_starts[seg_ids]
-        + torch.arange(total, device=device)  # pyrefly: ignore [no-matching-overload]
-        - output_starts[seg_ids]
-    )
-
-    num_tokens_per_expert = t_mat.sum(0)
-    return permuted_indices, num_tokens_per_expert
-
-
-def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
-    permuted_indices, num_tokens_per_expert = _generate_permute_indices(
-        num_tokens_per_expert, num_local_experts, ep_degree
-    )
-    return x.shape, x[permuted_indices, :], permuted_indices, num_tokens_per_expert
-
-
-def _unpermute(out, input_shape, permuted_indices):
-    out_unpermuted = out.new_empty(input_shape)
-    out_unpermuted[permuted_indices, :] = out
-    return out_unpermuted
 
 
 class BaseExpertParallel(ParallelStyle, ABC):

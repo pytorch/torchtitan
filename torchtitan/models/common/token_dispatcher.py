@@ -13,7 +13,6 @@ from torch.distributed._functional_collectives import (
     all_to_all_single_autograd,
 )
 
-from torchtitan.distributed.expert_parallel import _permute, _unpermute
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
@@ -119,6 +118,9 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         selected_experts_indices: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
+        # TODO: Extract this local reordering block (histc, argsort, score
+        # application) into a shared helper — it's duplicated in
+        # TokenDispatcher.dispatch.
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
@@ -200,6 +202,9 @@ class TokenDispatcher(BaseTokenDispatcher):
     ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
         ep_degree = dist.get_world_size(self.ep_group)
 
+        # TODO: Extract this local reordering block (histc, argsort, score
+        # application) into a shared helper — it's duplicated in
+        # LocalTokenDispatcher.dispatch.
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
@@ -227,7 +232,7 @@ class TokenDispatcher(BaseTokenDispatcher):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        # All-to-all of per-expert token counts
+        # generate the input splits and output splits for all-to-all
         with torch.no_grad():
             num_tokens_per_expert_group = all_to_all_single(
                 num_tokens_per_expert,
@@ -235,7 +240,8 @@ class TokenDispatcher(BaseTokenDispatcher):
                 None,
                 group=self.ep_group,
             )
-            # Wait explicitly for use by triton kernel later
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
                 num_tokens_per_expert_group
             )
@@ -244,7 +250,7 @@ class TokenDispatcher(BaseTokenDispatcher):
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=True)
             )
-            # NOTE: this incurs a device-to-host sync
+            # NOTE: this would incur a device-to-host sync
             output_splits = (
                 num_tokens_per_expert_group.view(ep_degree, -1)
                 .sum(dim=1)
@@ -262,13 +268,20 @@ class TokenDispatcher(BaseTokenDispatcher):
         )
 
         # Reorder tokens from rank-major to expert-major layout for grouped_mm
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct layout, via _permute below.
         num_local_experts = num_tokens_per_expert_group.shape[0] // ep_degree
         (
             input_shape,
             routed_input,
             permuted_indices,
             num_tokens_per_expert_group,
-        ) = _permute(
+        ) = self._permute(
             routed_input,
             num_tokens_per_expert_group,
             ep_degree,
@@ -286,6 +299,57 @@ class TokenDispatcher(BaseTokenDispatcher):
         )
         return routed_input, num_tokens_per_expert_group, metadata
 
+    def _permute(
+        self, routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+    ):
+        """Reorder tokens from rank-major to expert-major layout.
+
+        Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
+        Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
+        """
+        device = num_tokens_per_expert_group.device
+        total = num_tokens_per_expert_group.sum()
+
+        # [R, E] matrix of token counts per (rank, expert)
+        t_mat = num_tokens_per_expert_group.view(ep_degree, num_local_experts)
+
+        # Where each (r, e) segment starts in the input (rank-major order)
+        input_starts = (
+            num_tokens_per_expert_group.cumsum(0) - num_tokens_per_expert_group
+        ).view(ep_degree, num_local_experts)
+
+        # Transpose to expert-major [E, R] and flatten
+        segment_lens = t_mat.t().reshape(-1)
+        input_starts = input_starts.t().reshape(-1)
+
+        # For each output position, find its input position:
+        #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
+        seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
+            segment_lens
+        )
+        output_starts = segment_lens.cumsum(0) - segment_lens
+        permuted_indices = (
+            input_starts[seg_ids]
+            + torch.arange(
+                total, device=device
+            )  # pyrefly: ignore [no-matching-overload]
+            - output_starts[seg_ids]
+        )
+
+        num_tokens_per_expert = t_mat.sum(0)
+        return (
+            routed_input.shape,
+            routed_input[permuted_indices, :],
+            permuted_indices,
+            num_tokens_per_expert,
+        )
+
+    def _unpermute(self, routed_output, metadata):
+        """Reverse expert-major reordering."""
+        out_unpermuted = routed_output.new_empty(metadata.input_shape)
+        out_unpermuted[metadata.permuted_indices, :] = routed_output
+        return out_unpermuted
+
     # pyrefly: ignore [bad-override]
     def combine(
         self,
@@ -297,9 +361,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         dim = routed_output.shape[1]
 
         # Reverse expert-major reordering
-        routed_output = _unpermute(
-            routed_output, metadata.input_shape, metadata.permuted_indices
-        )
+        routed_output = self._unpermute(routed_output, metadata)
 
         # All-to-all combine: send tokens back to originating EP ranks
         routed_output = all_to_all_single_autograd(
@@ -323,7 +385,7 @@ class TokenDispatcher(BaseTokenDispatcher):
 
 
 class TorchAoTokenDispatcher(TokenDispatcher):
-    """Token dispatcher for EP>1 with padded permutation for quantized grouped GEMMs.
+    """Token dispatcher for EP>1 with token group padding for quantized grouped GEMMs.
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
     reorder tokens into expert-major order and pad each expert's token group to
@@ -344,81 +406,15 @@ class TorchAoTokenDispatcher(TokenDispatcher):
         super().__init__(config)
         self.pad_multiple = config.pad_multiple
 
-    # pyrefly: ignore [bad-override]
-    def dispatch(
-        self,
-        x: torch.Tensor,
-        top_scores: torch.Tensor,
-        selected_experts_indices: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
-        ep_degree = dist.get_world_size(self.ep_group)
-
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
-
-        # Reorder the token indices to match the order of the experts
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted]
-
-        # Apply scores before expert computation if configured
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # All-to-all of per-expert token counts
-        with torch.no_grad():
-            num_tokens_per_expert_group = all_to_all_single(
-                num_tokens_per_expert,
-                None,
-                None,
-                group=self.ep_group,
-            )
-            # Wait explicitly for use by triton kernel later
-            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
-                num_tokens_per_expert_group
-            )
-            input_splits = (
-                num_tokens_per_expert.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            # NOTE: this incurs a device-to-host sync
-            output_splits = (
-                num_tokens_per_expert_group.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            input_splits_list = input_splits.tolist()
-            output_splits_list = output_splits.tolist()
-
-        # All-to-all dispatch tokens to EP ranks
-        routed_input = all_to_all_single_autograd(
-            routed_input,
-            output_splits_list,
-            input_splits_list,
-            self.ep_group,
-        )
-
-        # Reorder tokens from rank-major to expert-major layout with padding
-        # for quantized grouped GEMMs (FP8/MXFP8)
-        num_local_experts = num_tokens_per_expert_group.shape[0] // ep_degree
-
+    def _permute(
+        self, routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+    ):
+        # FP8/MXFP8 require groups to be permuted to expert major order AND
+        # padded to nearest multiple of 16.
+        # It also does padding to make sure the number of tokens each expert
+        # gets locally is a multiple of `self.pad_multiple`.
+        # Note that this will create side effects when wrapping the for-loop
+        # implementation of GroupedExperts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
 
         (
@@ -434,52 +430,18 @@ class TorchAoTokenDispatcher(TokenDispatcher):
             num_local_experts,
             self.pad_multiple,
         )
-
-        metadata = DispatchMetadata(
-            token_indices_experts_sorted=token_indices_experts_sorted,
-            top_scores=top_scores,
-            top_scores_experts_sorted=top_scores_experts_sorted,
-            input_shape=input_shape,
-            permuted_indices=permuted_indices,
-            input_splits=input_splits_list,
-            output_splits=output_splits_list,
+        return (
+            input_shape,
+            routed_input,
+            permuted_indices,
+            num_tokens_per_expert_group_padded,
         )
-        return routed_input, num_tokens_per_expert_group_padded, metadata
 
-    # pyrefly: ignore [bad-override]
-    def combine(
-        self,
-        routed_output: torch.Tensor,
-        metadata: DispatchMetadata,
-        *,
-        outputs: torch.Tensor,
-    ) -> torch.Tensor:
-        dim = routed_output.shape[1]
-
-        # Reverse expert-major reordering, stripping the padding sentinel row
+    def _unpermute(self, routed_output, metadata):
+        # Strip the padding sentinel row added by permute_and_pad
         out_unpermuted = routed_output.new_empty(metadata.input_shape)
         out_unpermuted[metadata.permuted_indices, :] = routed_output
-        routed_output = out_unpermuted[:-1]
-
-        # All-to-all combine: send tokens back to originating EP ranks
-        routed_output = all_to_all_single_autograd(
-            routed_output,
-            metadata.input_splits,
-            metadata.output_splits,
-            self.ep_group,
-        )
-
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(routed_output.dtype)
-
-        return deterministic_scatter_add(
-            outputs,
-            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
-            routed_output,
-        )
+        return out_unpermuted[:-1]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -551,7 +513,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep.hybridep import dispatch_tokens
 
-            hidden, tokens_per_expert, state = dispatch_tokens(
+            hidden_states, tokens_per_expert, state = dispatch_tokens(
                 x,
                 selected_experts_indices,
                 top_scores,
@@ -565,7 +527,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         else:
             from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-            hidden, tokens_per_expert, state = dispatch_tokens(
+            hidden_states, tokens_per_expert, state = dispatch_tokens(
                 x,
                 selected_experts_indices,
                 top_scores,
@@ -576,7 +538,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
             )
 
         metadata = DeepEPDispatchMetadata(state=state)
-        return hidden, tokens_per_expert, metadata
+        return hidden_states, tokens_per_expert, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(

@@ -334,4 +334,6 @@ def apply_moe_ep_tp(
         # at config time in update_from_config.
         if ep_mesh is not None:
             # pyrefly: ignore [missing-attribute]
-            transformer_block.moe.experts.token_dispatcher.ep_group = ep_mesh.get_group()
+            transformer_block.moe.experts.token_dispatcher.ep_group = (
+                ep_mesh.get_group()
+            )
