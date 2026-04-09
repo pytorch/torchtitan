@@ -236,8 +236,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 FSDP+TP+FlexAttn",
             "aot_llama3_fsdp_tp_flexattn",
             ngpu=8,
-            # TODO: Re-enable once flex attention CI failure is resolved
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -253,8 +251,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 FSDP+TP+FlexAttn autobucketing regional_inductor",
             "aot_llama3_fsdp_tp_flexattn_autobucketing_regional_inductor",
             ngpu=8,
-            # TODO: skip for now, re-enable when https://github.com/pytorch/pytorch/pull/179209 is in torch nightly
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -286,10 +282,9 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "AOT llama3 FSDP+TP+FlexAttn manualbucketing regional_inductor",
             "aot_llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=8,
-            # TODO: skip for now, re-enable when https://github.com/pytorch/pytorch/pull/179209 is in torch nightly
-            disabled=True,
         ),
         # === aot_fx_trace mode tests ===
+        # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         OverrideDefinitions(
             [
                 [
@@ -300,9 +295,10 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP",
+            "aot_fx_trace llama3 FSDP+TP+cudagraph",
             "aot_fx_trace_llama3_fsdp_tp",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -416,8 +412,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "AOT deepseek_v3 FSDP+TP+EP+FlexAttention",
             "aot_deepseekv3_fsdp_tp_ep_flexattention",
             ngpu=8,
-            # TODO: Re-enable once flex attention CI failure is resolved
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -437,6 +431,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === aot_fx_trace mode tests ===
+        # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
+        # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
         OverrideDefinitions(
             [
                 [
