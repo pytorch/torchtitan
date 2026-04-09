@@ -241,9 +241,9 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
     - **Unpinned CPU↔CUDA copies** (``aten.copy_``, ``aten._to_copy``):
       e.g. MoE load-balancing counters that copy tensors between CPU and
       CUDA.  CUDA graph capture requires pinned CPU memory for such copies.
-    - **``aten._grouped_mm`` with CPU inputs**: MoE routing indices on CPU
-      fed to a CUDA grouped matmul trigger an implicit device transfer
-      during capture.
+    - **``aten._grouped_mm``**: the grouped matmul kernel used by MoE may
+      perform internal CPU↔CUDA copies (e.g. workspace allocation) that
+      are invisible in the FX graph metadata, breaking CUDA graph capture.
     - **flex_attention HOPs**: flex_attention higher-order ops require
       torch.compile (e.g. regional_inductor) to lower them into fused
       Triton kernels.  Without compilation they fall back to an unfused
@@ -276,17 +276,17 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
                     )
                     return False
 
-        # Check for aten._grouped_mm with CPU tensor inputs
-        # (MoE routing indices on CPU fed to a CUDA op).
+        # Check for aten._grouped_mm unconditionally.
+        # _grouped_mm may perform internal CPU↔CUDA copies (e.g. workspace
+        # allocation) that are not visible from the FX graph metadata, so we
+        # cannot rely on checking input device types alone.
         if node.target == torch.ops.aten._grouped_mm.default:
-            for inp in node.all_input_nodes:
-                inp_val = inp.meta.get("val")
-                if isinstance(inp_val, torch.Tensor) and inp_val.device.type == "cpu":
-                    logger.warning(
-                        "Skipping cudagraph: graph contains aten._grouped_mm "
-                        "with CPU tensor inputs (MoE routing indices)"
-                    )
-                    return False
+            logger.warning(
+                "Skipping cudagraph: graph contains aten._grouped_mm "
+                "which may perform internal CPU↔CUDA copies incompatible "
+                "with CUDA graph capture"
+            )
+            return False
 
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
