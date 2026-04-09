@@ -118,12 +118,13 @@ class GraphTrainer(Trainer):
                     extra_kwargs,
                 )
 
-            passes = construct_default_graph_passes(self._traced_step)
-            self._traced_step.gm = apply_graph_passes(
-                self._traced_step.gm,
-                self._traced_step.example_inputs,
-                passes,
-            )
+            if self.config.compile.enable_passes:
+                passes = construct_default_graph_passes(self._traced_step)
+                self._traced_step.gm = apply_graph_passes(
+                    self._traced_step.gm,
+                    self._traced_step.example_inputs,
+                    passes,
+                )
         with self.train_context(), self.maybe_enable_amp:
             outputs = run_traced_train_step(
                 self._traced_step,
