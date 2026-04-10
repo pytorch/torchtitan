@@ -14,6 +14,7 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
@@ -153,7 +154,7 @@ class TestCheckpointManager(unittest.TestCase):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, **kwargs):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -675,7 +676,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, **kwargs):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
@@ -700,6 +701,91 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=1)
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
+
+
+class TestModelWrapperConverterKeys(unittest.TestCase):
+    """Tests for converter hooks and their effect on load planner."""
+
+    def _create_manager(self, mock_save, mock_load, model, temp_dir):
+        """Create a CheckpointManager with mocked dcp.save/load."""
+        mock_save.side_effect = lambda *a, **kw: os.makedirs(
+            kw.get("checkpoint_id", a[1] if len(a) > 1 else ""), exist_ok=True
+        )
+        mock_load.side_effect = lambda *a, **kw: None
+
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="disabled",
+            folder="",
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=None,
+            initial_load_model_only=False,
+        )
+        with mock.patch("torch.distributed.new_group", return_value="pg"):
+            return CheckpointManager(
+                dataloader=FakeDataLoader(),
+                model_parts=[model],
+                optimizers=FakeOptimizersContainer(),
+                lr_schedulers=FakeLRSchedulersContainer(),
+                states={},
+                config=cfg,
+                sd_adapter=None,
+                base_folder=temp_dir,
+                ft_manager=DummyFTManager(),
+            )
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_load_uses_strict_planner_without_converter(
+        self, mock_save, mock_load, mock_rank
+    ):
+        """Without converter keys, dcp.load is called with allow_partial_load=False."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            model = nn.Linear(2, 2)
+            manager = self._create_manager(mock_save, mock_load, model, temp_dir)
+            manager.save(curr_step=1)
+            manager.load(step=1)
+
+            _, kwargs = mock_load.call_args
+            planner = kwargs.get("planner")
+            self.assertIsInstance(planner, DefaultLoadPlanner)
+            self.assertFalse(planner.allow_partial_load)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_load_uses_partial_planner_with_converter(
+        self, mock_save, mock_load, mock_rank
+    ):
+        """With converter keys on the model, dcp.load is called with allow_partial_load=True."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            from torchtitan.protocols.model_converter import ConverterCheckpointHooks
+
+            model = nn.Linear(2, 2)
+            object.__setattr__(
+                model,
+                "_converter_hooks",
+                ConverterCheckpointHooks(key_filter=lambda key: ".lora_a." in key),
+            )
+            manager = self._create_manager(mock_save, mock_load, model, temp_dir)
+            manager.save(curr_step=1)
+            manager.load(step=1)
+
+            _, kwargs = mock_load.call_args
+            planner = kwargs.get("planner")
+            self.assertIsInstance(planner, DefaultLoadPlanner)
+            self.assertTrue(planner.allow_partial_load)
+        finally:
+            shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":

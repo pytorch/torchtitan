@@ -119,6 +119,14 @@ def llama3_debugmodel_lora() -> Trainer.Config:
     config.model_converters = ModelConvertersContainer.Config(
         converters=[LoRAConverter.Config()],
     )
+    # For LoRA finetuning, set initial_load_in_hf=True to enable proper
+    # checkpoint resumption (load base model from HF, then load LoRA adapters)
+    config.checkpoint = CheckpointManager.Config(
+        interval=500,
+        initial_load_in_hf=True,
+        initial_load_model_only=True,
+        last_save_model_only=False,
+    )
     return config
 
 
@@ -151,6 +159,26 @@ def llama3_8b() -> Trainer.Config:
             steps=1200,
         ),
     )
+
+
+def llama3_8b_lora() -> Trainer.Config:
+    config = llama3_8b()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            LoRAConverter.Config(
+                rank=128,
+                alpha=32.0,
+            ),
+        ],
+    )
+    config.checkpoint = CheckpointManager.Config(
+        enable=True,
+        interval=500,
+        initial_load_in_hf=True,
+        initial_load_model_only=True,
+        last_save_in_hf=True,
+    )
+    return config
 
 
 def llama3_70b() -> Trainer.Config:
