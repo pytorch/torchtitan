@@ -59,7 +59,7 @@ Items enter the board in one of three ways:
 
 - **Developer creates** a draft issue or real issue directly on the board.
 - **Nightly scout** discovers something and creates a Backlog draft
-  (see [nightly.md](nightly.md) §7 for the scout's implementation rules).
+  (see [nightly_scout.md](nightly_scout.md) §8 for the scout's hand-off rules).
 - **Agent proposes** during a work session — creates a Backlog draft for
   things discovered while working on something else.
 
