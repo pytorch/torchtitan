@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -54,8 +55,6 @@ def _distribute_dtensor(
     This helps enable Simple FSDP + TP/EP, in which
         inner spec/mesh is TP/EP spec/mesh
         outer spec/mesh is FSDP/DDP/HSDP spec/mesh
-    The logic follows
-    https://github.com/pytorch/pytorch/blob/main/torch/distributed/_composable/fsdp/_fsdp_param.py#L261
     """
     inner_spec = tensor._spec
     outer_mesh, inner_mesh = device_mesh, inner_spec.mesh
@@ -128,6 +127,11 @@ def _distribute_dtensor(
     )
 
 
+# Cache of (original_class, param_names) -> wrapper class, so all instances
+# of the same module type share one SimpleFSDP class for torch.compile reuse.
+_wrap_class_cache: dict[tuple[type, frozenset[str]], type] = {}
+
+
 def _register_parametrization(
     module: nn.Module, param_names: list[str], parametrization: nn.Module
 ) -> None:
@@ -144,11 +148,19 @@ def _register_parametrization(
         )
         for param_name in param_names
     }
-    module_cls = type(
-        f"SimpleFSDP{module.__class__.__name__}",
-        (module.__class__,),
-        param_name_to_property,
-    )
+    cache_key = (module.__class__, frozenset(param_names))
+    if cache_key in _wrap_class_cache:
+        module_cls = _wrap_class_cache[cache_key]
+    else:
+        module_cls = type(
+            f"SimpleFSDP{module.__class__.__name__}",
+            (module.__class__,),
+            param_name_to_property,
+        )
+        # Expose the dynamically created class as a real, importable symbol
+        # so that pickle/GraphPickler can resolve it during serialization.
+        sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
+        _wrap_class_cache[cache_key] = module_cls
     module.__class__ = module_cls
 
 
@@ -238,7 +250,7 @@ class ReplicateComputation(Module):
         # inspection / debugging / initialization
         # model initialization can be done now through
         # with disable_active_parametrization():
-        #     model.init_weights()
+        #     model.init_states()
         if not _active_parametrization:
             return x
 
