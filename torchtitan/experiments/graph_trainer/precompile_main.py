@@ -47,6 +47,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
 )
 from torchtitan.experiments.graph_trainer.precompile import _ARTIFACT_KEY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.model_setup import materialize_model
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -134,8 +135,6 @@ def main():
             "(e.g. --module graph_trainer.llama3)."
         )
 
-    # TODO: Factor the model setup below with the training path so precompile
-    # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
     model_config.update_from_config(trainer_config=config)
 
@@ -163,15 +162,12 @@ def main():
     # CooR must be disabled during init_weights because DTensor RNG ops
     # (weight initialization seeding) raise NotImplementedError under
     # compile_on_one_rank=True. Re-enable for the tracing phase after.
-    device_type = utils.device_type
-    model.to_empty(device=device_type)
-    dist_config.compile_on_one_rank = False
-    try:
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-    finally:
-        dist_config.compile_on_one_rank = True
-    model.train()
+    with dist_config.patch("compile_on_one_rank", False):
+        model = materialize_model(
+            model,
+            init_device=utils.device_type,
+            buffer_device=None,
+        )
 
     logger.info("Model parallelized and materialized, starting AOT compile")
 
