@@ -293,7 +293,7 @@ def get_human_readable_time(iso_date_str: str) -> str:
         return "yesterday"
     else:
         # Use non-breaking spaces to prevent vertical stacking in tables
-        return f"{diff.days}&nbsp;days&nbsp;ago"
+        return f"{diff.days} days ago"
 
 
 def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
@@ -315,13 +315,6 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
         "those references (Open, Closed, or Merged) to help identify technical debt that is ready "
         "to be addressed.\n\n"
     )
-    # Table's header notation
-    output += (
-        "*Author*: The author of the comment</br>"
-        "*Content*: The body of the comment</br>"
-        "*When*: When the linked PR/Issue was Merged, Closed or Opened</br>"
-        "*File Location*: The placement of the comment</br>\n\n"
-    )
 
     groups = {"merged": [], "closed": [], "open": [], "unknown": []}
     for item in all_items:
@@ -334,7 +327,8 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
         if groups[status]:
             has_any = True
             output += f"### {emojis[status]}\n"
-            output += "| Author | Content | When | File Location |\n"
+            status_title = "opened" if status == "open" else status
+            output += f"| Comment Author | Comment Content | Blocker {status_title.capitalize()} | Comment Location |\n"
             output += "| :--- | :--- | :--- | :--- |\n"
 
             sorting_timestamp_key = (
