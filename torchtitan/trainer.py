@@ -30,7 +30,7 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.config import Configurable
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     CommConfig,
@@ -41,12 +41,7 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.model_setup import (
-    build_model_on_meta,
-    materialize_model,
-    parallelize_model,
-    prepare_model_config,
-)
+from torchtitan.model_setup import materialize_model
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -249,20 +244,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build model (using meta init)
-        model_config = prepare_model_config(
-            model_spec=model_spec,
-            trainer_config=config,
-        )
+        model_config = model_spec.model
+        model_config.update_from_config(trainer_config=config)
         self.model_config = model_config
 
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
-        model = build_model_on_meta(
-            model_config=model_config,
-            training_dtype=config.training.dtype,
-        )
+        with (
+            torch.device("meta"),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+        ):
+            model = model_config.build()
 
         # Build the collection of model converters. No-op if converters empty
         model_compile_enabled = (
@@ -393,16 +387,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
         else:
             # apply Tensor/Context/Expert Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = parallelize_model(
-                model,
-                model_spec=model_spec,
-                parallel_dims=parallel_dims,
-                training=config.training,
-                model_converters=config.model_converters,
-                parallelism=config.parallelism,
-                compile_config=config.compile,
-                ac_config=config.activation_checkpoint,
-                dump_folder=config.dump_folder,
+            model = cast(
+                BaseModel,
+                model_spec.parallelize_fn(
+                    model,
+                    parallel_dims=parallel_dims,
+                    training=config.training,
+                    model_converters=config.model_converters,
+                    parallelism=config.parallelism,
+                    compile_config=config.compile,
+                    ac_config=config.activation_checkpoint,
+                    dump_folder=config.dump_folder,
+                ),
             )
 
             model = materialize_model(

@@ -27,7 +27,7 @@ import functools
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     apply_graph_ac,
@@ -47,12 +47,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
 )
 from torchtitan.experiments.graph_trainer.precompile import _ARTIFACT_KEY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.model_setup import (
-    build_model_on_meta,
-    materialize_model,
-    parallelize_model,
-    prepare_model_config,
-)
+from torchtitan.model_setup import materialize_model
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -140,23 +135,21 @@ def main():
             "(e.g. --module graph_trainer.llama3)."
         )
 
-    model_config = prepare_model_config(
-        model_spec=model_spec,
-        trainer_config=config,
-    )
+    model_config = model_spec.model
+    model_config.update_from_config(trainer_config=config)
 
     logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")
-    model = build_model_on_meta(
-        model_config=model_config,
-        training_dtype=config.training.dtype,
-    )
+    with (
+        torch.device("meta"),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+    ):
+        model = model_config.build()
 
     model.verify_module_protocol()
 
     no_compile_config = dataclasses.replace(compile_config, enable=False)
-    model = parallelize_model(
+    model = model_spec.parallelize_fn(
         model,
-        model_spec=model_spec,
         parallel_dims=parallel_dims,
         training=config.training,
         model_converters=config.model_converters,
@@ -169,12 +162,12 @@ def main():
     # CooR must be disabled during init_weights because DTensor RNG ops
     # (weight initialization seeding) raise NotImplementedError under
     # compile_on_one_rank=True. Re-enable for the tracing phase after.
-    model = materialize_model(
-        model,
-        init_device=utils.device_type,
-        buffer_device=None,
-        init_weights_context=dist_config.patch("compile_on_one_rank", False),
-    )
+    with dist_config.patch("compile_on_one_rank", False):
+        model = materialize_model(
+            model,
+            init_device=utils.device_type,
+            buffer_device=None,
+        )
 
     logger.info("Model parallelized and materialized, starting AOT compile")
 
