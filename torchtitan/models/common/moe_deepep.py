@@ -70,29 +70,22 @@ class DeepEPMoE(MoE):
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Dispatch + expert computation + async combine all inside experts.forward().
-        # The combine operation returns asynchronously, allowing overlap with
+        # Dispatch + expert computation + async combine.
+        # The combine returns asynchronously, allowing overlap with
         # shared_experts computation below.
-        # NOTE: We pass zeros here (not shared experts output) because shared_experts
-        # must run in parallel with the async combine — it hasn't computed yet.
-        outputs = torch.zeros_like(x)
-        routed_output = self.experts(
+        routed_output, _metadata = self.experts(
             x,
             num_tokens_per_expert,
             top_scores,
             selected_experts_indices,
-            outputs=outputs,
         )
 
-        # shared_experts runs in parallel with combine communication.
-        # This is the key optimization - we overlap compute with communication.
-        out = self.shared_experts(x) if self.shared_experts is not None else None
+        # shared_experts overlaps with the async combine communication
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
 
         # Sync the combine operation before using routed_output.
-        # This inserts a CUDA stream wait, ensuring combine is complete before
-        # the subsequent addition or reshape operations read routed_output.
         sync_combine()
 
-        if out is None:
+        if shared_out is None:
             return routed_output.reshape(bs, slen, dim)
-        return (out + routed_output).reshape(bs, slen, dim)
+        return (shared_out + routed_output).reshape(bs, slen, dim)

@@ -14,7 +14,6 @@ from torch.distributed._functional_collectives import (
 )
 
 from torchtitan.config import Configurable
-from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -83,18 +82,17 @@ class BaseTokenDispatcher(Configurable):
         self,
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
-        *,
-        outputs: torch.Tensor,
     ) -> torch.Tensor:
-        """Combine expert outputs back to original token order.
+        """Reverse the dispatch: unpermute + optional all-to-all.
 
         Args:
             routed_output: (R, dim) expert outputs
             metadata: state from dispatch()
-            outputs: (num_tokens, dim) pre-allocated output tensor to accumulate into
 
         Returns:
-            output: (num_tokens, dim) combined output
+            routed_output in local token order (not yet scatter_add'd).
+            For EP, this is an AsyncCollectiveTensor — the a2a runs on
+            the NCCL stream and won't block until accessed.
         """
         raise NotImplementedError
 
@@ -153,22 +151,8 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
-        *,
-        outputs: torch.Tensor,
     ) -> torch.Tensor:
-        dim = routed_output.shape[1]
-
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(routed_output.dtype)
-
-        return deterministic_scatter_add(
-            outputs,
-            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
-            routed_output,
-        )
+        return routed_output
 
 
 class TokenDispatcher(BaseTokenDispatcher):
@@ -345,34 +329,21 @@ class TokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: DispatchMetadata,
-        *,
-        outputs: torch.Tensor,
     ) -> torch.Tensor:
-        dim = routed_output.shape[1]
-
         # Reverse expert-major reordering
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
         )
 
-        # All-to-all combine: send tokens back to originating EP ranks
-        routed_output = all_to_all_single_autograd(
+        # All-to-all combine: send tokens back to originating EP ranks.
+        # Returns an AsyncCollectiveTensor — the a2a runs on the NCCL stream
+        # and won't block until the tensor is accessed (e.g. by scatter_add
+        # in MoE.forward).
+        return all_to_all_single_autograd(
             routed_output,
             metadata.input_splits,
             metadata.output_splits,
             self.ep_group,
-        )
-
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(routed_output.dtype)
-
-        return deterministic_scatter_add(
-            outputs,
-            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
-            routed_output,
         )
 
 
@@ -530,13 +501,11 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
-        *,
-        outputs: torch.Tensor,
     ) -> torch.Tensor:
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep
 
-            return outputs + hybridep.combine_tokens(
+            return hybridep.combine_tokens(
                 routed_output,
                 metadata.state,  # pyrefly: ignore [bad-argument-type]
                 pad_multiple=self.pad_multiple,
@@ -545,4 +514,4 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
             from torchtitan.distributed.deepep.deepep import combine_tokens
 
             # pyrefly: ignore [bad-argument-type]
-            return outputs + combine_tokens(routed_output, metadata.state)
+            return combine_tokens(routed_output, metadata.state)
