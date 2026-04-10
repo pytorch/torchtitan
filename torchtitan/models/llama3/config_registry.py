@@ -111,6 +111,8 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
 
 def llama3_debugmodel_lora() -> Trainer.Config:
     config = llama3_debugmodel()
+    # Applies LoRA to all linears (including LM head) for debug/testing.
+    # Production configs should set target_modules to exclude the LM head.
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             LoRAConverter.Config(
