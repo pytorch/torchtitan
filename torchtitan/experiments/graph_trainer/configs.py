@@ -37,6 +37,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
 
+    enable_passes: bool = True
+    """When False, skip all graph passes (both default and user-configured)."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:

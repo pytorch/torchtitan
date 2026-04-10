@@ -310,6 +310,22 @@ class TracedResult:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
 
+    @property
+    def num_static_inputs(self) -> int:
+        """Number of leading graph inputs with stable tensor addresses.
+
+        Parameters and buffers (the state entries) have fixed addresses across
+        training steps.  Each may expand to multiple plain tensors after
+        subclass unwrapping (e.g. DTensor -> inner tensors).
+        """
+        num_state = len(self.state_fqns)
+        return sum(
+            self.input_subclass_layouts[i].num_tensors
+            if i in self.input_subclass_layouts
+            else 1
+            for i in range(num_state)
+        )
+
 
 def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
     """Return a tracer for a stateless ``fn`` with explicit ``state`` input.
