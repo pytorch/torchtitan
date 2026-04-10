@@ -17,27 +17,16 @@ from .moe import MoE
 
 
 class DeepEPMoE(MoE):
-    """Mixture of Experts with DeepEP communication.
+    """MoE with DeepEP communication.
 
-    Overrides forward() to overlap shared_experts computation with the
-    DeepEP combine communication. The forward pass proceeds as:
-
-    1. Router computes expert assignments
-    2. GroupedExperts.forward() runs the full pipeline via DeepEPTokenDispatcher:
-       a. dispatch — sends tokens to expert-owning ranks (sync)
-       b. expert computation
-       c. combine — starts sending results back (async, returns immediately)
-    3. shared_experts runs IN PARALLEL with the async combine communication
-    4. sync_combine() waits for combine to complete
-    5. Add shared_experts output and routed_output
+    Overrides forward() to insert an explicit sync_combine() barrier.
+    DeepEP's combine is async — unlike NCCL all-to-all which synchronizes
+    implicitly, DeepEP requires a manual sync for combine to complete.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):
         pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with DeepEP communication and overlapped shared_experts.

@@ -23,7 +23,7 @@ from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
     TokenDispatcher,
-    TorchAoTokenDispatcher,
+    TorchAOTokenDispatcher,
 )
 
 
@@ -155,7 +155,7 @@ def make_token_dispatcher_config(
     Returns the right Config subclass based on parallelism settings:
     - EP=1 (default): LocalTokenDispatcher.Config → LocalTokenDispatcher
     - EP>1, standard: TokenDispatcher.Config → TokenDispatcher
-    - EP>1, standard, pad_multiple: TorchAoTokenDispatcher.Config → TorchAoTokenDispatcher
+    - EP>1, standard, pad_multiple: TorchAOTokenDispatcher.Config → TorchAOTokenDispatcher
     - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
       (pad_multiple is handled internally by the DeepEP/HybridEP library)
     """
@@ -164,15 +164,17 @@ def make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
+            ep_degree=ep_degree,
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=pad_multiple,
         )
     elif ep_degree > 1 and pad_multiple is not None:
-        return TorchAoTokenDispatcher.Config(
+        return TorchAOTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
+            ep_degree=ep_degree,
             pad_multiple=pad_multiple,
         )
     elif ep_degree > 1:
@@ -180,6 +182,7 @@ def make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
+            ep_degree=ep_degree,
         )
     else:
         return LocalTokenDispatcher.Config(
@@ -187,6 +190,33 @@ def make_token_dispatcher_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
         )
+
+
+def apply_ep(
+    layers: list,
+    *,
+    ep_degree: int,
+    comm_backend: str = "standard",
+    hybridep_non_blocking_expert_capacity_factor: float | None = None,
+    pad_multiple: int | None = None,
+) -> None:
+    """Replace token dispatchers in MoE layers for expert parallelism.
+
+    Mutates layer configs in-place: for each MoE layer, replaces the
+    token_dispatcher with the appropriate config based on EP settings.
+    """
+    for layer_cfg in layers:
+        if layer_cfg.moe is not None:
+            td = layer_cfg.moe.experts.token_dispatcher
+            layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
+                num_experts=td.num_experts,
+                top_k=td.top_k,
+                score_before_experts=td.score_before_experts,
+                ep_degree=ep_degree,
+                comm_backend=comm_backend,
+                hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
+                pad_multiple=pad_multiple,
+            )
 
 
 def make_experts_config(

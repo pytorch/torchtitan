@@ -327,13 +327,3 @@ def apply_moe_ep_tp(
             device_mesh=experts_mesh,
             parallelize_plan=experts_plan,
         )
-
-        # Set ep_group on the token dispatcher so it can perform
-        # all-to-all communication. The dispatcher type (including
-        # TorchAoTokenDispatcher for pad_multiple) is already selected
-        # at config time in update_from_config.
-        if ep_mesh is not None:
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.moe.experts.token_dispatcher.ep_group = (
-                ep_mesh.get_group()
-            )

@@ -297,6 +297,18 @@ class TokenChoiceTopKRouter(Module):
 
 
 class MoE(Module):
+    """Mixture of Experts layer.
+
+    The forward pass proceeds as:
+    1. Router computes expert assignments
+    2. GroupedExperts.forward() runs the full pipeline via token_dispatcher:
+       a. dispatch — reorder tokens + optional all-to-all to expert-owning ranks
+       b. expert computation
+       c. combine — reverse the dispatch (all-to-all + scatter_add)
+    3. shared_experts computes on the same input
+    4. Add shared_experts output and routed_output
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
@@ -389,9 +401,7 @@ class MoE(Module):
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # Dispatch tokens to experts, compute, and combine results.
-        # Note: shared_experts runs AFTER routed experts to preserve the
-        # original backward execution order (expert gradients accumulate
-        # into x.grad before shared_expert gradients).
+        # Note: shared_experts runs AFTER routed experts
         out = self.experts(
             x,
             num_tokens_per_expert,

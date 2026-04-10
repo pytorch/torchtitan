@@ -63,10 +63,13 @@ class ExpertParallel(BaseExpertParallel):
         for param_name, param in mod.named_parameters(recurse=False):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             mod.register_parameter(param_name, dist_param)
+        # Set ep_group on the token dispatcher for all-to-all communication.
+        # device_mesh here is the 1D EP mesh.
+        mod.token_dispatcher.ep_group = (
+            device_mesh.get_group()
+        )  # pyrefly: ignore [missing-attribute]
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        # NOTE: Token dispatch/combine is now handled by Experts.token_dispatcher.
-        # ExpertParallel only shards expert weights.
         return distribute_module(
             module,
             device_mesh,
@@ -97,10 +100,13 @@ class ExpertTensorParallel(ExpertParallel):
             # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
+        # Set ep_group on the token dispatcher for all-to-all communication.
+        # device_mesh is the 2D (EP, ETP) mesh; slice the EP dimension.
+        mod.token_dispatcher.ep_group = device_mesh[
+            "ep"
+        ].get_group()  # pyrefly: ignore [missing-attribute]
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        # NOTE: Token dispatch/combine is now handled by Experts.token_dispatcher.
-        # ExpertTensorParallel only shards expert weights with (EP, TP) placement.
         return distribute_module(
             module,
             device_mesh,

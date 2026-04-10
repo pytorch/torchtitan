@@ -11,8 +11,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.quantization import find_pad_multiple
-
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -21,7 +19,6 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_fixed_block_mask_mod,
 )
-from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -151,26 +148,6 @@ class Llama4Model(Decoder):
                         layer_cfg.moe.experts.use_grouped_mm = False
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
-                    )
-
-                    # Replace the default LocalTokenDispatcher config with the
-                    # correct dispatcher for the chosen parallelism strategy.
-                    # Layer builders (e.g. _build_llama4_layers) create configs
-                    # without parallelism info, so the dispatcher defaults to
-                    # LocalTokenDispatcher (EP=1). Here we rebuild it with the
-                    # actual EP degree, comm backend, and pad_multiple from the
-                    # training config.
-                    td = layer_cfg.moe.experts.token_dispatcher
-                    layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
-                        num_experts=td.num_experts,
-                        top_k=td.top_k,
-                        score_before_experts=td.score_before_experts,
-                        ep_degree=parallelism.expert_parallel_degree,
-                        comm_backend=parallelism.expert_parallel_comm_backend,
-                        hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
-                        pad_multiple=find_pad_multiple(
-                            trainer_config.model_converters.converters
-                        ),
                     )
 
                     if parallelism.expert_parallel_comm_backend == "deepep":

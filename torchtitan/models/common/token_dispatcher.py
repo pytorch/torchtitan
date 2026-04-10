@@ -13,6 +13,7 @@ from torch.distributed._functional_collectives import (
     all_to_all_single_autograd,
 )
 
+from torchtitan.config import Configurable
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
@@ -21,7 +22,6 @@ class LocalDispatchMetadata:
     """Metadata returned by LocalTokenDispatcher.dispatch() for use in combine()."""
 
     token_indices_experts_sorted: torch.Tensor  # (N*top_k,)
-    top_scores: torch.Tensor  # (N, top_k) original scores
     top_scores_experts_sorted: torch.Tensor  # (N*top_k,) scores in expert-sorted order
 
 
@@ -35,7 +35,7 @@ class DispatchMetadata(LocalDispatchMetadata):
     output_splits: list[int]
 
 
-class BaseTokenDispatcher:
+class BaseTokenDispatcher(Configurable):
     """Abstract base for token dispatchers in MoE.
 
     A token dispatcher handles the full token routing lifecycle:
@@ -45,21 +45,17 @@ class BaseTokenDispatcher:
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config:
+    class Config(Configurable.Config):
         num_experts: int
         top_k: int
         score_before_experts: bool
-
-        def build(self):
-            raise NotImplementedError(
-                f"{type(self).__name__}.build() is abstract. "
-                "Use a concrete Config subclass (e.g. LocalTokenDispatcher.Config)."
-            )
+        ep_degree: int = 1
 
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
+        self.ep_degree = config.ep_degree
 
     def dispatch(
         self,
@@ -108,8 +104,7 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenDispatcher.Config):
-        def build(self) -> "LocalTokenDispatcher":
-            return LocalTokenDispatcher(self)
+        pass
 
     def dispatch(
         self,
@@ -150,7 +145,6 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
 
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted=token_indices_experts_sorted,
-            top_scores=top_scores,
             top_scores_experts_sorted=top_scores_experts_sorted,
         )
         return routed_input, num_tokens_per_expert, metadata
@@ -185,12 +179,11 @@ class TokenDispatcher(BaseTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenDispatcher.Config):
-        def build(self) -> "TokenDispatcher":
-            return TokenDispatcher(self)
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # Set by parallelization code (e.g. apply_moe_ep_tp)
+        # Set by ExpertParallel / ExpertTensorParallel._apply()
         self.ep_group: dist.ProcessGroup
 
     def dispatch(
@@ -200,7 +193,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         selected_experts_indices: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
-        ep_degree = dist.get_world_size(self.ep_group)
+        ep_degree = self.ep_degree
 
         # TODO: Extract this local reordering block (histc, argsort, score
         # application) into a shared helper — it's duplicated in
@@ -267,14 +260,12 @@ class TokenDispatcher(BaseTokenDispatcher):
             self.ep_group,
         )
 
-        # Reorder tokens from rank-major to expert-major layout for grouped_mm
-        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
-        # However, the num_tokens_per_expert_group is not of the final target format
-        # [#tokens for local expert 0, #tokens for local expert 1, ...]
-        # Rather, it is of the format
-        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
-        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
-        # We need to perform another shuffle to get the correct layout, via _permute below.
+        # Reorder from rank-major to expert-major via _permute.
+        #
+        # num_tokens_per_expert_group layout after all-to-all:
+        #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
+        # _permute reshuffles to:
+        #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
         num_local_experts = num_tokens_per_expert_group.shape[0] // ep_degree
         (
             input_shape,
@@ -290,7 +281,6 @@ class TokenDispatcher(BaseTokenDispatcher):
 
         metadata = DispatchMetadata(
             token_indices_experts_sorted=token_indices_experts_sorted,
-            top_scores=top_scores,
             top_scores_experts_sorted=top_scores_experts_sorted,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
@@ -386,7 +376,7 @@ class TokenDispatcher(BaseTokenDispatcher):
         )
 
 
-class TorchAoTokenDispatcher(TokenDispatcher):
+class TorchAOTokenDispatcher(TokenDispatcher):
     """Token dispatcher for EP>1 with token group padding for quantized grouped GEMMs.
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
@@ -394,15 +384,12 @@ class TorchAoTokenDispatcher(TokenDispatcher):
     a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
     quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
 
-    ep_group is set by the parallelization code after construction.
+    ep_group is set by ExpertParallel / ExpertTensorParallel._apply().
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(TokenDispatcher.Config):
         pad_multiple: int
-
-        def build(self) -> "TorchAoTokenDispatcher":
-            return TorchAoTokenDispatcher(self)
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -439,10 +426,10 @@ class TorchAoTokenDispatcher(TokenDispatcher):
             num_tokens_per_expert_group_padded,
         )
 
-    def _unpermute(self, out, input_shape, permuted_indices):
+    def _unpermute(self, routed_output, metadata):
         # Strip the padding sentinel row added by permute_and_pad
-        out_unpermuted = out.new_empty(input_shape)
-        out_unpermuted[permuted_indices, :] = out
+        out_unpermuted = routed_output.new_empty(metadata.input_shape)
+        out_unpermuted[metadata.permuted_indices, :] = routed_output
         return out_unpermuted[:-1]
 
 
@@ -460,7 +447,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
     token dispatch and combine. For the DeepEP backend, combine is asynchronous
     — callers must call sync_combine() before using the result.
 
-    ep_group is set by the parallelization code after construction.
+    ep_group is set by ExpertParallel / ExpertTensorParallel._apply().
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -481,9 +468,6 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         hybridep_non_blocking_expert_capacity_factor: float | None = None
         pad_multiple: int | None = None
 
-        def build(self) -> "DeepEPTokenDispatcher":
-            return DeepEPTokenDispatcher(self)
-
     def __init__(self, config: Config):
         super().__init__(config)
         self.comm_backend = config.comm_backend
@@ -491,7 +475,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
             config.hybridep_non_blocking_expert_capacity_factor
         )
         self.pad_multiple = config.pad_multiple
-        # Set by parallelization code (e.g. apply_moe_ep_tp)
+        # Set by ExpertParallel / ExpertTensorParallel._apply()
         self.ep_group: dist.ProcessGroup
 
         # Import to register custom ops so SAC saves communication outputs
@@ -509,8 +493,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         selected_experts_indices: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        ep_degree = dist.get_world_size(self.ep_group)
-        num_local_experts = self.num_experts // ep_degree
+        num_local_experts = self.num_experts // self.ep_degree
 
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep.hybridep import dispatch_tokens
