@@ -21,7 +21,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import CommConfig, DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -289,29 +289,6 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
             yield
 
     return context
-
-
-def maybe_enable_amp(
-    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
-) -> contextlib.AbstractContextManager[None] | torch.autocast:
-    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
-        # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard or replicate")
-        return contextlib.nullcontext()
-    else:
-        if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
-            logger.warning(
-                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/DDP is enabled."
-            )
-            logger.info("Mixed precision training is disabled")
-            return contextlib.nullcontext()
-        else:
-            # the following code will only be executed for single-device training
-            logger.info("Mixed precision training is handled by AMP")
-            return torch.autocast(
-                device_type,
-                dtype=TORCH_DTYPE_MAP[mixed_precision_param],
-            )
 
 
 def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):

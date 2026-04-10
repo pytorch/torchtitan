@@ -146,7 +146,7 @@ For each blocked TODO, check if the blocker has been resolved:
 
 ## 3. Test & CI Coverage Gap Analysis
 
-Check the health of CI workflows. Look for things we should be testing but aren't, 
+Check the health of CI workflows. Look for things we should be testing but aren't,
 things we test locally but CI doesn't pick up.
 
 **Prior report context:** If a coverage gap was already flagged in a prior
