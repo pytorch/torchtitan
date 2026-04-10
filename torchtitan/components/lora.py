@@ -79,7 +79,23 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
             def init_weights(self, **kwargs) -> None:
                 super().init_weights(**kwargs)  # pyrefly: ignore [not-callable]
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
-                nn.init.zeros_(self.lora_b.weight)
+                # Standard LoRA uses zeros for lora_b so the initial
+                # contribution is exactly zero.  When the adapter has QAT
+                # fake quantization (e.g. float8), zeros cause NaN because
+                # dynamic scaling divides by max(abs(0)) = 0.  Use std=0.02
+                # so values are representable in float8; the initial LoRA
+                # contribution is still negligible.
+                try:
+                    from torchao.quantization.qat.linear import FakeQuantizedLinear
+
+                    is_fake_quantized = isinstance(self.lora_b, FakeQuantizedLinear)
+                except ImportError:
+                    is_fake_quantized = False
+
+                if is_fake_quantized:
+                    nn.init.normal_(self.lora_b.weight, mean=0.0, std=0.02)
+                else:
+                    nn.init.zeros_(self.lora_b.weight)
 
             def forward(self, input: torch.Tensor) -> torch.Tensor:
                 base_out = super().forward(input)
@@ -131,6 +147,9 @@ class LoRAConverter(Configurable):
             set(config.target_modules) if config.target_modules is not None else None
         )
         self.merge_adapter = config.merge_adapter
+        # Set by ModelConvertersContainer when QAT is also active.
+        self.qat_scheme: str | None = None
+        self.qat_group_size: int = 128
         if self.target_modules is None:
             logger.info(
                 f"LoRA training active with rank={self.rank}, alpha={self.alpha} "
@@ -279,6 +298,12 @@ class LoRAConverter(Configurable):
         model.requires_grad_(False)
         self._replace_linears_with_lora(model)
 
+        # QATConverter must run before LoRAConverter: quantize_() replaces
+        # nn.Linear via from_linear() which discards lora_a/lora_b.
+        # With QAT first, LoRA inherits from FakeQuantizedLinear instead.
+        if self.qat_scheme is not None:
+            self._apply_adapter_qat(model, self.qat_scheme, self.qat_group_size)
+
         if self.merge_adapter:
             hooks = ConverterCheckpointHooks(key_filter=self._is_lora_key)
         else:
@@ -288,6 +313,52 @@ class LoRAConverter(Configurable):
                 load_additional_fn=self._load_peft,
             )
         model._converter_hooks = hooks  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _qat_compatible(rank: int, scheme: str, group_size: int) -> bool:
+        """Check if QAT scheme is compatible with the given in_features size.
+
+        Tests prepare + forward on a temporary linear, since some schemes
+        (e.g. int4_weight_only) only fail at forward time.
+        """
+        import torch
+
+        from torchtitan.components.quantization.qat import apply_qat_prepare
+
+        try:
+            probe = nn.ModuleDict({"l": nn.Linear(rank, rank, bias=False).to("cuda")})
+            apply_qat_prepare(probe, scheme, group_size)
+            probe.l(torch.randn(1, rank, device="cuda", dtype=probe.l.weight.dtype))
+            return True
+        except (ValueError, RuntimeError, AssertionError):
+            return False
+
+    def _apply_adapter_qat(
+        self, model: nn.Module, scheme: str, group_size: int
+    ) -> None:
+        """Apply QAT to LoRA adapter linears.
+
+        Always applies to lora_a. For lora_b, skips if rank is incompatible
+        with the scheme's block/group size (Unsloth approach).
+        """
+        from torchtitan.components.quantization.qat import apply_qat_prepare
+
+        def _is_lora(suffix: str):
+            def fn(mod: nn.Module, fqn: str) -> bool:
+                return isinstance(mod, nn.Linear) and fqn.endswith(suffix)
+
+            return fn
+
+        apply_qat_prepare(model, scheme, group_size, filter_fn=_is_lora(".lora_a"))
+
+        skip_lora_b = not self._qat_compatible(self.rank, scheme, group_size)
+        if not skip_lora_b:
+            apply_qat_prepare(model, scheme, group_size, filter_fn=_is_lora(".lora_b"))
+
+        logger.info(
+            f"Applied adapter QAT (scheme={scheme}, group_size={group_size}, "
+            f"lora_b={'skipped' if skip_lora_b else 'applied'})"
+        )
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         matched = set()

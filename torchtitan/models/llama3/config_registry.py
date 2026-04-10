@@ -13,6 +13,7 @@ from torchtitan.components.optimizer import (
     OptimizersInBackwardContainer,
 )
 from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.components.quantization.qat import QATConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -126,6 +127,83 @@ def llama3_debugmodel_lora() -> Trainer.Config:
         initial_load_in_hf=True,
         initial_load_model_only=True,
         last_save_model_only=False,
+    )
+    return config
+
+
+def llama3_debugmodel_qat() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_qat_lora() -> Trainer.Config:
+    config = llama3_debugmodel()
+    # QATConverter must come before LoRAConverter. See LoRAConverter.convert()
+    # for why this ordering is required.
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(scheme="intx_weight_only", group_size=8),
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_qat_lora_int8act() -> Trainer.Config:
+    """QAT (int8_dynamic_act_intx_weight, group_size=8) + LoRA rank=8."""
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(scheme="int8_dynamic_act_intx_weight", group_size=8),
+            LoRAConverter.Config(rank=8, alpha=16.0),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_qat_lora_float8() -> Trainer.Config:
+    """QAT (float8_dynamic_act_float8_weight) + LoRA rank=8."""
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(scheme="float8_dynamic_act_float8_weight"),
+            LoRAConverter.Config(rank=8, alpha=16.0),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_qat_lora_merged() -> Trainer.Config:
+    """QAT + LoRA with merged save — QAT is applied to both base weights and
+    LoRA adapters, then adapters are folded into base weights at save time."""
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(scheme="intx_weight_only", group_size=8),
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+                merge_adapter=True,
+            ),
+        ],
+    )
+    config.checkpoint = CheckpointManager.Config(
+        enable=True,
+        interval=5,
+        last_save_model_only=True,
+    )
+    config.training = TrainingConfig(
+        local_batch_size=8,
+        seq_len=2048,
+        steps=20,
     )
     return config
 
