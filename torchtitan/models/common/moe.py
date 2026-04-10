@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
 
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward, FusedFeedForward
 from torchtitan.models.common.linear import Linear
 
 from torchtitan.protocols.module import Module
@@ -324,7 +324,7 @@ class MoE(Module):
         experts: GroupedExperts.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
-        shared_experts: FeedForward.Config | None = None
+        shared_experts: FeedForward.Config | FusedFeedForward.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()

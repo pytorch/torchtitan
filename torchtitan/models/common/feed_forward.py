@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
+__all__ = ["FeedForward", "FusedFeedForward", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
@@ -52,3 +52,21 @@ class FeedForward(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class FusedFeedForward(Module):
+    """SwiGLU feed-forward with w1 (gate) and w3 (up) fused into a single linear."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        w13: Linear.Config
+        w2: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.w13 = config.w13.build()
+        self.w2 = config.w2.build()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w1_out, w3_out = self.w13(x).chunk(2, dim=-1)
+        return self.w2(F.silu(w1_out) * w3_out)

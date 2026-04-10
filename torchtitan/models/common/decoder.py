@@ -21,7 +21,7 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward, FusedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -50,7 +50,7 @@ class TransformerBlock(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         attention: BaseAttention.Config  # required, no default
-        feed_forward: FeedForward.Config | None = None
+        feed_forward: FeedForward.Config | FusedFeedForward.Config | None = None
         moe: MoE.Config | None = None
         attention_norm: RMSNorm.Config
         ffn_norm: RMSNorm.Config

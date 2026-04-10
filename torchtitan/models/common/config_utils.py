@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward, FusedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -142,6 +142,24 @@ def make_ffn_config(
         ),
         w3=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
+        ),
+    )
+
+
+def make_fused_ffn_config(
+    *,
+    dim: int,
+    hidden_dim: int,
+    w13_param_init: dict[str, Callable],
+    w2_param_init: dict[str, Callable],
+) -> FusedFeedForward.Config:
+    """Build a fully-specified FusedFeedForward.Config."""
+    return FusedFeedForward.Config(
+        w13=Linear.Config(
+            in_features=dim, out_features=2 * hidden_dim, param_init=w13_param_init
+        ),
+        w2=Linear.Config(
+            in_features=hidden_dim, out_features=dim, param_init=w2_param_init
         ),
     )
 

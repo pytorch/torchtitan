@@ -29,6 +29,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.feed_forward import FusedFeedForward
 
 logger = logging.getLogger(__name__)
 
@@ -170,20 +171,27 @@ def apply_non_moe_tp(
 
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward": PrepareModuleInput(
-                        input_layouts=(sp_layout,),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": ColwiseParallel(use_local_output=False),
-                    "feed_forward.w2": RowwiseParallel(
-                        output_layouts=sp_layout,
-                        use_local_output=False,
-                    ),
-                    "feed_forward.w3": ColwiseParallel(use_local_output=False),
-                }
-            )
+            ffn_plan: dict[str, object] = {
+                "feed_forward": PrepareModuleInput(
+                    input_layouts=(sp_layout,),
+                    desired_input_layouts=(Replicate(),),
+                ),
+            }
+            # pyrefly: ignore [missing-attribute]
+            if isinstance(transformer_block.feed_forward, FusedFeedForward):
+                ffn_plan["feed_forward.w13"] = ColwiseParallel(use_local_output=False)
+                ffn_plan["feed_forward.w2"] = RowwiseParallel(
+                    output_layouts=sp_layout,
+                    use_local_output=False,
+                )
+            else:
+                ffn_plan["feed_forward.w1"] = ColwiseParallel(use_local_output=False)
+                ffn_plan["feed_forward.w2"] = RowwiseParallel(
+                    output_layouts=sp_layout,
+                    use_local_output=False,
+                )
+                ffn_plan["feed_forward.w3"] = ColwiseParallel(use_local_output=False)
+            layer_plan.update(ffn_plan)
         else:
             raise ValueError(
                 "Running vLLM inference with torchtitan Qwen3 MoE model is not supported yet."
