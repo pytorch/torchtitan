@@ -20,7 +20,12 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import (
+    ChunkedCELoss,
+    ChunkedCELossFactory,
+    IGNORE_INDEX,
+    LossFunction,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -409,6 +414,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
+        # If build_loss_fn returned a ChunkedCELossFactory, initialize
+        # ChunkedCELoss now with the model so it can access lm_head.
+        if isinstance(self.loss_fn, ChunkedCELossFactory):
+            # For non-PP, use the single model part; for PP, use the last stage
+            model_for_loss = self.model_parts[-1]
+            self.loss_fn = self.loss_fn(model_for_loss)
+            logger.info(
+                f"Initialized ChunkedCELoss with "
+                f"{self.loss_fn.num_chunks} chunks"
+            )
+
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
@@ -691,6 +707,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
             else:
                 loss = torch.tensor([-1.0], device=self.device)
+        elif isinstance(self.loss_fn, ChunkedCELoss):
+            # Chunked CE loss: model forward without lm_head, then chunked
+            # lm_head + loss computation with manual gradient assembly
+            assert len(model_parts) == 1
+            with self.train_context():
+                hidden_states = model_parts[0](
+                    inputs, **extra_inputs, **extra_kwargs, skip_lm_head=True
+                )
+
+                # ChunkedCELoss handles: detach, chunk, lm_head, ce_loss,
+                # per-chunk backward, gradient accumulation, and decoder backward.
+                # Returns scaled loss (loss_sum / global_valid_tokens).
+                loss = self.loss_fn(hidden_states, labels, global_valid_tokens)
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1

@@ -126,6 +126,7 @@ class Decoder(BaseModel):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        skip_lm_head: bool = False,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
@@ -134,6 +135,8 @@ class Decoder(BaseModel):
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
+        if skip_lm_head:
+            return h
         output = self.output(h) if self.output is not None else h
         return output
 
