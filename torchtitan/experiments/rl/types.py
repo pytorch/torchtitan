@@ -54,4 +54,6 @@ class TrainBatch:
     response_lens: list[int]  # [num_episodes]
     seq_lens: list[int]  # [num_episodes] (prompt_lens + response_lens)
     advantages: torch.Tensor  # [num_episodes]
-    token_logprobs: list[list[float]]  # per-sample response logprobs from rollout
+    token_logprobs: list[
+        list[float]
+    ]  # [num_episodes][response_len_i] per-token logprobs from rollout

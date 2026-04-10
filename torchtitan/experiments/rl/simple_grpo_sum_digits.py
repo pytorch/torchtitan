@@ -48,20 +48,23 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
-class GRPOLoss:
+class GRPOLoss(Configurable):
     """Clipped GRPO loss with an optional KL penalty.
 
     Takes per-sample response logprobs (already extracted from whatever
     packing or padding format the trainer uses).
     """
 
-    def __init__(
-        self,
-        kl_coef: float = 0.0,
-        clip_eps: float = 0.2,
-    ):
-        self.kl_coef = kl_coef
-        self.clip_eps = clip_eps
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        kl_coef: float = 0.0
+        """KL divergence penalty coefficient against the reference model."""
+        clip_eps: float = 0.2
+        """PPO clipping epsilon for the probability ratio."""
+
+    def __init__(self, config: Config):
+        self.kl_coef = config.kl_coef
+        self.clip_eps = config.clip_eps
 
     def __call__(
         self,
@@ -182,7 +185,9 @@ class RLTrainer(Configurable):
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
 
-        trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
+        trainer: PolicyTrainer.Config = field(
+            default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
+        )
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
 
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
@@ -254,6 +259,7 @@ class RLTrainer(Configurable):
         )
 
     def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
+        """Round-robin partition episodes across DP ranks."""
         return [
             [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
             for rank in range(self.trainer_dp_degree)
@@ -261,6 +267,7 @@ class RLTrainer(Configurable):
 
     @staticmethod
     def _collate_episodes(episodes: list[Episode]) -> TrainBatch:
+        """Pack episodes into a single varlen-packed TrainBatch."""
         all_ids: list[int] = []
         prompt_lens: list[int] = []
         response_lens: list[int] = []
@@ -402,7 +409,6 @@ class RLTrainer(Configurable):
             "trainer",
             PolicyTrainer,
             config.trainer,
-            loss_fn=GRPOLoss(),
             model_spec=config.model_spec,
             hf_assets_path=config.hf_assets_path,
             transfer_dtype=config.generator.model_dtype,

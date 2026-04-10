@@ -6,7 +6,6 @@
 
 import logging
 import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +53,7 @@ class PolicyTrainer(Actor, Configurable):
         config: PolicyTrainer.Config for model/optimizer/parallelism settings.
         model_spec: Model specification (model config, parallelize_fn, state_dict_adapter).
         hf_assets_path: Path to HF assets folder for checkpoint loading.
+        transfer_dtype: DType to cast weights to before transfer. If None, no cast is performed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -69,21 +69,20 @@ class PolicyTrainer(Actor, Configurable):
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
-        """Communication configuration for distributed initialization."""
         compile: CompileConfig = field(default_factory=CompileConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        loss: Configurable.Config = field(default_factory=Configurable.Config)
 
     def __init__(
         self,
         config: Config,
         *,
-        loss_fn: Callable,
         model_spec: ModelSpec,
         hf_assets_path: str = "",
         transfer_dtype: str = "",
     ):
         self.config = config
-        self.loss_fn = loss_fn
+        self.loss_fn = config.loss.build()
         self.model_spec = model_spec
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
