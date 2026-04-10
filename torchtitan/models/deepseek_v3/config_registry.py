@@ -54,7 +54,6 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )
 
@@ -104,7 +103,6 @@ def deepseek_v3_16b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=10),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
     )
@@ -137,7 +135,6 @@ def deepseek_v3_671b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
         model_converters=ModelConvertersContainer.Config(

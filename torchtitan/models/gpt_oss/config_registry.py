@@ -50,7 +50,6 @@ def gpt_oss_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="none",
-            selective_ac_option="2",
         ),
         validator=Validator.Config(
             freq=5,

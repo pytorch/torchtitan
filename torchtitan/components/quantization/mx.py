@@ -10,7 +10,6 @@ from typing import ClassVar, Literal
 
 import torch.nn as nn
 from torchtitan.components.quantization import QuantizationConverter
-
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
@@ -49,15 +48,6 @@ class MXFP8Converter(QuantizationConverter):
         This is a prototype feature that requires the torchao nightly build.
         """
 
-        pad_token_groups_for_grouped_mm: bool = True
-        """
-        Boolean indicating if token group sizes should be padded to multiple of 32 (MXFP8 scaling block size)
-        for compatibility with quantization kernels. Default is true.
-
-        If using HybridEP, set to false. HybridEP automatically performs this padding as part of the
-        all-to-all dispatch step, so running the padding/unpadding kernels would incur unnecessary extra overhead.
-        """
-
     def __init__(
         self,
         config: Config,
@@ -78,11 +68,15 @@ class MXFP8Converter(QuantizationConverter):
             10, 0
         ), "MXFP8 is only supported on SM100 or architectures"
 
-        # Warn user if torch.compile is not enabled
         if not model_compile_enabled:
             logger.warning(
                 "torch.compile enablement is required for highest performance of MXFP8 dynamic quantization."
             )
+
+        # If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
+        # as part of the EP implementation (except for DeepEP backend).
+        # Otherwise, if EP is not enabled, we need TorchAO to pad the token groups.
+        self.pad_token_groups_for_grouped_mm = not parallel_dims.ep_enabled
 
         self.config = config
         self.enabled = True
@@ -119,7 +113,7 @@ class MXFP8Converter(QuantizationConverter):
         recipe = MXFP8TrainingRecipe(self.config.recipe_name)
         mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
         mxfp8_op_config.pad_token_groups_for_grouped_mm = (
-            self.config.pad_token_groups_for_grouped_mm
+            self.pad_token_groups_for_grouped_mm
         )
 
         quantize_(model, config=mxfp8_op_config, filter_fn=module_filter_fn)

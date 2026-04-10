@@ -21,7 +21,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import CommConfig, DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -127,9 +127,9 @@ def set_determinism(
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.common.attention import FlexAttentionWrapper
+        from torchtitan.models.common.attention import FlexAttention
 
-        FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
+        FlexAttention._compiled_flex_attn = torch.compile(flex_attention)
 
     if debug_config.detect_anomaly:
         logger.warning(
@@ -207,6 +207,72 @@ def set_determinism(
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
 
 
+_batch_invariant_enabled: bool = False
+
+
+def is_in_batch_invariant_mode() -> bool:
+    """Return whether batch-invariant mode is active."""
+    return _batch_invariant_enabled
+
+
+def set_batch_invariance(enable: bool) -> None:
+    """Enable batch-invariant mode for reproducible RL training.
+
+    Delegates ATen operator overrides (``mm``, ``addmm``, ``_log_softmax``,
+    ``mean.dim``) to the ``batch_invariant_ops`` package, which registers
+    Triton kernels with a fixed tile iteration order producing bit-identical
+    results for the same input regardless of batch composition.
+
+    On top of that, this function applies torchtitan-specific settings:
+    - NCCL env vars for deterministic inter-GPU collectives
+    - Disables reduced-precision reductions and TF32
+
+    Note: callers must set ``debug.deterministic=True`` separately.
+    """
+    global _batch_invariant_enabled
+    if not enable or _batch_invariant_enabled:
+        return
+
+    # Register batch-invariant ATen overrides via upstream package
+    # https://github.com/thinking-machines-lab/batch_invariant_ops
+    from batch_invariant_ops import (  # pyrefly: ignore [missing-import]
+        enable_batch_invariant_mode as _upstream_enable,
+    )
+
+    _upstream_enable()
+
+    # Set NCCL env vars for deterministic inter-GPU collectives.
+    # Must be set BEFORE dist.init_process_group.
+    os.environ["NCCL_ALGO"] = "Ring"  # Fixed summation order (Tree may vary)
+    os.environ["NCCL_MIN_NCHANNELS"] = "1"  # Single channel to avoid split interleaving
+    os.environ["NCCL_MAX_NCHANNELS"] = "1"
+    os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 may reorder reductions
+    os.environ[
+        "NCCL_COLLNET_ENABLE"
+    ] = "0"  # Disable SHARP (non-deterministic HW reduce)
+    os.environ[
+        "NCCL_NVLS_ENABLE"
+    ] = "0"  # Disable NVLink SHARP (non-deterministic HW reduce)
+
+    # Disable reduced-precision reductions: these allow cuBLAS to use
+    # lower-precision accumulation that can round differently depending
+    # on batch size / tile decomposition.
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+
+    # Disable TF32 for exact fp32 accumulation
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+    _batch_invariant_enabled = True
+
+    logger.info(
+        "Batch-invariant mode enabled: mm, addmm, _log_softmax, mean.dim "
+        "overridden with Triton kernels (via batch_invariant_ops); "
+        "reduced-precision reductions and TF32 disabled"
+    )
+
+
 class TrainContext(Protocol):
     @abstractmethod
     def __call__(self) -> contextlib.AbstractContextManager[None]:
@@ -223,29 +289,6 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
             yield
 
     return context
-
-
-def maybe_enable_amp(
-    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
-) -> contextlib.AbstractContextManager[None] | torch.autocast:
-    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
-        # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard or replicate")
-        return contextlib.nullcontext()
-    else:
-        if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
-            logger.warning(
-                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/DDP is enabled."
-            )
-            logger.info("Mixed precision training is disabled")
-            return contextlib.nullcontext()
-        else:
-            # the following code will only be executed for single-device training
-            logger.info("Mixed precision training is handled by AMP")
-            return torch.autocast(
-                device_type,
-                dtype=TORCH_DTYPE_MAP[mixed_precision_param],
-            )
 
 
 def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
