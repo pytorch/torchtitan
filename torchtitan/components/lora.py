@@ -33,10 +33,15 @@ _expert_lora_class_cache: dict[type, type] = {}
 
 
 def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
+    """Apply LoRA adapters to a Linear module via dynamic class inheritance.
+
+    Mutates ``linear`` in-place by swapping its ``__class__`` to a dynamically
+    created LoRA subclass, then attaches ``lora_a`` and ``lora_b`` child modules.
+    Returns the same object for convenience.
+    """
     parent_cls = type(linear)
-    assert issubclass(
-        parent_cls, nn.Linear
-    ), f"parent_cls must be a subclass of nn.Linear, got {parent_cls}"
+    if not issubclass(parent_cls, nn.Linear):
+        raise ValueError(f"apply_lora expects an nn.Linear subclass, got {parent_cls}")
 
     if parent_cls not in _lora_class_cache:
 
@@ -52,16 +57,10 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 linear._init_lora(rank, alpha)  # type: ignore[attr-defined]
                 return linear  # type: ignore[return-value]
 
-            def _init_lora(
-                self,
-                rank: int,
-                alpha: float,
-                device: torch.device | None = None,
-                dtype: torch.dtype | None = None,
-            ) -> None:
+            def _init_lora(self, rank: int, alpha: float) -> None:
                 self._lora_scaling = alpha / rank
-                device = device if device is not None else self.weight.device
-                dtype = dtype if dtype is not None else self.weight.dtype
+                device = self.weight.device
+                dtype = self.weight.dtype
                 self.lora_a = (
                     Linear.Config(bias=False)
                     .build(in_features=self.in_features, out_features=rank)
@@ -93,14 +92,6 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                     nn.init.normal_(self.lora_b.weight, mean=0.0, std=0.02)
                 else:
                     nn.init.zeros_(self.lora_b.weight)
-
-            def named_parameters(self, *args, **kwargs):
-                # Force recurse=False so ColwiseParallel._partition_linear_fn
-                # only sees direct params (weight, bias), not dotted names like
-                # "lora_a.weight". The adapter submodules are visited separately
-                # by distribute_module and made Replicate automatically.
-                kwargs["recurse"] = False
-                yield from super().named_parameters(*args, **kwargs)
 
             def forward(self, input: torch.Tensor) -> torch.Tensor:
                 base_out = super().forward(input)
@@ -290,8 +281,9 @@ class LoRAConverter(Configurable):
         """Scaling factor. Output is scaled by alpha/rank."""
 
         target_modules: list[str] | None = None
-        """Module attribute names to apply LoRA to (e.g. ["wq", "wv"]).
-        None means all nn.Linear layers."""
+        """Attribute names of Linear modules to apply LoRA to (e.g. ["wq", "wv"]).
+        Matches on the direct attribute name (last segment of the FQN).
+        None means all nn.Linear layers. An empty list means no layers."""
 
         merge_adapter: bool = False
         """When True, adapters are folded into base weights
@@ -300,24 +292,26 @@ class LoRAConverter(Configurable):
         Use checkpoint.last_save_in_hf=True to save in PEFT format."""
 
     def __init__(self, config: Config, **kwargs):
+        if config.rank <= 0:
+            raise ValueError(f"LoRA rank must be positive, got {config.rank}")
         self.rank = config.rank
         self.alpha = config.alpha
         self.target_modules = (
-            set(config.target_modules) if config.target_modules else set()
+            set(config.target_modules) if config.target_modules is not None else None
         )
         self.merge_adapter = config.merge_adapter
         # Set by ModelConvertersContainer when QAT is also active.
         self.qat_scheme: str | None = None
         self.qat_group_size: int = 128
-        if self.target_modules:
-            logger.info(
-                f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
-                f"target_modules={sorted(self.target_modules)}"
-            )
-        else:
+        if self.target_modules is None:
             logger.info(
                 f"LoRA training active with rank={self.rank}, alpha={self.alpha} "
                 f"(all Linear layers)"
+            )
+        else:
+            logger.info(
+                f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
+                f"target_modules={sorted(self.target_modules)}"
             )
 
     @staticmethod
@@ -528,9 +522,16 @@ class LoRAConverter(Configurable):
                 router_gate_ids.add(id(child.gate))
 
         matched = set()
+        visited: set[int] = set()
         for _, parent in list(module.named_modules()):
             for attr_name, child in list(parent.named_children()):
-                if self.target_modules and attr_name not in self.target_modules:
+                if id(child) in visited:
+                    continue
+                visited.add(id(child))
+                if (
+                    self.target_modules is not None
+                    and attr_name not in self.target_modules
+                ):
                     continue
                 if isinstance(child, nn.Linear) and id(child) not in router_gate_ids:
                     apply_lora(child, self.rank, self.alpha)
@@ -538,7 +539,7 @@ class LoRAConverter(Configurable):
                 elif isinstance(child, GroupedExperts):
                     apply_expert_lora(child, self.rank, self.alpha)
                     matched.add(attr_name)
-        unmatched = self.target_modules - matched
+        unmatched = (self.target_modules or set()) - matched
         if unmatched:
             logger.warning(
                 f"LoRA target_modules {sorted(unmatched)} did not match any "
