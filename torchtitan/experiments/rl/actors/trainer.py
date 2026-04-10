@@ -132,6 +132,7 @@ class PolicyTrainer(Actor, Configurable):
         self.model_parts = [model]
 
         # Conditionally build frozen reference model for KL penalty
+        # TODO: @joecummings remove ref entirely, this is hacky and we don't need it
         if getattr(config.loss, "kl_coef", 0) > 0:
             ref_model = self._build_model(
                 model_spec, config, device_type, hf_assets_path
