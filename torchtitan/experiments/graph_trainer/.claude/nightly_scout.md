@@ -382,10 +382,11 @@ scout does NOT implement fixes directly — it discovers and triages.
 
 Use the same board configuration as autodev.md:
 
-| Variable         | Default     |
-|------------------|-------------|
-| `<BOARD_NUMBER>` | `161`       |
-| `<BOARD_OWNER>`  | `pytorch`   |
+| Variable         | Default                    |
+|------------------|----------------------------|
+| `<BOARD_NUMBER>` | `161`                      |
+| `<BOARD_OWNER>`  | `pytorch`                  |
+| `<PROJECT_ID>`   | `PVT_kwDOAUB9vs4BT6Cu`     |
 
 ### 8b. Check for existing board items
 
@@ -434,8 +435,22 @@ Rules:
 - **New findings only.** Carried-forward items from prior reports that already
   have board items should not get new drafts — just update the existing item
   if the situation changed.
-- Items are created in **Backlog** status (the default). A developer will
-  move them to **Ready** when they should be worked on.
+- Items MUST be in **Backlog** status. The board's default column may not
+  be Backlog, so after creating each item, explicitly set its status:
+  ```bash
+  # Get the Status field ID and Backlog option ID
+  FIELD_ID=$(gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+      --jq '.fields[] | select(.name == "Status") | .id')
+  BACKLOG_ID=$(gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+      --jq '.fields[] | select(.name == "Status") | .options[] | select(.name == "Backlog") | .id')
+
+  # Set the item to Backlog (replace <ITEM_ID> with the created item's ID)
+  gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
+      --field-id $FIELD_ID --single-select-option-id $BACKLOG_ID
+  ```
+  A developer will move items to **Ready** when they should be worked on.
+  Do NOT put items in Ready regardless of priority — even P0 items go to
+  Backlog first.
 
 ### 8d. Update the report comment
 
