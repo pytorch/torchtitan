@@ -5,8 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import dataclasses
 import unittest
 from collections import Counter
+from dataclasses import fields
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -27,7 +30,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     trace_train_step,
 )
 
-
 def get_loss(logits, labels):
     return torch.nn.functional.cross_entropy(
         logits.flatten(0, 1).float(),
@@ -44,7 +46,8 @@ def make_train_step(loss_fn):
         logits = model(*fwd_args)
         loss = loss_fn(logits, labels)
         params = list(model.parameters())
-        grads = torch.autograd.grad(loss, params)
+        with torch.fx.traceback.annotate({"phase": "backward"}):
+            grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
 
     return train_step
@@ -58,7 +61,8 @@ def make_stateless_train_step(model, loss_fn):
         with torch.nn.utils.stateless._reparametrize_module(model, state):
             logits = model(*fwd_args)
         loss = loss_fn(logits, labels)
-        grads = torch.autograd.grad(loss, list(state.values()))
+        with torch.fx.traceback.annotate({"phase": "backward"}):
+            grads = torch.autograd.grad(loss, list(state.values()))
         return [loss] + list(grads)
 
     return train_step
@@ -70,6 +74,10 @@ def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     with torch.no_grad():
         model.init_states(buffer_device=torch.device(device))
     return model
+
+
+def copy_config_fields(config_cls, config):
+    return config_cls(**{field.name: getattr(config, field.name) for field in fields(config)})
 
 
 def _apply_regional_inductor(traced_result):
@@ -102,6 +110,34 @@ class SimpleMLP(nn.Module):
 
     def forward(self, x):
         return self.fc2(torch.relu(self.fc1(self.embed(x))))
+
+
+class TinyFlexAttentionModel(nn.Module):
+    def __init__(self, dim=32, num_heads=2, vocab_size=128):
+        super().__init__()
+        assert dim % num_heads == 0
+        self.embed = nn.Embedding(vocab_size, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
+        self.v_proj = nn.Linear(dim, dim, bias=False)
+        from torchtitan.models.common.attention import FlexAttention
+
+        self.attn = FlexAttention(FlexAttention.Config())
+        self.out_proj = nn.Linear(dim, vocab_size, bias=False)
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+    def _project(self, x, layer):
+        proj = layer(x)
+        return proj.view(*proj.shape[:2], self.num_heads, self.head_dim)
+
+    def forward(self, tokens, attention_masks):
+        x = self.embed(tokens)
+        q = self._project(x, self.q_proj)
+        k = self._project(x, self.k_proj)
+        v = self._project(x, self.v_proj)
+        out = self.attn(q, k, v, attention_masks=attention_masks)
+        return self.out_proj(out.reshape(*out.shape[:2], -1))
 
 
 class TestGraphTrainerActivationCheckpointModes(unittest.TestCase):
@@ -788,6 +824,647 @@ class TestTraceModels(unittest.TestCase):
             )
 
 
+class GraphBasedSACTestMixin:
+    DEVICE = "cuda"
+
+    def setUp(self):
+        torch.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+
+    def tearDown(self):
+        torch.use_deterministic_algorithms(False)
+
+    def _measure_step_peak(self, model, step_fn):
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        loss, grads = step_fn(model)
+        torch.cuda.synchronize()
+        peak = (torch.cuda.max_memory_allocated() - baseline) / 1e9
+        return loss, grads, peak
+
+    def _clone_grads_to_cpu(self, grads):
+        return [g.detach().cpu().clone() for g in grads]
+
+    def _random_tokens_and_labels(self, vocab_size, shape):
+        tokens = torch.randint(0, vocab_size, shape, device=self.DEVICE)
+        labels = torch.randint(0, vocab_size, shape, device=self.DEVICE)
+        return tokens, labels
+
+    def _run_sac_test(
+        self,
+        model_cls,
+        model_config,
+        fwd_args,
+        labels,
+        dtype=torch.float32,
+        num_steps=3,
+        use_regional_inductor=False,
+        check_peak_memory=True,
+        check_grads=False,
+    ):
+        """Run eager+AC vs traced+graph SAC, assert bitwise-identical loss
+        and similar peak memory.
+
+        For flex_attention models, set use_regional_inductor=True — eager uses
+        torch.compile(flex_attention) internally, so the traced graph needs
+        regional_inductor to match numerics.
+        """
+        from torchtitan.config import ActivationCheckpointConfig
+        from torchtitan.distributed.activation_checkpoint import apply_ac
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_ac_regions,
+        )
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+
+        # Create reference weights on CPU.
+        ref_model = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
+        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
+        del ref_model
+        torch.cuda.empty_cache()
+
+        def run_steps(step_fn, model):
+            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+            step_results = []
+            step_peaks = []
+            for _ in range(num_steps):
+                loss, grads, peak = self._measure_step_peak(model, step_fn)
+                if check_grads:
+                    step_results.append(
+                        (loss.detach().cpu(), self._clone_grads_to_cpu(grads))
+                    )
+                else:
+                    step_results.append(loss.detach().cpu())
+                step_peaks.append(peak)
+                for p, g in zip(model.parameters(), grads, strict=True):
+                    p.grad = g
+                opt.step()
+                opt.zero_grad()
+            del opt
+            return step_results, max(step_peaks)
+
+        def eager_step(model):
+            logits = model(*fwd_args)
+            loss = get_loss(logits, labels)
+            loss.backward()
+            grads = [p.grad.clone() for p in model.parameters()]
+            return loss, grads
+
+        def traced_step_factory(model):
+            annotate_ac_regions(model)
+            train_step = make_train_step(get_loss)
+            maybe_regional = (
+                annotate_flex_attention_for_regional_inductor()
+                if use_regional_inductor
+                else contextlib.nullcontext()
+            )
+            maybe_register_blockmask_pytree_node()
+            with maybe_regional:
+                traced = trace_train_step(train_step)(model, *fwd_args, labels)
+            if use_regional_inductor:
+                _apply_regional_inductor(traced)
+            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+
+            def traced_step_fn(model):
+                result = run_traced_train_step(traced, model, *fwd_args, labels)
+                return result[0], result[1:]
+
+            return traced_step_fn
+
+        # Eager + AC
+        model_eager = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            model_eager.init_weights(buffer_device=torch.device(self.DEVICE))
+        model_eager.load_state_dict(state)
+        apply_ac(model_eager, ActivationCheckpointConfig(mode="selective"))
+        eager_losses, peak_eager = run_steps(eager_step, model_eager)
+        del model_eager
+        torch.cuda.empty_cache()
+
+        # Traced + graph SAC
+        model_traced = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
+        with torch.no_grad():
+            model_traced.init_weights(buffer_device=torch.device(self.DEVICE))
+        model_traced.load_state_dict(state)
+        traced_step = traced_step_factory(model_traced)
+        traced_losses, peak_traced = run_steps(traced_step, model_traced)
+        del model_traced
+        torch.cuda.empty_cache()
+
+        if check_grads:
+            for step, ((el, eg), (tl, tg)) in enumerate(
+                zip(eager_losses, traced_losses, strict=True)
+            ):
+                self.assertTrue(
+                    torch.equal(el, tl),
+                    f"Step {step}: eager loss={el.item():.6f} "
+                    f"vs traced loss={tl.item():.6f}",
+                )
+                for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
+                    self.assertTrue(
+                        torch.equal(ge, gt),
+                        f"Step {step}: grad[{i}] mismatch",
+                    )
+        else:
+            for step, (el, tl) in enumerate(zip(eager_losses, traced_losses, strict=True)):
+                self.assertTrue(
+                    torch.equal(el, tl),
+                    f"Step {step}: eager loss={el.item():.6f} "
+                    f"vs traced loss={tl.item():.6f}",
+                )
+
+        if check_peak_memory:
+            ratio = peak_traced / peak_eager
+            self.assertLess(
+                ratio,
+                1.1,
+                f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
+                f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
+            )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestGraphBasedSACSmoke(GraphBasedSACTestMixin, unittest.TestCase):
+    def test_llama3_debugmodel_sac_smoke(self):
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        config = llama3_configs["debugmodel"]()
+        tokens = torch.randint(0, config.vocab_size, (1, 128), device=self.DEVICE)
+        labels = torch.randint(0, config.vocab_size, (1, 128), device=self.DEVICE)
+        self._run_sac_test(
+            Llama3Model,
+            config,
+            (tokens,),
+            labels,
+            dtype=torch.bfloat16,
+            num_steps=1,
+            check_peak_memory=False,
+        )
+
+    def test_tiny_flex_attention_graph_sac_repro(self):
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            get_causal_mask_mod,
+        )
+
+        model_ref = TinyFlexAttentionModel().to(device=self.DEVICE, dtype=torch.bfloat16)
+        model_test = TinyFlexAttentionModel().to(device=self.DEVICE, dtype=torch.bfloat16)
+        model_test.load_state_dict(model_ref.state_dict())
+
+        tokens = torch.randint(0, 128, (1, 128), device=self.DEVICE)
+        labels = torch.randint(0, 128, (1, 128), device=self.DEVICE)
+        attention_mask = create_attention_mask(
+            get_causal_mask_mod(), 1, None, tokens.shape[1], tokens.shape[1]
+        )
+
+        train_step = make_train_step(get_loss)
+        maybe_register_blockmask_pytree_node()
+        traced = trace_train_step(train_step)(model_test, tokens, attention_mask, labels)
+
+        flex_nodes = [
+            node
+            for node in traced.gm.graph.nodes
+            if "flex_attention" in str(node.target) and "backward" not in str(node.target)
+        ]
+        self.assertGreater(len(flex_nodes), 0, "No flex_attention nodes found")
+
+        traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+
+        logits_ref = model_ref(tokens, attention_mask)
+        loss_ref = get_loss(logits_ref, labels)
+        grads_ref = torch.autograd.grad(loss_ref, tuple(model_ref.parameters()))
+
+        result = run_traced_train_step(traced, model_test, tokens, attention_mask, labels)
+        loss_tr = result[0]
+        grads_tr = result[1:]
+
+        # Intentional: eager FlexAttention goes through its compiled path while
+        # traced execution inlines the HOP under make_fx, so bf16 results are
+        # expected to be numerically close rather than bitwise identical.
+        torch.testing.assert_close(loss_ref, loss_tr, rtol=1e-4, atol=1e-3)
+        for grad_ref, grad_tr in zip(grads_ref, grads_tr, strict=True):
+            torch.testing.assert_close(grad_ref, grad_tr, rtol=3e-2, atol=2e-3)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestGraphBasedSAC(GraphBasedSACTestMixin, unittest.TestCase):
+    """Tests for graph-based selective AC across all decoder models.
+
+    Each test verifies:
+    1. Bitwise-identical loss between eager+AC and traced+graph SAC
+    2. Traced+AC peak memory within 10% of eager+AC
+    """
+
+    def _run_token_only_case(
+        self,
+        config_factory,
+        model_cls,
+        *,
+        shape,
+        dtype=torch.float32,
+    ):
+        config = config_factory()
+        tokens, labels = self._random_tokens_and_labels(config.vocab_size, shape)
+        self._run_sac_test(
+            model_cls,
+            config,
+            (tokens,),
+            labels,
+            dtype=dtype,
+        )
+
+    def _run_masked_case(
+        self,
+        config_factory,
+        model_cls,
+        *,
+        shape,
+        make_masks,
+        use_regional_inductor=False,
+    ):
+        config = config_factory()
+        tokens, labels = self._random_tokens_and_labels(config.vocab_size, shape)
+        self._run_sac_test(
+            model_cls,
+            config,
+            (tokens, make_masks(config, shape[1])),
+            labels,
+            use_regional_inductor=use_regional_inductor,
+        )
+
+    def test_llama3_sac(self):
+        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+
+        self._run_token_only_case(
+            llama3_configs["1B"],
+            Llama3Model,
+            shape=(2, 2048),
+            dtype=torch.bfloat16,
+        )
+
+    def test_qwen3_sac(self):
+        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3.model import Qwen3Model
+
+        self._run_token_only_case(
+            qwen3_configs["0.6B"],
+            Qwen3Model,
+            shape=(2, 2048),
+            dtype=torch.bfloat16,
+        )
+
+    def test_deepseek_v3_sac(self):
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+
+        self._run_token_only_case(
+            deepseekv3_configs["debugmodel"],
+            DeepSeekV3Model,
+            shape=(4, 256),
+        )
+
+    @unittest.expectedFailure
+    def test_llama4_sac(self):
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            get_causal_mask_mod,
+        )
+        from torchtitan.models.llama4 import llama4_configs
+        from torchtitan.models.llama4.model import Llama4Model
+
+        self._run_masked_case(
+            llama4_configs["debugmodel"],
+            Llama4Model,
+            shape=(4, 128),
+            make_masks=lambda _config, seq_len: create_attention_mask(
+                get_causal_mask_mod(), 1, None, seq_len, seq_len
+            ),
+            use_regional_inductor=True,
+        )
+
+    @unittest.expectedFailure
+    def test_gpt_oss_sac(self):
+        from torch.nn.attention.flex_attention import and_masks
+
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            get_causal_mask_mod,
+            get_sliding_window_mask_mod,
+        )
+        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss.model import GptOssModel
+
+        self._run_masked_case(
+            gptoss_configs["debugmodel"],
+            GptOssModel,
+            shape=(4, 128),
+            make_masks=lambda config, seq_len: {
+                "basic_mask": create_attention_mask(
+                    get_causal_mask_mod(), 1, None, seq_len, seq_len
+                ),
+                "sliding_window_mask": create_attention_mask(
+                    and_masks(
+                        get_causal_mask_mod(),
+                        get_sliding_window_mask_mod(
+                            config.layers[0].attention.sliding_window_size
+                        ),
+                    ),
+                    1,
+                    None,
+                    seq_len,
+                    seq_len,
+                ),
+            },
+            use_regional_inductor=True,
+        )
+
+
+class TestDistributedGraphBasedSAC(FSDPTest):
+    @property
+    def world_size(self):
+        return min(torch.cuda.device_count(), 4)
+
+    def _setup(self):
+        from torchtitan.distributed import ParallelDims
+
+        self.parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+    def _run_distributed_flex_sac_trace_test(
+        self,
+        *,
+        model_config,
+        parallelize_fn,
+        tp_degree=1,
+    ):
+        from torchtitan.config import (
+            ActivationCheckpointConfig,
+            ParallelismConfig,
+            TrainingConfig,
+        )
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_ac_on_fwd_bwd_graph,
+        )
+        from torchtitan.protocols.model_converter import ModelConvertersContainer
+        import torch._inductor.config as inductor_config
+
+        if self.world_size < 2:
+            self.skipTest("distributed graph SAC regression test requires >=2 GPUs")
+        if self.world_size < tp_degree:
+            self.skipTest(f"tp={tp_degree} requires at least {tp_degree} GPUs")
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        torch.use_deterministic_algorithms(True)
+        self._setup_with_tp(tp_degree)
+        try:
+            def run_test():
+                training = TrainingConfig(
+                    local_batch_size=1,
+                    seq_len=64,
+                    steps=1,
+                    dtype="bfloat16",
+                )
+                parallelism = ParallelismConfig(
+                    data_parallel_replicate_degree=1,
+                    data_parallel_shard_degree=self.parallel_dims.dp_shard,
+                    context_parallel_degree=1,
+                    tensor_parallel_degree=tp_degree,
+                    disable_loss_parallel=True,
+                    pipeline_parallel_degree=1,
+                    expert_parallel_degree=1,
+                    expert_tensor_parallel_degree=1,
+                )
+                compile_config = GraphTrainerCompileConfig(
+                    enable=False,
+                    mode="aot_fx_trace",
+                )
+                debug_config = dataclasses.make_dataclass(
+                    "DebugConfig",
+                    [
+                        (
+                            "moe_force_load_balance",
+                            bool,
+                            dataclasses.field(default=False),
+                        )
+                    ],
+                )()
+                trainer_config = dataclasses.make_dataclass(
+                    "RegionalInductorProbeConfig",
+                    [
+                        ("training", TrainingConfig),
+                        ("parallelism", ParallelismConfig),
+                        ("compile", GraphTrainerCompileConfig),
+                        ("debug", type(debug_config)),
+                    ],
+                )(
+                    training=training,
+                    parallelism=parallelism,
+                    compile=compile_config,
+                    debug=debug_config,
+                )
+
+                config = dataclasses.replace(model_config)
+                config.update_from_config(trainer_config=trainer_config)
+                if hasattr(config, "n_layers"):
+                    updates = {"n_layers": 1}
+                    if hasattr(config, "layer") and hasattr(
+                        config.layer, "n_dense_layers"
+                    ):
+                        updates["layer"] = dataclasses.replace(
+                            config.layer, n_dense_layers=1
+                        )
+                    config = dataclasses.replace(config, **updates)
+
+                with torch.device("meta"):
+                    model = config.build()
+
+                model = parallelize_fn(
+                    model,
+                    parallel_dims=self.parallel_dims,
+                    training=training,
+                    model_converters=ModelConvertersContainer.Config(),
+                    parallelism=parallelism,
+                    compile_config=compile_config,
+                    ac_config=ActivationCheckpointConfig(mode="none"),
+                    dump_folder="",
+                )
+                model.to_empty(device="cuda")
+                with torch.no_grad():
+                    model.init_weights(buffer_device=torch.device("cuda"))
+                model.train()
+                model.to(dtype=torch.bfloat16)
+
+                tokens = torch.randint(
+                    2,
+                    config.vocab_size,
+                    (training.local_batch_size, training.seq_len),
+                    device="cuda",
+                )
+                tokens[:, 15::16] = 1
+                labels = torch.zeros_like(tokens)
+                attention_masks = model.get_attention_masks(
+                    tokens,
+                    SimpleNamespace(eos_id=1),
+                )
+
+                def step(mod, tok, masks, lbl):
+                    del lbl
+                    logits = mod(tok, attention_masks=masks)
+                    loss = logits.float().sum()
+                    with torch.fx.traceback.annotate({"phase": "backward"}):
+                        grads = torch.autograd.grad(
+                            loss,
+                            [p for p in mod.parameters() if p.requires_grad],
+                            allow_unused=True,
+                        )
+                    return [loss] + [grad for grad in grads if grad is not None]
+
+                maybe_register_blockmask_pytree_node()
+                with annotate_flex_attention_for_regional_inductor():
+                    traced = trace_train_step(step)(
+                        model, tokens, attention_masks, labels
+                    )
+
+                ag = sum(
+                    1
+                    for node in traced.gm.graph.nodes
+                    if "all_gather_into_tensor" in str(node.target)
+                )
+                rs = sum(
+                    1
+                    for node in traced.gm.graph.nodes
+                    if "reduce_scatter_tensor" in str(node.target)
+                )
+                self.assertTrue(
+                    ag > 0 and rs > 0,
+                    f"Expected collective ops in distributed graph (ag={ag}, rs={rs})",
+                )
+
+                flex_nodes = [
+                    node
+                    for node in traced.gm.graph.nodes
+                    if "flex_attention" in str(node.target)
+                    and "backward" not in str(node.target)
+                ]
+                self.assertGreater(len(flex_nodes), 0, "No FlexAttention nodes found")
+
+                old_compile_threads = inductor_config.compile_threads
+                inductor_config.compile_threads = 1
+                try:
+                    # Keep Inductor compilation in-process so distributed failures
+                    # surface the underlying exception instead of an autotune wrapper.
+                    traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
+                    _apply_regional_inductor(traced)
+
+                    result = run_traced_train_step(
+                        traced, model, tokens, attention_masks, labels
+                    )
+                    loss = result[0]
+                    self.assertTrue(torch.isfinite(loss).item())
+                finally:
+                    inductor_config.compile_threads = old_compile_threads
+
+            run_test()
+        finally:
+            torch.use_deterministic_algorithms(False)
+
+    def _setup_with_tp(self, tp_degree):
+        from torchtitan.distributed import ParallelDims
+
+        self.parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=tp_degree,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+    def test_llama3_flex_attn_fsdp_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
+            parallelize_llama,
+        )
+        from torchtitan.experiments.graph_trainer.llama3.model import (
+            GraphTrainerLlama3Model,
+        )
+        from torchtitan.models.llama3 import llama3_configs
+
+        config = llama3_configs["debugmodel_flex_attn"]()
+        self._run_distributed_flex_sac_trace_test(
+            model_config=copy_config_fields(GraphTrainerLlama3Model.Config, config),
+            parallelize_fn=parallelize_llama,
+        )
+
+    def test_llama3_flex_attn_fsdp_tp2_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
+            parallelize_llama,
+        )
+        from torchtitan.experiments.graph_trainer.llama3.model import (
+            GraphTrainerLlama3Model,
+        )
+        from torchtitan.models.llama3 import llama3_configs
+
+        config = llama3_configs["debugmodel_flex_attn"]()
+        self._run_distributed_flex_sac_trace_test(
+            model_config=copy_config_fields(GraphTrainerLlama3Model.Config, config),
+            parallelize_fn=parallelize_llama,
+            tp_degree=2,
+        )
+
+    @unittest.expectedFailure
+    def test_deepseek_v3_flex_attn_fsdp_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
+            parallelize_deepseekv3,
+        )
+        from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
+            GraphTrainerDeepSeekV3Model,
+        )
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+
+        config = deepseekv3_configs["debugmodel_flex_attn"]()
+        self._run_distributed_flex_sac_trace_test(
+            model_config=copy_config_fields(GraphTrainerDeepSeekV3Model.Config, config),
+            parallelize_fn=parallelize_deepseekv3,
+        )
+
+    def test_deepseek_v3_flex_attn_fsdp_tp2_graph_sac(self):
+        from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
+            parallelize_deepseekv3,
+        )
+        from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
+            GraphTrainerDeepSeekV3Model,
+        )
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+
+        config = deepseekv3_configs["debugmodel_flex_attn"]()
+        self._run_distributed_flex_sac_trace_test(
+            model_config=copy_config_fields(GraphTrainerDeepSeekV3Model.Config, config),
+            parallelize_fn=parallelize_deepseekv3,
+            tp_degree=2,
+        )
+
+
 class TestTraceFSDP(FSDPTest):
     @property
     def world_size(self):
@@ -970,161 +1647,6 @@ class TestTraceFSDP(FSDPTest):
         )
 
 
-class GraphBasedSACTestMixin:
-    DEVICE = "cuda"
-
-    def setUp(self):
-        torch.manual_seed(42)
-        torch.use_deterministic_algorithms(True)
-
-    def tearDown(self):
-        torch.use_deterministic_algorithms(False)
-
-    def _measure_step_peak(self, model, step_fn):
-        torch.cuda.synchronize()
-        baseline = torch.cuda.memory_allocated()
-        torch.cuda.reset_peak_memory_stats()
-        loss, grads = step_fn(model)
-        torch.cuda.synchronize()
-        peak = (torch.cuda.max_memory_allocated() - baseline) / 1e9
-        return loss, grads, peak
-
-    def _clone_grads_to_cpu(self, grads):
-        return [g.detach().cpu().clone() for g in grads]
-
-    def _run_sac_test(
-        self,
-        model_cls,
-        model_config,
-        fwd_args,
-        labels,
-        dtype=torch.float32,
-        num_steps=3,
-        use_regional_inductor=False,
-        check_peak_memory=True,
-        check_grads=False,
-    ):
-        """Run eager+AC vs traced+graph SAC, assert bitwise-identical loss
-        and similar peak memory.
-
-        For flex_attention models, set use_regional_inductor=True. Eager uses
-        torch.compile(flex_attention) internally, so the traced graph needs
-        regional_inductor to match numerics.
-        """
-        from torchtitan.config import ActivationCheckpointConfig
-        from torchtitan.distributed.activation_checkpoint import apply_ac
-        from torchtitan.experiments.graph_trainer.common_utils import (
-            annotate_ac_regions,
-        )
-        from torchtitan.experiments.graph_trainer.passes import (
-            apply_ac_on_fwd_bwd_graph,
-        )
-
-        ref_model = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
-        with torch.no_grad():
-            ref_model.init_weights(buffer_device=torch.device(self.DEVICE))
-        state = {k: v.cpu() for k, v in ref_model.state_dict().items()}
-        del ref_model
-        torch.cuda.empty_cache()
-
-        def run_steps(step_fn, model):
-            opt = torch.optim.Adam(model.parameters(), lr=1e-4)
-            step_results = []
-            step_peaks = []
-            for _ in range(num_steps):
-                loss, grads, peak = self._measure_step_peak(model, step_fn)
-                if check_grads:
-                    step_results.append(
-                        (loss.detach().cpu(), self._clone_grads_to_cpu(grads))
-                    )
-                else:
-                    step_results.append(loss.detach().cpu())
-                step_peaks.append(peak)
-                for p, g in zip(model.parameters(), grads, strict=True):
-                    p.grad = g
-                opt.step()
-                opt.zero_grad()
-            del opt
-            return step_results, max(step_peaks)
-
-        def eager_step(model):
-            logits = model(*fwd_args)
-            loss = get_loss(logits, labels)
-            loss.backward()
-            grads = [p.grad.clone() for p in model.parameters()]
-            return loss, grads
-
-        def traced_step_factory(model):
-            annotate_ac_regions(model)
-            train_step = make_train_step(get_loss)
-            maybe_regional = (
-                annotate_flex_attention_for_regional_inductor()
-                if use_regional_inductor
-                else contextlib.nullcontext()
-            )
-            maybe_register_blockmask_pytree_node()
-            with maybe_regional:
-                traced = trace_train_step(train_step)(model, *fwd_args, labels)
-            if use_regional_inductor:
-                _apply_regional_inductor(traced)
-            traced.gm = apply_ac_on_fwd_bwd_graph(traced.gm)
-
-            def traced_step_fn(model):
-                result = run_traced_train_step(traced, model, *fwd_args, labels)
-                return result[0], result[1:]
-
-            return traced_step_fn
-
-        model_eager = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
-        with torch.no_grad():
-            model_eager.init_weights(buffer_device=torch.device(self.DEVICE))
-        model_eager.load_state_dict(state)
-        apply_ac(model_eager, ActivationCheckpointConfig(mode="selective"))
-        eager_losses, peak_eager = run_steps(eager_step, model_eager)
-        del model_eager
-        torch.cuda.empty_cache()
-
-        model_traced = model_cls(model_config).to(device=self.DEVICE, dtype=dtype)
-        with torch.no_grad():
-            model_traced.init_weights(buffer_device=torch.device(self.DEVICE))
-        model_traced.load_state_dict(state)
-        traced_step = traced_step_factory(model_traced)
-        traced_losses, peak_traced = run_steps(traced_step, model_traced)
-        del model_traced
-        torch.cuda.empty_cache()
-
-        if check_grads:
-            for step, ((el, eg), (tl, tg)) in enumerate(
-                zip(eager_losses, traced_losses, strict=True)
-            ):
-                self.assertTrue(
-                    torch.equal(el, tl),
-                    f"Step {step}: eager loss={el.item():.6f} "
-                    f"vs traced loss={tl.item():.6f}",
-                )
-                for i, (ge, gt) in enumerate(zip(eg, tg, strict=True)):
-                    self.assertTrue(
-                        torch.equal(ge, gt),
-                        f"Step {step}: grad[{i}] mismatch",
-                    )
-        else:
-            for step, (el, tl) in enumerate(zip(eager_losses, traced_losses, strict=True)):
-                self.assertTrue(
-                    torch.equal(el, tl),
-                    f"Step {step}: eager loss={el.item():.6f} "
-                    f"vs traced loss={tl.item():.6f}",
-                )
-
-        if check_peak_memory:
-            ratio = peak_traced / peak_eager
-            self.assertLess(
-                ratio,
-                1.1,
-                f"Traced+AC peak memory ({peak_traced:.2f} GB) is more than "
-                f"10% above eager+AC ({peak_eager:.2f} GB), ratio={ratio:.2f}",
-            )
-
-
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestGraphSACPeakMemory(GraphBasedSACTestMixin, unittest.TestCase):
     def test_llama_1b_peak_memory(self):
@@ -1148,8 +1670,6 @@ class TestGraphSACPeakMemory(GraphBasedSACTestMixin, unittest.TestCase):
             check_peak_memory=True,
             check_grads=True,
         )
-
-
 class TestAutogradGradVsBackwardFSDP(FSDPTest):
     """Verify autograd.grad() and loss.backward() have identical peak memory with FSDP."""
 
