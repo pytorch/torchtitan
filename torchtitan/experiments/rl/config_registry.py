@@ -188,28 +188,42 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
-    """On-policy GRPO config for Qwen3-0.6B under same parallelism (4 GPUs: 2 gen + 2 train).
+    """batch-invariant config for Qwen3-0.6B (6 GPUs: 2 gen + 4 train).
 
-    Enables deterministic + batch-invariant mode for true on-policy RL training.
+    Tests bitwise identity between trainer (FSDP2+TP2, fp32 weights with
+    bf16 mixed precision) and generator (TP2, bf16 weights).
+
+    Trainer: 4 GPUs with TP=2, FSDP=2. Weights are stored in fp32 and
+    cast to bf16 by FSDP mixed precision (param_dtype=bf16) during forward.
+    Generator: 2 GPUs with TP=2. Weights are natively bf16 via
+    vLLM's set_default_dtype.
+
+    For bitwise identity:
+    - FSDP mixed precision param_dtype=bf16 ensures trainer weights match
+      generator's bf16 weights during forward.
+    - TP degree must match between trainer and generator.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            # bfloat16 is needed for trainer to align with generator dtype
-            # TODO: replace bfloat16 enablement with FSDP2+TP2
-            training=TrainingConfig(dtype="bfloat16"),
+            # fp32 weights: FSDP mixed precision casts to bf16 for forward
+            training=TrainingConfig(
+                dtype="float32",
+                mixed_precision_param="bfloat16",
+                mixed_precision_reduce="float32",
+            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
+                data_parallel_shard_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             debug=batch_invariant_config,
