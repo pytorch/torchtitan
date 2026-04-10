@@ -21,11 +21,15 @@ from torch.distributed.checkpoint.state_dict import (
 
 from torchtitan.config import Configurable
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe.moe import GroupedExperts, TokenChoiceTopKRouter
 from torchtitan.protocols.model_converter import ConverterCheckpointHooks
 from torchtitan.tools.logging import logger
 
 # Cache for dynamically created LoRA classes
 _lora_class_cache: dict[type, type] = {}
+
+# Cache for dynamically created expert LoRA classes
+_expert_lora_class_cache: dict[type, type] = {}
 
 
 def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
@@ -110,13 +114,170 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
     return _lora_class_cache[parent_cls].from_linear(linear, rank, alpha)
 
 
-class LoRAConverter(Configurable):
-    """Apply LoRA adapters to Linear layers in a model.
+def _compute_expert_lora_delta(
+    lora_a: torch.Tensor,
+    lora_b: torch.Tensor,
+    scaling: float,
+    target_weight: nn.Parameter,
+) -> torch.Tensor:
+    """Compute the LoRA weight delta for expert weights.
 
-    When ``target_modules`` is None (default), every ``nn.Linear`` receives a
-    LoRA adapter.  When specified, only modules whose attribute name matches one
-    of the entries are converted (e.g. ``["wq", "wv"]`` targets the query and
-    value projections).
+    Args:
+        lora_a: (E, in, r) — projects input dim to rank.
+        lora_b: (E, r, out) — projects rank to output dim.
+        scaling: alpha / rank.
+        target_weight: The base weight parameter to match DTensor placements.
+
+    Returns:
+        delta matching target_weight's shape and placements.
+        Math: delta = scaling * B^T @ A^T  →  shape (E, out, in).
+    """
+    from torch.distributed.tensor import distribute_tensor, DTensor
+
+    delta = scaling * torch.bmm(lora_b.transpose(-2, -1), lora_a.transpose(-2, -1))
+    # When the base weight is a DTensor (TP/EP sharded), distribute the delta
+    # to match its placements so the in-place add_/sub_ operates on matching shapes.
+    if isinstance(target_weight, DTensor) and not isinstance(delta, DTensor):
+        delta = distribute_tensor(
+            delta, target_weight.device_mesh, target_weight.placements
+        )
+    return delta
+
+
+def apply_expert_lora(
+    experts: GroupedExperts, rank: int, alpha: float
+) -> GroupedExperts:
+    """Apply LoRA adapters to a GroupedExperts module via class swapping.
+
+    LoRA parameters are registered as direct parameters on the module. EP partition
+    functions that use ``named_parameters(recurse=False)`` with ``Shard(0)`` will
+    correctly shard them on the expert dimension. TP/ETP partition functions only
+    touch w1/w2/w3 by name and leave LoRA parameters unsharded.
+
+    Forward uses merge-per-forward: LoRA deltas are merged into base weights before
+    calling the base forward, then unmerged after. This reuses the base
+    GroupedExperts.forward without duplicating its DTensor/EP/padding logic.
+    """
+    parent_cls = type(experts)
+    assert issubclass(
+        parent_cls, GroupedExperts
+    ), f"parent_cls must be a subclass of GroupedExperts, got {parent_cls}"
+
+    if parent_cls not in _expert_lora_class_cache:
+
+        class LoRAGroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                raise RuntimeError(
+                    "LoRAGroupedExperts should not be instantiated directly."
+                )
+
+            @classmethod
+            def from_experts(
+                cls, experts: GroupedExperts, rank: int, alpha: float
+            ) -> "LoRAGroupedExperts":
+                experts.__class__ = cls
+                experts._init_expert_lora(rank, alpha)  # type: ignore[attr-defined]
+                return experts  # type: ignore[return-value]
+
+            def _init_expert_lora(self, rank: int, alpha: float) -> None:
+                self._lora_scaling = alpha / rank
+                num_experts = self.num_experts
+                # w1: (E, hidden_dim, dim) -> A1: (E, dim, r), B1: (E, r, hidden_dim)
+                dim_w1_in = self.w1.shape[2]  # dim
+                dim_w1_out = self.w1.shape[1]  # hidden_dim
+                # w2: (E, dim, hidden_dim) -> A2: (E, hidden_dim, r), B2: (E, r, dim)
+                dim_w2_in = self.w2.shape[2]  # hidden_dim
+                dim_w2_out = self.w2.shape[1]  # dim
+                # w3: (E, hidden_dim, dim) -> A3: (E, dim, r), B3: (E, r, hidden_dim)
+                dim_w3_in = self.w3.shape[2]  # dim
+                dim_w3_out = self.w3.shape[1]  # hidden_dim
+
+                device = self.w1.device
+                dtype = self.w1.dtype
+
+                self.lora_a_w1 = nn.Parameter(
+                    torch.empty(
+                        num_experts, dim_w1_in, rank, device=device, dtype=dtype
+                    )
+                )
+                self.lora_b_w1 = nn.Parameter(
+                    torch.empty(
+                        num_experts, rank, dim_w1_out, device=device, dtype=dtype
+                    )
+                )
+                self.lora_a_w2 = nn.Parameter(
+                    torch.empty(
+                        num_experts, dim_w2_in, rank, device=device, dtype=dtype
+                    )
+                )
+                self.lora_b_w2 = nn.Parameter(
+                    torch.empty(
+                        num_experts, rank, dim_w2_out, device=device, dtype=dtype
+                    )
+                )
+                self.lora_a_w3 = nn.Parameter(
+                    torch.empty(
+                        num_experts, dim_w3_in, rank, device=device, dtype=dtype
+                    )
+                )
+                self.lora_b_w3 = nn.Parameter(
+                    torch.empty(
+                        num_experts, rank, dim_w3_out, device=device, dtype=dtype
+                    )
+                )
+
+            def init_weights(self, init_std: float) -> None:
+                super().init_weights(init_std)
+                for name in ("lora_a_w1", "lora_a_w2", "lora_a_w3"):
+                    nn.init.kaiming_uniform_(getattr(self, name), a=math.sqrt(5))
+                for name in ("lora_b_w1", "lora_b_w2", "lora_b_w3"):
+                    nn.init.zeros_(getattr(self, name))
+
+            def forward(
+                self,
+                x: torch.Tensor,
+                num_tokens_per_expert: torch.Tensor,
+            ) -> torch.Tensor:
+                # Merge LoRA deltas into base weights, run base forward, unmerge.
+                # This reuses all base GroupedExperts logic (DTensor, EP, padding).
+                deltas = {}
+                for w_name, a_name, b_name in (
+                    ("w1", "lora_a_w1", "lora_b_w1"),
+                    ("w2", "lora_a_w2", "lora_b_w2"),
+                    ("w3", "lora_a_w3", "lora_b_w3"),
+                ):
+                    lora_a = getattr(self, a_name)
+                    lora_b = getattr(self, b_name)
+                    w = getattr(self, w_name)
+                    delta = _compute_expert_lora_delta(
+                        lora_a, lora_b, self._lora_scaling, w
+                    )
+                    w.data.add_(delta)
+                    deltas[w_name] = delta
+
+                try:
+                    return super().forward(x, num_tokens_per_expert)
+                finally:
+                    # Unmerge: subtract deltas to restore original weights
+                    for w_name, delta in deltas.items():
+                        getattr(self, w_name).data.sub_(delta)
+
+        LoRAGroupedExperts.__name__ = f"LoRA{parent_cls.__name__}"
+        LoRAGroupedExperts.__qualname__ = f"LoRA{parent_cls.__name__}"
+        _expert_lora_class_cache[parent_cls] = LoRAGroupedExperts
+
+    # pyrefly: ignore [missing-attribute]
+    return _expert_lora_class_cache[parent_cls].from_experts(experts, rank, alpha)
+
+
+class LoRAConverter(Configurable):
+    """Apply LoRA adapters to Linear layers and GroupedExperts in a model.
+
+    When ``target_modules`` is None (default), every ``nn.Linear`` (except
+    router gates) and ``GroupedExperts`` receives a LoRA adapter.  When
+    specified, only modules whose attribute name matches one of the entries
+    are converted (e.g. ``["wq", "wv"]`` targets the query and value
+    projections).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -361,11 +522,18 @@ class LoRAConverter(Configurable):
         )
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
+        # Collect router gate linears so we can skip them — routing scores
+        # must stay frozen to preserve expert load balancing.
+        router_gate_ids: set[int] = set()
+        for child in module.modules():
+            if isinstance(child, TokenChoiceTopKRouter):
+                router_gate_ids.add(id(child.gate))
+
         matched = set()
         visited: set[int] = set()
         for _, parent in list(module.named_modules()):
             for attr_name, child in list(parent.named_children()):
-                if id(child) in visited or not isinstance(child, nn.Linear):
+                if id(child) in visited:
                     continue
                 visited.add(id(child))
                 if (
@@ -373,13 +541,18 @@ class LoRAConverter(Configurable):
                     and attr_name not in self.target_modules
                 ):
                     continue
-                apply_lora(child, self.rank, self.alpha)
-                matched.add(attr_name)
+                if isinstance(child, nn.Linear) and id(child) not in router_gate_ids:
+                    apply_lora(child, self.rank, self.alpha)
+                    matched.add(attr_name)
+                elif isinstance(child, GroupedExperts):
+                    apply_expert_lora(child, self.rank, self.alpha)
+                    matched.add(attr_name)
         unmatched = (self.target_modules or set()) - matched
         if unmatched:
             logger.warning(
                 f"LoRA target_modules {sorted(unmatched)} did not match any "
-                f"nn.Linear in the model. Check module attribute names."
+                f"nn.Linear or GroupedExperts in the model. "
+                f"Check module attribute names."
             )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:

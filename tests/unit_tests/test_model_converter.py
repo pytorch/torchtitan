@@ -202,6 +202,85 @@ def test_lora_key_remap_roundtrip():
         assert torch.equal(rt_sd[k], tt_sd[k])
 
 
+def test_lora_moe_freeze_and_trainability():
+    """LoRA on MoE model: router frozen, expert LoRA adapters trainable, base weights frozen."""
+    from torchtitan.models.common.moe.moe import GroupedExperts, TokenChoiceTopKRouter
+
+    # Build a minimal MoE-like model: a router + grouped experts + a dense linear
+    num_experts = 4
+    dim = 64
+    hidden_dim = 128
+
+    class SimpleMoEModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.router = TokenChoiceTopKRouter(
+                dim=dim,
+                num_experts=num_experts,
+                num_expert_groups=None,
+                num_limited_groups=None,
+                top_k=2,
+                score_func="softmax",
+                route_norm=False,
+                route_scale=1.0,
+                gate_bias=False,
+            )
+            self.experts = GroupedExperts(
+                dim=dim,
+                hidden_dim=hidden_dim,
+                num_experts=num_experts,
+                use_grouped_mm=False,
+            )
+            self.output = nn.Linear(dim, dim)
+
+        def forward(self, x):
+            # Just test that LoRA params exist — no need for full MoE forward
+            return self.output(x)
+
+    model = SimpleMoEModel()
+    converter = LoRAConverter(LoRAConverter.Config(rank=4, alpha=8.0))
+    converter.convert(model)
+
+    # Router gate should be frozen (LoRA skips router gates)
+    assert not hasattr(model.router.gate, "lora_a"), "Router gate should not have LoRA"
+    for param in model.router.parameters():
+        assert not param.requires_grad, "Router params should be frozen"
+
+    # Dense linear should have LoRA adapters
+    assert hasattr(model.output, "lora_a")
+    assert hasattr(model.output, "lora_b")
+
+    # GroupedExperts should have expert LoRA adapters
+    assert hasattr(model.experts, "lora_a_w1")
+    assert hasattr(model.experts, "lora_b_w1")
+    assert hasattr(model.experts, "lora_a_w2")
+    assert hasattr(model.experts, "lora_b_w2")
+    assert hasattr(model.experts, "lora_a_w3")
+    assert hasattr(model.experts, "lora_b_w3")
+
+    # Check trainability: LoRA params trainable, base params frozen
+    lora_param_names = []
+    base_param_names = []
+    for name, param in model.named_parameters():
+        if "lora_a" in name or "lora_b" in name:
+            lora_param_names.append(name)
+            assert param.requires_grad, f"LoRA param '{name}' should be trainable"
+        else:
+            base_param_names.append(name)
+            assert not param.requires_grad, f"Base param '{name}' should be frozen"
+
+    assert len(lora_param_names) > 0, "No LoRA params found"
+    assert len(base_param_names) > 0, "No base params found"
+
+    # Verify expert LoRA shapes: (num_experts, *, rank) or (num_experts, rank, *)
+    assert model.experts.lora_a_w1.shape == (num_experts, dim, 4)
+    assert model.experts.lora_b_w1.shape == (num_experts, 4, hidden_dim)
+    assert model.experts.lora_a_w2.shape == (num_experts, hidden_dim, 4)
+    assert model.experts.lora_b_w2.shape == (num_experts, 4, dim)
+    assert model.experts.lora_a_w3.shape == (num_experts, dim, 4)
+    assert model.experts.lora_b_w3.shape == (num_experts, 4, hidden_dim)
+
+
 @pytest.mark.parametrize(
     "scheme, group_size, expected_linear_cls",
     [
