@@ -134,7 +134,7 @@ def test_lora_freeze_and_training():
 
 
 def test_lora_target_modules():
-    """target_modules selectively applies LoRA in nested hierarchies."""
+    """target_modules selectively applies LoRA by attribute name."""
 
     class Attention(nn.Module):
         def __init__(self):
