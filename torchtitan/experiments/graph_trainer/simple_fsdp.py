@@ -127,7 +127,9 @@ def _distribute_dtensor(
     )
 
 
-_wrap_class_counter = 0  # Not thread-safe; assumes single-threaded model init
+# Cache of (original_class, param_names) -> wrapper class, so all instances
+# of the same module type share one SimpleFSDP class for torch.compile reuse.
+_wrap_class_cache: dict[tuple[type, frozenset[str]], type] = {}
 
 
 def _register_parametrization(
@@ -140,23 +142,26 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan's torchtitan/components/checkpoint.py.
     """
-    global _wrap_class_counter
-    _wrap_class_counter += 1
     param_name_to_property = {
         param_name: property(
             lambda self, pn=param_name: parametrization(self._parameters[pn])
         )
         for param_name in param_names
     }
-    module_cls = type(
-        f"SimpleFSDP{module.__class__.__name__}_{_wrap_class_counter}",
-        (module.__class__,),
-        param_name_to_property,
-    )
+    cache_key = (module.__class__, frozenset(param_names))
+    if cache_key in _wrap_class_cache:
+        module_cls = _wrap_class_cache[cache_key]
+    else:
+        module_cls = type(
+            f"SimpleFSDP{module.__class__.__name__}",
+            (module.__class__,),
+            param_name_to_property,
+        )
+        # Expose the dynamically created class as a real, importable symbol
+        # so that pickle/GraphPickler can resolve it during serialization.
+        sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
+        _wrap_class_cache[cache_key] = module_cls
     module.__class__ = module_cls
-    # Expose the dynamically created class as a real, importable symbol
-    # so that pickle/GraphPickler can resolve it during serialization.
-    sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
 
 
 class ReplicateComputation(Module):

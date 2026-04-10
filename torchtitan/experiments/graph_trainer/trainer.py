@@ -22,7 +22,11 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     trace_train_step,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import apply_default_graph_passes
+from torchtitan.experiments.graph_trainer.passes import (
+    apply_graph_passes,
+    construct_default_graph_passes,
+    graph_ac_pass,
+)
 from torchtitan.trainer import Trainer
 
 
@@ -107,13 +111,14 @@ class GraphTrainer(Trainer):
     ) -> torch.Tensor:
         if self._traced_step is None:
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-            enable_graph_ac = enable_graph_ac_for_mode(
-                self.config.activation_checkpoint.mode
-            )
+            enable_graph_ac = False
+            if hasattr(self.config, "activation_checkpoint"):
+                ac_mode = self.config.activation_checkpoint.mode
+                enable_graph_ac = enable_graph_ac_for_mode(ac_mode)
             if enable_graph_ac:
                 annotate_ac_regions(model)
             maybe_register_blockmask_pytree_node()
-            with self.train_context(), self.maybe_enable_amp:
+            with self.train_context():
                 self._traced_step = trace_train_step(fwd_bwd_fn)(
                     model,
                     inputs,
@@ -122,12 +127,18 @@ class GraphTrainer(Trainer):
                     extra_inputs,
                     extra_kwargs,
                 )
-            self._traced_step.gm = apply_default_graph_passes(
-                self._traced_step.gm,
-                self._traced_step.example_inputs,
-                enable_graph_ac=enable_graph_ac,
-            )
-        with self.train_context(), self.maybe_enable_amp:
+
+            if self.config.compile.enable_passes:
+                passes = []
+                if enable_graph_ac:
+                    passes.append(graph_ac_pass)
+                passes.extend(construct_default_graph_passes(self._traced_step))
+                self._traced_step.gm = apply_graph_passes(
+                    self._traced_step.gm,
+                    self._traced_step.example_inputs,
+                    passes,
+                )
+        with self.train_context():
             outputs = run_traced_train_step(
                 self._traced_step,
                 model,
