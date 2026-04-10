@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from contextlib import contextmanager
 from typing import TypeAlias
 
 import torch
@@ -119,45 +118,6 @@ class GradAccumulator:
         return self._buffer
 
 
-@contextmanager
-def _no_reshard_after_backward(model: nn.Module):
-    """Temporarily disable FSDP2 reshard_after_backward for the model.
-
-    This avoids repeated all-gathers of lm_head weights when computing
-    chunked loss, since each chunk triggers a backward through lm_head.
-
-    In torchtitan, lm_head (``model.output``) and norm are typically grouped
-    together in one FSDP unit via ``fully_shard([model.norm, model.output])``,
-    and the top-level model is also wrapped with ``fully_shard(model)``.
-    We disable reshard_after_backward on the top-level FSDPModule to prevent
-    any resharding during the chunk loop. This is a slightly broader scope
-    than strictly necessary (also keeps transformer layer params unsharded
-    through the chunk loop), but the extra memory cost is negligible since
-    transformer layer params are typically already managed by separate FSDP
-    units that reshard after their own backward.
-
-    Non-FSDP modules are silently ignored.
-    """
-    from torch.distributed._composable.fsdp import FSDPModule
-
-    original_settings: list[bool] = []
-
-    try:
-        if isinstance(model, FSDPModule):
-            state = model._get_fsdp_state()
-            for pg in state._fsdp_param_groups:
-                original_settings.append(pg.reshard_after_backward)
-            model.set_reshard_after_backward(False)
-        yield
-    finally:
-        if isinstance(model, FSDPModule):
-            state = model._get_fsdp_state()
-            for i, pg in enumerate(state._fsdp_param_groups):
-                if i < len(original_settings):
-                    pg.reshard_after_backward = original_settings[i]
-            model.reshard()
-
-
 class ChunkedCELoss:
     """Chunked cross-entropy loss that splits the sequence dimension to reduce peak memory.
 
@@ -170,19 +130,28 @@ class ChunkedCELoss:
     1. Model forward with skip_lm_head=True to get hidden states [B, L, D]
     2. Detach hidden states at the boundary
     3. Split detached hidden states into N chunks along seq dim
-    4. For each chunk: lm_head(chunk) -> ce_loss(logits, labels_chunk) -> backward()
+    4. For each chunk: F.linear(chunk, lm_weight) -> ce_loss -> backward()
     5. Assemble chunk gradients into a full gradient [B, L, D] via GradAccumulator
-    6. Backward through the decoder with the accumulated gradient
+    6. Backward through the decoder via ``(h * accumulated_grad).sum()``
 
-    Composability:
-    - FSDP2: Temporarily disables reshard_after_backward on lm_head to avoid
-      N all-gathers (one per chunk). Uses _no_reshard_after_backward context manager.
-    - TP with Loss Parallel: If SP produces Shard placement on TP mesh, we
-      redistribute to Replicate before chunking, then chunk the local tensor.
-      Loss parallel still works within each chunk (N all-reduces total).
-    - CP: Further chunks the local sequence dimension. Works out of the box.
-    - Compile: ce_loss can be compiled independently; lm_head is not compiled
-      (FSDP2 module would cause graph break).
+    FSDP2 composability:
+        FSDP2's backward hooks are one-shot per forward pass. The chunked backward
+        uses ``F.linear`` (functional) instead of calling the lm_head module
+        directly, so it does NOT trigger FSDP2's backward hooks. This keeps the
+        hooks available for the single decoder backward at the end.
+
+        The lm_head weight gradients are accumulated directly on the weight tensor
+        by autograd (through ``F.linear``), bypassing FSDP2's reduce-scatter.
+        FSDP2's reduce-scatter for the decoder parameters fires normally during
+        the ``(h * accumulated_grad).sum().backward()`` call.
+
+    TP with Loss Parallel:
+        Loss parallel still works within each chunk since the ``loss_parallel()``
+        context wraps the entire chunked computation.
+
+    CP: Further chunks the local sequence dimension. Works out of the box.
+
+    Compile: ce_loss can be compiled independently; lm_head is not compiled.
     """
 
     def __init__(
@@ -195,7 +164,6 @@ class ChunkedCELoss:
 
         Args:
             model: The decoder model. Must have an ``output`` attribute (the lm_head).
-                The model reference is kept for FSDP2 reshard control.
             num_chunks: Number of chunks to split the sequence into.
             loss_fn: The base cross-entropy loss function (e.g. cross_entropy_loss
                 or a compiled version of it).
@@ -209,7 +177,6 @@ class ChunkedCELoss:
             "ChunkedCELoss requires the model to have an output (lm_head) layer"
         )
 
-        self.model = model
         self.lm_head = model.output
         self.num_chunks = num_chunks
         self.loss_fn = loss_fn
@@ -228,6 +195,7 @@ class ChunkedCELoss:
 
         Args:
             hidden_states: Output of the decoder (before lm_head), shape [B, L, D].
+                Must be connected to the model's autograd graph (not detached).
             labels: Target labels, shape [B, L]. -100 for padding/ignored tokens.
             global_valid_tokens: Total valid token count across all DP ranks,
                 used to scale each chunk's loss before backward.
@@ -236,6 +204,7 @@ class ChunkedCELoss:
             The scaled loss (loss_sum / global_valid_tokens) for logging.
         """
         num_chunks = self.num_chunks
+        lm_weight = self.lm_head.weight
 
         # Detach hidden states to stop gradient propagation at this boundary.
         # We'll manually backward through the decoder after all chunks.
@@ -258,31 +227,39 @@ class ChunkedCELoss:
 
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
-        with _no_reshard_after_backward(self.model):
-            for h_chunk, label_chunk in zip(h_chunks, label_chunks):
-                # lm_head projection: [B, L/N, D] -> [B, L/N, V]
-                logits = self.lm_head(h_chunk)
+        for h_chunk, label_chunk in zip(h_chunks, label_chunks):
+            # Use F.linear instead of self.lm_head(h_chunk) to bypass FSDP2's
+            # module forward/backward hooks. This ensures FSDP2's one-shot
+            # backward hooks remain available for the decoder backward below.
+            logits = torch.nn.functional.linear(h_chunk, lm_weight)
 
-                # Cross-entropy loss on this chunk (sum reduction)
-                chunk_loss = self.loss_fn(logits, label_chunk)
-                total_loss = total_loss + chunk_loss.detach()
+            # Cross-entropy loss on this chunk (sum reduction)
+            chunk_loss = self.loss_fn(logits, label_chunk)
+            total_loss = total_loss + chunk_loss.detach()
 
-                # Scale loss before backward so gradients are properly normalized
-                scaled_chunk_loss = chunk_loss / global_valid_tokens
-                scaled_chunk_loss.backward()
+            # Scale loss before backward so gradients are properly normalized
+            scaled_chunk_loss = chunk_loss / global_valid_tokens
+            scaled_chunk_loss.backward()
 
-                # Accumulate gradient for this chunk
-                grad_accumulator.add(h_chunk.grad)
+            # Accumulate gradient for this chunk
+            grad_accumulator.add(h_chunk.grad)
 
-                # Free memory before next chunk
-                h_chunk.grad = None
-                del scaled_chunk_loss, chunk_loss, logits
+            # Free memory before next chunk
+            h_chunk.grad = None
+            del scaled_chunk_loss, chunk_loss, logits
 
-        # Get the accumulated gradient and backward through the decoder
+        # Get the accumulated gradient and backward through the decoder.
+        # We use (h * grad).sum() instead of h.backward(grad) because FSDP2's
+        # backward hooks are one-shot and only fire during a proper loss.backward()
+        # chain. h.backward(grad) would attempt a second backward through FSDP
+        # modules whose hooks have been consumed, causing "data not allocated" errors.
+        # The (h * grad).sum() trick creates a scalar loss connected to h's
+        # autograd graph, and its backward properly triggers FSDP2's hooks.
         accumulated_grad = grad_accumulator.result()
         assert accumulated_grad.dtype == torch.float32
 
-        hidden_states.backward(accumulated_grad.to(hidden_states.dtype))
+        decoder_loss = (hidden_states * accumulated_grad.to(hidden_states.dtype)).sum()
+        decoder_loss.backward()
 
         return total_loss / global_valid_tokens
 
