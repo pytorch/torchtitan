@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.components.quantization.qat import QATConverter
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -199,3 +200,138 @@ def test_lora_key_remap_roundtrip():
     assert set(rt_sd.keys()) == set(tt_sd.keys())
     for k in tt_sd:
         assert torch.equal(rt_sd[k], tt_sd[k])
+
+
+@pytest.mark.parametrize(
+    "scheme, group_size, expected_linear_cls",
+    [
+        ("int4_weight_only", 64, "FakeQuantizedLinear"),
+        ("intx_weight_only", 64, "FakeQuantizedLinear"),
+        ("int8_dynamic_act_intx_weight", 64, "FakeQuantizedLinear"),
+        ("float8_dynamic_act_float8_weight", None, "FakeQuantizedLinear"),
+        ("float8_dynamic_act_int4_weight", None, "FakeQuantizedLinear"),
+        ("nvfp4", None, "NVFP4FakeQuantizedLinear"),
+        ("mx", None, "MXFakeQuantizedLinear"),
+    ],
+)
+def test_qat_all_schemes(scheme, group_size, expected_linear_cls):
+    """Each QAT scheme should replace nn.Linear with the correct fake-quantized
+    class and preserve weight dtype (fake quantization happens in forward)."""
+    pytest.importorskip("torchao")
+
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
+    original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
+
+    config_kwargs = {"scheme": scheme}
+    if group_size is not None:
+        config_kwargs["group_size"] = group_size
+    converter = QATConverter(QATConverter.Config(**config_kwargs))
+    converter.convert(model)
+
+    # Linear layers should be replaced with the expected class
+    assert (
+        type(model.fc1).__name__ == expected_linear_cls
+    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc1).__name__}"
+    assert (
+        type(model.fc2).__name__ == expected_linear_cls
+    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc2).__name__}"
+
+    # Weight dtype should be preserved
+    for name, param in model.named_parameters():
+        assert (
+            param.dtype == original_dtypes[name]
+        ), f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
+
+
+def test_qat_unknown_scheme_raises():
+    """QATConverter should raise ValueError for unknown schemes."""
+    with pytest.raises(ValueError, match="Unknown QAT scheme"):
+        QATConverter(QATConverter.Config(scheme="not_a_real_scheme"))
+
+
+def test_qat_group_size_warning_for_unsupported_scheme(caplog):
+    """QATConverter should warn when group_size is set for a scheme that ignores it."""
+    pytest.importorskip("torchao")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        QATConverter(
+            QATConverter.Config(
+                scheme="float8_dynamic_act_float8_weight", group_size=64
+            )
+        )
+    assert "does not use group_size" in caplog.text
+
+
+def test_qat_lora_adapter_qat():
+    """QAT + LoRA: base and adapter weights are both fake-quantized.
+    Also tests that group_size > rank is clamped to rank."""
+    pytest.importorskip("torchao")
+    from torchao.quantization.qat.linear import FakeQuantizedLinear
+
+    # --- group_size > rank: clamped to rank so adapters still work ---
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(128, 128)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(128, 128)),
+            ]
+        )
+    )
+    qat_converter = QATConverter(
+        QATConverter.Config(scheme="intx_weight_only", group_size=128)
+    )
+    qat_converter.convert(model)
+    lora_converter = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_converter.qat_scheme = qat_converter.scheme
+    lora_converter.qat_group_size = qat_converter.group_size
+    lora_converter.convert(model)
+    # Adapter linears should be FakeQuantizedLinear with clamped group_size
+    assert isinstance(model.fc1.lora_a, FakeQuantizedLinear)
+    assert isinstance(model.fc1.lora_b, FakeQuantizedLinear)
+    # Forward pass should succeed
+    x = torch.randn(4, 128)
+    out = model(x)
+    assert out.shape == (4, 128)
+
+    # --- Compatible group_size should work ---
+    model = nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(64, 64)),
+                ("relu", nn.ReLU()),
+                ("fc2", nn.Linear(64, 64)),
+            ]
+        )
+    )
+    qat_converter = QATConverter(
+        QATConverter.Config(scheme="intx_weight_only", group_size=8)
+    )
+    qat_converter.convert(model)
+
+    assert isinstance(model.fc1, FakeQuantizedLinear)
+
+    lora_converter = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_converter.qat_scheme = qat_converter.scheme
+    lora_converter.qat_group_size = qat_converter.group_size
+    lora_converter.convert(model)
+
+    # Base linears are LoRA-wrapped FakeQuantizedLinear
+    assert isinstance(model.fc1, FakeQuantizedLinear)
+    # Adapter linears are also FakeQuantizedLinear
+    assert isinstance(model.fc1.lora_a, FakeQuantizedLinear)
+    assert isinstance(model.fc1.lora_b, FakeQuantizedLinear)
+
+    # Forward pass should succeed
+    x = torch.randn(4, 64)
+    out = model(x)
+    assert out.shape == (4, 64)
