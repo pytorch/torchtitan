@@ -41,13 +41,15 @@ different values, substitute throughout.
 | **Blocked**      | Work started but hit an external blocker             | Agent or developer         |
 | **Need Review**  | Branch is pushed, waiting for developer review       | Agent (when work is ready) |
 | **Done**         | Merged or resolved                                   | Developer (after merge)    |
+| **Abort**        | Rejected or no longer relevant                       | Developer                  |
 
-### Key rule: only developers move items to Ready, Done, and out of Blocked
+### Key rule: only developers move items to Ready, Done, Abort, and out of Blocked
 
 Agents can propose items (as Backlog drafts) and advance them through
 In Progress → Blocked → Need Review. But the developer decides what's worth
 doing (Backlog → Ready), what's actually finished (Need Review → Done),
-and when a blocker is resolved (Blocked → In Progress).
+what should be abandoned (→ Abort), and when a blocker is resolved
+(Blocked → In Progress).
 
 ---
 
@@ -59,7 +61,7 @@ Items enter the board in one of three ways:
 
 - **Developer creates** a draft issue or real issue directly on the board.
 - **Nightly scout** discovers something and creates a Backlog draft
-  (see [nightly.md](nightly.md) §7 for the scout's implementation rules).
+  (see [nightly_scout.md](nightly_scout.md) §8 for the scout's hand-off rules).
 - **Agent proposes** during a work session — creates a Backlog draft for
   things discovered while working on something else.
 

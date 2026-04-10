@@ -6,7 +6,7 @@ check if things are broken (CI does that). Its purpose is to discover
 
 Run with:
 ```bash
-claude -p "$(cat torchtitan/experiments/graph_trainer/.claude/nightly.md)"
+claude -p "$(cat torchtitan/experiments/graph_trainer/.claude/nightly_scout.md)"
 ```
 
 ---
@@ -50,26 +50,24 @@ a hardcoded window).
 
 If no prior reports exist, proceed as if this is the first run.
 
-### 0b. Check Prior Self-Improvement Commits
+### 0b. Check Existing Board Items
 
-Check what the nightly scout has already attempted to fix:
+Check what the nightly scout has already filed on the AutoDev board:
 
 ```bash
-# List local self-improve branches
-git branch --list "graph_trainer/self_improve/*" --sort=-committerdate
-
-# Check commits on each branch from the past 7 days
-for branch in $(git branch --list "graph_trainer/self_improve/*" --sort=-committerdate); do
-    echo "=== $branch ==="
-    git log --oneline --since="7 days ago" "$branch" --grep="self_improve"
-done
-
-# Also check main
-git log --oneline --since="7 days ago" main --grep="self_improve"
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 ```
 
-Items that were already committed by a prior run should not be re-attempted
-unless the commit was reverted or the fix was incomplete.
+Build a list of items that originated from prior nightly scout reports
+(look for "Nightly Scout Report" in item bodies). Note their current
+status — items in **Done** or **Abort** are resolved and should not be
+recreated, items in **In Progress** or **Need Review** are being handled
+by AutoDev, and items still in **Backlog** or **Ready** haven't been
+started yet.
+
+Do not create duplicate board items for issues that already have one.
+For existing items, only add a status update comment if the situation
+has materially changed.
 
 ---
 
@@ -374,57 +372,93 @@ notice without actively looking.
 
 ---
 
-## 8. Implement Action Items
+## 8. Hand Off Action Items to AutoDev
 
-After writing the report, implement every action item from the report.
+After publishing the report, create board items for each action item so the
+AutoDev agent (see [autodev.md](autodev.md)) can pick them up. The nightly
+scout does NOT implement fixes directly — it discovers and triages.
 
-### 8a. Create a feature branch
+### 8a. Read board configuration
 
-Before making any code changes, create a dedicated branch off `main`:
+Use the same board configuration as autodev.md:
 
-```bash
-git checkout -b graph_trainer/self_improve/YYYY-MM-DD
-```
+| Variable         | Default                    |
+|------------------|----------------------------|
+| `<BOARD_NUMBER>` | `161`                      |
+| `<BOARD_OWNER>`  | `pytorch`                  |
+| `<PROJECT_ID>`   | `PVT_kwDOAUB9vs4BT6Cu`     |
 
-All commits in this section go on this branch. Do NOT commit to `main` directly.
+### 8b. Check for existing board items
 
-### 8b. Implementation rules
-
-- **One commit per action item.** Do not bundle multiple items into one commit.
-- **Priority order.** Work through P0 items first, then P1, then P2.
-- **Commit messages.** Each commit must have a clear, reviewable message:
-  - Prefix with `[graph_trainer][self_improve]`
-  - Explain *why* the change is needed, not just *what* changed
-  - Reference the nightly report priority (e.g., "P0 fix" or "P1 coverage gap")
-- **Scope discipline.** Each commit should touch only what is necessary for that
-  action item. Do not sneak in unrelated cleanups or refactors.
-- **Loop until done.** When you finish one item, move on to the next. Do not
-  stop until all action items are committed.
-- **Don't re-attempt carried-forward items.** If a "Carried Forward" item was
-  already committed by a prior nightly run (detected in Step 0b) and that
-  commit hasn't been reverted, skip it. Only re-attempt if the prior fix was
-  incomplete or reverted.
-- **New items only.** Focus implementation effort on items in the "Action Items
-  (new findings)" section. Carried-forward items should only be implemented if
-  the situation has materially changed (e.g., an upstream blocker was removed).
-
-### 8c. Push the branch
-
-After all commits are done, push the branch to origin:
+Before creating new items, check the board for duplicates:
 
 ```bash
-git push origin graph_trainer/self_improve/YYYY-MM-DD
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 ```
 
-Do NOT open a PR — leave that for the human reviewer to decide.
+Compare each action item against existing board items by title and
+description. If an item already covers the same issue, skip it — do not
+create a duplicate.
+
+### 8c. Create Backlog drafts
+
+For each **new** action item in the report (not carried-forward items that
+already have board items), create a draft issue on the board:
+
+```bash
+gh project item-create <BOARD_NUMBER> --owner <BOARD_OWNER> \
+    --title "[NightlyScout][Pn] Short description" \
+    --body "$(cat <<'EOF'
+**Source:** Nightly Scout Report — YYYY-MM-DD
+**Priority:** P0 / P1 / P2
+**Section:** (which report section discovered this)
+
+## Problem
+What was found and why it matters.
+
+## Suggested Fix
+Concrete guidance on what to change and where.
+
+## References
+- Report comment: <link to the §7 report comment>
+- Relevant files: list of files involved
+EOF
+)"
+```
+
+Rules:
+- **One board item per action item.** Do not bundle multiple items.
+- **Title prefix.** Always use `[NightlyScout][Pn]` so items are identifiable
+  on the board and §8b can filter for duplicates.
+- **Actionable descriptions.** Include enough context that the AutoDev agent
+  can pick up the item without re-reading the full nightly report.
+- **New findings only.** Carried-forward items from prior reports that already
+  have board items should not get new drafts — just update the existing item
+  if the situation changed.
+- Items MUST be in **Backlog** status. The board's default column may not
+  be Backlog, so after creating each item, explicitly set its status:
+  ```bash
+  # Get the Status field ID and Backlog option ID
+  FIELD_ID=$(gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+      --jq '.fields[] | select(.name == "Status") | .id')
+  BACKLOG_ID=$(gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+      --jq '.fields[] | select(.name == "Status") | .options[] | select(.name == "Backlog") | .id')
+
+  # Set the item to Backlog (replace <ITEM_ID> with the created item's ID)
+  gh project item-edit --project-id <PROJECT_ID> --id <ITEM_ID> \
+      --field-id $FIELD_ID --single-select-option-id $BACKLOG_ID
+  ```
+  A developer will move items to **Ready** when they should be worked on.
+  Do NOT put items in Ready regardless of priority — even P0 items go to
+  Backlog first.
 
 ### 8d. Update the report comment
 
 Edit the report comment (from Section 7) to link each action item to its
-fix commit on the pushed branch. Use the GitHub commit URL format:
+board item. Use the board item URL or ID:
 
 ```
-- [x] [P0] Description — [fix](https://github.com/pytorch/torchtitan/commit/<sha>)
+- [ ] [P0] Description — [board item](https://github.com/orgs/<BOARD_OWNER>/projects/<BOARD_NUMBER>?pane=issue&itemId=<ITEM_ID>)
 ```
 
 To edit the comment, find its ID and use:
@@ -434,7 +468,7 @@ To edit the comment, find its ID and use:
 COMMENT_ID=$(gh api repos/pytorch/torchtitan/issues/2856/comments --paginate \
   --jq '.[] | select(.body | startswith("# Nightly Scout Report — YYYY-MM-DD")) | .id')
 
-# Update the comment body with commit links
+# Update the comment body with board item links
 gh api repos/pytorch/torchtitan/issues/comments/$COMMENT_ID \
   --method PATCH --field body="<updated report body>"
 ```
