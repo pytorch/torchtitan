@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
+from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
@@ -181,16 +182,17 @@ class CUDAGraphWrapper:
     def __call__(self, *args):
         if not self._has_warmup:
             self._has_warmup = True
+            device = torch.cuda.current_device()
 
-            # Warmup: run the function once on the current stream to
-            # trigger lazy kernel compilation and workspace allocation.
-            # We stay on the current stream (rather than switching to
-            # _cg_manager.stream) so NCCL collectives execute normally.
-            # Recording (next call) uses _cg_manager.stream with the
-            # graph pool, where NCCL ops are captured, not executed.
-            torch.cuda.synchronize()
-            out = self._runnable(*args)
-            torch.cuda.synchronize()
+            # Warmup on the current stream so NCCL collectives execute
+            # normally, but allocate from the graph memory pool to avoid
+            # fragmentation between eager and graph pools. We pass
+            # current_stream (not _cg_manager.stream) so no stream
+            # switch occurs — NCCL stays on the stream it was init'd on.
+            with _use_cuda_memory_pool_manager(
+                device, _cg_manager.graph_pool, torch.cuda.current_stream()
+            ):
+                out = self._runnable(*args)
             return out
 
         if self._cudagraph is None:
@@ -199,7 +201,6 @@ class CUDAGraphWrapper:
             self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
             ]
-            torch.cuda.synchronize()
             self._cudagraph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(
                 self._cudagraph,
