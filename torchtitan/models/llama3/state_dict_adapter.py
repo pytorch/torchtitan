@@ -68,11 +68,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
-        n_heads = self.model_config.layer.attention.n_heads
+        n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
-            self.model_config.layer.attention.n_kv_heads
+            self.model_config.layers[0].attention.n_kv_heads
             # pyrefly: ignore [missing-attribute]
-            if self.model_config.layer.attention.n_kv_heads is not None
+            if self.model_config.layers[0].attention.n_kv_heads is not None
             else n_heads
         )
         dim = self.model_config.dim
@@ -98,6 +98,8 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     continue
                 new_key = new_key.format(layer_num)
             else:
+                if self.model_config.enable_weight_tying and key == "output.weight":
+                    continue
                 new_key = to_hf_map[key]
 
             hf_state_dict[new_key] = value
@@ -105,11 +107,18 @@ class Llama3StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        n_heads = self.model_config.layer.attention.n_heads
+        if (
+            self.model_config.enable_weight_tying
+            and "lm_head.weight" not in hf_state_dict
+        ):
+            assert "model.embed_tokens.weight" in hf_state_dict
+            hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
+
+        n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
-            self.model_config.layer.attention.n_kv_heads
+            self.model_config.layers[0].attention.n_kv_heads
             # pyrefly: ignore [missing-attribute]
-            if self.model_config.layer.attention.n_kv_heads is not None
+            if self.model_config.layers[0].attention.n_kv_heads is not None
             else n_heads
         )
         dim = self.model_config.dim

@@ -35,13 +35,12 @@ class ToyModel(Module):
 
     def __init__(self, dim=16, n_layers=3):
         super().__init__()
-        linear_config = Linear.Config(bias=True)
-        self.layers = ModuleList(
-            [
-                linear_config.build(in_features=dim, out_features=dim)
-                for _ in range(n_layers)
-            ]
-        )
+
+        def _make_linear():
+            cfg = Linear.Config(in_features=dim, out_features=dim, bias=True)
+            return cfg.build()
+
+        self.layers = ModuleList([_make_linear() for _ in range(n_layers)])
 
     def forward(self, x):
         for layer in self.layers:
@@ -134,7 +133,12 @@ class TestReassignToPgPass(FSDPTest):
         self.assertGreater(ag_before, 0, "Expected AG nodes with FSDP PG name")
 
         # Apply the pass
-        reassign_to_pg_pass(bw_gm, bw_example_inputs, fsdp_pg_name, target_pg_name)
+        reassign_to_pg_pass(
+            bw_gm,
+            bw_example_inputs,
+            source_pg_name=fsdp_pg_name,
+            target_pg_name=target_pg_name,
+        )
 
         # After: AG nodes should use the target PG
         ag_with_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
@@ -155,7 +159,12 @@ class TestReassignToPgPass(FSDPTest):
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
         total_before = self._count_all_ag_nodes(bw_gm)
-        reassign_to_pg_pass(bw_gm, bw_example_inputs, fsdp_pg_name, "new_pg")
+        reassign_to_pg_pass(
+            bw_gm,
+            bw_example_inputs,
+            source_pg_name=fsdp_pg_name,
+            target_pg_name="new_pg",
+        )
         total_after = self._count_all_ag_nodes(bw_gm)
 
         self.assertEqual(total_before, total_after)
@@ -172,7 +181,12 @@ class TestReassignToPgPass(FSDPTest):
         ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
 
         # Use a non-matching source PG name
-        reassign_to_pg_pass(bw_gm, bw_example_inputs, "nonexistent_pg", "target_pg")
+        reassign_to_pg_pass(
+            bw_gm,
+            bw_example_inputs,
+            source_pg_name="nonexistent_pg",
+            target_pg_name="target_pg",
+        )
 
         # FSDP AG nodes should be unchanged
         ag_after = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
@@ -201,7 +215,12 @@ class TestReassignToPgPass(FSDPTest):
         self.assertGreater(ag_before, 0)
 
         # Reassign to the real extra PG
-        reassign_to_pg_pass(bw_gm, bw_example_inputs, fsdp_pg_name, extra_pg_name)
+        reassign_to_pg_pass(
+            bw_gm,
+            bw_example_inputs,
+            source_pg_name=fsdp_pg_name,
+            target_pg_name=extra_pg_name,
+        )
 
         ag_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
         ag_new = self._count_ag_nodes_with_pg(bw_gm, extra_pg_name)

@@ -6,13 +6,22 @@
 
 import torch
 import torch.nn as nn
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
 
 from torchtitan.config import CompileConfig
-from torchtitan.models.common.moe import moe as moe_module
+from torchtitan.models.common import moe as moe_module
 from torchtitan.tools.logging import logger
+
+
+# TODO: Remove this monkeypatch once FakeTensorMode.__init__ is decorated with
+# @torch.compiler.disable(recursive=True) upstream.
+# See https://github.com/pytorch/pytorch/issues/178887
+FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
+    FakeTensorMode.__init__, recursive=True
+)
 
 
 def apply_compile_dense(model: nn.Module, compile_config: CompileConfig) -> None:
@@ -33,9 +42,7 @@ def apply_compile_dense(model: nn.Module, compile_config: CompileConfig) -> None
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(
-            transformer_block, backend=compile_config.backend, fullgraph=True
-        )
+        transformer_block.compile(backend=compile_config.backend, fullgraph=True)
         # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
 
@@ -93,27 +100,13 @@ def apply_compile_sparse(
                             # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
                             # https://github.com/pytorch/torchtitan/issues/1940
                             continue
-                        setattr(
-                            moe,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
+                        submod.compile(backend=compile_config.backend, fullgraph=True)
                 else:
-                    setattr(
-                        block,
-                        attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
-                    )
-
+                    submod.compile(backend=compile_config.backend, fullgraph=True)
         else:
             # If it's not a MoE layer, there is no FSDP(GroupedExperts)
             # So we can compile the whole block
-            transformer_block = torch.compile(
-                transformer_block,
+            transformer_block.compile(
                 backend=compile_config.backend,
                 fullgraph=True,
             )

@@ -160,7 +160,7 @@ Enable deterministic algorithms to ensure bit-for-bit reproducibility across run
 
 Use `--debug.deterministic_warn_only` to only warn about (not stop running) kernel without deterministic implementation.
 
-### Activation Checkipointing Debugging ###
+### Activation Checkpointing Debugging ###
 
 The following debug configs are available for AC.
 
