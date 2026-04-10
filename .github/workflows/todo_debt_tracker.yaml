@@ -23,7 +23,7 @@ jobs:
       # read access to issues and pull-requests to allow the gh api calls to work
       # against private repositories or to fetch metadata like titles.
       pull-requests: read
-      issues: read
+      issues: write # for updating the issue body
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -39,4 +39,21 @@ jobs:
       - name: Generate TODO Status Report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python .github/scripts/todo_debt_tracker.py
+        run: |
+          python .github/scripts/todo_debt_tracker.py > report.md
+
+      - name: Update the Issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Find the issue with the specific label
+          ISSUE_NUMBER=$(gh issue list --label "todo-debt-report" --state open --limit 1 --json number --jq '.[0].number')
+
+          if [ "$ISSUE_NUMBER" != "null" ] && [ -n "$ISSUE_NUMBER" ]; then
+            # 2. Update the issue with the contents of report.md
+            gh issue edit "$ISSUE_NUMBER" --body-file report.md
+            echo "Successfully updated issue #$ISSUE_NUMBER"
+          else
+            echo "No issue found with label 'todo-debt-report'. Please ensure the dashboard issue is open."
+            exit 1
+          fi
