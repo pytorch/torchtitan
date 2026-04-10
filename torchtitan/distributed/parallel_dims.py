@@ -31,6 +31,7 @@ class ParallelDims:
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
+    _force_fsdp_mesh: bool = True
 
     @classmethod
     def from_config(
@@ -77,7 +78,7 @@ class ParallelDims:
             assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
-        if name == "fsdp":
+        if name == "fsdp" and self._force_fsdp_mesh:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
