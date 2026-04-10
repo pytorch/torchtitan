@@ -16,18 +16,15 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_ac_regions,
-    annotate_flex_for_regional_inductor,
     apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
-
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -42,10 +39,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes.
-    - Flex attention annotation: Tags FlexAttention.forward with
-      {"compile_with_inductor": "flex_attention"} so the compiler can apply
-      regional inductor pass based on the annotation. Regional inductor is now only
-      supported in AOT mode.
     - AC region annotation: Tags each transformer block's forward with a unique
       ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
       boundaries for the min-cut partitioner.
@@ -62,7 +55,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
-    annotate_flex_for_regional_inductor()
     annotate_ac_regions(model)
 
 

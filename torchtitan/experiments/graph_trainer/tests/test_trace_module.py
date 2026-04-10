@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import unittest
 from collections import Counter
 
@@ -13,7 +12,6 @@ import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_flex_attention_for_regional_inductor,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -24,6 +22,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
     run_traced_train_step,
     trace_train_step,
+)
+from torchtitan.experiments.graph_trainer.passes import (
+    annotate_flex_attention_for_regional_inductor_pass,
 )
 
 
@@ -75,6 +76,8 @@ def _apply_regional_inductor(traced_result):
     """Apply regional_inductor to compile annotated HOP regions in the traced graph."""
     from torch.fx.graph import CodeGen
     from torch.fx.passes.regional_inductor import regional_inductor
+
+    annotate_flex_attention_for_regional_inductor_pass(traced_result.gm)
 
     fake_mode = None
     for node in traced_result.gm.graph.nodes:
@@ -537,16 +540,10 @@ class TestTraceModels(unittest.TestCase):
     ):
         train_step = make_train_step(get_loss)
 
-        maybe_regional_inductor = (
-            annotate_flex_attention_for_regional_inductor()
-            if use_regional_inductor
-            else contextlib.nullcontext()
-        )
         maybe_register_blockmask_pytree_node()
-        with maybe_regional_inductor:
-            traced: TracedResult = trace_train_step(train_step)(
-                model_ref, *fwd_args, labels
-            )
+        traced: TracedResult = trace_train_step(train_step)(
+            model_ref, *fwd_args, labels
+        )
 
         if check_collective_ops:
             ag = sum(
@@ -753,12 +750,11 @@ class TestTraceModels(unittest.TestCase):
             "sliding_window_mask": sliding_window_mask,
         }
         maybe_register_blockmask_pytree_node()
-        with annotate_flex_attention_for_regional_inductor():
 
-            def forward(model, tokens, attn_masks):
-                return model(tokens, attn_masks)
+        def forward(model, tokens, attn_masks):
+            return model(tokens, attn_masks)
 
-            traced = trace_train_step(forward)(model, tokens, attn_masks)
+        traced = trace_train_step(forward)(model, tokens, attn_masks)
 
         flex_nodes = [
             n
@@ -766,6 +762,8 @@ class TestTraceModels(unittest.TestCase):
             if "flex_attention" in str(n.target) and "backward" not in str(n.target)
         ]
         self.assertGreater(len(flex_nodes), 0, "No FlexAttentionHOP nodes found")
+
+        annotate_flex_attention_for_regional_inductor_pass(traced.gm)
 
         for node in flex_nodes:
             custom = node.meta.get("custom", {})
@@ -846,14 +844,8 @@ class TestTraceFSDP(FSDPTest):
 
         train_step = make_train_step(get_loss)
 
-        maybe_regional_inductor = (
-            annotate_flex_attention_for_regional_inductor()
-            if use_regional_inductor
-            else contextlib.nullcontext()
-        )
         maybe_register_blockmask_pytree_node()
-        with maybe_regional_inductor:
-            traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
+        traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
 
         ag = sum(
             1

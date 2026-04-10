@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -154,53 +153,6 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_to_name = {m: n for n, m in model.named_modules()}
     module_fqns = convert_modules_to_fqns(module_list, module_to_name)
     return module_fqns
-
-
-def annotate_flex_for_regional_inductor() -> None:
-    """Annotate compiled flex attention functions for regional_inductor.
-
-    Annotates ``FlexAttention._compiled_flex_attn`` and
-    ``_compiled_create_block_mask`` with ``compile_with_inductor`` metadata.
-    Uses the same inductor configs as ``FlexAttention._compiled_flex_attn``
-    to ensure bitwise-identical kernels between eager and regional_inductor paths.
-
-    For permanent annotations (e.g. in parallelize), call this directly.
-    For temporary annotations (e.g. in tests), use the
-    :func:`annotate_flex_attention_for_regional_inductor` context manager.
-    """
-    import torchtitan.models.common.attention as attention_module
-    from torchtitan.models.common.attention import FlexAttention
-
-    annotation = {
-        "compile_with_inductor": {"inductor_configs": FlexAttention.inductor_configs}
-    }
-    FlexAttention._compiled_flex_attn = annotate_fn(annotation)(
-        FlexAttention._compiled_flex_attn
-    )
-    attention_module._compiled_create_block_mask = annotate_fn(annotation)(
-        attention_module._compiled_create_block_mask
-    )
-
-
-@contextmanager
-def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
-    """Context manager: apply flex attention annotations temporarily for tracing.
-
-    Applies the same annotations as :func:`annotate_flex_for_regional_inductor`
-    but restores the originals on exit.
-    """
-    import torchtitan.models.common.attention as attention_module
-    from torchtitan.models.common.attention import FlexAttention
-
-    orig_compiled = FlexAttention._compiled_flex_attn
-    orig_create = attention_module._compiled_create_block_mask
-
-    annotate_flex_for_regional_inductor()
-    try:
-        yield
-    finally:
-        FlexAttention._compiled_flex_attn = orig_compiled
-        attention_module._compiled_create_block_mask = orig_create
 
 
 def apply_graph_ac(
