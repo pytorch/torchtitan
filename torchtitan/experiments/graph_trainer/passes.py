@@ -232,26 +232,12 @@ def validate_flex_attn_annotation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """Verify user annotations show up in the graph."""
-    from pathlib import Path
-    import tempfile
-
-    output_path = Path(tempfile.gettempdir()) / "validate_flex_attn_debug.txt"
-    lines = []
     for node in gm.graph.nodes:
         if node.target in {
             torch.ops.higher_order.flex_attention,
             torch.ops.higher_order.flex_attention_backward,
         }:
-            custom = node.meta.get("custom", {})
-            lines.append(
-                f"node={node.name} target={node.target} custom={custom}"
-            )
-            assert "compile_with_inductor" in custom, (
-                f"{node.name} missing compile_with_inductor annotation. "
-                f"custom={custom}, all meta keys={list(node.meta.keys())}"
-            )
-    output_path.write_text("\n".join(lines) if lines else "No flex_attention nodes found")
-    print(f"[DEBUG] validate_flex_attn dump: {output_path}")
+            assert "compile_with_inductor" in node.meta.get("custom", {})
     return gm
 
 
