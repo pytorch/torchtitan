@@ -4,19 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import logging
+from dataclasses import dataclass
 
 import torch
-from torch.distributed.tensor import DTensor
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
-from torchtitan.experiments.rl.models.vllm_compat_attention import (
-    VLLMCompatibleFlashAttention,
-)
-from torchtitan.protocols.module import Module
-
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import LocalMapInnerAttention
+from torchtitan.tools.logging import warn_once
+from torchtitan.tools.utils import has_cuda_capability
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import (
@@ -26,9 +26,11 @@ from vllm.v1.attention.backends.flash_attn import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
+logger = logging.getLogger(__name__)
+
 
 @register_backend(AttentionBackendEnum.CUSTOM)
-class PyTorchFlashAttentionBackend(FlashAttentionBackend):
+class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -48,10 +50,10 @@ class PyTorchFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        return PyTorchFlashAttentionImpl
+        return PyTorchVarlenAttentionImpl
 
 
-class PyTorchFlashAttentionImpl(FlashAttentionImpl):
+class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
     """
     Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
     Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel
@@ -61,12 +63,18 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Activate PyTorch's FA3 flash attention implementation. This is required for
-        # the varlen attention API to work with paged attention (KV cache in block
-        # layout) because vLLM uses default page size 16 but FA2 only supports
-        # page_size=256. Error out if FA3 is not available in the current environment.
-        if current_flash_attention_impl() != "FA3":
-            activate_flash_attention_impl("FA3")
+        self.enable_gqa = self.num_heads > self.num_kv_heads
+
+        # Hopper (SM 9.0) uses FA3
+        if has_cuda_capability(9, 0):
+            # activate_flash_attention_impl() will restore internal global state
+            # and re-run register function, so we want to only call it once.
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+        else:
+            warn_once(
+                logger, "FA3 not available (requires SM 9.0+), falling back to FA2. "
+            )
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
@@ -150,75 +158,126 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
+        # FA3 can infer cu_seqlens_k from block_table + seqused_k.
+        # FA2 requires cu_seqlens_k to be explicitly set.
+        if current_flash_attention_impl() == "FA3":
+            cu_seqlens_k = None
+        else:
+            num_seqs = seqused_k.shape[0]
+            cu_seqlens_k = torch.zeros(
+                num_seqs + 1, dtype=torch.int32, device=query.device
+            )
+            cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
+        # FA3 + batch-invariant: fix num_splits=1 to prevent non-deterministic
+        # split-k reductions. FA2 is automatically batch-invariant and does
+        # not accept num_splits.
+        extra_kwargs = {}
+
+        # Disable split_kv in Flash Attention to ensure bitwise identical output.
+        # see https://github.com/pytorch/pytorch/pull/176905
+        if is_in_batch_invariant_mode() and current_flash_attention_impl() == "FA3":
+            extra_kwargs["num_splits"] = 1
+
+        if self.enable_gqa:
+            extra_kwargs["enable_gqa"] = True
+
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
             value_cache,
             cu_seqlens_q,
-            None,
+            cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             scale=self.scale,
             window_size=sliding_window_size,
             block_table=block_table,
             seqused_k=seqused_k,
+            **extra_kwargs,
         )
 
 
-logger = logging.getLogger(__name__)
-
-
-class VLLMAttention(Module):
+class VLLMAttentionWrapper(LocalMapInnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
-    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.  This
-    wrapper handles the transpose/reshape from TorchTitan's
-    ``(batch, num_heads, seq_len, head_dim)`` layout and back.
+    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
 
-    Used by the **generator** (via :func:`replace_with_vllm_attention`).
+    Receives ``(bs, seq, heads, dim)`` layout from GQAttention. DTensor with
+    ``Shard(2)`` placements is handled by the base class
+    ``LocalMapInnerAttention.__call__``.
+
+    Used as ``inner_attention`` in GQAttention via Config-based construction.
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        layer_name: str,
-        scale: float | None = None,
-    ) -> None:
-        super().__init__()
+    # vLLM requires a unique prefix per Attention layer for
+    # static_forward_context registration.
+    # TODO: Pass layer_id through the build chain instead of using a
+    # global counter. The counter breaks with pipeline parallelism
+    # where layers are built on different ranks.
+    _layer_counter: itertools.count = itertools.count()
 
-        self.hidden_size = hidden_size
-        self.layer_name = layer_name
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalMapInnerAttention.Config):
+        hidden_size: int
+        num_heads: int
+        num_kv_heads: int
+        head_dim: int
+        scale: float | None = None
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
 
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        tp_degree = vllm_config.parallel_config.tensor_parallel_size
 
+        num_heads = config.num_heads
+        num_kv_heads = config.num_kv_heads
+
+        if num_kv_heads < tp_degree:
+            raise ValueError(
+                f"num_kv_heads ({num_kv_heads}) must be >= "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        if num_kv_heads % tp_degree != 0:
+            raise ValueError(
+                f"num_kv_heads ({num_kv_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+        if num_heads % tp_degree != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp_degree})"
+            )
+
+        num_heads = num_heads // tp_degree
+        num_kv_heads = num_kv_heads // tp_degree
+        head_dim = config.head_dim
+        scale = config.scale if config.scale is not None else head_dim**-0.5
+
+        self.hidden_size = config.hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-
-        if scale is None:
-            self.scale = head_dim**-0.5
-        else:
-            self.scale = scale
+        self.scale = scale
 
         cache_config = (
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        # TODO: This need to be compatible with Pipeline Parallelism
+        layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
-            scale=self.scale,
+            scale=scale,
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
-            prefix=f"model.layers.{layer_name}.attention.inner_attention",
+            prefix=f"model.layers.{layer_id}.attention.inner_attention",
         )
 
     def forward(
@@ -226,152 +285,35 @@ class VLLMAttention(Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        *,
-        scale: float | None = None,
-        enable_gqa: bool = False,
+        **kwargs,
     ) -> torch.Tensor:
-        """Run vLLM paged attention.
+        """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
-            q: ``(batch, num_heads, seq_len, head_dim)``
-            k: ``(batch, num_kv_heads, seq_len, head_dim)``
-            v: ``(batch, num_kv_heads, seq_len, head_dim)``
-            scale: Ignored — vLLM uses its own internal scale.
-            enable_gqa: Ignored — vLLM handles GQA internally.
+            q: ``(batch, seq_len, num_heads, head_dim)``
+            k: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, num_heads, seq_len, head_dim)``
+            ``(batch, seq_len, num_heads * head_dim)`` — ready for
+            ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
-        # Capture the original symbolic seq_len from the input BEFORE
-        # to_local() so that the symbol is the same one GQAttention uses
-        # in its .view(bs, seqlen, -1) call.
-        batch_size, _, seq_len, head_dim = q.shape
+        batch_size, seq_len, _, head_dim = q.shape
 
-        # Unwrap DTensor inputs to local tensors for attention computation
-        device_mesh = None
-        placements = None
-        if isinstance(q, DTensor):
-            device_mesh = q.device_mesh
-            placements = q.placements
-            q = q.to_local()
-            k = k.to_local()
-            v = v.to_local()
+        # vllm attention expects (bs*seqlen, n_heads, head_dim)
+        # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
+        q = q.reshape(batch_size * seq_len, -1, head_dim)
+        k = k.reshape(batch_size * seq_len, -1, head_dim)
+        v = v.reshape(batch_size * seq_len, -1, head_dim)
 
-        # TODO: may be good to use einops in future as we can explicitly reshape
-        # with dimension names - see https://github.com/arogozhnikov/einops
-        # Convert from (batch, num_heads, seq_len, head_dim)
-        #   to (batch*seq_len, num_heads (or num_kv_heads), head_dim) for vLLM Attn
-        q = q.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        k = k.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        v = v.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-
-        # vLLM attention returns (num_tokens, num_heads/num_kv_heads * head_dim)
         output_flat = self.vllm_attn(q, k, v)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
-        # shape under torch.compile.  Narrow to trim this padding
-        # NOTE: this error only happens when batch_size and seq_len are 1
-        # which happens with cudagraph capture for dummy input
+        # shape under torch.compile.  Narrow to trim this padding.
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
+        # Reshape back to the format expected by GQAttention.forward()
         output = output_flat.view(batch_size, seq_len, -1, head_dim)
-        output = output.transpose(1, 2)
-
-        if device_mesh is not None:
-            output = DTensor.from_local(
-                output, device_mesh=device_mesh, placements=placements
-            )
 
         return output
-
-
-def replace_with_vllm_attention(model, tp_degree=1):
-    """Replace ``inner_attention`` with :class:`VLLMAttention`.
-
-    **Generator side.** Used by ``TorchTitanVLLMModelWrapper`` because:
-
-    1. ``vllm.Attention`` manages KV-cache and paged attention for inference.
-    2. Head counts are divided by *tp_degree* so each TP rank holds the
-       correct shard of Q / KV heads.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-        tp_degree: Tensor-parallel world size.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    model_args = model.config
-
-    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3.py#L80
-    # Calculate num_kv_heads based on TP size
-    total_num_kv_heads = model_args.layer.attention.n_kv_heads
-    if total_num_kv_heads >= tp_degree:
-        # Number of KV heads is greater than TP size, so we partition
-        # the KV heads across multiple tensor parallel GPUs.
-        assert total_num_kv_heads % tp_degree == 0
-        num_kv_heads = total_num_kv_heads // tp_degree
-    else:
-        # TODO: Handle this branch correctly
-        raise ValueError("num_kv_heads are smaller than tp_degree")
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        # GQA
-        head_dim = model_args.layer.attention.head_dim
-        vllm_attn = VLLMAttention(
-            hidden_size=model_args.dim,
-            num_heads=model_args.layer.attention.n_heads // tp_degree,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            layer_name=layer_name,
-            scale=head_dim**-0.5,
-        )
-
-        layer.attention.inner_attention = vllm_attn
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMAttention "
-        f"({len(model.layers)} layers)"
-    )
-
-
-def replace_with_vllm_compatible_flash_attention(model, tp_size=1):
-    """Replace ``inner_attention`` with :class:`VLLMCompatibleFlashAttention`.
-
-    **Trainer side.** Called on the ``PolicyTrainer`` model because:
-
-    1. The generator's ``vllm.Attention`` (see :func:`replace_with_vllm_attention`)
-       uses vLLM's flash-attention kernel internally.  To achieve **bitwise
-       identical** forward outputs between trainer and generator, we patch the
-       trainer's attention to the same flash-attention kernel.
-    2. Training requires gradients.  ``VLLMCompatibleFlashAttention`` wraps
-       vLLM's flash-attention kernel with a custom backward pass so gradients
-       can flow during RL policy updates.
-
-    Args:
-        model: TorchTitan model with ``.layers`` and ``.config``.
-    """
-    if not hasattr(model, "layers"):
-        raise AttributeError(
-            f"Model {type(model).__name__} must have .layers attribute"
-        )
-
-    for layer_name, layer in model.layers.items():
-        if not hasattr(layer, "attention"):
-            raise ValueError(f"Layer {layer_name} must have .attention attribute")
-
-        vllm_attn = VLLMCompatibleFlashAttention()
-
-        layer.attention.inner_attention = vllm_attn
-
-    logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMCompatibleFlashAttention "
-        f"({len(model.layers)} layers)"
-    )

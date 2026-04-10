@@ -17,9 +17,9 @@ from torchtitan.protocols.module import Module, ModuleDict
 class TransformerBlock(Module):
     def __init__(self, dim=512):
         super().__init__()
-        linear_config = Linear.Config(bias=False)
-        self.attention = linear_config.build(in_features=dim, out_features=dim)
-        self.mlp = linear_config.build(in_features=dim, out_features=dim)
+        linear_config = Linear.Config(in_features=dim, out_features=dim, bias=False)
+        self.attention = linear_config.build()
+        self.mlp = linear_config.build()
         self.moe_enabled = False
 
     def forward(self, x):
@@ -54,7 +54,7 @@ class TestApplyCompile(unittest.TestCase):
         apply_compile_sparse(unused_model1, compile_config, ep_enabled=True)
         apply_compile_sparse(unused_model2, compile_config, ep_enabled=True)
 
-        from torchtitan.models.common.moe import moe as moe_module
+        from torchtitan.models.common import moe as moe_module
 
         # Generate sample inputs for _run_experts_grouped_mm
         num_experts = 8

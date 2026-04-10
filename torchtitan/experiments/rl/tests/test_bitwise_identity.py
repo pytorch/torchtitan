@@ -35,15 +35,16 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config.compilation import CompilationConfig, CUDAGraphMode
-from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.configs import ParallelismConfig
+from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    GeneratorCompileConfig,
+    SamplingConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.actors.utils import (
     compute_token_log_probs,
@@ -76,15 +77,18 @@ def _log_attention_module(model, label):
 # ---------------------------------------------------------------------------
 
 
-def create_vllm_engine(config):
+def create_vllm_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine from the RL config."""
     gen_config = config.generator
     model_path = config.hf_assets_path
 
-    # Enable batch-invariant mode so vLLM uses the deterministic flash-attn path.
-    init_batch_invariance(AttentionBackendEnum[gen_config.attention_backend])
+    # Enable batch-invariant mode for deterministic ops (Triton mm, log_softmax,
+    # mean, TF32 disable, deterministic algorithms).
+    from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
 
-    assert gen_config.attention_backend == "CUSTOM"
+    enable_batch_invariant_mode()
+
+    assert gen_config.attention_backend in "CUSTOM"
     engine_kwargs = dict(
         model=model_path,
         trust_remote_code=True,
@@ -92,13 +96,13 @@ def create_vllm_engine(config):
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
+        enforce_eager=gen_config.compile.is_eager,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
-        attention_backend=gen_config.attention_backend,
-        compilation_config=CompilationConfig(
-            backend="eager",
-            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        ),
+        attention_backend="CUSTOM",
     )
+    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    if vllm_compilation_config is not None:
+        engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.seed is not None:
         engine_kwargs["seed"] = gen_config.seed
     engine_args = EngineArgs(**engine_kwargs)
@@ -111,7 +115,9 @@ def create_vllm_engine(config):
     return engine
 
 
-def generate_with_vllm(engine, prompt, gen_config):
+def generate_with_vllm(
+    engine: LLMEngine, prompt: str, gen_config: VLLMGenerator.Config
+) -> tuple[list[int], list[int], list[float]]:
     """Generate tokens from *prompt*, return IDs + log-probs."""
     sampling = gen_config.sampling
     sampling_params = SamplingParams(
@@ -133,6 +139,7 @@ def generate_with_vllm(engine, prompt, gen_config):
     assert len(outputs) == 1, f"Expected 1 output, got {len(outputs)}"
     output = outputs[0]
 
+    logger.info('vLLM text output: "%s"', output.outputs[0].text)
     prompt_token_ids = list(output.prompt_token_ids)
     sample = output.outputs[0]
     generated_token_ids = list(sample.token_ids)
@@ -156,12 +163,29 @@ def build_trainer_model(config):
 
     Mirrors PolicyTrainer._build_model() but without the Monarch actor
     framework.
-
-    TODO(zhxchen17) Switch trainer model to use varlen backend with batch-invariant mode.
     """
+    from torchtitan.experiments.rl.batch_invariant import enable_batch_invariant_mode
+
+    # Enable batch-invariant Triton kernels (log_softmax, mean) and
+    # deterministic cuBLAS before building the model.
+    enable_batch_invariant_mode()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+    import dataclasses
+
     model_spec = config.model_spec
-    model_config = model_spec.model
     hf_assets_path = config.hf_assets_path
+
+    # Override attention backend to varlen for batch-invariant mode,
+    # matching PolicyTrainer._build_model() behavior.
+    if config.batch_invariant_mode:
+        attn_cfg = model_spec.model.layer.attention
+        new_attn = dataclasses.replace(attn_cfg, attn_backend="varlen")
+        new_layer = dataclasses.replace(model_spec.model.layer, attention=new_attn)
+        model_config = dataclasses.replace(model_spec.model, layer=new_layer)
+    else:
+        model_config = model_spec.model
 
     device_module, device_type = utils.device_module, utils.device_type
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -184,8 +208,17 @@ def build_trainer_model(config):
 
     # Build model on meta device
     with torch.device("meta"):
-        with utils.set_default_dtype(TORCH_DTYPE_MAP["bfloat16"]):
+        with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
             model = model_config.build()
+
+    # Disable torch.compile on VarlenAttentionWrapper to match the
+    # generator's uncompiled varlen_attn_out path.
+    if config.batch_invariant_mode:
+        from torch.nn.attention.varlen import varlen_attn
+
+        from torchtitan.models.common.attention import VarlenAttentionWrapper
+
+        VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn
 
     # Parallelize (trainer path: has_position_id=False)
     model = parallelize_qwen3(
@@ -197,7 +230,7 @@ def build_trainer_model(config):
     # Materialize on device
     model.to_empty(device=device_type)
     with torch.no_grad():
-        model.init_weights(buffer_device=None)
+        model.init_states(buffer_device=None)
 
     # Load HF checkpoint (same logic as PolicyTrainer._load_initial_hf_weights)
     if model_spec.state_dict_adapter is not None:
@@ -228,15 +261,18 @@ def build_trainer_model(config):
 
 def _test_config() -> RLTrainer.Config:
     """Test-specific config: greedy sampling, fewer tokens, single sample."""
+    model_spec = model_registry("0.6B_varlen")
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B"),
+        model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
+            training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -244,13 +280,13 @@ def _test_config() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=GeneratorCompileConfig(backend="eager", cudagraph_mode="piecewise"),
             num_samples_per_prompt=1,
             sampling=SamplingConfig(
                 temperature=0.0,
                 top_p=1.0,
-                max_tokens=30,
+                max_tokens=200,
             ),
-            attention_backend="CUSTOM",
         ),
     )
 
@@ -260,6 +296,16 @@ def main():
     config = _test_config()
     config.model_spec.parallelize_fn = parallelize_qwen3
 
+    # Activate FA3 so varlen attention uses the same FA3 kernel as the
+    # generator's CUSTOM backend.
+    from torch.nn.attention import (
+        activate_flash_attention_impl,
+        current_flash_attention_impl,
+    )
+
+    if current_flash_attention_impl() != "FA3":
+        activate_flash_attention_impl("FA3")
+
     # Register model with vLLM
     register_model_to_vllm_model_registry(config.model_spec)
 
@@ -267,7 +313,10 @@ def main():
     dist_utils.init_distributed(CommConfig())
 
     # ---- Step 1: Generate via vLLM ----
-    prompt = "Hello, my name is"
+    prompt = (
+        "You are a helpful assistant that solves math problems step by step. "
+        "Show your reasoning clearly and carefully before giving the final answer."
+    )
 
     engine = create_vllm_engine(config)
     vllm_model = engine.model_executor.driver_worker.get_model().model
@@ -292,7 +341,10 @@ def main():
 
     with torch.no_grad():
         trainer_token_log_probs = compute_token_log_probs(
-            trainer_model, prompt_token_ids, generated_token_ids, device
+            trainer_model,
+            prompt_token_ids,
+            generated_token_ids,
+            device,
         )
 
     if dist.get_rank() == 0:
