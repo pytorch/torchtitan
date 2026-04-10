@@ -232,6 +232,10 @@ def _deserialize_with_cudagraph(
                 cg[0]._boxed_call_inner = True
             return cg[0](new_inputs)
 
+        # Inductor's post_compile expects the cudagraphified callable
+        # to have _boxed_call=True (single list arg convention), matching
+        # what the original cudagraphify returns.
+        run._boxed_call = True
         return run
 
     _compile_fx_mod.cudagraphify = _patched_cudagraphify
