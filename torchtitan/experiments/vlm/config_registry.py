@@ -40,6 +40,5 @@ def vlm_debugmodel() -> MultiModalTrainerConfig:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )

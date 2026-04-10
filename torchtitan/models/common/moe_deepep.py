@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 from torch.distributed.tensor import DTensor, Partial
 
-from torchtitan.distributed.deepep import sync_combine
+from torchtitan.distributed.deepep.deepep import sync_combine
 
 from .moe import MoE
 
@@ -38,8 +38,8 @@ class DeepEPMoE(MoE):
     class Config(MoE.Config):
         pass
 
-    def __init__(self, config: Config, *, dim: int):
-        super().__init__(config, dim=dim)
+    def __init__(self, config: Config):
+        super().__init__(config)
         # DeepEP doesn't use reorderer - routing handled by DeepEPExpertParallel
         self.reorderer = None  # pyrefly: ignore [bad-assignment]
 

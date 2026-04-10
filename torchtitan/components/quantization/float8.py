@@ -10,14 +10,9 @@ from typing import ClassVar, Literal
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    FP8_GROUP_ALIGNMENT_SIZE,
-    QuantizationConverter,
-)
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed import ParallelDims
-
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -26,7 +21,6 @@ from .module_utils import (
     inject_module_protocol,
     verify_module_protocol,
 )
-
 from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
@@ -190,7 +184,7 @@ class Float8LinearConverter(QuantizationConverter):
         # We need to first verify if all nn.Linear have been converted to Linear.
         verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+            model, ["_param_init"], nn_module_cls=nn.Linear
         )
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
@@ -264,9 +258,6 @@ class Float8GroupedMMConverter(QuantizationConverter):
             not parallel_dims.cp_enabled
         ), "Float8 MoE training prototype does not yet support context parallelism"
 
-        # For fp8 grouped GEMM, token group sizes must be multiples of 16
-        # (16 byte alignment / 1 byte per elem = 16 elements)
-        set_token_group_alignment_size_m(FP8_GROUP_ALIGNMENT_SIZE)
         self.enabled = True
 
     def convert(self, model: nn.Module):
@@ -293,7 +284,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
         # We need to first verify if all nn.Linear have been converted to Linear.
         verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+            model, ["_param_init"], nn_module_cls=nn.Linear
         )
 
         config = Float8TrainingOpConfig()

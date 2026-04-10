@@ -283,6 +283,37 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=8,
         ),
+        # === aot_fx_trace mode tests ===
+        # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+cudagraph",
+            "aot_fx_trace_llama3_fsdp_tp",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_flex_attn",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+FlexAttn",
+            "aot_fx_trace_llama3_fsdp_tp_flexattn",
+            ngpu=8,
+        ),
     ]
 
 
@@ -397,6 +428,41 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "AOT deepseek_v3 inductor_decomposition",
             "aot_deepseekv3_inductor_decomposition",
+            ngpu=8,
+        ),
+        # === aot_fx_trace mode tests ===
+        # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
+        # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_flex_attn",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
             ngpu=8,
         ),
     ]

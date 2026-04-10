@@ -73,7 +73,7 @@ def generate():
         enforce_eager=gen_config.compile.is_eager,
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
-        attention_backend=gen_config.attention_backend,
+        attention_backend="CUSTOM",
     )
     vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
     if vllm_compilation_config is not None:

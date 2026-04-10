@@ -14,64 +14,75 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 
 
-class TestModuleInitWeights(unittest.TestCase):
-    """Tests for Module.init_weights behavior.
+class TestModuleInitStates(unittest.TestCase):
+    """Tests for Module.init_states behavior."""
 
-    Module.init_weights provides a default no-op implementation so that
-    subclasses without learnable parameters (or loaded from checkpoints)
-    do not need to override it.
-    """
-
-    def test_default_init_weights_is_noop(self):
-        """Subclass without init_weights gets the default no-op."""
+    def test_default_init_states_no_param_init_raises(self):
+        """Subclass with parameters but no param_init raises ValueError."""
 
         class SimpleModule(Module):
             def __init__(self):
                 super().__init__()
+                self.weight = nn.Parameter(torch.empty(4))
 
         m = SimpleModule()
-        m.init_weights()  # should not raise
+        with self.assertRaises(ValueError):
+            m.init_states()
 
-    def test_init_weights_implemented(self):
-        """Subclass with init_weights works normally."""
+    def test_init_states_auto_recurses(self):
+        """init_states automatically recurses into Module children."""
 
-        class GoodModule(Module):
+        class Child(Module):
             def __init__(self):
                 super().__init__()
-                self.linear = Linear.Config(bias=True).build(
-                    in_features=4, out_features=4
-                )
+                self.weight = nn.Parameter(torch.empty(4))
 
-            def init_weights(self, **kwargs):
-                nn.init.zeros_(self.linear.weight)
+        class Parent(Module):
+            def __init__(self):
+                super().__init__()
+                self.child = Child()
 
-        m = GoodModule()
-        m.init_weights()
-        self.assertTrue(torch.all(m.linear.weight == 0))
+        m = Parent()
+        m.child._param_init = {"weight": nn.init.zeros_}
+        m.init_states()
+        self.assertTrue(torch.all(m.child.weight == 0))
+
+    def test__init_self_buffers_called(self):
+        """_init_self_buffers is called with kwargs."""
+
+        class BufferModule(Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("buf", torch.zeros(4))
+                self.buffer_device_seen = None
+
+            def _init_self_buffers(self, *, buffer_device=None):
+                self.buffer_device_seen = buffer_device
+
+        m = BufferModule()
+        m.init_states(buffer_device=torch.device("cpu"))
+        self.assertEqual(m.buffer_device_seen, torch.device("cpu"))
+
+    def test_no_params_no_error(self):
+        """Module with no parameters and no param_init doesn't raise."""
+
+        class NoParams(Module):
+            def __init__(self):
+                super().__init__()
+
+        m = NoParams()
+        m.init_states()  # should not raise
 
 
 class TestDiamondInheritance(unittest.TestCase):
-    """Tests for diamond inheritance: class Foo(nn.SomeModule, Module).
-
-    The diamond pattern will be used if a Module component also inherits from
-    an nn.Module (e.g., nn.Embedding) to reuse PyTorch's implementation while
-    satisfying the Module protocol.
-    These tests ensure the pattern works correctly and catches regressions.
-    """
+    """Tests for diamond inheritance: class Foo(nn.SomeModule, Module)."""
 
     class TestEmbedding(nn.Embedding, Module):
         def __init__(self, num_embeddings, embedding_dim):
             super().__init__(num_embeddings, embedding_dim)
 
-        def init_weights(self, **kwargs):
-            nn.init.normal_(self.weight, mean=0.0, std=0.02)
-
     def test_module_has_no_init(self):
-        """Module must not define __init__ in its own __dict__.
-
-        If Module defined __init__, diamond inheritance (e.g. nn.Embedding +
-        Module) may break the __init__ structure.
-        """
+        """Module must not define __init__ in its own __dict__."""
         self.assertNotIn(
             "__init__",
             Module.__dict__,
@@ -87,29 +98,12 @@ class TestDiamondInheritance(unittest.TestCase):
         out = emb(torch.tensor([0, 1, 2]))
         self.assertEqual(out.shape, torch.Size([3, 32]))
 
-    def test_init_weights(self):
-        """init_weights runs the subclass implementation."""
-        emb = self.TestEmbedding(100, 32)
-        emb.init_weights()
-        # Weight should have been re-initialized; just check it's finite
-        self.assertTrue(torch.all(torch.isfinite(emb.weight)))
-
     def test_isinstance_checks(self):
         """Diamond class is an instance of all parent types."""
         emb = self.TestEmbedding(100, 32)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertIsInstance(emb, nn.Module)
         self.assertIsInstance(emb, Module)
-
-    def test_default_init_weights_noop_diamond(self):
-        """Diamond class without init_weights gets the default no-op."""
-
-        class SimpleEmbedding(nn.Embedding, Module):
-            def __init__(self, num_embeddings, embedding_dim):
-                super().__init__(num_embeddings, embedding_dim)
-
-        emb = SimpleEmbedding(10, 4)
-        emb.init_weights()  # should not raise
 
     def test_module_hierarchy_is_flat(self):
         """Diamond embedding adds no extra layer to the module tree."""
@@ -118,9 +112,10 @@ class TestDiamondInheritance(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.embed = TestDiamondInheritance.TestEmbedding(100, 32)
-                self.linear = Linear.Config(bias=True).build(
-                    in_features=32, out_features=16
+                linear_config = Linear.Config(
+                    in_features=32, out_features=16, bias=True
                 )
+                self.linear = linear_config.build()
 
         model = Model()
         param_names = {name for name, _ in model.named_parameters()}
@@ -160,21 +155,19 @@ class TestFromNnModule(unittest.TestCase):
         self.assertIsInstance(m, nn.Conv2d)
         self.assertIsInstance(m, Module)
 
-    def test_init_weights_calls_reset_parameters(self):
-        """For classes with reset_parameters, init_weights delegates to it."""
+    def test_init_states_calls_reset_parameters(self):
+        """For classes with reset_parameters, init_states delegates to it."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         m = LayerNorm(32)
-        # Manually set weight to zeros, then init_weights should reset
         nn.init.zeros_(m.weight)
-        m.init_weights()
-        # After reset_parameters, weight should be ones for LayerNorm
+        m.init_states()
         self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
 
-    def test_init_weights_noop_for_parameterless(self):
-        """For classes without reset_parameters, init_weights is a no-op."""
+    def test_init_states_noop_for_parameterless(self):
+        """For classes without reset_parameters, init_states is a no-op."""
         GELU = Module.from_nn_module(nn.GELU)
         m = GELU()
-        m.init_weights()  # should not raise
+        m.init_states()  # should not raise
 
     def test_cache(self):
         """Repeated calls return the same class object."""
@@ -188,7 +181,6 @@ class TestFromNnModule(unittest.TestCase):
         torch.manual_seed(42)
         orig = nn.LayerNorm(16)
         wrapped = LayerNorm(16)
-        # Copy weights
         wrapped.load_state_dict(orig.state_dict())
         x = torch.randn(2, 16)
         torch.testing.assert_close(orig(x), wrapped(x))
@@ -206,41 +198,74 @@ class TestFromNnModule(unittest.TestCase):
             )
 
 
-class TestContainerInitWeights(unittest.TestCase):
-    """Tests for ModuleList, ModuleDict, Sequential init_weights."""
+class TestContainerInitStates(unittest.TestCase):
+    """Tests for ModuleList, ModuleDict, Sequential init_states."""
 
-    def test_module_list_init_weights(self):
-        """ModuleList.init_weights calls init_weights on each child."""
+    def test_module_list_init_states(self):
+        """ModuleList.init_states initializes children."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         norms = ModuleList([LayerNorm(8) for _ in range(3)])
         for n in norms:
             nn.init.zeros_(n.weight)
-        norms.init_weights()
+        norms.init_states()
         for n in norms:
             self.assertTrue(torch.allclose(n.weight, torch.ones(8)))
 
-    def test_module_dict_init_weights(self):
-        """ModuleDict.init_weights calls init_weights on each child."""
+    def test_module_dict_init_states(self):
+        """ModuleDict.init_states initializes children."""
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         norms = ModuleDict({"a": LayerNorm(8), "b": LayerNorm(8)})
         for n in norms.values():
             nn.init.zeros_(n.weight)
-        norms.init_weights()
+        norms.init_states()
         for n in norms.values():
             self.assertTrue(torch.allclose(n.weight, torch.ones(8)))
 
-    def test_sequential_init_weights(self):
-        """Sequential.init_weights calls init_weights on each child."""
-        linear = Linear.Config(bias=False).build(in_features=4, out_features=4)
+    def test_sequential_init_states(self):
+        """Sequential.init_states recurses into children."""
         GELU = Module.from_nn_module(nn.GELU)
-        seq = Sequential(linear, GELU())
-        seq.init_weights()  # should not raise
+        seq = Sequential(GELU())
+        seq.init_states()  # should not raise
 
     def test_containers_are_module(self):
         """Container instances satisfy Module protocol."""
         self.assertIsInstance(ModuleList(), Module)
         self.assertIsInstance(ModuleDict(), Module)
         self.assertIsInstance(Sequential(), Module)
+
+
+class TestConfigBuildPropagatesParamInit(unittest.TestCase):
+    """Tests for Config.build() propagating param_init to the instance."""
+
+    def test_param_init_on_instance(self):
+        """build() sets _param_init on the constructed instance."""
+        param_init = {"weight": nn.init.zeros_}
+        config = Linear.Config(in_features=4, out_features=4, param_init=param_init)
+        linear = config.build()
+        self.assertTrue(hasattr(linear, "_param_init"))
+        self.assertIs(linear._param_init, param_init)
+
+    def test_no_param_init_by_default(self):
+        """build() without param_init leaves it as None."""
+        config = Linear.Config(in_features=4, out_features=4)
+        linear = config.build()
+        self.assertIsNone(linear._param_init)
+
+    def test_init_states_uses_config_param_init(self):
+        """init_states uses param_init from config when available."""
+
+        class Parent(Module):
+            def __init__(self):
+                super().__init__()
+                linear_config = Linear.Config(
+                    in_features=4, out_features=4, param_init={"weight": nn.init.ones_}
+                )
+                self.linear = linear_config.build()
+
+        m = Parent()
+        nn.init.zeros_(m.linear.weight)
+        m.init_states()
+        self.assertTrue(torch.all(m.linear.weight == 1))
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):
@@ -261,7 +286,8 @@ class TestVerifyModuleProtocol(unittest.TestCase):
 
             def __init__(self):
                 super().__init__()
-                self.linear = Linear.Config().build(in_features=4, out_features=4)
+                linear_config = Linear.Config(in_features=4, out_features=4)
+                self.linear = linear_config.build()
 
         model = GoodModel()
         model.verify_module_protocol()  # should not raise
