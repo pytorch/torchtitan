@@ -48,6 +48,7 @@ jobs:
           python .github/scripts/todo_debt_tracker.py > report.md
 
       - name: Update the Issue
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: 2936
