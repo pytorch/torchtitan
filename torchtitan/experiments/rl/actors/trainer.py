@@ -131,13 +131,17 @@ class PolicyTrainer(Actor, Configurable):
         self.model = model
         self.model_parts = [model]
 
-        # Create reference model for KL divergence (frozen copy of initial policy)
-        # TODO: Move ref_model to a separate actor so it can live on different GPUs
-        ref_model = self._build_model(model_spec, config, device_type, hf_assets_path)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        self.ref_model = ref_model
+        # Conditionally build frozen reference model for KL penalty
+        if getattr(config.loss, "kl_coef", 0) > 0:
+            ref_model = self._build_model(
+                model_spec, config, device_type, hf_assets_path
+            )
+            ref_model.eval()
+            ref_model.requires_grad_(False)
+            self.ref_model = ref_model
+            logger.info("Built frozen reference model for KL penalty")
+        else:
+            self.ref_model = None
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -304,14 +308,17 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        with torch.no_grad():
-            ref_logits = self.ref_model(
-                token_ids, attention_masks=attention_masks, positions=positions
-            )
-            all_ref_logprobs = compute_logprobs(ref_logits, token_ids)
-            ref_logprobs = extract_response_logprobs(
-                all_ref_logprobs, seq_lens, prompt_lens, response_lens
-            )
+        if self.ref_model is not None:
+            with torch.no_grad():
+                ref_logits = self.ref_model(
+                    token_ids, attention_masks=attention_masks, positions=positions
+                )
+                all_ref_logprobs = compute_logprobs(ref_logits, token_ids)
+                ref_logprobs = extract_response_logprobs(
+                    all_ref_logprobs, seq_lens, prompt_lens, response_lens
+                )
+        else:
+            ref_logprobs = [torch.zeros_like(lp) for lp in policy_logprobs]
 
         loss, loss_metrics = self.loss_fn(
             policy_logprobs=policy_logprobs,
