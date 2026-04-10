@@ -62,13 +62,21 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                 device = self.weight.device
                 dtype = self.weight.dtype
                 self.lora_a = (
-                    Linear.Config(bias=False)
-                    .build(in_features=self.in_features, out_features=rank)
+                    Linear.Config(
+                        in_features=self.in_features,
+                        out_features=rank,
+                        bias=False,
+                    )
+                    .build()
                     .to(device=device, dtype=dtype)
                 )
                 self.lora_b = (
-                    Linear.Config(bias=False)
-                    .build(in_features=rank, out_features=self.out_features)
+                    Linear.Config(
+                        in_features=rank,
+                        out_features=self.out_features,
+                        bias=False,
+                    )
+                    .build()
                     .to(device=device, dtype=dtype)
                 )
 
