@@ -201,49 +201,41 @@ def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
 
 
 @contextmanager
-def _patch_engine_run_backward() -> Generator[None, None, None]:
-    """Patch _engine_run_backward to install stacktrace preservation hooks.
+def _patch_autograd_grad() -> Generator[None, None, None]:
+    """Wrap upstream ``torch.compiler._patch_autograd_grad`` with seq_nr setup.
 
-    Why this is needed:
-    When make_fx traces a function that calls loss.backward(), the backward
-    pass is decomposed into primitive ATen ops. Normally (in eager autograd),
-    ``setup_stacktrace_preservation_hooks`` is called by the autograd engine
-    to propagate ``seq_nr`` from forward ops to their corresponding backward
-    ops. Under make_fx tracing, this hook setup doesn't happen automatically
-    because the engine path differs, so backward FX nodes end up without
-    ``seq_nr`` metadata. Without ``seq_nr``, we can't correlate backward
-    nodes back to their forward counterparts (needed by
-    ``_copy_fwd_metadata_to_bw_nodes``).
+    Upstream ``_patch_autograd_grad`` is responsible for tagging traced
+    ``torch.autograd.grad`` ops with ``custom["autograd_backward"]``.
+    Graph trainer additionally needs ``setup_stacktrace_preservation_hooks`` so
+    backward nodes inherit ``seq_nr``/stacktrace from their forward producers.
 
-    This context manager patches ``_engine_run_backward`` to call
-    ``setup_stacktrace_preservation_hooks`` before the autograd engine runs,
-    restoring ``seq_nr`` propagation during tracing.
-
-    We must patch the name in both modules since ``torch.autograd.__init__``
-    imports it via ``from .graph import``.
+    TODO: remove this wrapper once https://github.com/pytorch/pytorch/pull/179610
+    (or equivalent upstream support) is available in the PyTorch version used by
+    TorchTitan.
     """
+    import functools
     import torch.autograd
-    import torch.autograd.graph
 
-    _orig_fn = torch.autograd.graph._engine_run_backward
+    with torch.compiler._patch_autograd_grad():
+        _orig_grad = torch.autograd.grad
 
-    def _patched(t_outputs, *args, **kwargs):  # type: ignore[no-untyped-def]
-        roots = [
-            t.grad_fn
-            for t in t_outputs
-            if isinstance(t, torch.Tensor) and t.grad_fn is not None
-        ]
-        if roots:
-            setup_stacktrace_preservation_hooks(roots)
-        return _orig_fn(t_outputs, *args, **kwargs)
+        @functools.wraps(_orig_grad)
+        def _patched_grad(outputs, inputs, *args, **kwargs):
+            t_outputs = outputs if isinstance(outputs, (list, tuple)) else (outputs,)
+            roots = [
+                t.grad_fn
+                for t in t_outputs
+                if isinstance(t, torch.Tensor) and t.grad_fn is not None
+            ]
+            if roots:
+                setup_stacktrace_preservation_hooks(roots)
+            return _orig_grad(outputs, inputs, *args, **kwargs)
 
-    torch.autograd.graph._engine_run_backward = _patched  # type: ignore[assignment]
-    torch.autograd._engine_run_backward = _patched  # type: ignore[assignment]
-    try:
-        yield
-    finally:
-        torch.autograd.graph._engine_run_backward = _orig_fn  # type: ignore[assignment]
-        torch.autograd._engine_run_backward = _orig_fn  # type: ignore[assignment]
+        torch.autograd.grad = _patched_grad
+        try:
+            yield
+        finally:
+            torch.autograd.grad = _orig_grad
 
 
 def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
@@ -402,7 +394,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
 
-            with _patch_engine_run_backward():
+            with _patch_autograd_grad():
                 result = fn(state_for_fn, *user_list)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
@@ -412,7 +404,13 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
         ctx = TracingContext(fake_mode)
         # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-        with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
+        with (
+            fake_mode,
+            tracing(ctx),
+            preserve_node_meta(),
+            _skip_nested_compile(),
+            torch.compiler._non_strict_tracing_context(),
+        ):
             traced = make_fx(
                 fn_with_subclass_handling,
                 record_stack_traces=True,
@@ -450,6 +448,10 @@ def run_traced(
     This is a reference implementation of traced-graph execution. It keeps the
     state handling, subclass unwrapping, and output reconstruction logic
     explicit instead of baking those semantics into ``TracedResult`` itself.
+    Runs under ``torch.no_grad()`` because the graph already contains explicit
+    backward ops (from ``torch.autograd.grad`` traced by make_fx). Without
+    this, PyTorch would build a redundant autograd graph on top, keeping all
+    forward intermediates alive via ``grad_fn`` references.
     """
     state_flat = list(state.values())
     user_args_flat, _ = pytree.tree_flatten(list(args))
@@ -461,7 +463,8 @@ def run_traced(
     all_args = list(state_flat) + list(user_args_flat)
     flat_inputs, _ = _unwrap_subclasses(all_args)
 
-    flat_outputs = traced_result.gm(*flat_inputs)
+    with torch.no_grad():
+        flat_outputs = traced_result.gm(*flat_inputs)
     wrapped = _wrap_subclasses(
         flat_outputs,
         traced_result.num_flat_outputs,
