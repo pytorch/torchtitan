@@ -19,7 +19,39 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+class CrossEntropyLoss:
+    """Cross-entropy loss with sum reduction for token-based normalization.
+
+    This is the standard loss for autoregressive language model training.
+    Predictions are flattened from [B, L, V] to [B*L, V] and cast to float32.
+    Labels are flattened from [B, L] to [B*L]. Tokens with label == -100
+    (IGNORE_INDEX) are excluded from the loss.
+    """
+
+    def __init__(self, compile_config: CompileConfig | None = None):
+        self._fn: LossFunction = _cross_entropy_loss
+        if compile_config is not None and compile_config.enable and "loss" in compile_config.components:
+            logger.info("Compiling the loss function with torch.compile")
+            self._fn = torch.compile(self._fn, backend=compile_config.backend)
+
+    def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        return self._fn(pred, labels)
+
+
+class MSELoss:
+    """MSE loss with sum reduction for Transformer models training (e.g. Flux)."""
+
+    def __init__(self, compile_config: CompileConfig | None = None):
+        self._fn: LossFunction = _mse_loss
+        if compile_config is not None and compile_config.enable and "loss" in compile_config.components:
+            logger.info("Compiling the loss function with torch.compile")
+            self._fn = torch.compile(self._fn, backend=compile_config.backend)
+
+    def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        return self._fn(pred, labels)
+
+
+def _cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -29,29 +61,28 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
-def build_cross_entropy_loss(compile_config: CompileConfig, **kwargs):
-    del kwargs  # delete any unused arguments
-    loss_fn = cross_entropy_loss
-    if compile_config.enable and "loss" in compile_config.components:
-        logger.info("Compiling the loss function with torch.compile")
-        loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
-    return loss_fn
-
-
-def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def _mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Common MSE loss function with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
         pred.float(), labels.float().detach(), reduction="sum"
     )
 
 
+# Keep the old function names as public API for backward compatibility
+cross_entropy_loss = _cross_entropy_loss
+mse_loss = _mse_loss
+
+
+def build_cross_entropy_loss(compile_config: CompileConfig, **kwargs):
+    """Build a CrossEntropyLoss instance."""
+    del kwargs
+    return CrossEntropyLoss(compile_config)
+
+
 def build_mse_loss(compile_config: CompileConfig, **kwargs):
-    del kwargs  # delete any unused arguments
-    loss_fn = mse_loss
-    if compile_config.enable and "loss" in compile_config.components:
-        logger.info("Compiling the loss function with torch.compile")
-        loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
-    return loss_fn
+    """Build an MSELoss instance."""
+    del kwargs
+    return MSELoss(compile_config)
 
 
 class GradAccumulator:
@@ -165,8 +196,8 @@ class ChunkedCELoss:
         Args:
             model: The decoder model. Must have an ``output`` attribute (the lm_head).
             num_chunks: Number of chunks to split the sequence into.
-            loss_fn: The base cross-entropy loss function (e.g. cross_entropy_loss
-                or a compiled version of it).
+            loss_fn: The base cross-entropy loss function (e.g. CrossEntropyLoss
+                instance or a plain callable).
         """
         from torchtitan.models.common.decoder import Decoder
 
@@ -295,9 +326,6 @@ def build_chunked_cross_entropy_loss(
     """
     del parallel_dims, kwargs
 
-    loss_fn = cross_entropy_loss
-    if compile_config.enable and "loss" in compile_config.components:
-        logger.info("Compiling the ce_loss function with torch.compile")
-        loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
+    loss_fn = CrossEntropyLoss(compile_config)
 
     return ChunkedCELossFactory(num_chunks=num_chunks, loss_fn=loss_fn)
