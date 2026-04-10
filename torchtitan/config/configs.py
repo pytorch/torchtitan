@@ -129,6 +129,9 @@ class ParallelismConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
+    enable_sequence_parallel: bool = True
+    """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -187,14 +190,6 @@ class ParallelismConfig:
     This value is used to compute the total number of microbatches by dividing local_batch_size with
     pipeline_parallel_microbatch_size.
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
-    """
-
-    pipeline_parallel_expert_parallel_overlap: bool = True
-    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
-    communication. This is only effective when the pipeline parallel schedule is DualPipeV and
-    pipeline_parallel_degree > 1 and expert_parallel_degree > 1.
-
-    TODO: Does not support activation_checkpoint, set mode="none"
     """
 
     context_parallel_degree: int = 1
@@ -287,12 +282,6 @@ class ParallelismConfig:
 class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
-
-    selective_ac_option: str = "2"
-    """
-    Selective activation checkpointing options ['int', 'op'].
-    'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
-    """
 
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]
@@ -419,6 +408,10 @@ class DebugConfig:
     detect_anomaly: bool = False
     """Enable torch.autograd anomaly detection to help track down NaN/Inf gradients.
     Note: incurs significant overhead; for debugging only."""
+
+    batch_invariant: bool = False
+    """Enable batch-invariant mode to use batch-invariant ops in model
+    forward and deterministic NCCL collective reduction order"""
 
     print_config: bool = False
     """Print the job configs to terminal"""

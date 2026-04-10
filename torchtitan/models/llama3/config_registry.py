@@ -19,7 +19,11 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import (
+    ChatDataLoader,
+    HuggingFaceTextDataLoader,
+)
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.profiling import ProfilingConfig
 from torchtitan.trainer import Trainer
@@ -54,7 +58,6 @@ def llama3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
         validator=Validator.Config(
             freq=5,
@@ -131,7 +134,6 @@ def llama3_8b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
         validator=Validator.Config(
             freq=500,
@@ -212,5 +214,57 @@ def llama3_405b() -> Trainer.Config:
         validator=Validator.Config(
             freq=500,
             steps=1200,
+        ),
+    )
+
+
+def sft_debugmodel() -> Trainer.Config:
+    """SFT debug config with Llama3 debugmodel and local test data."""
+
+    def process_sample(sample):
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
+
+    from torchtitan.models.common import FlexAttention
+
+    model_spec = model_registry("debugmodel")
+    assert isinstance(model_spec.model, Decoder.Config)
+
+    for layer_cfg in model_spec.model.layers:
+        layer_cfg.attention.inner_attention = FlexAttention.Config()
+        layer_cfg.attention.mask_type = "block_causal"
+
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        model_spec=model_spec,
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        dataloader=ChatDataLoader.Config(
+            dataset_path="json",
+            load_dataset_kwargs={
+                "data_files": "tests/assets/sft_test/data.json",
+                "split": "train",
+            },
+            sample_processor=process_sample,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )
