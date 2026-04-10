@@ -44,16 +44,31 @@ jobs:
 
       - name: Update the Issue
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: 2936
         run: |
-          # 1. Find the issue with the specific label
-          ISSUE_NUMBER=$(gh issue list --label "todo-debt-report" --state open --limit 1 --json number --jq '.[0].number')
+          set -e
 
-          if [ "$ISSUE_NUMBER" != "null" ] && [ -n "$ISSUE_NUMBER" ]; then
-            # 2. Update the issue with the contents of report.md
-            gh issue edit "$ISSUE_NUMBER" --body-file report.md
+          echo "Checking if issue #$ISSUE_NUMBER exists..."
+
+          if ! STATE=$(gh issue view "$ISSUE_NUMBER" --json state --jq '.state' 2>/dev/null); then
+            echo "Error: Issue #$ISSUE_NUMBER does not exist in this repository."
+            exit 1
+          fi
+
+          if [ "$STATE" != "OPEN" ]; then
+            echo "Error: Issue #$ISSUE_NUMBER is currently $STATE. "
+            exit 1
+          fi
+
+          if [ ! -s report.md ]; then
+            echo "Error: report.md is missing or empty."
+            exit 1
+          fi
+
+          if gh issue edit "$ISSUE_NUMBER" --body-file report.md; then
             echo "Successfully updated issue #$ISSUE_NUMBER"
           else
-            echo "No issue found with label 'todo-debt-report'. Please ensure the dashboard issue is open."
+            echo "Failed to update issue #$ISSUE_NUMBER. Check permissions."
             exit 1
           fi
