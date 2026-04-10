@@ -184,10 +184,13 @@ class CUDAGraphWrapper:
             self._has_warmup = True
             device = torch.cuda.current_device()
 
-            # warmup in cudagraph memory pool to avoid fragmentation
-            # across eager memory pool and cudagraph memory pool.
+            # Warmup on the current stream so NCCL collectives execute
+            # normally, but allocate from the graph memory pool to avoid
+            # fragmentation between eager and graph pools. We pass
+            # current_stream (not _cg_manager.stream) so no stream
+            # switch occurs — NCCL stays on the stream it was init'd on.
             with _use_cuda_memory_pool_manager(
-                device, _cg_manager.graph_pool, _cg_manager.stream
+                device, _cg_manager.graph_pool, torch.cuda.current_stream()
             ):
                 out = self._runnable(*args)
             return out
@@ -198,15 +201,13 @@ class CUDAGraphWrapper:
             self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
             ]
-
             self._cudagraph = torch.cuda.CUDAGraph()
-
             with torch.cuda.graph(
                 self._cudagraph,
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
+                capture_error_mode="thread_local",
             ):
-                # `output` is managed by pytorch's cudagraph pool
                 self._output = self._runnable(*args)
 
         if self._should_check_address:
