@@ -323,6 +323,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.compile, parallel_dims=parallel_dims
         )
 
+        # Wrap loss function with ChunkedCELoss if configured
+        if config.training.loss_num_chunks > 1:
+            if not isinstance(self.loss_fn, ChunkedCELossFactory):
+                self.loss_fn = ChunkedCELossFactory(
+                    num_chunks=config.training.loss_num_chunks,
+                    loss_fn=self.loss_fn,
+                )
+
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
         if global_batch_size < 0:
