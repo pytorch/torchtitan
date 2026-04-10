@@ -77,9 +77,11 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         hf_assets_path: str = "",
         transfer_dtype: str = "",
+        kl_coef: float = 0.0,
     ):
         self.config = config
         self.model_spec = model_spec
+        self.kl_coef = kl_coef
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
@@ -127,13 +129,17 @@ class PolicyTrainer(Actor, Configurable):
         self.model = model
         self.model_parts = [model]
 
-        # Create reference model for KL divergence (frozen copy of initial policy)
-        # TODO: Move ref_model to a separate actor so it can live on different GPUs
-        ref_model = self._build_model(model_spec, config, device_type, hf_assets_path)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        self.ref_model = ref_model
+        # Conditionally build frozen reference model for KL penalty
+        if kl_coef > 0:
+            ref_model = self._build_model(
+                model_spec, config, device_type, hf_assets_path
+            )
+            ref_model.eval()
+            ref_model.requires_grad_(False)
+            self.ref_model = ref_model
+            logger.info(f"Built frozen reference model (kl_coef={kl_coef})")
+        else:
+            self.ref_model = None
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -301,27 +307,24 @@ class PolicyTrainer(Actor, Configurable):
         my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
         my_advantages = advantages[my_indices]
 
-        # Compute reference log probs using frozen ref_model (local shard only)
-        ref_token_log_probs = []
-        device = next(self.model.parameters()).device
-        with torch.no_grad():
-            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
-                token_lps = compute_token_log_probs(
-                    self.ref_model,
-                    prompt_toks,
-                    gen_toks,
-                    device,
-                )
-                ref_token_log_probs.append(token_lps)
+        # Compute reference model log probs if KL penalty is enabled
+        ref_token_log_probs = None
+        if self.ref_model is not None:
+            ref_token_log_probs = []
+            with torch.no_grad():
+                for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
+                    ref_lps = compute_token_log_probs(
+                        self.ref_model, prompt_toks, gen_toks, self.device
+                    )
+                    ref_token_log_probs.append(ref_lps)
 
-        # Compute loss on this rank's shard
         loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
             self.model,
             my_token_ids,
             my_prompt_token_ids,
             my_advantages,
-            ref_token_log_probs,
-            kl_coef=0.1,
+            ref_token_log_probs=ref_token_log_probs,
+            kl_coef=self.kl_coef,
         )
 
         # Verify logprob identity (local shard)
