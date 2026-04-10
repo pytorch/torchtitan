@@ -10,9 +10,14 @@ on:
 
   # 3. Triggered if the script or the action configuration is changed
   push:
-    paths:
-      - .github/workflows/todo_debt_tracker.yaml
-      - .github/scripts/todo_debt_tracker.py
+    branches: [main]
+    paths: &shared_paths
+      - '.github/workflows/todo_debt_tracker.yaml'
+      - '.github/scripts/todo_debt_tracker.py'
+
+  pull_request:
+    branches: [main]
+    paths: *shared_paths
 
 jobs:
   check_todos:
