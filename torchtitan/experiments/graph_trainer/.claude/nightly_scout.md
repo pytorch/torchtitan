@@ -60,9 +60,10 @@ gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 
 Build a list of items that originated from prior nightly scout reports
 (look for "Nightly Scout Report" in item bodies). Note their current
-status — items already in **Done** are resolved, items in **In Progress**
-or **Need Review** are being handled by AutoDev, and items still in
-**Backlog** or **Ready** haven't been started yet.
+status — items in **Done** or **Abort** are resolved and should not be
+recreated, items in **In Progress** or **Need Review** are being handled
+by AutoDev, and items still in **Backlog** or **Ready** haven't been
+started yet.
 
 Do not create duplicate board items for issues that already have one.
 For existing items, only add a status update comment if the situation
@@ -394,10 +395,9 @@ Before creating new items, check the board for duplicates:
 gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
 ```
 
-If a board item already exists for a reported action item (match by title or
-description), do NOT create a duplicate. Instead, add a comment to the
-existing item noting "Re-flagged by nightly scout YYYY-MM-DD" with any
-status update.
+Compare each action item against existing board items by title and
+description. If an item already covers the same issue, skip it — do not
+create a duplicate.
 
 ### 8c. Create Backlog drafts
 
@@ -406,7 +406,7 @@ already have board items), create a draft issue on the board:
 
 ```bash
 gh project item-create <BOARD_NUMBER> --owner <BOARD_OWNER> \
-    --title "[Pn] Short description" \
+    --title "[NightlyScout][Pn] Short description" \
     --body "$(cat <<'EOF'
 **Source:** Nightly Scout Report — YYYY-MM-DD
 **Priority:** P0 / P1 / P2
@@ -427,7 +427,8 @@ EOF
 
 Rules:
 - **One board item per action item.** Do not bundle multiple items.
-- **Priority in the title.** Use `[P0]`, `[P1]`, or `[P2]` prefix.
+- **Title prefix.** Always use `[NightlyScout][Pn]` so items are identifiable
+  on the board and §8b can filter for duplicates.
 - **Actionable descriptions.** Include enough context that the AutoDev agent
   can pick up the item without re-reading the full nightly report.
 - **New findings only.** Carried-forward items from prior reports that already
