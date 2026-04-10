@@ -30,6 +30,7 @@ permissions:
 
 jobs:
   build-test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.aws.h100.8
@@ -65,5 +66,8 @@ jobs:
 
         # Run the DeepSeek numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "dsv3"
+
+        # Run bitwise deterministic guardrail test (includes H100-only hardcoded-hash tests)
+        pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
