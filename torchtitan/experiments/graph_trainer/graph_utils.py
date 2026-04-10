@@ -21,6 +21,8 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 
+from torch.utils._pytree import TreeSpec
+
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -45,7 +47,11 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
 
 
 def export_joint(
-    model, args, kwargs=None, dump_folder: str | None = None
+    model,
+    args,
+    kwargs=None,
+    dump_folder: str | None = None,
+    precompile: bool = False,
 ) -> tuple[JointWithDescriptors, TracingContext]:
     """
     Export joint forward-backward graph with AOT Autograd.
@@ -55,27 +61,40 @@ def export_joint(
         args: Tuple of input arguments
         kwargs: Dict of keyword arguments for the model
         dump_folder: Optional folder to dump the graph to
+        precompile: If True, enable compile-on-one-rank (CooR) so that
+            ProcessGroups flow through the graph as opaque inputs instead
+            of being baked as string-literal PG names. This makes the
+            serialized artifact rank-agnostic.
     """
     if kwargs is None:
         kwargs = {}
     assert isinstance(args, tuple)
     assert isinstance(kwargs, dict)
-    with (
-        # TODO Investigate error on MOE model with use_grouped_mm=False.
-        # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
-        torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
-        torch.fx.traceback.preserve_node_meta(),
-    ):
-        gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
-        _dump_gm(dump_folder, gm, "dynamo_gm")
 
-        tracing_context = gm.meta["tracing_context"]
+    import torch.distributed.config as dist_config
 
-    with tracing(tracing_context):
-        return (
-            aot_export_joint_with_descriptors_alone(gm, args, kwargs),
-            tracing_context,
-        )
+    coor_ctx = (
+        dist_config.patch("compile_on_one_rank", True)
+        if precompile
+        else contextlib.nullcontext()
+    )
+    with coor_ctx:
+        with (
+            # TODO Investigate error on MOE model with use_grouped_mm=False.
+            # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
+            torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
+            torch.fx.traceback.preserve_node_meta(),
+        ):
+            gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
+            _dump_gm(dump_folder, gm, "dynamo_gm")
+
+            tracing_context = gm.meta["tracing_context"]
+
+        with tracing(tracing_context):
+            return (
+                aot_export_joint_with_descriptors_alone(gm, args, kwargs),
+                tracing_context,
+            )
 
 
 def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
@@ -111,6 +130,8 @@ def joint_graph_builder(
     joint_custom_passes: list[Callable] | None = None,
     dump_folder: str | None = None,
     compile_config: CompileConfig | None = None,
+    serializable: bool = False,
+    on_compile: Callable[[Any, TreeSpec | None], None] | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -123,7 +144,10 @@ def joint_graph_builder(
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
-        job_config: Job configuration
+        compile_config: Compile configuration
+        serializable: If True, compile with serialization support
+        on_compile: Optional callback invoked after compilation with
+            (compiled_fn, out_spec)
     """
     assert isinstance(model_args, tuple)
 
@@ -133,6 +157,7 @@ def joint_graph_builder(
         model_args,
         model_kwargs,
         dump_folder=dump_folder,
+        precompile=serializable,
     )
 
     # Check if inductor_decomposition is configured and create the pass with proper context
@@ -163,8 +188,14 @@ def joint_graph_builder(
 
     with tracing(tracing_context):
         fn = aot_compile_joint_with_descriptors(
-            joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
+            joint_with_descriptors,
+            fw_compiler=fw_compiler,
+            bw_compiler=bw_compiler,
+            serializable=serializable,
         )
+
+    if on_compile is not None:
+        on_compile(fn, joint_with_descriptors.out_spec)
 
     def wrapper_fn(args, kwargs):
         inputs = [
@@ -184,6 +215,7 @@ class CompiledModule(Module):
         parallel_dims: ParallelDims,
         joint_graph_builder: Callable,
         parallelize_inputs: Callable,
+        precompiled_fn: Callable | None = None,
         **overrides,
     ) -> None:
         super().__init__()
@@ -192,6 +224,7 @@ class CompiledModule(Module):
 
         self.joint_graph_builder = joint_graph_builder
         self.joint_graph_module = None
+        self.precompiled_fn = precompiled_fn
 
         self.parallelize_inputs = parallelize_inputs
 
@@ -220,13 +253,16 @@ class CompiledModule(Module):
         else:
             super().__delattr__(name)
 
-    def init_weights(self, **kwargs) -> None:
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
         # Explicitly delegate to inner model. Without this override,
-        # Module.init_weights (a no-op) would be found via MRO before
-        # the overwritten __getattr__ is triggered, silently skipping
-        # weight initialization.
+        # Module.init_states would be found via MRO before the overwritten
+        # __getattr__ is triggered, silently skipping weight initialization.
         # This is similar to state_dict, load_state_dict, ...
-        self.inner.init_weights(**kwargs)
+        self.inner.init_states(buffer_device=buffer_device)
 
     def state_dict(self, *args, **kwargs) -> Any:
         return self.inner.state_dict(*args, **kwargs)
@@ -246,9 +282,12 @@ class CompiledModule(Module):
         dt_args, dt_kwargs = self.parallelize_inputs(self.parallel_dims, args, kwargs)
 
         if self.joint_graph_module is None:
-            self.joint_graph_module = self.joint_graph_builder(
-                self.inner, dt_args, dt_kwargs
-            )
+            if self.precompiled_fn is not None:
+                self.joint_graph_module = self.precompiled_fn
+            else:
+                self.joint_graph_module = self.joint_graph_builder(
+                    self.inner, dt_args, dt_kwargs
+                )
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
@@ -460,6 +499,23 @@ def get_compiler_passes_from_config(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],
                     fsdp_manual_buckets=get_transformer_block_buckets(model),
+                )
+            )
+        elif pass_name == "regional_inductor" and getattr(
+            compile_config, "precompile_artifact_dir", ""
+        ):
+            # regional_inductor needs an explicit serializable=True at
+            # the pass level so it produces serializable RegionalOutputCode.
+            # full_inductor_compilation does NOT need a pass-level flag:
+            # compile_fx_inner already returns a CompiledFxGraph that is
+            # natively serializable, so aot_compile_joint_with_descriptors
+            # (called with serializable=True in joint_graph_builder) can
+            # bundle it into a BundledAOTAutogradSerializableCallable
+            # without any pass-level cooperation.
+            compiler_passes.append(
+                functools.partial(
+                    AVAILABLE_COMPILER_PASSES[pass_name],
+                    serializable=True,
                 )
             )
         else:

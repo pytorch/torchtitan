@@ -9,5 +9,6 @@
 # Exclude the experiments directory by adding a pattern without owners
 /torchtitan/experiments/
 
-# codeowners for experiments/forge
-/torchtitan/experiments/forge/* @joecummings @felipemello1 @daniellepintz @allenwang28 @tianyu-l @wwwjn @fegin
+/torchtitan/experiments/forge/ @joecummings @felipemello1 @daniellepintz @tianyu-l @wwwjn @fegin
+
+/torchtitan/experiments/graph_trainer/ @yiming0416 @tianyu-l @SherlockNoMad @xmfan @aditvenk
