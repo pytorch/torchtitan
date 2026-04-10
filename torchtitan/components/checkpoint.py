@@ -26,6 +26,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -62,7 +63,14 @@ class AsyncMode(str, enum.Enum):
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.cache_state_dict = self._get_state_dict()
+
+    def _get_hooks(self):
+        """Return the ConverterCheckpointHooks from the first model part that has them."""
+        for part in self.model:
+            hooks = getattr(part, "_converter_hooks", None)
+            if hooks is not None:
+                return hooks
+        return None
 
     def _get_state_dict(self) -> dict[str, Any]:
         state_dict = {
@@ -70,8 +78,21 @@ class ModelWrapper(Stateful):
         }
         return state_dict
 
+    def base_state_dict(self) -> dict[str, Any]:
+        """Return state dict with only the original model keys (before converters)."""
+        hooks = self._get_hooks()
+        if hooks is None or hooks.key_filter is None:
+            return self._get_state_dict()
+        full_sd = self._get_state_dict()
+        return {k: v for k, v in full_sd.items() if not hooks.key_filter(k)}
+
     def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
+        """Adapter-only keys if hooks.key_filter is set, otherwise full state dict."""
+        hooks = self._get_hooks()
+        if hooks is not None and hooks.key_filter is not None:
+            full_sd = self._get_state_dict()
+            return {k: v for k, v in full_sd.items() if hooks.key_filter(k)}
+        return self._get_state_dict()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -80,9 +101,6 @@ class ModelWrapper(Stateful):
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
-        # `set_model_state_dict()` does change the keys of the input state_dict,
-        # we will need to reinitialize the cache_state_dict.
-        self.cache_state_dict = self._get_state_dict()
 
 
 class Terminate:
@@ -281,6 +299,15 @@ class CheckpointManager(Configurable):
         This will load the model only, excluding the specified keys.
         """
 
+        additional_load_paths: list[str] = field(default_factory=list)
+        """
+        Additional checkpoint paths to load from after the primary checkpoint.
+        Useful for loading state dicts from multiple sources, e.g., base model
+        weights from one checkpoint and converter-specific weights from another.
+        Each path should contain a valid DCP checkpoint, or a converter-specific
+        format if the model has a ``_converter_hooks.load_additional_fn`` attribute.
+        """
+
         enable_first_step_checkpoint: bool = False
         """
         Enable the checkpoint save at first step. This will save a checkpoint immediately
@@ -358,8 +385,15 @@ class CheckpointManager(Configurable):
                 sd_adapter is not None
             ), "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
         self.sd_adapter = sd_adapter
+
+        # Inject from_hf_map into converter hooks so save/load fns can remap keys
+        hooks = self.states[MODEL]._get_hooks()
+        if hooks is not None and sd_adapter is not None:
+            hooks.from_hf_map = getattr(sd_adapter, "from_hf_map", None)
+
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.exclude_from_loading = config.exclude_from_loading
+        self.additional_load_paths = config.additional_load_paths
         self.interval = config.interval
         self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
@@ -514,41 +548,70 @@ class CheckpointManager(Configurable):
     def dcp_load(
         self,
         state_dict: dict[str, Any],
-        checkpoint_id: str,
+        checkpoint_ids: list[str],
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        """Load the checkpoint with dcp.
+        """Load the checkpoint(s) with dcp.
+
         Args:
             state_dict (dict): The state dict to load.
-            checkpoint_id (str): The checkpoint id to load.
-            from_hf (bool): Whether to load from HuggingFace checkpoint with
-                its own model definition and safetensors format.
+            checkpoint_ids (list[str]): The checkpoint ids to load.
+                The first checkpoint is treated as the primary checkpoint.
+                Additional checkpoints use the model's
+                ``_converter_hooks.load_additional_fn`` if available, otherwise DCP.
+            from_hf (bool): Whether to load the primary checkpoint from
+                HuggingFace safetensors format.
+            from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
         """
+        hooks = self.states[MODEL]._get_hooks()
+        has_converter_keys = hooks is not None and hooks.key_filter is not None
+        needs_partial = len(checkpoint_ids) > 1 or has_converter_keys
+        planner = DefaultLoadPlanner(allow_partial_load=needs_partial)
 
-        if from_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-                checkpoint_id, from_quantized
-            )
+        for i, cid in enumerate(checkpoint_ids):
+            is_primary = i == 0
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
-
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
-        else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
-
-            # TODO: Since we flatten the model states in state_dict, we need to
-            # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
-                self.states[MODEL].load_state_dict(state_dict)
+            if is_primary:
+                if from_hf:
+                    # HF format: model only, training states from additional checkpoints
+                    if self.sd_adapter is None:
+                        raise ValueError(
+                            "Trying to load HF safetensors but sd_adapter is not provided."
+                        )
+                    hf_state_dict = self.sd_adapter.to_hf(
+                        self.states[MODEL].base_state_dict()
+                    )
+                    hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
+                        cid, from_quantized
+                    )
+                    dcp.load(
+                        hf_state_dict,
+                        storage_reader=hf_storage_reader,
+                        planner=planner,
+                    )
+                    converted_sd = self.sd_adapter.from_hf(hf_state_dict)
+                    if MODEL in self.states:
+                        self.states[MODEL].load_state_dict(converted_sd)
+                else:
+                    dcp.load(state_dict, checkpoint_id=cid, planner=planner)
+                    if MODEL in self.states:
+                        self.states[MODEL].load_state_dict(state_dict)
+            else:
+                load_fn = hooks.load_additional_fn if hooks is not None else None
+                if load_fn is not None:
+                    # Converter-provided load (e.g. PEFT safetensors)
+                    load_fn(
+                        cid,
+                        self.states[MODEL].model,
+                        hooks,
+                    )
+                else:
+                    # DCP: load all available states (model + training info).
+                    # This overwrites corresponding states from primary.
+                    dcp.load(state_dict, checkpoint_id=cid, planner=planner)
+                    if MODEL in self.states:
+                        self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -631,6 +694,12 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
+        for path in self.additional_load_paths:
+            if not os.path.isdir(path):
+                raise ValueError(
+                    f"checkpoint.additional_load_paths contains invalid path: {path}"
+                )
+
         model_only = False
         from_hf = False
         from_quantized = False
@@ -702,7 +771,7 @@ class CheckpointManager(Configurable):
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
-            checkpoint_id=checkpoint_id,
+            checkpoint_ids=[checkpoint_id] + self.additional_load_paths,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
@@ -758,6 +827,35 @@ class CheckpointManager(Configurable):
         folder = folder if folder else self.folder
         return os.path.join(folder, f"step-{step}")
 
+    def _ft_save(self, step: int) -> None:
+        begin = time.monotonic()
+        self._async_wait()
+        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
+        self.save_future = self.dcp_save(
+            self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
+        )
+        logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
+
+    def _ft_load(self) -> None:
+        step = self._find_load_step(folder=self._ft_folder())
+        if step == -1:
+            return
+
+        begin = time.monotonic()
+        logger.info(f"Loading the FT checkpoint at step {step}.")
+        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
+        self.dcp_load(
+            self.ft_states,
+            checkpoint_ids=[checkpoint_id],
+            # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
+            from_hf=False,
+            from_quantized=False,
+        )
+        GarbageCollection.collect("GC collection for checkpoint loading.")
+        logger.info(
+            f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
+        )
+
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -805,8 +903,15 @@ class CheckpointManager(Configurable):
         # conversion when we are checkpointing model only and the current dtype
         # is not the same as the export dtype at the end of the training.
 
+        # Run converter finalization (e.g. LoRA merge) before extracting state dict.
+        model_wrapper = self.states[MODEL]
+        hooks = model_wrapper._get_hooks()
+        if hooks is not None and hooks.finalize_fn is not None:
+            hooks.finalize_fn()
+
         if self.last_save_model_only:
-            states = self.states[MODEL].state_dict()
+            # After finalize, _get_state_dict() returns the right (merged) base weights
+            states = model_wrapper.state_dict()
 
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
@@ -822,6 +927,17 @@ class CheckpointManager(Configurable):
             assert (
                 self.last_save_model_only
             ), "Only model can be saved when saving in HF safetensors format."
+
+        # Converter-provided last-step save (e.g. PEFT format)
+        save_last_fn = hooks.save_last_fn if hooks is not None else None
+        if (
+            self.last_save_in_hf
+            and self.last_save_model_only
+            and save_last_fn is not None
+        ):
+            checkpoint_dir = self._create_checkpoint_id(curr_step)
+            save_last_fn(states, checkpoint_dir, hooks)
+            return
 
         self.dcp_save(
             states,

@@ -3,6 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -12,6 +13,17 @@ from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
+
+
+@dataclass
+class ConverterCheckpointHooks:
+    """Hooks attached to a model by converters for checkpoint integration."""
+
+    key_filter: Callable[[str], bool] | None = None
+    save_last_fn: Callable | None = None
+    load_additional_fn: Callable | None = None
+    finalize_fn: Callable | None = None
+    from_hf_map: dict[str, str | None] | None = None
 
 
 class ModelConverter(Protocol):
@@ -29,6 +41,14 @@ class ModelConverter(Protocol):
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
+        ...
+
+    def finalize(self, model: nn.Module) -> None:
+        """End-of-training hook called before the last checkpoint save.
+
+        Examples: LoRA merge (fold adapter weights into base weights),
+        QAT CONVERT (replace fake-quantized modules with real quantized ones).
+        """
         ...
 
 
@@ -79,9 +99,24 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         if self.print_after_conversion:
             logger.info(f"Model definition after conversion:\n\n{model}\n\n")
 
+        # Attach finalize into existing hooks (or create new hooks)
+        hooks = getattr(model, "_converter_hooks", None) or ConverterCheckpointHooks()
+        hooks.finalize_fn = lambda: self.finalize(model)
+        model._converter_hooks = hooks  # type: ignore[attr-defined]
+
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
+
+    def finalize(self, model: nn.Module) -> None:
+        """Run end-of-training finalization in reverse converter order.
+
+        Reverse order ensures proper composition: e.g. LoRA merge happens
+        before QAT CONVERT so that adapters are folded into base weights
+        before real quantization is applied.
+        """
+        for mh in reversed(self.converters):
+            mh.finalize(model)
 
 
 def _validate_converter_ordering(converters: list[Configurable.Config]):

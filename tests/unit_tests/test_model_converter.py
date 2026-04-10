@@ -170,3 +170,32 @@ def test_lora_target_modules():
     assert not hasattr(model.attention.wo, "lora_a")
     assert not hasattr(model.w1, "lora_a")
     assert not hasattr(model.w2, "lora_a")
+
+
+def test_lora_key_remap_roundtrip():
+    """Remap torchtitan LoRA keys to HF and back, verify roundtrip."""
+    from torchtitan.components.lora import (
+        remap_lora_keys_from_hf,
+        remap_lora_keys_to_hf,
+    )
+
+    from_hf_map = {
+        "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+        "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+    }
+
+    tt_sd = {
+        "layers.0.attention.wq.lora_a.weight": torch.randn(8, 64),
+        "layers.0.attention.wq.lora_b.weight": torch.randn(64, 8),
+        "layers.2.feed_forward.w1.lora_a.weight": torch.randn(8, 64),
+    }
+
+    hf_sd = remap_lora_keys_to_hf(tt_sd, from_hf_map)
+    assert "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight" in hf_sd
+    assert "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight" in hf_sd
+    assert "base_model.model.model.layers.2.mlp.gate_proj.lora_A.weight" in hf_sd
+
+    rt_sd = remap_lora_keys_from_hf(hf_sd, from_hf_map)
+    assert set(rt_sd.keys()) == set(tt_sd.keys())
+    for k in tt_sd:
+        assert torch.equal(rt_sd[k], tt_sd[k])
