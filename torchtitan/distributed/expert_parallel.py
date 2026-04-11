@@ -166,7 +166,7 @@ class ExpertParallel(BaseExpertParallel):
             input_splits = (
                 num_tokens_per_expert.view(ep_degree, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=False)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
@@ -504,7 +504,7 @@ class TorchAOExpertParallel(ExpertParallel):
             input_splits = (
                 num_tokens_per_expert.view(ep_degree, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=False)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
