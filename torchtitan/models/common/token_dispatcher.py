@@ -61,7 +61,6 @@ class BaseTokenDispatcher(Configurable):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
         """Reorder and (optionally) dispatch tokens to experts.
 
@@ -69,7 +68,6 @@ class BaseTokenDispatcher(Configurable):
             x: (num_tokens, dim) all input tokens
             top_scores: (num_tokens, top_k) routing scores
             selected_experts_indices: (num_tokens, top_k) expert indices per token
-            num_tokens_per_expert: (num_experts,) token counts per expert
 
         Returns:
             routed_input: (R, dim) tokens ready for expert computation, padded for alignment
@@ -109,7 +107,6 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
         # TODO: Extract this local reordering block (histc, argsort, score
         # application) into a shared helper — it's duplicated in
@@ -175,7 +172,6 @@ class TokenDispatcher(BaseTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
         ep_degree = self.ep_degree
 
@@ -462,7 +458,6 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         num_local_experts = self.num_experts // self.ep_degree
 

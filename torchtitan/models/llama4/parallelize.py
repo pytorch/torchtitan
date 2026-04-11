@@ -38,6 +38,7 @@ from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
+    ExpertSequenceParallel,
     ExpertTensorParallel,
     TensorParallel,
 )
@@ -546,14 +547,6 @@ def apply_moe_ep_tp(
                     local_output_grad_placements=(Partial(),),
                 ),
             }
-            if ep_mesh is not None and etp_mesh is None:
-                # ETP=1: EP borrows from TP, requires ReordererSequenceParallel
-                # to split tokens across TP ranks. Not yet supported with
-                # the new token dispatcher.
-                raise NotImplementedError(
-                    "EP>1 with ETP=1 and TP>1 requires ReordererSequenceParallel, "
-                    "which is not yet supported yet with the new token dispatcher."
-                )
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
                 # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
@@ -600,9 +593,14 @@ def apply_moe_ep_tp(
                 )
             if comm_backend in ("deepep", "hybridep"):
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            # Weight sharding only — dispatch/combine handled by
-            # the token dispatcher (selected at config time or rebuilt below).
-            experts_plan = ExpertParallel()
+            if tp_mesh is not None:
+                # ETP=1: EP borrows from TP. Each EP rank processes a
+                # disjoint token subset (sequence parallel).
+                experts_plan = ExpertSequenceParallel()
+            else:
+                # Weight sharding only — dispatch/combine handled by
+                # the token dispatcher (selected at config time or rebuilt below).
+                experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
                 raise NotImplementedError(

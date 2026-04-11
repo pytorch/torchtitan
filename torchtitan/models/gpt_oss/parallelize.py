@@ -286,12 +286,12 @@ def apply_moe_ep_tp(
                 ),
             }
             if ep_mesh is not None and not etp_enabled:
-                # ETP=1: EP borrows from TP, requires ReordererSequenceParallel
-                # to split tokens across TP ranks. Not yet supported with
-                # the new token dispatcher.
+                # ETP=1: EP borrows from TP, requires ExpertSequenceParallel
+                # to split tokens across EP ranks. Not yet supported for
+                # gpt_oss.
                 raise NotImplementedError(
-                    "EP>1 with ETP=1 and TP>1 requires ReordererSequenceParallel, "
-                    "which is not yet supported with the new token dispatcher."
+                    "EP>1 with ETP=1 and TP>1 requires ExpertSequenceParallel, "
+                    "which is not yet supported for gpt_oss."
                 )
 
             parallelize_module(

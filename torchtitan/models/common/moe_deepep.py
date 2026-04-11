@@ -75,7 +75,6 @@ class DeepEPMoE(MoE):
         # shared_experts computation below.
         routed_output, _metadata = self.experts(
             x,
-            num_tokens_per_expert,
             top_scores,
             selected_experts_indices,
         )

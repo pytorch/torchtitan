@@ -123,7 +123,6 @@ class GroupedExperts(Module):
     def forward(
         self,
         x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, object]:
@@ -134,7 +133,7 @@ class GroupedExperts(Module):
         shared_experts with the async combine all-to-all.
         """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
-            x, top_scores, selected_experts_indices, num_tokens_per_expert
+            x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
         routed_output = self.token_dispatcher.combine(routed_output, metadata)
@@ -373,7 +372,7 @@ class MoE(Module):
         # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
         #   w1/w3, Rowwise on w2) produce Partial output gradients.
         # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
+        #   (via ExpertSequenceParallel), so grad(x) is non-zero only at
         #   each rank's token positions(Partial).
         #
         # This holds for all MoE components (router.gate, routed experts, shared
@@ -410,7 +409,6 @@ class MoE(Module):
         # (the a2a is still in flight on the NCCL stream).
         routed_output, metadata = self.experts(
             x,
-            num_tokens_per_expert,
             top_scores,
             selected_experts_indices,
         )
