@@ -325,9 +325,7 @@ class FaultTolerantTrainer(Trainer):
             sd_transforms=sd_transforms,
             base_folder=config.dump_folder,
             ft_manager=self.ft_manager,
-            key_filter=model_converters.key_filter(),
-            state_dict_transform=model_converters.state_dict_transform(),
-            converter_sd_adapters=model_converters.converter_sd_adapters(),
+            model_converters=model_converters,
         )
 
         loss_parallel_enabled = (

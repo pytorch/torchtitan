@@ -869,7 +869,7 @@ class TestMultiSourceLoading(unittest.TestCase):
 
                     lora_filter = lambda k: "lora" in k  # noqa: E731
                     converter_adapter = None
-                    converter_sd_adapters = None
+                    model_converters = None
 
                     if use_adapter:
                         converter_adapter = mock.Mock()
@@ -882,7 +882,12 @@ class TestMultiSourceLoading(unittest.TestCase):
                         converter_adapter.get_hf_storage_reader.return_value = (
                             mock.Mock()
                         )
-                        converter_sd_adapters = [(converter_adapter, lora_filter)]
+                        model_converters = mock.Mock()
+                        model_converters.key_filter.return_value = lora_filter
+                        model_converters.state_dict_transform.return_value = None
+                        model_converters.converter_sd_adapters.return_value = [
+                            (converter_adapter, lora_filter)
+                        ]
 
                     cfg = CheckpointManager.Config(
                         enable=True,
@@ -907,8 +912,7 @@ class TestMultiSourceLoading(unittest.TestCase):
                             config=cfg,
                             sd_transforms=StateDictTransforms(),
                             base_folder=temp_dir,
-                            key_filter=lora_filter if use_adapter else None,
-                            converter_sd_adapters=converter_sd_adapters,
+                            model_converters=model_converters,
                         )
 
                     manager.save(curr_step=1)

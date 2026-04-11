@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -39,7 +38,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.state_dict_transforms import StateDictTransforms
 from torchtitan.experiments.ft.manager import FTManager
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -84,11 +83,7 @@ class FTCheckpointManager(CheckpointManager):
         sd_transforms: StateDictTransforms,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
-        key_filter: Callable[[str], bool] | None = None,
-        state_dict_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-        converter_sd_adapters: (
-            list[tuple[BaseStateDictAdapter, Callable[[str], bool]]] | None
-        ) = None,
+        model_converters: ModelConvertersContainer | None = None,
     ) -> None:
         # Initialize the base checkpoint manager (without FT)
         super().__init__(
@@ -100,9 +95,7 @@ class FTCheckpointManager(CheckpointManager):
             states=states,
             sd_transforms=sd_transforms,
             base_folder=base_folder,
-            key_filter=key_filter,
-            state_dict_transform=state_dict_transform,
-            converter_sd_adapters=converter_sd_adapters,
+            model_converters=model_converters,
         )
 
         self.ft_manager = (

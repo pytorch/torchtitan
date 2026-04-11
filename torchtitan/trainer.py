@@ -467,9 +467,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             states={"train_state": self},
             sd_transforms=sd_transforms,
             base_folder=config.dump_folder,
-            key_filter=model_converters.key_filter(),
-            state_dict_transform=model_converters.state_dict_transform(),
-            converter_sd_adapters=model_converters.converter_sd_adapters(),
+            model_converters=model_converters,
         )
 
         loss_parallel_enabled = (

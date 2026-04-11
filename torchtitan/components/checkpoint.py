@@ -44,6 +44,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.state_dict_transforms import StateDictTransforms
 from torchtitan.config import Configurable
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -388,11 +389,7 @@ class CheckpointManager(Configurable):
         states: dict[str, Any],
         sd_transforms: StateDictTransforms,
         base_folder: str = "",
-        key_filter: Callable[[str], bool] | None = None,
-        state_dict_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-        converter_sd_adapters: (
-            list[tuple[BaseStateDictAdapter, Callable[[str], bool]]] | None
-        ) = None,
+        model_converters: ModelConvertersContainer | None = None,
     ) -> None:
         self.enable = config.enable
         self.load_only = config.load_only
@@ -402,15 +399,23 @@ class CheckpointManager(Configurable):
             {
                 MODEL: ModelWrapper(
                     model_parts,
-                    key_filter=key_filter,
-                    state_dict_transform=state_dict_transform,
+                    key_filter=(
+                        model_converters.key_filter() if model_converters else None
+                    ),
+                    state_dict_transform=(
+                        model_converters.state_dict_transform()
+                        if model_converters
+                        else None
+                    ),
                 ),
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
             }
         )
-        self._converter_sd_adapters = converter_sd_adapters or []
+        self._converter_sd_adapters = (
+            model_converters.converter_sd_adapters() if model_converters else []
+        )
 
         # Config fields — always initialized so the object has a consistent
         # shape regardless of whether checkpointing is enabled.
