@@ -182,7 +182,6 @@ def remove_identity_slice_pass(
     return gm
 
 
-
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -203,6 +202,10 @@ def construct_default_graph_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # produce bitwise identical results to the eager Trainer path.
+        # When left uncompiled, flex_attention still runs correctly but
+        # produces different numerical results.
         annotate_flex_attention_for_regional_inductor_pass,
         regional_inductor_pass,
     ]
