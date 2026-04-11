@@ -30,7 +30,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.expert_parallel import ExpertParallel
+from torchtitan.distributed.expert_parallel import (
+    ExpertParallel,
+    ExpertSequenceParallel,
+)
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama3.parallelize import apply_replicate
@@ -286,13 +289,10 @@ def apply_moe_ep_tp(
                 ),
             }
             if ep_mesh is not None and not etp_enabled:
-                # ETP=1: EP borrows from TP, requires ExpertSequenceParallel
-                # to split tokens across EP ranks. Not yet supported for
-                # gpt_oss.
-                raise NotImplementedError(
-                    "EP>1 with ETP=1 and TP>1 requires ExpertSequenceParallel, "
-                    "which is not yet supported for gpt_oss."
-                )
+                # ETP=1: EP borrows from TP. Token splitting is handled by
+                # ExpertSequenceParallel (applied to moe.experts below),
+                # not here in the TP plan.
+                pass
 
             parallelize_module(
                 # pyrefly: ignore [bad-argument-type]
@@ -309,9 +309,14 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # Weight sharding only — dispatch/combine handled by
-            # the token dispatcher (selected at config time or rebuilt below).
-            experts_plan = ExpertParallel()
+            if tp_mesh is not None:
+                # ETP=1: EP borrows from TP. Each EP rank processes a
+                # disjoint token subset (sequence parallel).
+                experts_plan = ExpertSequenceParallel()
+            else:
+                # Weight sharding only — dispatch/combine handled by
+                # the token dispatcher (selected at config time or rebuilt below).
+                experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
                 raise NotImplementedError(

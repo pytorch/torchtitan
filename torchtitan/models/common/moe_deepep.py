@@ -19,9 +19,9 @@ from .moe import MoE
 class DeepEPMoE(MoE):
     """MoE with DeepEP communication.
 
-    Overrides forward() to insert an explicit sync_combine() barrier.
-    DeepEP's combine is async — unlike NCCL all-to-all which synchronizes
-    implicitly, DeepEP requires a manual sync for combine to complete.
+    Overrides forward() because DeepEP's combine requires an explicit
+    sync_combine() call, unlike NCCL which syncs implicitly when the
+    AsyncCollectiveTensor is materialized.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -79,12 +79,15 @@ class DeepEPMoE(MoE):
             selected_experts_indices,
         )
 
-        # shared_experts overlaps with the async combine communication
-        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+        # shared_experts runs in parallel with combine communication.
+        # This is the key optimization - we overlap compute with communication.
+        out = self.shared_experts(x) if self.shared_experts is not None else None
 
         # Sync the combine operation before using routed_output.
+        # This inserts a CUDA stream wait, ensuring combine is complete before
+        # the subsequent addition or reshape operations read routed_output.
         sync_combine()
 
-        if shared_out is None:
+        if out is None:
             return routed_output.reshape(bs, slen, dim)
-        return (shared_out + routed_output).reshape(bs, slen, dim)
+        return (out + routed_output).reshape(bs, slen, dim)

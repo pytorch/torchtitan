@@ -586,13 +586,13 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            if comm_backend == "deepep" and pad_multiple is not None:
-                raise ValueError(
-                    "DeepEP does not support pad_multiple. "
-                    "Use hybridep or standard comm backend instead."
-                )
             if comm_backend in ("deepep", "hybridep"):
-                logger.info(f"Applying {comm_backend.upper()} to MoE layer")
+                if comm_backend == "deepep" and pad_multiple is not None:
+                    raise ValueError(
+                        "DeepEP does not support pad_multiple. "
+                        "Use hybridep or standard comm backend instead."
+                    )
+                    logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             if tp_mesh is not None:
                 # ETP=1: EP borrows from TP. Each EP rank processes a
                 # disjoint token subset (sequence parallel).
