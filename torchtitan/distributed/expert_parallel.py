@@ -139,8 +139,8 @@ class ExpertSequenceParallel(ExpertParallel):
         #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
         #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
 
-        def _split_along_first_dim(t: torch.Tensor) -> torch.Tensor:
-            assert t.is_contiguous()
+        def _split_along_first_dim(x: torch.Tensor) -> torch.Tensor:
+            assert x.is_contiguous()
             if num_tokens % device_mesh.size() != 0:
                 raise ValueError(
                     "Uneven split of tokens is not supported yet. "
@@ -149,13 +149,15 @@ class ExpertSequenceParallel(ExpertParallel):
             local_num_tokens = num_tokens // device_mesh.size()
             local_rank = device_mesh.get_local_rank()
             offset = local_rank * local_num_tokens
-            return t[offset : offset + local_num_tokens]
+            output = x[offset : offset + local_num_tokens]
+
+            return output
 
         x = _split_along_first_dim(x)
         top_scores = _split_along_first_dim(top_scores)
         selected_experts_indices = _split_along_first_dim(selected_experts_indices)
 
-        # shape (batch_size * seq_len // ep_degree, ...)
+        # shape (batch_size * seq_len // ep_degree, topk)
         return x, top_scores, selected_experts_indices
 
     def _prepare_output_fn(
@@ -164,7 +166,7 @@ class ExpertSequenceParallel(ExpertParallel):
         routed_output, metadata = outputs
 
         local_rank = device_mesh.get_local_rank()
-        if not hasattr(mod, "top_k"):
+        if not hasattr(mod.token_dispatcher, "top_k"):
             raise ValueError(
                 "Expert's TokenDispatcher class in MoE should always have top_k attribute."
             )
