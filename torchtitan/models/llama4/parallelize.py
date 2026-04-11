@@ -599,7 +599,7 @@ def apply_moe_ep_tp(
                 experts_plan = ExpertSequenceParallel()
             else:
                 # Weight sharding only — dispatch/combine handled by
-                # the token dispatcher (selected at config time or rebuilt below).
+                # the token dispatcher.
                 experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:

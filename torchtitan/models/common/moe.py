@@ -426,7 +426,7 @@ class MoE(Module):
             routed_output = (
                 routed_output.to(torch.float32)
                 * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(routed_output.dtype)
+            ).to(x.dtype)
 
         out = deterministic_scatter_add(
             out,

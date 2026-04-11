@@ -157,7 +157,7 @@ class ExpertSequenceParallel(ExpertParallel):
         top_scores = _split_along_first_dim(top_scores)
         selected_experts_indices = _split_along_first_dim(selected_experts_indices)
 
-        # shape (batch_size * seq_len // ep_degree, topk)
+        # shape (batch_size * seq_len // ep_degree, top_k)
         return x, top_scores, selected_experts_indices
 
     def _prepare_output_fn(

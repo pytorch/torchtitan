@@ -288,12 +288,6 @@ def apply_moe_ep_tp(
                     local_output_grad_placements=(Partial(),),
                 ),
             }
-            if ep_mesh is not None and not etp_enabled:
-                # ETP=1: EP borrows from TP. Token splitting is handled by
-                # ExpertSequenceParallel (applied to moe.experts below),
-                # not here in the TP plan.
-                pass
-
             parallelize_module(
                 # pyrefly: ignore [bad-argument-type]
                 module=transformer_block,
@@ -315,7 +309,7 @@ def apply_moe_ep_tp(
                 experts_plan = ExpertSequenceParallel()
             else:
                 # Weight sharding only — dispatch/combine handled by
-                # the token dispatcher (selected at config time or rebuilt below).
+                # the token dispatcher.
                 experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
