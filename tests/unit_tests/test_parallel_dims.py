@@ -211,22 +211,6 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertTrue(parallel_dims.pp_enabled)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
-    def test_fsdp_gradient_divide_factor(self):
-        """Test fsdp_gradient_divide_factor calculation."""
-        parallel_dims = ParallelDims(
-            dp_replicate=2,
-            dp_shard=3,
-            cp=2,
-            tp=1,
-            pp=1,
-            ep=1,
-            etp=1,
-            world_size=12,
-        )
-        # Should be dp_replicate * dp_shard * cp = 2 * 3 * 2 = 12
-        self.assertEqual(parallel_dims.fsdp_gradient_divide_factor, 12)
-
-    @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_non_data_parallel_size(self):
         """Test non_data_parallel_size calculation."""
         parallel_dims = ParallelDims(
@@ -581,9 +565,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertFalse(parallel_dims.ep_enabled)
 
             # Validate calculated properties
-            self.assertEqual(
-                parallel_dims.fsdp_gradient_divide_factor, 4
-            )  # dp_replicate * dp_shard * cp = 2 * 2 * 1
             self.assertEqual(
                 parallel_dims.non_data_parallel_size, 2
             )  # cp * tp * pp = 1 * 2 * 1
