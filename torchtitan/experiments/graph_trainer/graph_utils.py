@@ -351,6 +351,8 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
+    # Only try to print/dump if gm is still a GraphModule
+    # (compile_fx_inner returns a CompiledFxGraph which doesn't have print_readable)
     if hasattr(gm, "print_readable"):
         _dump_gm(dump_folder, gm, f"{name}_after_compiler")
 
