@@ -112,6 +112,15 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
         return iter(self._data)
 
+    def _normalize_positions(self, positions: list[int]) -> list[int]:
+        offset = positions[0]
+        if offset > 0:
+            for i, p in enumerate(positions):
+                if p == 0:
+                    break
+                positions[i] = p - offset
+        return positions
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
 
@@ -122,6 +131,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 sample_tokens = self._tokenizer.encode(
                     sample_text, add_bos=True, add_eos=True
                 )
+
                 self._inputs_buffer.extend(sample_tokens)
                 # Per-document positions reset at document boundaries,
                 # matching inference frameworks (e.g. vLLM) that start
@@ -129,21 +139,22 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 # to stay within the RoPE cache, effectively chunking
                 # long documents into seq_len-sized segments.
                 # TODO: make overflow policy configurable (chunk / truncate / drop).
-                self._positions_buffer.extend(
-                    i % self.seq_len for i in range(len(sample_tokens))
-                )
+                self._positions_buffer.extend(range(len(sample_tokens)))
                 self._sample_idx += 1
 
                 while len(self._inputs_buffer) >= max_buffer_token_len:
                     x = torch.LongTensor(self._inputs_buffer[:max_buffer_token_len])
                     pos = torch.LongTensor(
-                        self._positions_buffer[:max_buffer_token_len]
+                        self._normalize_positions(
+                            self._positions_buffer[:max_buffer_token_len]
+                        )
                     )
                     # update buffers to the remaining tokens
                     self._inputs_buffer = self._inputs_buffer[max_buffer_token_len:]
                     self._positions_buffer = self._positions_buffer[
                         max_buffer_token_len:
                     ]
+
                     input = x[:-1]
                     label = x[1:]
                     positions = pos[:-1]
@@ -272,7 +283,8 @@ class ChatDataset(IterableDataset, Stateful):
                 "ChatDataset requires a tokenizer with a valid EOS token."
             )
 
-        self._data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
+        self._original_data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
+        self._data = self._original_data
         self._tokenizer = tokenizer
         self._eos_id = tokenizer.eos_id
         self.seq_len = seq_len
@@ -381,8 +393,8 @@ class ChatDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # pyrefly: ignore [bad-argument-type]
                 result = self._tokenize_sample(sample)
-                self._sample_idx += 1
                 if result is None:
+                    self._sample_idx += 1
                     continue
 
                 input_ids, label_ids = result
@@ -401,6 +413,7 @@ class ChatDataset(IterableDataset, Stateful):
                 self._inputs_buffer.extend(input_ids)
                 self._labels_buffer.extend(label_ids)
                 self._positions_buffer.extend(range(len(input_ids)))
+                self._sample_idx += 1
 
                 if len(self._inputs_buffer) == self.seq_len:
                     yield self._flush_buffers()
@@ -423,7 +436,7 @@ class ChatDataset(IterableDataset, Stateful):
                 self._epoch += 1
                 if isinstance(self._data, Dataset):
                     self._data = cast(
-                        Dataset, self._data.shuffle(seed=42 + self._epoch)
+                        Dataset, self._original_data.shuffle(seed=42 + self._epoch)
                     )
                 elif hasattr(self._data, "set_epoch"):
                     self._data.set_epoch(self._epoch)
@@ -467,7 +480,9 @@ class ChatDataset(IterableDataset, Stateful):
             self._sample_idx = state_dict["sample_idx"]
             # Replay shuffles so _data matches the order at checkpoint time
             if self._epoch > 0:
-                self._data = cast(Dataset, self._data.shuffle(seed=42 + self._epoch))
+                self._data = cast(
+                    Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                )
         else:
             assert "data" in state_dict
             self._data.load_state_dict(state_dict["data"])

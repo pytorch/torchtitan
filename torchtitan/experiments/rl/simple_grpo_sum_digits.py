@@ -121,21 +121,38 @@ class RLTrainer(Configurable):
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
-        batch_invariant_mode: bool = True
-        """Enable batch-invariant mode for deterministic NCCL collective
-        operations and bitwise-reproducible forward/backward passes."""
-
         num_episodes_per_step: int = 5
         """Number of episodes to create before every training step."""
 
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
 
+        kl_coef: float = 0.0
+        """KL divergence penalty coefficient. When > 0, a frozen reference model
+        is built and KL divergence is added to the policy gradient loss."""
+
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
 
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
+
+        def __post_init__(self):
+            if self.trainer.debug.batch_invariant:
+                if not self.trainer.debug.deterministic:
+                    raise ValueError("batch_invariant requires deterministic=True")
+                # TODO: Replace trainer dtype constraint to use mixed
+                #  training enabled by FSDP.
+                if self.trainer.training.dtype != "bfloat16":
+                    raise ValueError(
+                        f"batch_invariant requires bfloat16 training dtype, "
+                        f"got {self.trainer.training.dtype!r}"
+                    )
+                if self.generator.model_dtype != "bfloat16":
+                    raise ValueError(
+                        f"batch_invariant requires bfloat16 generator dtype, "
+                        f"got {self.generator.model_dtype!r}"
+                    )
 
     def __init__(self, config: Config):
         self.config = config
@@ -304,9 +321,9 @@ class RLTrainer(Configurable):
             PolicyTrainer,
             config.trainer,
             model_spec=config.model_spec,
-            batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
             transfer_dtype=config.generator.model_dtype,
+            kl_coef=config.kl_coef,
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -314,7 +331,6 @@ class RLTrainer(Configurable):
             config.generator,
             model_spec=config.model_spec,
             model_path=config.hf_assets_path,
-            batch_invariant_mode=config.batch_invariant_mode,
         )
         self.grader = grader_mesh.spawn(
             "grader",

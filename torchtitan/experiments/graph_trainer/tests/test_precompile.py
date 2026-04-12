@@ -400,7 +400,7 @@ class TestPrecompileSaveValidation(unittest.TestCase):
 
 
 class TestDeserializeWithCudagraph(unittest.TestCase):
-    """Test _deserialize_with_cudagraph patching and restore behavior."""
+    """Test _deserialize_with_cudagraph config-patching and policy behavior."""
 
     def test_without_cudagraph_calls_deserialize_directly(self):
         """When cudagraph=False, calls deserialize_compile_artifacts unchanged."""
@@ -424,8 +424,7 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
 
     def test_with_cudagraph_restores_config_on_error(self):
         """When cudagraph=True and deserialization fails, inductor config
-        and patched functions must still be restored to their original values."""
-        import torch._inductor.compile_fx as _compile_fx_mod
+        must still be restored to original values (via config.patch)."""
         import torch._inductor.config as _inductor_config
 
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -434,19 +433,18 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
 
         orig_cudagraphs = _inductor_config.triton.cudagraphs
         orig_graph_partition = _inductor_config.graph_partition
-        orig_cudagraphify = _compile_fx_mod.cudagraphify
+        orig_policy = _inductor_config.cudagraph_policy
 
         with self.assertRaises((pickle.UnpicklingError, RuntimeError, ValueError)):
             _deserialize_with_cudagraph(b"invalid_bytes", cudagraph=True)
 
         self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
         self.assertEqual(_inductor_config.graph_partition, orig_graph_partition)
-        self.assertIs(_compile_fx_mod.cudagraphify, orig_cudagraphify)
+        self.assertIs(_inductor_config.cudagraph_policy, orig_policy)
 
-    def test_with_cudagraph_patches_during_deserialize(self):
-        """When cudagraph=True, inductor config should be patched during
+    def test_with_cudagraph_sets_policy_during_deserialize(self):
+        """When cudagraph=True, a CUDAGraphPolicy should be set during
         deserialization and restored afterwards."""
-        import torch._inductor.compile_fx as _compile_fx_mod
         import torch._inductor.config as _inductor_config
         from torch._dynamo.aot_compile_types import (
             BundledAOTAutogradSerializableCallable,
@@ -454,18 +452,16 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
 
         from torchtitan.experiments.graph_trainer.precompile import (
             _deserialize_with_cudagraph,
+            _PrecompileCUDAGraphPolicy,
         )
 
-        orig_cudagraphs = _inductor_config.triton.cudagraphs
-        orig_cudagraphify = _compile_fx_mod.cudagraphify
+        orig_policy = _inductor_config.cudagraph_policy
         captured = {}
 
         def spy_deserialize(serialized_bytes):
             captured["cudagraphs"] = _inductor_config.triton.cudagraphs
             captured["graph_partition"] = _inductor_config.graph_partition
-            captured["cudagraphify_patched"] = (
-                _compile_fx_mod.cudagraphify is not orig_cudagraphify
-            )
+            captured["policy"] = _inductor_config.cudagraph_policy
             return MagicMock()
 
         with patch.object(
@@ -477,28 +473,22 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
 
         self.assertTrue(captured["cudagraphs"])
         self.assertFalse(captured["graph_partition"])
-        self.assertTrue(captured["cudagraphify_patched"])
+        self.assertIsInstance(captured["policy"], _PrecompileCUDAGraphPolicy)
 
         # After the call, everything should be restored
-        self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
-        self.assertIs(_compile_fx_mod.cudagraphify, orig_cudagraphify)
+        self.assertIs(_inductor_config.cudagraph_policy, orig_policy)
 
-    def test_regional_restores_post_compile_on_error(self):
+    def test_regional_restores_config_on_error(self):
         """When is_regional=True and deserialization fails,
-        BundledOutputCodeLoadable.post_compile must be restored."""
-        import torch._inductor.compile_fx as _compile_fx_mod
+        all config must be restored."""
         import torch._inductor.config as _inductor_config
-        from torch._functorch._aot_autograd.aot_autograd_result import (
-            BundledOutputCodeLoadable,
-        )
 
         from torchtitan.experiments.graph_trainer.precompile import (
             _deserialize_with_cudagraph,
         )
 
         orig_cudagraphs = _inductor_config.triton.cudagraphs
-        orig_cudagraphify = _compile_fx_mod.cudagraphify
-        orig_post_compile = BundledOutputCodeLoadable.post_compile
+        orig_policy = _inductor_config.cudagraph_policy
 
         with self.assertRaises((pickle.UnpicklingError, RuntimeError, ValueError)):
             _deserialize_with_cudagraph(
@@ -506,32 +496,25 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
             )
 
         self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
-        self.assertIs(_compile_fx_mod.cudagraphify, orig_cudagraphify)
-        self.assertIs(BundledOutputCodeLoadable.post_compile, orig_post_compile)
+        self.assertIs(_inductor_config.cudagraph_policy, orig_policy)
 
-    def test_non_regional_does_not_patch_post_compile(self):
-        """BundledOutputCodeLoadable.post_compile should NOT be patched
-        for non-regional cudagraph deserialization — opaque-type support
-        in Inductor's cudagraph_tests (is_opaque_value) means
-        cudagraph_fail_reasons is empty at precompile time."""
+    def test_regional_policy_skips_inner_wrapping(self):
+        """When is_regional=True, the policy's should_wrap returns False
+        so inner CompiledFxGraphs are not cudagraphed individually."""
+        import torch._inductor.config as _inductor_config
         from torch._dynamo.aot_compile_types import (
             BundledAOTAutogradSerializableCallable,
-        )
-        from torch._functorch._aot_autograd.aot_autograd_result import (
-            BundledOutputCodeLoadable,
         )
 
         from torchtitan.experiments.graph_trainer.precompile import (
             _deserialize_with_cudagraph,
         )
 
-        orig_post_compile = BundledOutputCodeLoadable.post_compile
         captured = {}
 
         def spy_deserialize(serialized_bytes):
-            captured["post_compile_patched"] = (
-                BundledOutputCodeLoadable.post_compile is not orig_post_compile
-            )
+            policy = _inductor_config.cudagraph_policy
+            captured["should_wrap"] = policy.should_wrap(MagicMock())
             return MagicMock()
 
         with patch.object(
@@ -539,44 +522,67 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
             "deserialize_compile_artifacts",
             side_effect=spy_deserialize,
         ):
-            _deserialize_with_cudagraph(
-                b"fake_bytes", cudagraph=True, is_regional=False
-            )
+            _deserialize_with_cudagraph(b"fake_bytes", cudagraph=True, is_regional=True)
 
-        self.assertFalse(captured["post_compile_patched"])
+        self.assertFalse(captured["should_wrap"])
 
 
-class TestWrapRegionalWithCudagraph(unittest.TestCase):
-    """Test _wrap_regional_with_cudagraph wrapping behavior."""
+class TestPrecompileCUDAGraphPolicy(unittest.TestCase):
+    """Test _PrecompileCUDAGraphPolicy wrapping behavior."""
 
-    def test_wrapped_has_boxed_call(self):
-        """Wrapped result must have _boxed_call=True for the AOT runtime."""
+    def test_wrap_output_has_boxed_call(self):
+        """Wrapped RegionalOutputCode must have _boxed_call=True."""
+        from torch._inductor.output_code import RegionalOutputCode
+
         from torchtitan.experiments.graph_trainer.precompile import (
-            _wrap_regional_with_cudagraph,
+            _PrecompileCUDAGraphPolicy,
         )
 
-        fake_regional = MagicMock()
+        policy = _PrecompileCUDAGraphPolicy(is_regional=True)
+
+        fake_regional = MagicMock(spec=RegionalOutputCode)
         fake_regional._boxed_call = True
-        wrapped = _wrap_regional_with_cudagraph(fake_regional)
+        wrapped = policy.wrap_output(fake_regional)
         self.assertTrue(getattr(wrapped, "_boxed_call", False))
         self.assertTrue(callable(wrapped))
 
-    def test_wrapped_is_lazy(self):
+    def test_wrap_output_is_lazy(self):
         """CUDAGraphWrapper should not be created until first call."""
+        from torch._inductor.output_code import RegionalOutputCode
+
         from torchtitan.experiments.graph_trainer.precompile import (
-            _wrap_regional_with_cudagraph,
+            _PrecompileCUDAGraphPolicy,
         )
 
-        call_count = [0]
+        policy = _PrecompileCUDAGraphPolicy(is_regional=True)
 
-        def fake_regional(inputs):
-            call_count[0] += 1
-            return [torch.zeros(1)]
-
-        fake_regional._boxed_call = True
-        wrapped = _wrap_regional_with_cudagraph(fake_regional)
+        inner_mock = MagicMock(spec=RegionalOutputCode)
+        inner_mock._boxed_call = True
+        inner_mock.return_value = [torch.zeros(1)]
+        wrapped = policy.wrap_output(inner_mock)
         # No calls to the original before first invocation
-        self.assertEqual(call_count[0], 0)
+        inner_mock.assert_not_called()
+
+    def test_should_wrap_regional(self):
+        """should_wrap returns False when is_regional=True."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _PrecompileCUDAGraphPolicy,
+        )
+
+        policy_regional = _PrecompileCUDAGraphPolicy(is_regional=True)
+        policy_normal = _PrecompileCUDAGraphPolicy(is_regional=False)
+        self.assertFalse(policy_regional.should_wrap(MagicMock()))
+        self.assertTrue(policy_normal.should_wrap(MagicMock()))
+
+    def test_non_regional_wrap_output_is_identity(self):
+        """wrap_output should be identity for non-RegionalOutputCode."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _PrecompileCUDAGraphPolicy,
+        )
+
+        policy = _PrecompileCUDAGraphPolicy(is_regional=True)
+        obj = MagicMock()
+        self.assertIs(policy.wrap_output(obj), obj)
 
 
 class TestCudagraphFingerprintStripping(unittest.TestCase):
