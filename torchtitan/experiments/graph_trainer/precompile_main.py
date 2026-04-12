@@ -227,12 +227,39 @@ def main():
         compiler_passes, dump_folder=config.dump_folder
     )
 
+    # When cudagraphs are enabled, capture the static input indices for
+    # fwd/bwd while the GraphModule is still inspectable (before Inductor
+    # replaces it with OutputCode). These are stored in the artifact
+    # metadata so that the load-time CUDAGraphPolicy can use them instead
+    # of treating all inputs as dynamic.
+    extra_metadata: dict = {}
+    if use_inductor_cudagraphs:
+        from torchtitan.experiments.graph_trainer.cudagraph import (
+            get_static_input_indices,
+        )
+
+        _orig_fw_compiler = fw_compiler
+        _orig_bw_compiler = bw_compiler
+
+        def fw_compiler(gm, example_inputs):
+            extra_metadata["fw_static_input_indices"] = get_static_input_indices(
+                gm, is_forward=True
+            )
+            return _orig_fw_compiler(gm, example_inputs)
+
+        def bw_compiler(gm, example_inputs):
+            extra_metadata["bw_static_input_indices"] = get_static_input_indices(
+                gm, is_forward=False
+            )
+            return _orig_bw_compiler(gm, example_inputs)
+
     on_compile = _make_precompile_callback(
         model,
         compile_config,
         parallel_dims,
         storage=storage,
         config_fingerprint=config_fingerprint,
+        extra_metadata=extra_metadata,
     )
 
     model_joint_graph_builder = functools.partial(

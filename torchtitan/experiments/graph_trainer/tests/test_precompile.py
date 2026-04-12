@@ -522,6 +522,41 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
 
         self.assertFalse(captured["should_wrap"])
 
+    def test_static_indices_passed_to_policy(self):
+        """When static indices are provided, the policy receives them."""
+        import torch._inductor.config as _inductor_config
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _deserialize_with_cudagraph,
+        )
+
+        captured = {}
+
+        def spy_deserialize(serialized_bytes):
+            policy = _inductor_config.cudagraph_policy
+            captured["fw_indices"] = policy._fw_static_input_indices
+            captured["bw_indices"] = policy._bw_static_input_indices
+            return MagicMock()
+
+        with patch.object(
+            BundledAOTAutogradSerializableCallable,
+            "deserialize_compile_artifacts",
+            side_effect=spy_deserialize,
+        ):
+            _deserialize_with_cudagraph(
+                b"fake_bytes",
+                cudagraph=True,
+                is_regional=True,
+                fw_static_input_indices=[0, 1, 2],
+                bw_static_input_indices=[0],
+            )
+
+        self.assertEqual(captured["fw_indices"], [0, 1, 2])
+        self.assertEqual(captured["bw_indices"], [0])
+
 
 class TestPrecompileCUDAGraphPolicy(unittest.TestCase):
     """Test _PrecompileCUDAGraphPolicy wrapping behavior."""
@@ -579,6 +614,55 @@ class TestPrecompileCUDAGraphPolicy(unittest.TestCase):
         policy = _PrecompileCUDAGraphPolicy(is_regional=True)
         obj = MagicMock()
         self.assertIs(policy.wrap_output(obj), obj)
+
+    def test_wrap_output_uses_static_indices_fwd_then_bwd(self):
+        """wrap_output should use fw indices on first call, bw on second.
+
+        The call counter inside the policy selects fw_static_input_indices
+        for the first RegionalOutputCode (forward) and bw_static_input_indices
+        for the second (backward), matching the ordering in wrap_post_compile.
+        """
+        from torch._inductor.output_code import RegionalOutputCode
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _PrecompileCUDAGraphPolicy,
+        )
+
+        fw_indices = [0, 1, 2]
+        bw_indices = [0, 1]
+        policy = _PrecompileCUDAGraphPolicy(
+            is_regional=True,
+            fw_static_input_indices=fw_indices,
+            bw_static_input_indices=bw_indices,
+        )
+
+        fw_mock = MagicMock(spec=RegionalOutputCode)
+        bw_mock = MagicMock(spec=RegionalOutputCode)
+
+        wrapped_fw = policy.wrap_output(fw_mock)
+        wrapped_bw = policy.wrap_output(bw_mock)
+
+        # Both should be callable wrappers (not identity)
+        self.assertTrue(callable(wrapped_fw))
+        self.assertTrue(callable(wrapped_bw))
+        self.assertIsNot(wrapped_fw, fw_mock)
+        self.assertIsNot(wrapped_bw, bw_mock)
+
+    def test_wrap_output_falls_back_to_empty_indices(self):
+        """When no static indices are provided, wrap_output still works
+        (backward compat with artifacts saved before this feature)."""
+        from torch._inductor.output_code import RegionalOutputCode
+
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _PrecompileCUDAGraphPolicy,
+        )
+
+        policy = _PrecompileCUDAGraphPolicy(is_regional=True)
+
+        mock = MagicMock(spec=RegionalOutputCode)
+        wrapped = policy.wrap_output(mock)
+        self.assertTrue(callable(wrapped))
+        self.assertIsNot(wrapped, mock)
 
 
 class TestCudagraphFingerprintConsistency(unittest.TestCase):

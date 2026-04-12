@@ -164,8 +164,16 @@ class _PrecompileCUDAGraphPolicy(CUDAGraphPolicy):
     at the outer level via ``wrap_output``.
     """
 
-    def __init__(self, is_regional: bool = False) -> None:
+    def __init__(
+        self,
+        is_regional: bool = False,
+        fw_static_input_indices: list[int] | None = None,
+        bw_static_input_indices: list[int] | None = None,
+    ) -> None:
         self._is_regional = is_regional
+        self._fw_static_input_indices = fw_static_input_indices
+        self._bw_static_input_indices = bw_static_input_indices
+        self._wrap_output_call_count = 0
 
     def cudagraphify(
         self,
@@ -200,19 +208,33 @@ class _PrecompileCUDAGraphPolicy(CUDAGraphPolicy):
         from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
 
         original = output_code
+
+        # wrap_post_compile calls wrap_output for fwd first, bwd second.
+        # Use the call counter to select the right static indices.
+        call_idx = self._wrap_output_call_count
+        self._wrap_output_call_count += 1
+        static_input_indices = (
+            self._fw_static_input_indices
+            if call_idx == 0
+            else self._bw_static_input_indices
+        )
+        if static_input_indices is None:
+            static_input_indices = ()
+
         cg: list[CUDAGraphWrapper | None] = [None]
 
-        # TODO: static_input_indices=() means all inputs are treated as
-        # dynamic and copied each iteration. The non-precompile regional
-        # path pre-computes static indices from the graph; investigate
-        # whether we can do the same here for better performance.
         def wrapped(inputs: list) -> Any:
             if cg[0] is None:
-                cg[0] = CUDAGraphWrapper(original, inputs, (), boxed_call=True)
+                cg[0] = CUDAGraphWrapper(
+                    original, inputs, tuple(static_input_indices), boxed_call=True
+                )
             return cg[0](inputs)
 
         wrapped._boxed_call = True  # type: ignore[attr-defined]
-        logger.info("Wrapped RegionalOutputCode with CUDAGraphWrapper")
+        logger.info(
+            f"Wrapped RegionalOutputCode with CUDAGraphWrapper "
+            f"(static_input_indices={len(static_input_indices)} entries)"
+        )
         return wrapped
 
     def teardown(self) -> None:
@@ -225,6 +247,8 @@ def _deserialize_with_cudagraph(
     serialized_fn_bytes: bytes,
     cudagraph: bool,
     is_regional: bool = False,
+    fw_static_input_indices: list[int] | None = None,
+    bw_static_input_indices: list[int] | None = None,
 ) -> Callable:
     """Deserialize a compiled artifact, optionally applying CUDAGraphWrapper.
 
@@ -246,7 +270,11 @@ def _deserialize_with_cudagraph(
 
     import torch._inductor.config as _inductor_config
 
-    policy = _PrecompileCUDAGraphPolicy(is_regional=is_regional)
+    policy = _PrecompileCUDAGraphPolicy(
+        is_regional=is_regional,
+        fw_static_input_indices=fw_static_input_indices,
+        bw_static_input_indices=bw_static_input_indices,
+    )
 
     with _inductor_config.patch(
         {
@@ -332,6 +360,8 @@ def precompile_load(
 
     out_spec = artifact.out_spec
     serialized_fn_bytes = artifact.serialized_fn
+    fw_static_input_indices = artifact.metadata.get("fw_static_input_indices")
+    bw_static_input_indices = artifact.metadata.get("bw_static_input_indices")
     compiled_fn: Callable | None = None
 
     def wrapper_fn(args, kwargs):
@@ -363,7 +393,11 @@ def precompile_load(
                 )
 
             compiled_fn = _deserialize_with_cudagraph(
-                serialized_fn_bytes, cudagraph, is_regional=is_regional
+                serialized_fn_bytes,
+                cudagraph,
+                is_regional=is_regional,
+                fw_static_input_indices=fw_static_input_indices,
+                bw_static_input_indices=bw_static_input_indices,
             )
 
         # Build the flat input tuple: params + buffers + user args.
