@@ -1,14 +1,14 @@
-"""Data loading: dataset registry, HuggingFace streaming dataset, and dataloader."""
+"""Data loading: local text dataset + distributed dataloader."""
 
 import inspect
+import os
 import pickle
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
-from functools import partial
-from typing import Any, Callable
+from dataclasses import asdict
+from typing import Any
 
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -20,51 +20,31 @@ from src.logging import logger
 
 
 # ---------------------------------------------------------------------------
-# Dataset registry
+# Dataset loading
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class DatasetConfig:
-    path: str
-    loader: Callable
-    sample_processor: Callable
+def load_text_dataset(path: str):
+    """Load a text dataset from a local path.
+
+    Supports:
+    - HF datasets saved via `Dataset.save_to_disk(path)` (detected by `dataset_info.json`)
+    - Directories of parquet / jsonl / txt files (auto-detected by HF `load_dataset`)
+    """
+    if os.path.isdir(path) and os.path.exists(os.path.join(path, "dataset_info.json")):
+        return load_from_disk(path)
+    return load_dataset(path, split="train")
 
 
-def _load_c4_dataset(dataset_path: str, split: str):
-    return load_dataset(dataset_path, name="en", split=split, streaming=True)
-
-
-def _process_c4_text(sample: dict[str, Any]) -> str:
-    return sample["text"]
-
-
-DATASETS = {
-    "c4": DatasetConfig(
-        path="allenai/c4",
-        loader=partial(_load_c4_dataset, split="train"),
-        sample_processor=_process_c4_text,
-    ),
-    "c4_test": DatasetConfig(
-        path="tests/assets/c4_test",
-        loader=lambda path: load_dataset(path, split="train"),
-        sample_processor=_process_c4_text,
-    ),
-}
-
-
-def _validate_dataset(
-    dataset_name: str, dataset_path: str | None = None
-) -> tuple[str, Callable, Callable]:
-    if dataset_name not in DATASETS:
-        raise ValueError(
-            f"Dataset {dataset_name} is not supported. "
-            f"Supported datasets are: {list(DATASETS.keys())}"
-        )
-    config = DATASETS[dataset_name]
-    path = dataset_path or config.path
-    logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.sample_processor
+def extract_text(sample: dict[str, Any]) -> str:
+    """Pull the text field out of a sample. Supports common field names."""
+    for key in ("text", "content", "raw_content"):
+        if key in sample:
+            return sample[key]
+    raise KeyError(
+        f"Could not find a text field in sample; tried 'text', 'content', 'raw_content'. "
+        f"Sample keys: {list(sample.keys())}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -72,29 +52,26 @@ def _validate_dataset(
 # ---------------------------------------------------------------------------
 
 
-class HuggingFaceTextDataset(IterableDataset, Stateful):
+class TextDataset(IterableDataset, Stateful):
+    """Tokenizes text samples and yields packed fixed-length sequences for LM training."""
+
     def __init__(
         self,
-        dataset_name: str,
-        dataset_path: str | None,
+        dataset_path: str,
         tokenizer: BaseTokenizer,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
     ) -> None:
-        dataset_name = dataset_name.lower()
-        path, dataset_loader, text_processor = _validate_dataset(
-            dataset_name, dataset_path
-        )
-        ds = dataset_loader(path)
+        logger.info(f"Loading dataset from {dataset_path}")
+        ds = load_text_dataset(dataset_path)
 
-        self.dataset_name = dataset_name
+        self.dataset_path = dataset_path
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
-        self._text_processor = text_processor
         self._sample_idx = 0
         self._token_buffer: list[int] = []
 
@@ -111,7 +88,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
         while True:
             for sample in self._get_data_iter():
-                sample_text = self._text_processor(sample)
+                sample_text = extract_text(sample)
                 sample_tokens = self._tokenizer.encode(
                     sample_text, add_bos=True, add_eos=True
                 )
@@ -126,11 +103,11 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     yield {"input": input}, label
 
             if not self.infinite:
-                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                logger.warning(f"Dataset at {self.dataset_path} has run out of data")
                 break
             else:
                 self._sample_idx = 0
-                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                logger.warning(f"Dataset at {self.dataset_path} is being re-looped")
                 if not isinstance(self._data, Dataset):
                     if hasattr(self._data, "set_epoch") and hasattr(
                         self._data, "epoch"
@@ -236,14 +213,15 @@ def build_text_dataloader(
     tokenizer: BaseTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
+    dataset_path: str | None = None,
 ) -> ParallelAwareDataloader:
-    dataset_name = job_config.training.dataset
-    dataset_path = job_config.training.dataset_path
+    dataset_path = dataset_path or job_config.training.dataset_path
+    if not dataset_path:
+        raise ValueError("dataset_path must be set")
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
+    hf_ds = TextDataset(
         dataset_path=dataset_path,
         tokenizer=tokenizer,
         seq_len=seq_len,

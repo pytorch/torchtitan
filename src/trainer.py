@@ -1,5 +1,6 @@
 """Core training loop for MoE model."""
 
+import math
 import os
 import time
 from typing import Any
@@ -12,10 +13,10 @@ from torch.distributed.checkpoint.stateful import Stateful
 from src.components.checkpoint import CheckpointManager
 from src.components.lr_scheduler import build_lr_schedulers
 from src.components.optimizer import build_optimizers_with_moe_load_balancing
-from src.components.tokenizer import HuggingFaceTokenizer, resolve_tokenizer_path
+from src.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer, resolve_tokenizer_path
 from src.config import TORCH_DTYPE_MAP
 from src.config.config import Config, build_job_config
-from src.data import build_text_dataloader
+from src.data import DataloaderExhaustedError, build_text_dataloader
 from src.distributed import ParallelDims
 from src.distributed import utils as dist_utils
 from src.logging import init_logger, logger
@@ -36,9 +37,112 @@ class TrainState(Stateful):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
 
+@torch.no_grad()
+def run_eval(
+    model: torch.nn.Module,
+    tokenizer: BaseTokenizer,
+    device: torch.device,
+    cfg: Config,
+    job_config: Any,
+    dp_world_size: int,
+    dp_rank: int,
+    batch_mesh: Any,
+) -> dict[str, float]:
+    """Run one full pass over the eval dataset and return loss/ppl/top1 metrics.
+
+    All ranks must execute the same number of forward passes because FSDP issues
+    collectives during forward. We use an all-reduce MIN of a "has batch" flag
+    so every rank stops together once any rank runs out of data.
+    """
+    was_training = model.training
+    model.eval()
+
+    eval_loader = build_text_dataloader(
+        dp_world_size=dp_world_size,
+        dp_rank=dp_rank,
+        tokenizer=tokenizer,
+        job_config=job_config,
+        infinite=False,
+        dataset_path=cfg.eval.dataset_path,
+    )
+
+    local_loss_sum = 0.0  # sum over per-token cross entropy
+    local_correct = 0
+    local_tokens = 0
+
+    data_iter = iter(eval_loader)
+    multi_rank = batch_mesh is not None and batch_mesh.size() > 1
+    pg = batch_mesh.get_group() if multi_rank else None
+
+    while True:
+        input_dict: dict[str, torch.Tensor] | None = None
+        labels: torch.Tensor | None = None
+        try:
+            input_dict, labels = next(data_iter)
+            has_batch = 1
+        except (StopIteration, DataloaderExhaustedError):
+            has_batch = 0
+
+        # All ranks must stop together
+        if multi_rank:
+            flag = torch.tensor([has_batch], device=device, dtype=torch.int32)
+            dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=pg)
+            if flag.item() == 0:
+                break
+        elif has_batch == 0:
+            break
+
+        assert input_dict is not None and labels is not None
+        tokens = input_dict["input"].to(device)
+        labels_dev = labels.to(device)
+        pred = model(tokens)
+
+        pred_flat = pred.flatten(0, 1).float()
+        labels_flat = labels_dev.flatten(0, 1)
+
+        per_token_loss = F.cross_entropy(pred_flat, labels_flat, reduction="none")
+        local_loss_sum += per_token_loss.sum().item()
+
+        top1 = pred_flat.argmax(-1)
+        local_correct += (top1 == labels_flat).sum().item()
+        local_tokens += labels_flat.numel()
+
+    # Reduce across DP ranks
+    stats = torch.tensor(
+        [local_loss_sum, local_correct, local_tokens],
+        device=device,
+        dtype=torch.float64,
+    )
+    if multi_rank:
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=pg)
+
+    total_loss_sum, total_correct, total_tokens = stats.tolist()
+    if was_training:
+        model.train()
+
+    if total_tokens == 0:
+        logger.warning("Eval set was empty across all ranks")
+        return {"loss": float("nan"), "ppl": float("nan"), "top1_acc": float("nan")}
+
+    loss_mean = total_loss_sum / total_tokens
+    return {
+        "loss": loss_mean,
+        "ppl": math.exp(min(loss_mean, 20.0)),  # cap to avoid float overflow
+        "top1_acc": total_correct / total_tokens,
+    }
+
+
 def train(cfg: Config):
     """Run MoE model training from a resolved Config."""
-    init_logger()
+    init_logger(log_dir=cfg.logging.log_dump)
+
+    # quack and compile are mutually exclusive: CuTe-DSL kernels are opaque to Dynamo
+    if cfg.quack.enable and cfg.compile.enable:
+        raise ValueError(
+            "quack.enable and compile.enable are mutually exclusive: "
+            "QuACK kernels cannot be traced by torch.compile"
+        )
+
     job_config = build_job_config(cfg)
 
     # Init distributed
@@ -60,12 +164,23 @@ def train(cfg: Config):
         parallel_dims, device, job_config.debug, distinct_seed_mesh_dims=[]
     )
 
-    # Model config with seq_len for RoPE
-    model_cfg = cfg.model.model_copy(update={"max_seq_len": cfg.training.seq_len})
-
-    # Tokenizer and dataloader
+    # Tokenizer
     tokenizer_path = resolve_tokenizer_path(cfg.data.tokenizer)
     tokenizer = HuggingFaceTokenizer(tokenizer_path)
+
+    # Model config: seq_len for RoPE, vocab_size from tokenizer (unless pinned), quack flag
+    vocab_size = cfg.model.vocab_size or tokenizer.get_vocab_size()
+    if cfg.model.vocab_size is None:
+        logger.info(f"Auto-detected vocab_size={vocab_size} from tokenizer")
+    model_cfg = cfg.model.model_copy(
+        update={
+            "max_seq_len": cfg.training.seq_len,
+            "vocab_size": vocab_size,
+            "use_quack": cfg.quack.enable,
+        }
+    )
+
+    # Dataloader
     batch_mesh = parallel_dims.get_optional_mesh("batch")
     if batch_mesh is not None:
         dp_world_size = batch_mesh.size()
@@ -161,15 +276,19 @@ def train(cfg: Config):
         states={"train_state": train_state},
         checkpoint_config=job_config.checkpoint,
         sd_adapter=None,
-        base_folder=cfg.dump_folder,
+        base_folder="",  # checkpoint_dump is passed as absolute folder via build_job_config
     )
     checkpointer.load(step=job_config.checkpoint.load_step)
 
     total_steps = cfg.training.max_steps
     seq_len = cfg.training.seq_len
     max_norm = cfg.training.max_norm
-    log_freq = cfg.training.log_freq
+    log_step = cfg.logging.log_step
+    eval_step = cfg.eval.eval_step if cfg.eval.enable else 0
     tokens_per_step = global_batch_size * seq_len
+
+    if cfg.eval.enable and not cfg.eval.dataset_path:
+        raise ValueError("eval.enable is True but eval.dataset_path is empty")
 
     logger.info(
         f"Training: steps={total_steps}, "
@@ -180,6 +299,33 @@ def train(cfg: Config):
     )
 
     # Training loop
+    if cfg.quack.enable:
+        from quack import cross_entropy as quack_cross_entropy
+
+        # quack's cross_entropy backward kernel requires its grad input to have
+        # stride 1, but .sum()/count inside reduction="mean" produces a stride-0
+        # broadcast grad. We work around it by calling reduction="none" and
+        # materializing the grad via an identity autograd.Function that
+        # contiguates grad_output before it reaches the custom kernel.
+        class _ContiguousGrad(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                return grad_output.contiguous()
+
+        def cross_entropy_fn(pred, labels):
+            pred_flat = pred.flatten(0, 1).float()
+            labels_flat = labels.flatten(0, 1)
+            per_token = quack_cross_entropy(pred_flat, labels_flat, reduction="none")
+            per_token = _ContiguousGrad.apply(per_token)
+            return per_token.mean()
+    else:
+        def cross_entropy_fn(pred, labels):
+            return F.cross_entropy(pred.flatten(0, 1).float(), labels.flatten(0, 1))
+
     data_iter = iter(dataloader)
     start_time = time.perf_counter()
 
@@ -196,7 +342,7 @@ def train(cfg: Config):
             tokens = input_dict["input"].to(device)
             labels = labels.to(device)
             pred = model(tokens)
-            loss = F.cross_entropy(pred.flatten(0, 1).float(), labels.flatten(0, 1))
+            loss = cross_entropy_fn(pred, labels)
             (loss / grad_accum_steps).backward()
             accumulated_loss += loss.detach().item() / grad_accum_steps
 
@@ -214,7 +360,7 @@ def train(cfg: Config):
 
         checkpointer.save(step, last_step=(step == total_steps))
 
-        if step % log_freq == 0:
+        if step % log_step == 0:
             step_time = time.perf_counter() - step_start
             lr = lr_schedulers.schedulers[0].get_last_lr()[0]
             logger.info(
@@ -224,6 +370,27 @@ def train(cfg: Config):
                 f"lr: {lr:.2e}  "
                 f"tok/s: {tokens_per_step / step_time:,.0f}  "
                 f"step_time: {step_time:.2f}s"
+            )
+
+        if eval_step > 0 and step % eval_step == 0:
+            eval_start = time.perf_counter()
+            metrics = run_eval(
+                model=model,
+                tokenizer=tokenizer,
+                device=device,
+                cfg=cfg,
+                job_config=job_config,
+                dp_world_size=dp_world_size,
+                dp_rank=dp_rank,
+                batch_mesh=batch_mesh,
+            )
+            eval_time = time.perf_counter() - eval_start
+            logger.info(
+                f"eval @ step {step}/{total_steps}  "
+                f"loss: {metrics['loss']:.4f}  "
+                f"ppl: {metrics['ppl']:.2f}  "
+                f"top1: {metrics['top1_acc']:.4f}  "
+                f"eval_time: {eval_time:.2f}s"
             )
 
     logger.info(

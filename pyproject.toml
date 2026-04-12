@@ -3,18 +3,30 @@ name = "moe-training"
 version = "0.1.0"
 description = "MoE model training codebase built on TorchTitan parallelism"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = "==3.13.11"
 dependencies = [
     "datasets>=4.8.4",
+    "flash-attn==2.8.3",
     "logfire>=4.32.0",
     "pydantic>=2.0",
+    "pytest>=9.0.3",
     "pyyaml>=6.0",
+    "quack-kernels[cu13]>=0.3.9",
     "rich>=14.3.3",
     "ruff>=0.15.10",
     "safetensors>=0.7.0",
     "tokenizers>=0.22.2",
-    "torch>=2.11.0",
+    "torch==2.11.0",
     "torchdata>=0.11.0",
     "typer>=0.24.1",
     "wandb>=0.25.1",
 ]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3+cu130torch2.11-cp313-cp313-linux_x86_64.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

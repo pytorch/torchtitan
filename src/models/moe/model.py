@@ -2,32 +2,37 @@
 
 import torch
 import torch.nn.functional as F
+from flash_attn import flash_attn_func
 from torch import nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from src.config.config import ModelConfig
 from src.models.moe import FeedForward, build_moe
 
 
-# --- SDPA Attention Wrapper ---
+# --- RMSNorm ---
 
 
-class ScaledDotProductAttentionWrapper(nn.Module):
-    sdpa_backends: list[SDPBackend] = []
+class RMSNorm(nn.Module):
+    """RMSNorm that optionally dispatches to quack.rmsnorm for faster memory-bound ops."""
 
-    def __init__(self) -> None:
+    def __init__(self, dim: int, eps: float = 1e-5, use_quack: bool = False):
         super().__init__()
-        if not self.sdpa_backends:
-            self.sdpa_backends = [
-                SDPBackend.CUDNN_ATTENTION,
-                SDPBackend.FLASH_ATTENTION,
-                SDPBackend.EFFICIENT_ATTENTION,
-                SDPBackend.MATH,
-            ]
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.use_quack = use_quack
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, scale: float | None = None) -> torch.Tensor:
-        with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_quack:
+            from quack import rmsnorm
+
+            orig_shape = x.shape
+            y = rmsnorm(x.reshape(-1, orig_shape[-1]), self.weight, eps=self.eps)
+            return y.reshape(orig_shape)
+        return F.rms_norm(x, (x.shape[-1],), self.weight, self.eps)
+
+    def reset_parameters(self) -> None:
+        nn.init.ones_(self.weight)
+
 
 # --- RoPE ---
 
@@ -60,34 +65,26 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        x.unsqueeze(3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 # --- Attention ---
 
 
 class Attention(nn.Module):
+    """Standard GQA attention using FlashAttention 2.
+
+    flash_attn_func handles GQA natively when q has more heads than k/v,
+    and expects (batch, seqlen, nheads, headdim) layout.
+    """
+
     def __init__(self, dim: int, n_heads: int, n_kv_heads: int, head_dim: int):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
-        self.n_rep = n_heads // n_kv_heads
         self.head_dim = head_dim
 
         self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
         self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
         self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
         self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
-
-        self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -96,23 +93,15 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        xq = self.wq(x).view(bs, seqlen, -1, self.head_dim)
+        xk = self.wk(x).view(bs, seqlen, -1, self.head_dim)
+        xv = self.wv(x).view(bs, seqlen, -1, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        keys = repeat_kv(xk, self.n_rep)
-        values = repeat_kv(xv, self.n_rep)
-
-        xq = xq.transpose(1, 2)
-        xk = keys.transpose(1, 2)
-        xv = values.transpose(1, 2)
-
-        output = self.inner_attention(xq, xk, xv)
-        output = output.transpose(1, 2).contiguous().view(bs, seqlen, -1)
+        # flash_attn expects (bs, seqlen, nheads, headdim) and supports GQA natively
+        output = flash_attn_func(xq, xk, xv, causal=True)
+        output = output.view(bs, seqlen, -1)
         return self.wo(output)
 
 
@@ -127,8 +116,8 @@ class TransformerBlock(nn.Module):
         from src.models.moe import MoEArgs
 
         self.attention = Attention(cfg.dim, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim)
-        self.attention_norm = nn.RMSNorm(cfg.dim, eps=cfg.norm_eps)
-        self.ffn_norm = nn.RMSNorm(cfg.dim, eps=cfg.norm_eps)
+        self.attention_norm = RMSNorm(cfg.dim, eps=cfg.norm_eps, use_quack=cfg.use_quack)
+        self.ffn_norm = RMSNorm(cfg.dim, eps=cfg.norm_eps, use_quack=cfg.use_quack)
 
         self.moe_enabled = layer_id >= cfg.n_dense_layers
         if self.moe_enabled:
@@ -200,7 +189,7 @@ class MoETransformer(nn.Module):
         for layer_id in range(cfg.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, cfg)
 
-        self.norm = nn.RMSNorm(cfg.dim, eps=cfg.norm_eps)
+        self.norm = RMSNorm(cfg.dim, eps=cfg.norm_eps, use_quack=cfg.use_quack)
         self.output = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:

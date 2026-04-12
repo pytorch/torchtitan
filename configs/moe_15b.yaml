@@ -12,7 +12,6 @@ model:
   top_k: 6
   num_shared_experts: 2
   ffn_dim: 1408
-  vocab_size: 151936
 
 training:
   seq_len: 8192
@@ -23,8 +22,6 @@ training:
   weight_decay: 0.1
   warmup_steps: 2000
   min_lr_ratio: 0.1
-  log_freq: 10
-  dataset: "c4"
 
 parallelism:
   dp_shard: -1
@@ -32,6 +29,11 @@ parallelism:
 
 data:
   tokenizer: "Qwen/Qwen2-7B"
+  dataset_path: "./data/15b"  # path to local dataset
+
+logging:
+  log_step: 10
+  log_dump: "./outputs/moe_15b/logs"
 
 activation_checkpoint:
   mode: "selective"
@@ -43,7 +45,6 @@ compile:
 
 checkpoint:
   enable: true
-  interval: 1000
+  checkpoint_step: 1000
+  checkpoint_dump: "./outputs/moe_15b/checkpoints"
   async_mode: "async_with_pinned_mem"
-
-dump_folder: "./outputs/moe_15b"
