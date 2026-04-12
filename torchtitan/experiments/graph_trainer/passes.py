@@ -75,6 +75,58 @@ def remove_detach_pass(
     return gm
 
 
+_IDENTITY_VIEW_TARGETS = {
+    torch.ops.aten._unsafe_view.default,
+    torch.ops.aten.view.default,
+    torch.ops.aten.reshape.default,
+}
+
+
+def remove_identity_view_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity ``view``, ``reshape``, and ``_unsafe_view`` nodes.
+
+    In a traced graph these ops are no-ops when the output shape equals
+    the input shape.  Removing them simplifies the graph for downstream
+    passes (bucketing, scheduling, cudagraph).
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with identity view nodes removed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target not in _IDENTITY_VIEW_TARGETS:
+            continue
+
+        # Skip nodes without fake tensor metadata (e.g. symbolic or opaque).
+        inp = node.args[0]
+        inp_val = inp.meta.get("val") if isinstance(inp, torch.fx.Node) else None
+        out_val = node.meta.get("val")
+        if inp_val is None or out_val is None:
+            continue
+        if not isinstance(inp_val, torch.Tensor) or not isinstance(
+            out_val, torch.Tensor
+        ):
+            continue
+
+        if inp_val.shape == out_val.shape:
+            node.replace_all_uses_with(inp)
+            gm.graph.erase_node(node)
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} identity view/reshape node(s) from the graph")
+
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -93,6 +145,7 @@ def construct_default_graph_passes(
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
+        remove_identity_view_pass,
     ]
 
     # cudagraph should be the last pass.
