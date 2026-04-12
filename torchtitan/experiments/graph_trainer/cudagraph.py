@@ -168,18 +168,17 @@ class CUDAGraphWrapper:
             self._args[i].copy_(args[i])
 
     def _validate_and_classify_inputs(self, inputs) -> None:
-        """Validate input types and force-mark opaque values as static.
+        """Validate input types.
 
         Opaque inputs (e.g. DeviceMesh from SimpleFSDP/DTensor) are
-        inherently static — their values don't change between iterations.
-        We add them to ``_static_input_indices`` here so they are never
-        included in ``_input_indices_to_copy``.
+        inherently static and already excluded from copying (only
+        tensors appear in ``_input_indices_to_copy``), so no special
+        handling is needed beyond accepting them here.
         """
         for i, inp in enumerate(inputs):
             if isinstance(inp, (torch.Tensor, int, float, torch._C.Generator)):
                 continue
             if is_opaque_value(inp):
-                self._static_input_indices.add(i)
                 continue
             raise ValueError(
                 "args must be tensor, integer (for dynamic shapes), "

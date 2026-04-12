@@ -197,7 +197,7 @@ def cudagraph_pass(
     *,
     is_forward: bool,
     static_input_indices: list[int] | None = None,
-) -> torch.fx.GraphModule:
+) -> torch.fx.GraphModule | Callable:
     """
     Apply cudagraph.
 
