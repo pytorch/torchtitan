@@ -1,0 +1,36 @@
+# Tiny MoE model for smoke testing
+# 4 layers, 8 experts, dim=512, 1024 ctx
+
+model:
+  n_layers: 4
+  dim: 512
+  n_heads: 8
+  n_kv_heads: 2
+  head_dim: 64
+  num_experts: 8
+  top_k: 2
+  num_shared_experts: 1
+  ffn_dim: 256
+  vocab_size: 151936
+
+training:
+  seq_len: 1024
+  local_batch_size: 2
+  grad_accum_steps: 1
+  max_steps: 100
+  warmup_steps: 10
+  seed: 42
+  log_freq: 1
+  dataset: "c4"
+
+parallelism:
+  dp_shard: -1
+  ep: 4
+
+data:
+  tokenizer: "Qwen/Qwen2-7B"
+
+checkpoint:
+  enable: false
+
+dump_folder: "./outputs/moe_tiny"

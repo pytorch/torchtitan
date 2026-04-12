@@ -1,13 +1,15 @@
 [project]
-name = "torchtitan"
+name = "moe-training"
 version = "0.1.0"
-description = "Add your description here"
+description = "MoE model training codebase built on TorchTitan parallelism"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "datasets>=4.8.4",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
     "rich>=14.3.3",
-    "ruff>=0.15.9",
+    "ruff>=0.15.10",
     "safetensors>=0.7.0",
     "tokenizers>=0.22.2",
     "torch>=2.11.0",

@@ -1,0 +1,12 @@
+{
+    "pythonVersion": "3.13",
+    "pythonPlatform": "Linux",
+    "extraPaths": ["."],
+    "reportMissingImports": false,
+    "reportGeneralTypeIssues": false,
+    "reportAttributeAccessIssue": false,
+    "reportCallIssue": false,
+    "reportArgumentType": false,
+    "reportAssignmentType": false,
+    "reportInvalidTypeForm": false
+}

@@ -1,0 +1,41 @@
+# Full MoE model config
+# 27 layers, 64 experts, dim=2048, 8192 ctx
+# ~15B total params, ~2.4B active params per token
+
+model:
+  n_layers: 27
+  dim: 2048
+  n_heads: 16
+  n_kv_heads: 4
+  head_dim: 128
+  num_experts: 64
+  top_k: 6
+  num_shared_experts: 2
+  ffn_dim: 1408
+  vocab_size: 151936
+
+training:
+  seq_len: 8192
+  local_batch_size: 4
+  grad_accum_steps: 16
+  max_steps: 100000
+  lr: 3e-4
+  weight_decay: 0.1
+  warmup_steps: 2000
+  min_lr_ratio: 0.1
+  log_freq: 10
+  dataset: "c4"
+
+parallelism:
+  dp_shard: -1
+  ep: 8
+
+data:
+  tokenizer: "Qwen/Qwen2-7B"
+
+checkpoint:
+  enable: true
+  interval: 1000
+  async_mode: "async_with_pinned_mem"
+
+dump_folder: "./outputs/moe_15b"

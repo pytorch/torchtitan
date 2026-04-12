@@ -7,23 +7,22 @@ outputs
 dist/*
 .vscode
 .vs
+.venv
 
 # data
 data
 out
 wandb
 
-torchtitan/datasets/**/*.model
-
 # hf assets
 assets/hf/*
 assets/tokenizer/*
-torchtitan/experiments/flux/assets/*
+tokenizer/
+.tokenizers/
 
 # temp files
 *.log
 error.json
-_remote_module_non_scriptable.py
 
 # Editor temporaries (VIM)
 [._]*.s[a-v][a-z]
