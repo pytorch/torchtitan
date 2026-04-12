@@ -9,6 +9,7 @@ on:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
@@ -60,7 +61,7 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 --collect_peak_memory
 
         # Run the numerics unit tests (Llama3 only; DeepSeek tests run in the H100 workflow)
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestSimpleFSDP -v
@@ -76,7 +77,8 @@ jobs:
         # Run precompile unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
 
-        # Run bitwise deterministic guardrail test
+        # Run bitwise deterministic guardrail tests
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_compile_mode_compare.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

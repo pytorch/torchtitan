@@ -2033,9 +2033,15 @@
       "<|image|>": 1998,
       "<|begin_of_image|>": 1999,
       "<|end_of_image|>": 2000,
-      "<|pad|>": 2001
+      "<|pad|>": 2001,
+      "<|begin_of_text|>": 2002,
+      "<|end_of_text|>": 2003,
+      "<|endoftext|>": 2004,
+      "<|vision_start|>": 2005,
+      "<|vision_end|>": 2006,
+      "<|image_pad|>": 2007,
+      "<|video_pad|>": 2008
     },
-    "merges": [
-    ]
+    "merges": []
   }
 }

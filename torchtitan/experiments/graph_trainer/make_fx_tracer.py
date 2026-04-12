@@ -200,44 +200,6 @@ def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
     gm.recompile()
 
 
-@contextmanager
-def _patch_autograd_grad() -> Generator[None, None, None]:
-    """Wrap upstream ``torch.compiler._patch_autograd_grad`` with seq_nr setup.
-
-    Upstream ``_patch_autograd_grad`` is responsible for tagging traced
-    ``torch.autograd.grad`` ops with ``custom["autograd_backward"]``.
-    Graph trainer additionally needs ``setup_stacktrace_preservation_hooks`` so
-    backward nodes inherit ``seq_nr``/stacktrace from their forward producers.
-
-    TODO: remove this wrapper once https://github.com/pytorch/pytorch/pull/179610
-    (or equivalent upstream support) is available in the PyTorch version used by
-    TorchTitan.
-    """
-    import functools
-    import torch.autograd
-
-    with torch.compiler._patch_autograd_grad():
-        _orig_grad = torch.autograd.grad
-
-        @functools.wraps(_orig_grad)
-        def _patched_grad(outputs, inputs, *args, **kwargs):
-            t_outputs = outputs if isinstance(outputs, (list, tuple)) else (outputs,)
-            roots = [
-                t.grad_fn
-                for t in t_outputs
-                if isinstance(t, torch.Tensor) and t.grad_fn is not None
-            ]
-            if roots:
-                setup_stacktrace_preservation_hooks(roots)
-            return _orig_grad(outputs, inputs, *args, **kwargs)
-
-        torch.autograd.grad = _patched_grad
-        try:
-            yield
-        finally:
-            torch.autograd.grad = _orig_grad
-
-
 def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     """Copy forward node metadata (custom) to later nodes sharing the same seq_nr.
 
@@ -393,10 +355,8 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
             state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
-
-            with _patch_autograd_grad():
+            with torch.compiler._patch_autograd_grad():
                 result = fn(state_for_fn, *user_list)
-
             flat_outs, output_spec = pytree.tree_flatten(result)
             num_flat_outputs = len(flat_outs)
             unwrapped_outs, output_layouts = _unwrap_subclasses(flat_outs)

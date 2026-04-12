@@ -9,6 +9,7 @@ on:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
@@ -66,5 +67,10 @@ jobs:
 
         # Run the DeepSeek numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "dsv3"
+
+        # Run bitwise deterministic guardrail test (includes H100-only hardcoded-hash tests)
+        pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_compile_mode_compare.py -v
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_compile_mode_compare_regional.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

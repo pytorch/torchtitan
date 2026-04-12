@@ -511,6 +511,11 @@ def main():
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
     parser.add_argument("--ngpu", default=8, type=int)
+    parser.add_argument(
+        "--collect_peak_memory",
+        action="store_true",
+        help="Collect peak reserved/active CUDA memory from TensorBoard logs.",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):

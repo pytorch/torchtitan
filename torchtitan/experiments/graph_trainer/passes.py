@@ -239,16 +239,38 @@ def cudagraph_pass(
     return gm
 
 
-def validate_flex_attn_annotation_pass(
+def annotate_flex_attention_for_regional_inductor_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
-    """Verify user annotations show up in the graph."""
+    """Tag flex attention HOPs with compile_with_inductor for regional_inductor.
+
+    Annotates three sets of nodes so that regional_inductor correctly
+    scoops and compiles flex attention regions:
+    1. The HOP node itself (flex_attention / flex_attention_backward)
+    2. The get_attr nodes referencing score_mod / mask_mod submodules.
+    3. All nodes inside those submodule graphs.
+    """
+    from torchtitan.models.common.attention import FlexAttention
+
+    annotation = {"inductor_configs": FlexAttention.inductor_configs}
     for node in gm.graph.nodes:
-        if node.target in {
+        if node.target not in {
             torch.ops.higher_order.flex_attention,
             torch.ops.higher_order.flex_attention_backward,
         }:
-            assert "compile_with_inductor" in node.meta.get("custom", {})
+            continue
+        node.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+        for inp in node.all_input_nodes:
+            if inp.op != "get_attr":
+                continue
+            submod = getattr(gm, inp.target, None)
+            if not isinstance(submod, torch.fx.GraphModule):
+                continue
+            inp.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+            for sub_node in submod.graph.nodes:
+                sub_node.meta.setdefault("custom", {})[
+                    "compile_with_inductor"
+                ] = annotation
     return gm
 
 
@@ -603,6 +625,6 @@ AVAILABLE_COMPILER_PASSES = {
 AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
+    "annotate_flex_attention_for_regional_inductor": annotate_flex_attention_for_regional_inductor_pass,
     "apply_sac": apply_sac_pass,
 }
