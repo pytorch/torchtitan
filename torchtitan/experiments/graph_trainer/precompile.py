@@ -252,7 +252,6 @@ def _deserialize_with_cudagraph(
         {
             "cudagraph_policy": policy,
             "triton.cudagraphs": True,
-            "graph_partition": False,
         }
     ):
         compiled_fn = (

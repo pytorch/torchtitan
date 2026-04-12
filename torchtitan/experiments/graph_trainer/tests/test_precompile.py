@@ -432,14 +432,12 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
         )
 
         orig_cudagraphs = _inductor_config.triton.cudagraphs
-        orig_graph_partition = _inductor_config.graph_partition
         orig_policy = _inductor_config.cudagraph_policy
 
         with self.assertRaises((pickle.UnpicklingError, RuntimeError, ValueError)):
             _deserialize_with_cudagraph(b"invalid_bytes", cudagraph=True)
 
         self.assertEqual(_inductor_config.triton.cudagraphs, orig_cudagraphs)
-        self.assertEqual(_inductor_config.graph_partition, orig_graph_partition)
         self.assertIs(_inductor_config.cudagraph_policy, orig_policy)
 
     def test_with_cudagraph_sets_policy_during_deserialize(self):
@@ -460,7 +458,6 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
 
         def spy_deserialize(serialized_bytes):
             captured["cudagraphs"] = _inductor_config.triton.cudagraphs
-            captured["graph_partition"] = _inductor_config.graph_partition
             captured["policy"] = _inductor_config.cudagraph_policy
             return MagicMock()
 
@@ -472,7 +469,6 @@ class TestDeserializeWithCudagraph(unittest.TestCase):
             _deserialize_with_cudagraph(b"fake_bytes", cudagraph=True)
 
         self.assertTrue(captured["cudagraphs"])
-        self.assertFalse(captured["graph_partition"])
         self.assertIsInstance(captured["policy"], _PrecompileCUDAGraphPolicy)
 
         # After the call, everything should be restored
