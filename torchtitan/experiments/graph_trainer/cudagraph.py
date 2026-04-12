@@ -131,9 +131,10 @@ class CUDAGraphWrapper:
         _cg_manager.register_wrapper(self)
 
         self._runnable = runnable
-        # Boxed-call functions (e.g. CompiledFxGraph from Inductor)
-        # take a single list argument instead of individual *args.
-        # We adapt our calling convention accordingly.
+        # _boxed_call_inner controls how we *call* the inner runnable
+        # (single list arg vs *args). This is distinct from the outer
+        # _boxed_call attribute that the AOT runtime checks to decide
+        # how to call *us* (see cudagraph_pass in passes.py).
         self._boxed_call_inner = (
             boxed_call
             if boxed_call is not None
@@ -167,8 +168,8 @@ class CUDAGraphWrapper:
         for i in self._input_indices_to_copy:
             self._args[i].copy_(args[i])
 
-    def _validate_and_classify_inputs(self, inputs) -> None:
-        """Validate input types.
+    def _validate_inputs(self, inputs) -> None:
+        """Validate that all inputs are of supported types.
 
         Opaque inputs (e.g. DeviceMesh from SimpleFSDP/DTensor) are
         inherently static and already excluded from copying (only
@@ -229,7 +230,7 @@ class CUDAGraphWrapper:
             return out
 
         if self._cudagraph is None:
-            self._validate_and_classify_inputs(flat_args)
+            self._validate_inputs(flat_args)
             self._args = flat_args
             self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in flat_args

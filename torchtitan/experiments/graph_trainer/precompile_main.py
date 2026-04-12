@@ -206,9 +206,8 @@ def main():
     # This must happen after fingerprint computation (which uses the
     # original passes list) but before get_compiler_passes_from_config
     # (which should not include the non-serializable cudagraph pass).
-    cudagraph_ctx: contextlib.AbstractContextManager = contextlib.nullcontext()
-    if "cudagraph" in compile_config.passes:
-        cudagraph_ctx = torch._inductor.config.patch({"triton.cudagraphs": True})
+    use_inductor_cudagraphs = "cudagraph" in compile_config.passes
+    if use_inductor_cudagraphs:
         compile_config = dataclasses.replace(
             compile_config,
             passes=[p for p in compile_config.passes if p != "cudagraph"],
@@ -218,51 +217,60 @@ def main():
             "precompile (CudagraphCachedInfo will be serialized in the artifact)"
         )
 
+    joint_custom_passes = get_joint_custom_passes_from_config(
+        parallel_dims, compile_config, fsdp_reshard_after_forward
+    )
+    compiler_passes = get_compiler_passes_from_config(
+        model, compile_config, parallel_dims
+    )
+    fw_compiler, bw_compiler = make_compiler_with_passes(
+        compiler_passes, dump_folder=config.dump_folder
+    )
+
+    on_compile = _make_precompile_callback(
+        model,
+        compile_config,
+        parallel_dims,
+        storage=storage,
+        config_fingerprint=config_fingerprint,
+    )
+
+    model_joint_graph_builder = functools.partial(
+        joint_graph_builder,
+        fw_compiler=fw_compiler,
+        bw_compiler=bw_compiler,
+        joint_custom_passes=joint_custom_passes,
+        dump_folder=config.dump_folder,
+        compile_config=compile_config,
+        serializable=True,
+        on_compile=on_compile,
+    )
+
+    compiled_model = CompiledModule(
+        model, parallel_dims, model_joint_graph_builder, parallelize_inputs
+    )
+
+    # Forward pass triggers AOT compilation; the backward graph is compiled
+    # eagerly (not lazily) because serializable=True sets
+    # force_non_lazy_backward_lowering=True in aot_compile_joint.
+    seq_len = config.training.seq_len
+    local_batch_size = config.training.local_batch_size
+    vocab_size = model_config.vocab_size
+
+    dummy_input = torch.randint(
+        0, vocab_size, (local_batch_size, seq_len), device=device
+    )
+
+    # triton.cudagraphs only needs to be active during compilation
+    # (compile_fx_inner), where it causes Inductor to populate
+    # CudagraphCachedInfo in the serialized artifact. Scope it
+    # tightly to avoid affecting unrelated config readers.
+    cudagraph_ctx: contextlib.AbstractContextManager = contextlib.nullcontext()
+    if use_inductor_cudagraphs:
+        cudagraph_ctx = torch._inductor.config.patch({"triton.cudagraphs": True})
+
+    logger.info("Running forward pass to trigger AOT compilation...")
     with cudagraph_ctx:
-        joint_custom_passes = get_joint_custom_passes_from_config(
-            parallel_dims, compile_config, fsdp_reshard_after_forward
-        )
-        compiler_passes = get_compiler_passes_from_config(
-            model, compile_config, parallel_dims
-        )
-        fw_compiler, bw_compiler = make_compiler_with_passes(
-            compiler_passes, dump_folder=config.dump_folder
-        )
-
-        on_compile = _make_precompile_callback(
-            model,
-            compile_config,
-            parallel_dims,
-            storage=storage,
-            config_fingerprint=config_fingerprint,
-        )
-
-        model_joint_graph_builder = functools.partial(
-            joint_graph_builder,
-            fw_compiler=fw_compiler,
-            bw_compiler=bw_compiler,
-            joint_custom_passes=joint_custom_passes,
-            dump_folder=config.dump_folder,
-            compile_config=compile_config,
-            serializable=True,
-            on_compile=on_compile,
-        )
-
-        compiled_model = CompiledModule(
-            model, parallel_dims, model_joint_graph_builder, parallelize_inputs
-        )
-
-        # Forward pass triggers AOT compilation; the backward graph is compiled
-        # eagerly (not lazily) because serializable=True sets
-        # force_non_lazy_backward_lowering=True in aot_compile_joint.
-        seq_len = config.training.seq_len
-        local_batch_size = config.training.local_batch_size
-        vocab_size = model_config.vocab_size
-
-        dummy_input = torch.randint(
-            0, vocab_size, (local_batch_size, seq_len), device=device
-        )
-        logger.info("Running forward pass to trigger AOT compilation...")
         compiled_model(dummy_input)
 
     logger.info(
