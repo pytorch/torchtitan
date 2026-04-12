@@ -160,7 +160,6 @@ def parallelize_deepseekv3(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
-        gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
     )
 
     logger.info("Applied fully_shard to the model")
