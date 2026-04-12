@@ -129,19 +129,8 @@ def _apply_aot_compile(
         from .precompile import compute_config_fingerprint
 
         storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-
-        # Strip cudagraph from passes for fingerprint computation to
-        # match what precompile_main does at save time.
-        cudagraph_enabled = "cudagraph" in compile_config.passes
-        load_compile_config = compile_config
-        if cudagraph_enabled:
-            load_compile_config = dataclasses.replace(
-                compile_config,
-                passes=[p for p in compile_config.passes if p != "cudagraph"],
-            )
-
         config_fingerprint = compute_config_fingerprint(
-            model, load_compile_config, parallel_dims
+            model, compile_config, parallel_dims
         )
 
         if not storage.exists(_ARTIFACT_KEY):
@@ -151,7 +140,8 @@ def _apply_aot_compile(
                 f"Run precompile_main first to generate the artifact."
             )
 
-        is_regional = "regional_inductor" in load_compile_config.passes
+        cudagraph_enabled = "cudagraph" in compile_config.passes
+        is_regional = "regional_inductor" in compile_config.passes
         return _apply_aot_compile_load(
             model,
             parallel_dims,

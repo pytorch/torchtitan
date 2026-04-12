@@ -180,8 +180,9 @@ class _PrecompileCUDAGraphPolicy(CUDAGraphPolicy):
 
         def run(new_inputs: list) -> Any:
             if cg[0] is None:
-                cg[0] = CUDAGraphWrapper(model, new_inputs, tuple(static_input_idxs))
-                cg[0]._boxed_call_inner = True
+                cg[0] = CUDAGraphWrapper(
+                    model, new_inputs, tuple(static_input_idxs), boxed_call=True
+                )
             return cg[0](new_inputs)
 
         run._boxed_call = True  # type: ignore[attr-defined]
@@ -201,10 +202,13 @@ class _PrecompileCUDAGraphPolicy(CUDAGraphPolicy):
         original = output_code
         cg: list[CUDAGraphWrapper | None] = [None]
 
+        # TODO: static_input_indices=() means all inputs are treated as
+        # dynamic and copied each iteration. The non-precompile regional
+        # path pre-computes static indices from the graph; investigate
+        # whether we can do the same here for better performance.
         def wrapped(inputs: list) -> Any:
             if cg[0] is None:
-                cg[0] = CUDAGraphWrapper(original, inputs, ())
-                cg[0]._boxed_call_inner = True
+                cg[0] = CUDAGraphWrapper(original, inputs, (), boxed_call=True)
             return cg[0](inputs)
 
         wrapped._boxed_call = True  # type: ignore[attr-defined]

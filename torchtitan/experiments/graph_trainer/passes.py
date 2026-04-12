@@ -219,8 +219,6 @@ def cudagraph_pass(
             prior pass like full_inductor_compilation replaced the
             GraphModule with a non-inspectable callable).
     """
-    from torch._functorch._aot_autograd.utils import make_boxed_func
-
     from torchtitan.experiments.graph_trainer.cudagraph import (
         CUDAGraphWrapper,
         get_static_input_indices,
@@ -231,7 +229,7 @@ def cudagraph_pass(
 
     if isinstance(gm, torch.fx.GraphModule):
         gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
-        return make_boxed_func(gm)
+        return gm
     else:
         wrapper = CUDAGraphWrapper(gm, example_inputs, static_input_indices)
         # Propagate _boxed_call so the AOT runtime uses the same

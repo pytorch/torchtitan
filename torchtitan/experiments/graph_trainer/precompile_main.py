@@ -71,22 +71,6 @@ def main():
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
 
-    # The custom cudagraph pass (CUDAGraphWrapper) wraps at compile time and
-    # can't be serialized. For precompile, we use Inductor's built-in cudagraph
-    # mechanism instead: setting triton.cudagraphs=True populates
-    # CudagraphCachedInfo in the artifact, and post_compile() applies the
-    # wrapping at load time on each rank.
-    if "cudagraph" in compile_config.passes:
-        torch._inductor.config.triton.cudagraphs = True
-        compile_config = dataclasses.replace(
-            compile_config,
-            passes=[p for p in compile_config.passes if p != "cudagraph"],
-        )
-        logger.info(
-            "Cudagraph pass replaced with Inductor built-in cudagraphs for "
-            "precompile (CudagraphCachedInfo will be serialized in the artifact)"
-        )
-
     parallelism = config.parallelism
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
@@ -205,6 +189,33 @@ def main():
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
     )
 
+    from .precompile import compute_config_fingerprint
+
+    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+    config_fingerprint = compute_config_fingerprint(
+        model, compile_config, parallel_dims
+    )
+
+    # The custom cudagraph pass (CUDAGraphWrapper) wraps at compile time and
+    # can't be serialized. For precompile, we use Inductor's built-in cudagraph
+    # mechanism instead: setting triton.cudagraphs=True populates
+    # CudagraphCachedInfo in the artifact, and post_compile() applies the
+    # wrapping at load time on each rank.
+    #
+    # This must happen after fingerprint computation (which uses the
+    # original passes list) but before get_compiler_passes_from_config
+    # (which should not include the non-serializable cudagraph pass).
+    if "cudagraph" in compile_config.passes:
+        torch._inductor.config.triton.cudagraphs = True
+        compile_config = dataclasses.replace(
+            compile_config,
+            passes=[p for p in compile_config.passes if p != "cudagraph"],
+        )
+        logger.info(
+            "Cudagraph pass replaced with Inductor built-in cudagraphs for "
+            "precompile (CudagraphCachedInfo will be serialized in the artifact)"
+        )
+
     joint_custom_passes = get_joint_custom_passes_from_config(
         parallel_dims, compile_config, fsdp_reshard_after_forward
     )
@@ -213,13 +224,6 @@ def main():
     )
     fw_compiler, bw_compiler = make_compiler_with_passes(
         compiler_passes, dump_folder=config.dump_folder
-    )
-
-    from .precompile import compute_config_fingerprint
-
-    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallel_dims
     )
 
     on_compile = _make_precompile_callback(

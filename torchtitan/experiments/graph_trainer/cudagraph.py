@@ -124,6 +124,8 @@ class CUDAGraphWrapper:
         example_inputs: Sequence[Any],
         static_input_indices: tuple[int] | None = None,
         should_check_address: bool = False,
+        *,
+        boxed_call: bool | None = None,
     ):
         _cg_manager.maybe_initialize()
         _cg_manager.register_wrapper(self)
@@ -132,7 +134,11 @@ class CUDAGraphWrapper:
         # Boxed-call functions (e.g. CompiledFxGraph from Inductor)
         # take a single list argument instead of individual *args.
         # We adapt our calling convention accordingly.
-        self._boxed_call_inner = getattr(runnable, "_boxed_call", False)
+        self._boxed_call_inner = (
+            boxed_call
+            if boxed_call is not None
+            else getattr(runnable, "_boxed_call", False)
+        )
         self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )

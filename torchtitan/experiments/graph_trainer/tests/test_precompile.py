@@ -585,16 +585,17 @@ class TestPrecompileCUDAGraphPolicy(unittest.TestCase):
         self.assertIs(policy.wrap_output(obj), obj)
 
 
-class TestCudagraphFingerprintStripping(unittest.TestCase):
-    """Test that cudagraph is stripped from config before fingerprint computation,
-    so precompile (save) and load produce the same fingerprint."""
+class TestCudagraphFingerprintConsistency(unittest.TestCase):
+    """Test that save and load paths produce the same fingerprint.
 
-    def test_stripped_config_matches_no_cudagraph_config(self):
-        """Stripping cudagraph from passes should produce the same fingerprint
-        as never having cudagraph in passes, since both precompile_main and
-        _apply_aot_compile strip it before computing the fingerprint."""
-        import dataclasses
+    Both paths compute the fingerprint from the original (unmodified)
+    compile_config — cudagraph stripping in precompile_main happens
+    AFTER fingerprint computation, so no manual filtering is needed.
+    """
 
+    def test_cudagraph_included_in_fingerprint(self):
+        """Cudagraph in passes should produce a different fingerprint
+        than without cudagraph — no filtering is applied."""
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
         )
@@ -604,38 +605,26 @@ class TestCudagraphFingerprintStripping(unittest.TestCase):
         cfg_with = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
         cfg_without = _StubCompileConfig(passes=["full_inductor_compilation"])
 
-        cfg_stripped = dataclasses.replace(
-            cfg_with,
-            passes=[p for p in cfg_with.passes if p != "cudagraph"],
-        )
-
-        fp_stripped = compute_config_fingerprint(_make_stub_model(), cfg_stripped, dims)
+        fp_with = compute_config_fingerprint(_make_stub_model(), cfg_with, dims)
         fp_without = compute_config_fingerprint(_make_stub_model(), cfg_without, dims)
 
-        self.assertEqual(fp_stripped, fp_without)
+        self.assertNotEqual(fp_with, fp_without)
 
-    def test_regional_inductor_stripped_config_matches(self):
-        """Same stripping logic should work for regional_inductor + cudagraph."""
-        import dataclasses
-
+    def test_same_config_produces_same_fingerprint(self):
+        """Both save and load paths use the same unmodified config,
+        so the fingerprint is identical."""
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
         )
 
         dims = _StubParallelDims()
 
-        cfg_with = _StubCompileConfig(passes=["regional_inductor", "cudagraph"])
-        cfg_without = _StubCompileConfig(passes=["regional_inductor"])
+        cfg = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
 
-        cfg_stripped = dataclasses.replace(
-            cfg_with,
-            passes=[p for p in cfg_with.passes if p != "cudagraph"],
-        )
+        fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
+        fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
 
-        fp_stripped = compute_config_fingerprint(_make_stub_model(), cfg_stripped, dims)
-        fp_without = compute_config_fingerprint(_make_stub_model(), cfg_without, dims)
-
-        self.assertEqual(fp_stripped, fp_without)
+        self.assertEqual(fp1, fp2)
 
 
 class TestConfigFingerprint(unittest.TestCase):
