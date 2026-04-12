@@ -49,15 +49,15 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
       boundaries for the min-cut partitioner.
 
     """
-    from torchtitan.distributed.expert_parallel import ExpertParallel
     from torchtitan.models.common.attention import FlexAttention
     from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import BaseTokenDispatcher
 
-    ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
-        ExpertParallel._token_dispatch
+    BaseTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        BaseTokenDispatcher.dispatch
     )
-    ExpertParallel._token_combine = annotate_fn({"EP": "combine"})(
-        ExpertParallel._token_combine
+    BaseTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        BaseTokenDispatcher.combine
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
