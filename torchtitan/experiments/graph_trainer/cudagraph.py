@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
+from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
@@ -162,19 +163,17 @@ class CUDAGraphWrapper:
 
     def _check_input_types(self, inputs) -> None:
         for i, inp in enumerate(inputs):
-            if isinstance(inp, (torch.Tensor, int, torch._C.Generator)):
+            if isinstance(inp, (torch.Tensor, int, float, torch._C.Generator)):
                 continue
-            # Opaque inputs (e.g. DeviceMesh from SimpleFSDP/DTensor) are
-            # valid graph inputs. They are inherently static — their values
-            # don't change between iterations — so we treat them as static
-            # even if AOT Autograd didn't mark them. This ensures they are
-            # never included in _input_indices_to_copy (which already
-            # filters for torch.Tensor).
+            # Opaque inputs (e.g. DeviceMesh) are inherently static —
+            # force-mark them so they are never copied between
+            # iterations by _input_indices_to_copy.
             if is_opaque_value(inp):
                 self._static_input_indices.add(i)
                 continue
             raise ValueError(
                 "args must be tensor, integer (for dynamic shapes), "
+                "float (for scalar constants), "
                 "Generator (for random number generator), "
                 "or opaque object, "
                 f"but found {type(inp)} with value {inp!r} at index {i}"
@@ -210,16 +209,14 @@ class CUDAGraphWrapper:
 
         if not self._has_warmup:
             self._has_warmup = True
+            device = torch.cuda.current_device()
 
-            # Warmup: run the function once on the current stream to
-            # trigger lazy kernel compilation and workspace allocation.
-            # We stay on the current stream (rather than switching to
-            # _cg_manager.stream) so NCCL collectives execute normally.
-            # Recording (next call) uses _cg_manager.stream with the
-            # graph pool, where NCCL ops are captured, not executed.
-            torch.cuda.synchronize()
-            out = self._call_runnable(flat_args)
-            torch.cuda.synchronize()
+            # warmup in cudagraph memory pool to avoid fragmentation
+            # across eager memory pool and cudagraph memory pool.
+            with _use_cuda_memory_pool_manager(
+                device, _cg_manager.graph_pool, _cg_manager.stream
+            ):
+                out = self._call_runnable(flat_args)
             return out
 
         if self._cudagraph is None:
@@ -228,13 +225,13 @@ class CUDAGraphWrapper:
             self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in flat_args
             ]
-            torch.cuda.synchronize()
+
             self._cudagraph = torch.cuda.CUDAGraph()
+
             with torch.cuda.graph(
                 self._cudagraph,
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
-                capture_error_mode="thread_local",
             ):
                 self._output = self._call_runnable(flat_args)
 
@@ -252,6 +249,80 @@ class CUDAGraphWrapper:
         self._cudagraph = None
         self._args = None
         self._output = None
+
+
+_FLEX_ATTENTION_OPS = {
+    torch.ops.higher_order.flex_attention,
+    torch.ops.higher_order.flex_attention_backward,
+}
+
+
+def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
+    """Check whether the graph can be safely captured by CUDA graph.
+
+    Returns False (with a warning) when the graph contains patterns
+    incompatible with CUDA graph capture:
+
+    - **Unpinned CPU↔CUDA copies** (``aten.copy_``, ``aten._to_copy``):
+      e.g. MoE load-balancing counters that copy tensors between CPU and
+      CUDA.  CUDA graph capture requires pinned CPU memory for such copies.
+    - **``aten._grouped_mm``**: the grouped matmul kernel used by MoE may
+      perform internal CPU↔CUDA copies (e.g. workspace allocation) that
+      are invisible in the FX graph metadata, breaking CUDA graph capture.
+    - **flex_attention HOPs**: flex_attention higher-order ops require
+      torch.compile (e.g. regional_inductor) to lower them into fused
+      Triton kernels.  Without compilation they fall back to an unfused
+      Math implementation that is incompatible with CUDA graph capture.
+      The expected workflow is to apply regional_inductor first to compile
+      flex_attention regions, then apply cudagraph.
+    """
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+
+        # Check for aten.copy_ / aten._to_copy between CPU and CUDA
+        # without pin_memory (MoE load-balancing counters).
+        if node.target in (
+            torch.ops.aten.copy_.default,
+            torch.ops.aten._to_copy.default,
+        ):
+            val = node.meta.get("val")
+            if not isinstance(val, torch.Tensor):
+                continue
+            for inp in node.all_input_nodes:
+                inp_val = inp.meta.get("val")
+                if (
+                    isinstance(inp_val, torch.Tensor)
+                    and inp_val.device.type != val.device.type
+                ):
+                    logger.warning(
+                        "Skipping cudagraph: graph contains unpinned CPU↔CUDA "
+                        f"copy ({node.target})"
+                    )
+                    return False
+
+        # Check for aten._grouped_mm unconditionally.
+        # _grouped_mm may perform internal CPU↔CUDA copies (e.g. workspace
+        # allocation) that are not visible from the FX graph metadata, so we
+        # cannot rely on checking input device types alone.
+        if node.target == torch.ops.aten._grouped_mm.default:
+            logger.warning(
+                "Skipping cudagraph: graph contains aten._grouped_mm "
+                "which may perform internal CPU↔CUDA copies incompatible "
+                "with CUDA graph capture"
+            )
+            return False
+
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
+            logger.warning(
+                "Skipping cudagraph: graph contains flex_attention higher-order "
+                "ops that require regional_inductor to compile before cudagraph "
+                "can capture"
+            )
+            return False
+
+    return True
 
 
 def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:

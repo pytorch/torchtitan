@@ -324,8 +324,12 @@ class ReordererSequenceParallel(ParallelStyle):
         #       the MoE gather and scatter still require global token indices.
         # Use _sym_get_coordinate for CooR compatibility (see _split_along_first_dim).
         local_rank = device_mesh._sym_get_coordinate(0)
+        if not hasattr(mod, "top_k"):
+            raise ValueError(
+                "TokenReorderer class in MoE should always have top_k attribute."
+            )
         token_indices_experts_sorted = (
-            token_indices_experts_sorted + top_scores.shape[0] * local_rank
+            token_indices_experts_sorted + top_scores.shape[0] // mod.top_k * local_rank
         )
 
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert

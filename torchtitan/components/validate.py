@@ -60,7 +60,6 @@ class Validator(BaseValidator):
         parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
         validation_context: Context manager for validation
-        maybe_enable_amp: Context manager for AMP
         metrics_processor: Metrics processor
         pp_schedule: Pipeline schedule (optional)
         pp_has_first_stage: Whether this rank has the first PP stage (optional)
@@ -104,7 +103,6 @@ class Validator(BaseValidator):
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
-        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor,
         seq_len: int,
         local_batch_size: int,
@@ -125,7 +123,6 @@ class Validator(BaseValidator):
         self.seq_len = seq_len
         self.local_batch_size = local_batch_size
         self.validation_context = validation_context
-        self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
@@ -278,20 +275,17 @@ class Validator(BaseValidator):
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss_sum = (
+                if self.pp_has_last_stage:
+                    assert losses is not None
                     # using sum because loss_fn already uses reduction='sum'
-                    torch.sum(torch.stack(losses)).to(device_type)
-                    if self.pp_has_last_stage
-                    else torch.tensor([-1.0], device=device_type)
-                )
+                    loss_sum = torch.sum(torch.stack(losses)).to(device_type)
+                else:
+                    loss_sum = torch.tensor([-1.0], device=device_type)
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
-                    with self.maybe_enable_amp:
-                        predictions = model_parts[0](
-                            inputs, **extra_inputs, **extra_kwargs
-                        )
-                        loss_sum = self.loss_fn(predictions, labels)
+                    predictions = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    loss_sum = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1

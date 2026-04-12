@@ -18,7 +18,12 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
+)
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -29,6 +34,8 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 from torch.nn.attention.varlen import varlen_attn
+
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -156,6 +163,16 @@ class VarlenAttention(LocalMapInnerAttention):
     class Config(LocalMapInnerAttention.Config):
         pass
 
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+
+        from torchtitan.tools.utils import has_cuda_capability
+
+        # Hopper (SM 9.0) uses FA3
+        if has_cuda_capability(9, 0):
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -190,6 +207,19 @@ class VarlenAttention(LocalMapInnerAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
+        varlen_kwargs = dict()
+
+        if is_in_batch_invariant_mode():
+            if current_flash_attention_impl() == "FA3":
+                # Fix split count to 1 to prevent non-deterministic split-k
+                # reductions that vary with batch composition.
+                # Only needed for FA3; FA2 is automatically batch-invariant.
+                varlen_kwargs["num_splits"] = 1
+
+        # Forward enable_gqa from GQAttention when Q and KV head counts differ
+        if kwargs.get("enable_gqa", False):
+            varlen_kwargs["enable_gqa"] = True
+
         out_packed = varlen_attn(
             xq_packed,
             xk_packed,
@@ -210,6 +240,7 @@ class VarlenAttention(LocalMapInnerAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
+            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
@@ -556,19 +587,13 @@ class GQAttention(BaseAttention):
         wq: Linear.Config
         wkv: Linear.Config
         wo: Linear.Config
-        q_norm: RMSNorm.Config | None = None
-        k_norm: RMSNorm.Config | None = None
+        qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
-
-        def __post_init__(self):
-            BaseAttention.Config.__post_init__(self)
-            if (self.q_norm is None) != (self.k_norm is None):
-                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -588,9 +613,9 @@ class GQAttention(BaseAttention):
         # Optional QK normalization (Qwen3-style)
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
-        if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build()
-            self.k_norm = config.k_norm.build()
+        if config.qk_norm is not None:
+            self.q_norm = config.qk_norm.build()
+            self.k_norm = config.qk_norm.build()
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
@@ -620,9 +645,9 @@ class GQAttention(BaseAttention):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None:
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
             xq = self.q_norm(xq)
-        if self.k_norm is not None:
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings

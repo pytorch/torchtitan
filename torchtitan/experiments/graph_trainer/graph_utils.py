@@ -20,7 +20,6 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
-
 from torch.utils._pytree import TreeSpec
 
 from torchtitan.config import CompileConfig
@@ -352,10 +351,7 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
-    # Only try to print/dump if gm is still a GraphModule.
-    # Non-GraphModule results (CompiledFxGraph from inductor,
-    # CUDAGraphWrapper from cudagraph) don't have a readable graph.
-    if isinstance(gm, torch.fx.GraphModule):
+    if hasattr(gm, "print_readable"):
         _dump_gm(dump_folder, gm, f"{name}_after_compiler")
 
         # Log the final transformed graph to tlparse.
@@ -558,9 +554,9 @@ def get_joint_custom_passes_from_config(
         List of joint custom pass functions
     """
     from torchtitan.experiments.graph_trainer.passes import (
+        annotate_flex_attention_for_regional_inductor_pass,
         AVAILABLE_JOINT_PASSES,
         fsdp_reshard_after_fwd_pass,
-        validate_flex_attn_annotation_pass,
     )
 
     joint_custom_passes = []
@@ -570,7 +566,7 @@ def get_joint_custom_passes_from_config(
     # annotations. The validation is only relevant for regional_inductor.
     pass_names = getattr(compile_config, "passes", [])
     if "full_inductor_compilation" not in pass_names:
-        joint_custom_passes.append(validate_flex_attn_annotation_pass)
+        joint_custom_passes.append(annotate_flex_attention_for_regional_inductor_pass)
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])

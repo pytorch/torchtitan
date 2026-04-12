@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+title: torchtitan
+message: "If you use torchtitan, please cite it as below."
+type: software
+authors:
+  - family-names: torchtitan team
+url: https://github.com/pytorch/torchtitan
+preferred-citation:
+  type: conference-paper
+  title: "TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training"
+  authors:
+    - family-names: Liang
+      given-names: Wanchao
+    - family-names: Liu
+      given-names: Tianyu
+    - family-names: Wright
+      given-names: Less
+    - family-names: Constable
+      given-names: Will
+    - family-names: Gu
+      given-names: Andrew
+    - family-names: Huang
+      given-names: Chien-Chin
+    - family-names: Zhang
+      given-names: Iris
+    - family-names: Feng
+      given-names: Wei
+    - family-names: Huang
+      given-names: Howard
+    - family-names: Wang
+      given-names: Junjie
+    - family-names: Purandare
+      given-names: Sanket
+    - family-names: Nadathur
+      given-names: Gokul
+    - family-names: Idreos
+      given-names: Stratos
+  collection-title: "The Thirteenth International Conference on Learning Representations (ICLR 2025)"
+  year: 2025
+  url: "https://openreview.net/forum?id=SFN6Wm7YBI"

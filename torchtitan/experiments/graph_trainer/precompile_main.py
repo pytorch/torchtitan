@@ -27,6 +27,7 @@ import functools
 import torch
 import torch.distributed as dist
 
+from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -49,6 +50,16 @@ from torchtitan.experiments.graph_trainer.precompile import _ARTIFACT_KEY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
+
+
+class _DummyTokenizer:
+    """Minimal tokenizer stand-in for precompile.
+
+    Only eos_id is needed by get_attention_masks() to compute document
+    boundaries. Values don't matter — only pytree structure must match.
+    """
+
+    eos_id = 0
 
 
 def main():
@@ -268,13 +279,7 @@ def main():
     )
 
     # Build extra kwargs (positions, attention_masks) using the same
-    # shared function as the training path. A dummy tokenizer provides
-    # the eos_id needed by get_attention_masks(); the mask values don't
-    # matter for precompile — only the pytree structure must match.
-    class _DummyTokenizer:
-        eos_id = 0
-
-    from torchtitan.components.forward_utils import build_forward_extra_kwargs
+    # shared function as the training path.
 
     extra_kwargs = build_forward_extra_kwargs(
         model_config,

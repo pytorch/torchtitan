@@ -44,6 +44,7 @@ def _run_cmd(cmd):
 
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     llama3_precompile_dir = tempfile.mkdtemp(prefix="precompile_llama3_")
+    fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     cudagraph_precompile_dir = tempfile.mkdtemp(prefix="precompile_cudagraph_")
     dsv3_precompile_dir = tempfile.mkdtemp(prefix="precompile_dsv3_")
     dsv3_regional_precompile_dir = tempfile.mkdtemp(prefix="precompile_dsv3_regional_")
