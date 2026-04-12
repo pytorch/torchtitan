@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
     reassign_to_pg_pass,
+    remove_detach_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.linear import Linear
@@ -404,6 +405,138 @@ class TestApplySACPass(TestCase):
         for node, (target, policy) in zip(nodes, expected):
             self.assertEqual(node.target, target)
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
+
+
+class TestRemoveDetachPass(TestCase):
+    """Unit tests for the remove_detach_pass graph pass."""
+
+    def _build_detach_gm(self, op_targets):
+        """Build a GraphModule with a chain of call_function nodes.
+
+        Each op in op_targets becomes a call_function node chained sequentially:
+        placeholder(x) -> op1(x) -> op2(...) -> ... -> output.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        last = x
+        for target in op_targets:
+            last = graph.call_function(target, args=(last,))
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _count_detach_nodes(self, gm):
+        """Count aten.detach.default call_function nodes."""
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.detach.default
+        )
+
+    def _count_call_function_nodes(self, gm):
+        """Count all call_function nodes."""
+        return sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+    def test_detach_nodes_removed(self):
+        """Detach nodes are removed from a simple graph containing them."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        self.assertEqual(self._count_detach_nodes(gm), 1)
+
+        result = remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(result), 0)
+        # relu and neg should remain
+        self.assertEqual(self._count_call_function_nodes(result), 2)
+
+    def test_graph_without_detach_unchanged(self):
+        """Graphs without detach nodes are returned unchanged."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        num_nodes_before = len(list(gm.graph.nodes))
+
+        result = remove_detach_pass(gm)
+
+        self.assertIs(result, gm)
+        self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
+
+    def test_numerics_preserved(self):
+        """Forward outputs are preserved after removing detach nodes."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        x = torch.randn(4, 4)
+        expected = torch.neg(torch.detach_copy(torch.relu(x)))
+
+        remove_detach_pass(gm)
+        actual = gm(x)
+
+        self.assertEqual(actual, expected)
+
+    def test_detach_with_multiple_users(self):
+        """Detach node with multiple users: all uses are replaced."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        detach = graph.call_function(torch.ops.aten.detach.default, args=(x,))
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(detach,))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(detach,))
+        graph.output((relu, neg))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        self.assertEqual(self._count_detach_nodes(gm), 1)
+
+        remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(gm), 0)
+
+        # Both relu and neg should now consume the placeholder directly
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target in (
+                torch.ops.aten.relu.default,
+                torch.ops.aten.neg.default,
+            ):
+                self.assertEqual(node.args[0].op, "placeholder")
+
+        # Verify numerics
+        x = torch.randn(4, 4)
+        relu_out, neg_out = gm(x)
+        self.assertEqual(relu_out, torch.relu(x))
+        self.assertEqual(neg_out, torch.neg(x))
+
+    def test_nested_detach_chain(self):
+        """Nested detach chain (detach -> detach -> detach) is fully removed."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        self.assertEqual(self._count_detach_nodes(gm), 3)
+
+        remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(gm), 0)
+        self.assertEqual(self._count_call_function_nodes(gm), 2)
+
+        # Verify numerics
+        x = torch.randn(4, 4)
+        expected = torch.neg(torch.relu(x))
+        self.assertEqual(gm(x), expected)
 
 
 if __name__ == "__main__":
