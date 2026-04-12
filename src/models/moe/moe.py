@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from src.tools.logging import logger
+from src.logging import logger
 
 from .utils import indices_padding_wrapper
 

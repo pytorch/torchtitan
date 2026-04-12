@@ -19,8 +19,8 @@ from src.config import TORCH_DTYPE_MAP
 from src.config import Comm as CommConfig
 from src.config import Debug as DebugConfig
 from src.distributed.parallel_dims import ParallelDims
-from src.tools.logging import logger
-from src.tools.utils import device_module, device_type
+from src.logging import logger
+from src.utils import device_module, device_type
 
 
 def _dist_reduce(
@@ -118,14 +118,6 @@ def set_determinism(
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
-        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
-        # reproducibility, since the autotune results may not be deterministic.
-        from torch.nn.attention.flex_attention import flex_attention
-
-        from src.models.attention import FlexAttentionWrapper
-
-        FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
     seed = debug_config.seed
     if parallel_dims.world_size == 1:

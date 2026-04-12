@@ -29,14 +29,13 @@ from torch.distributed.checkpoint.state_dict_saver import (
 )
 from torch.distributed.checkpoint.stateful import Stateful
 
-from src.components.dataloader import BaseDataLoader
+from src.data import BaseDataLoader
 from src.components.lr_scheduler import LRSchedulersContainer
 from src.components.optimizer import OptimizersContainer
 from src.config import TORCH_DTYPE_MAP
 from src.config import Checkpoint as CheckpointConfig
-from src.protocols import BaseStateDictAdapter
-from src.tools.logging import logger
-from src.tools.utils import GarbageCollection
+from src.logging import logger
+from src.utils import GarbageCollection
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -150,8 +149,8 @@ class CheckpointManager:
         checkpoint_config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
             with checkpoint_config.folder
-        sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
-            dicts between native format and other formats.
+        sd_adapter: The adapter used to convert model state
+            dicts between native format and other formats. Pass None if not needed.
 
     """
 
@@ -166,7 +165,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
-        sd_adapter: BaseStateDictAdapter | None,
+        sd_adapter: Any | None = None,
         base_folder: str = "",
     ) -> None:
         self.enable = checkpoint_config.enable

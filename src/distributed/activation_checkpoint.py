@@ -12,7 +12,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from src.config.job_config import ActivationCheckpoint as ACConfig
-from src.tools.logging import logger
+from src.logging import logger
 
 _layer_sac_count = 0
 

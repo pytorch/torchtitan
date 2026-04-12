@@ -27,7 +27,7 @@ from src.config.config import ModelConfig
 from src.distributed import ParallelDims
 from src.models.moe.model import MoETransformer
 from src.models.parallelize import apply_fsdp, apply_moe_ep
-from src.tools.logging import init_logger, logger
+from src.logging import init_logger, logger
 
 
 def main():

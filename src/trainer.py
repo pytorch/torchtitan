@@ -2,24 +2,38 @@
 
 import os
 import time
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.distributed.checkpoint.stateful import Stateful
 
 from src.components.checkpoint import CheckpointManager
 from src.components.lr_scheduler import build_lr_schedulers
 from src.components.optimizer import build_optimizers_with_moe_load_balancing
 from src.components.tokenizer import HuggingFaceTokenizer, resolve_tokenizer_path
-from src.components.train_state import TrainState
 from src.config import TORCH_DTYPE_MAP
 from src.config.config import Config, build_job_config
+from src.data import build_text_dataloader
 from src.distributed import ParallelDims
 from src.distributed import utils as dist_utils
-from src.hf_datasets.text_datasets import build_text_dataloader
+from src.logging import init_logger, logger
 from src.models.moe.model import MoETransformer
 from src.models.parallelize import apply_fsdp, apply_moe_ep
-from src.tools.logging import init_logger, logger
+
+
+class TrainState(Stateful):
+    def __init__(self):
+        self.step = 0
+        self.ntokens_seen = 0
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+
+    def load_state_dict(self, state_dict: dict[str, Any]):
+        self.step = state_dict["step"]
+        self.ntokens_seen = state_dict["ntokens_seen"]
 
 
 def train(cfg: Config):
@@ -32,9 +46,7 @@ def train(cfg: Config):
     parallel_dims = ParallelDims(
         dp_replicate=1,
         dp_shard=cfg.parallelism.dp_shard,
-        cp=1,
-        tp=1,
-        pp=1,
+        cp=1, tp=1, pp=1,
         ep=cfg.parallelism.ep,
         etp=1,
         world_size=world_size,
@@ -96,9 +108,27 @@ def train(cfg: Config):
         f"({expert_params:,} expert, {non_expert_params:,} non-expert)"
     )
 
-    # Parallelism: EP then FSDP
+    # Parallelism: EP → AC → compile → FSDP (order matters)
     if parallel_dims.ep_enabled:
         apply_moe_ep(model, parallel_dims.get_mesh("ep"))
+
+    compile_enabled = cfg.compile.enable
+    if job_config.activation_checkpoint.mode != "none":
+        from src.distributed.activation_checkpoint import apply_ac
+
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=compile_enabled,
+        )
+        logger.info(
+            f"Applied activation checkpointing: mode={job_config.activation_checkpoint.mode}"
+        )
+
+    if compile_enabled:
+        from src.models.parallelize import apply_compile
+
+        apply_compile(model, backend=cfg.compile.backend, ep_enabled=parallel_dims.ep_enabled)
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         apply_fsdp(

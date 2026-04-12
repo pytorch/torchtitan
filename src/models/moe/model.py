@@ -1,11 +1,33 @@
 """Custom MoE Transformer model for training from scratch."""
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from src.config.config import ModelConfig
-from src.models.attention import ScaledDotProductAttentionWrapper
 from src.models.moe import FeedForward, build_moe
+
+
+# --- SDPA Attention Wrapper ---
+
+
+class ScaledDotProductAttentionWrapper(nn.Module):
+    sdpa_backends: list[SDPBackend] = []
+
+    def __init__(self) -> None:
+        super().__init__()
+        if not self.sdpa_backends:
+            self.sdpa_backends = [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ]
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, scale: float | None = None) -> torch.Tensor:
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 
 # --- RoPE ---
 

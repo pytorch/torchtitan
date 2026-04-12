@@ -5,8 +5,7 @@ from typing import Any, Optional
 
 from tokenizers import AddedToken, Tokenizer
 
-from src.config import JobConfig
-from src.tools.logging import logger
+from src.logging import logger
 
 
 def resolve_tokenizer_path(tokenizer: str) -> str:
@@ -206,8 +205,3 @@ class HuggingFaceTokenizer(BaseTokenizer):
     @property
     def vocab_size(self) -> int:
         return self.tokenizer.get_vocab_size()
-
-
-def build_hf_tokenizer(job_config: JobConfig) -> HuggingFaceTokenizer:
-    """Build a HuggingFaceTokenizer from the config's hf_assets_path."""
-    return HuggingFaceTokenizer(job_config.model.hf_assets_path)

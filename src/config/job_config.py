@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import torch
 
-from src.tools.logging import logger
+from src.logging import logger
 
 
 @dataclass
@@ -31,37 +31,6 @@ class Job:
     JobConfig dataclass. Users need to ensure that the path can be imported.
     """
 
-
-@dataclass
-class Profiling:
-    enable_profiling: bool = False
-    """Whether to enable pytorch profile"""
-
-    save_traces_folder: str = "profile_traces"
-    """Trace files location"""
-
-    profile_freq: int = 10
-    """How often to collect profile traces, in iterations"""
-
-    profiler_active: int = 1
-    """
-    The steps profiler is active for.
-
-    This is used to configure torch.profile.schedule.
-    """
-
-    profiler_warmup: int = 3
-    """
-    The number of warmup steps before the active step in each profiling cycle.
-
-    This is used to configure torch.profile.schedule.
-    """
-
-    enable_memory_snapshot: bool = False
-    """Whether to dump memory snapshot"""
-
-    save_memory_snapshot_folder: str = "memory_snapshot"
-    """Memory snapshot files location"""
 
 
 @dataclass
@@ -685,41 +654,6 @@ class Comm:
 
 
 @dataclass
-class Validation:
-    enable: bool = False
-    """Enable validation to default run validation after each training loop"""
-
-    dataset: str = "c4_validation"
-    """Dataset to use for validation"""
-
-    dataset_path: str | None = None
-    """Path to dataset to use for validation"""
-
-    local_batch_size: int = 8
-    """Batch size for validation"""
-
-    seq_len: int = 2048
-    """Sequence length for validation"""
-
-    freq: int = 10
-    """Frequency of validation"""
-
-    steps: int = -1
-    """
-    Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
-    WARNING: When setting to -1 there could be hangs due to mismatch among ranks
-    """
-
-    dataloader: DataLoader = field(default_factory=DataLoader)
-    """DataLoader configuration"""
-
-    def __post_init__(self):
-        assert self.steps > 0 or self.steps == -1, (
-            "validation steps must be positive or -1"
-        )
-
-
-@dataclass
 class Debug:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
@@ -741,7 +675,6 @@ class JobConfig:
     """
 
     job: Job = field(default_factory=Job)
-    profiling: Profiling = field(default_factory=Profiling)
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
     optimizer: Optimizer = field(default_factory=Optimizer)
@@ -754,7 +687,6 @@ class JobConfig:
     )
     compile: Compile = field(default_factory=Compile)
     comm: Comm = field(default_factory=Comm)
-    validation: Validation = field(default_factory=Validation)
     debug: Debug = field(default_factory=Debug)
 
     def to_dict(self) -> dict[str, Any]:

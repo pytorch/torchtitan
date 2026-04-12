@@ -8,7 +8,7 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from src.components.optimizer import OptimizersContainer
 from src.config import LRScheduler as LRSchedulerConfig
-from src.tools.logging import logger
+from src.logging import logger
 
 __all__ = [
     "LRSchedulersContainer",

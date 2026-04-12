@@ -9,7 +9,7 @@ import typer
 import yaml
 
 from src.config.config import Config
-from src.training.trainer import train
+from src.trainer import train
 
 app = typer.Typer(pretty_exceptions_enable=False)
 

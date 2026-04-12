@@ -2,7 +2,7 @@ from typing import Callable, Literal
 
 import torch
 
-from src.tools.utils import _round_up
+from src.utils import _round_up
 
 from .kernels import generate_permute_indices
 

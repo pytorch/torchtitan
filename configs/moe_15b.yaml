@@ -33,6 +33,14 @@ parallelism:
 data:
   tokenizer: "Qwen/Qwen2-7B"
 
+activation_checkpoint:
+  mode: "selective"
+  selective_ac_option: "op"
+
+compile:
+  enable: false
+  backend: "inductor"
+
 checkpoint:
   enable: true
   interval: 1000

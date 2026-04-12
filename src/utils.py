@@ -9,7 +9,7 @@ from typing import Generator, Optional
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
 
-from src.tools.logging import logger
+from src.logging import logger
 
 
 def has_cuda_capability(major: int, minor: int) -> bool:

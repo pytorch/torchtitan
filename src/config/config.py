@@ -52,6 +52,16 @@ class DataConfig(BaseModel):
     tokenizer: str = "Qwen/Qwen2-7B"  # HF model ID or local path
 
 
+class ActivationCheckpointConfig(BaseModel):
+    mode: str = "none"  # "none", "selective", "full"
+    selective_ac_option: str = "op"  # "op" for op-level, or int like "2" for every nth layer
+
+
+class CompileConfig(BaseModel):
+    enable: bool = False
+    backend: str = "inductor"
+
+
 class CheckpointConfig(BaseModel):
     enable: bool = True
     interval: int = 500
@@ -65,6 +75,8 @@ class Config(BaseModel):
     training: TrainingConfig = TrainingConfig()
     parallelism: ParallelismConfig = ParallelismConfig()
     data: DataConfig = DataConfig()
+    activation_checkpoint: ActivationCheckpointConfig = ActivationCheckpointConfig()
+    compile: CompileConfig = CompileConfig()
     checkpoint: CheckpointConfig = CheckpointConfig()
     dump_folder: str = "./outputs"
 
@@ -121,7 +133,8 @@ def build_job_config(cfg: Config):
     # Debug
     jc.debug.seed = cfg.training.seed
 
-    # Activation checkpoint — disabled
-    jc.activation_checkpoint.mode = "none"
+    # Activation checkpoint
+    jc.activation_checkpoint.mode = cfg.activation_checkpoint.mode  # type: ignore
+    jc.activation_checkpoint.selective_ac_option = cfg.activation_checkpoint.selective_ac_option
 
     return jc

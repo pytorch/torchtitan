@@ -2,8 +2,8 @@ from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from src.tools.logging import logger
-from src.tools.utils import device_type
+from src.logging import logger
+from src.utils import device_type
 
 __all__ = ["ParallelDims"]
 
