@@ -233,24 +233,13 @@ def main():
         model, compile_config, parallel_dims
     )
 
-    # Track whether the on_compile callback ran successfully.
-    # This lets us distinguish "compilation succeeded but execution
-    # failed on fake tensors" from "compilation itself failed."
-    compile_succeeded = False
-
-    def _on_compile_with_flag(compiled_fn, out_spec):
-        nonlocal compile_succeeded
-        _on_compile_inner(compiled_fn, out_spec)
-        compile_succeeded = True
-
-    _on_compile_inner = _make_precompile_callback(
+    on_compile = _make_precompile_callback(
         model,
         compile_config,
         parallel_dims,
         storage=storage,
         config_fingerprint=config_fingerprint,
     )
-    on_compile = _on_compile_with_flag
 
     model_joint_graph_builder = functools.partial(
         joint_graph_builder,
@@ -290,26 +279,7 @@ def main():
     )
 
     logger.info("Running forward pass to trigger AOT compilation...")
-    try:
-        compiled_model(dummy_input, **extra_kwargs)
-    except RuntimeError as e:
-        # The on_compile callback saves the artifact during compilation,
-        # before the compiled code executes on the (fake) inputs. MoE
-        # models with dynamic shapes (e.g. expert-parallel all-to-all)
-        # produce Inductor shape guards that fail when executed on fake
-        # tensors, but the serialized artifact is still valid because it
-        # was saved before execution. Only suppress the error if the
-        # on_compile callback ran successfully; re-raise otherwise since
-        # it means compilation itself failed, not just execution.
-        if not compile_succeeded:
-            raise
-        logger.warning(
-            f"Forward execution on fake inputs raised RuntimeError "
-            f"(expected for MoE models with dynamic shapes under fake "
-            f"backend): {e}\n"
-            f"The precompile artifact was saved successfully before "
-            f"execution — this error is harmless."
-        )
+    compiled_model(dummy_input, **extra_kwargs)
 
     logger.info(
         f"Precompile complete. Artifact saved to "
