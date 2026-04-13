@@ -209,18 +209,16 @@ class GptOssGroupedExperts(Module):
     def forward(
         self,
         x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        *,
-        outputs: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, object]:
         """Dispatch tokens to experts, compute, and combine results."""
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
-            x, top_scores, selected_experts_indices, num_tokens_per_expert
+            x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, outputs=outputs)
+        routed_output = self.token_dispatcher.combine(routed_output, metadata)
+        return routed_output, metadata
 
 
 class GptOssMoE(MoE):
