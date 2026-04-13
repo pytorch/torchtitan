@@ -16,7 +16,9 @@ from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.utils import get_train_context
-from torchtitan.experiments.graph_trainer.llama3 import model_registry as llama3_registry
+from torchtitan.experiments.graph_trainer.llama3 import (
+    model_registry as llama3_registry,
+)
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
@@ -79,7 +81,9 @@ class StepResult:
     active_gib: float
 
 
-def _measure_step(trainer: Trainer, tokens: torch.Tensor, labels: torch.Tensor) -> StepResult:
+def _measure_step(
+    trainer: Trainer, tokens: torch.Tensor, labels: torch.Tensor
+) -> StepResult:
     model = trainer.model_parts[0]
     model.zero_grad(set_to_none=True)
     global_valid_tokens = torch.tensor(labels.numel(), dtype=torch.float, device="cuda")
@@ -109,7 +113,8 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         _set_deterministic()
         model = _build_model()
         self.state_dict = {
-            key: value.detach().cpu().clone() for key, value in model.state_dict().items()
+            key: value.detach().cpu().clone()
+            for key, value in model.state_dict().items()
         }
         del model
         torch.cuda.empty_cache()
@@ -145,7 +150,9 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         for idx, (eager_grad, traced_grad) in enumerate(
             zip(eager.grads, traced.grads, strict=True)
         ):
-            self.assertTrue(torch.equal(eager_grad, traced_grad), f"grad[{idx}] mismatch")
+            self.assertTrue(
+                torch.equal(eager_grad, traced_grad), f"grad[{idx}] mismatch"
+            )
 
         reserved_ratio = traced.reserved_gib / eager.reserved_gib
         active_ratio = traced.active_gib / eager.active_gib

@@ -154,6 +154,7 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_fqns = convert_modules_to_fqns(module_list, module_to_name)
     return module_fqns
 
+
 def enable_graph_ac_for_mode(ac_mode: str) -> bool:
     if ac_mode == "none":
         return False
@@ -164,6 +165,7 @@ def enable_graph_ac_for_mode(ac_mode: str) -> bool:
         f"'selective' or 'none', got {ac_mode!r}. Use 'selective' for "
         "graph-based SAC."
     )
+
 
 def apply_graph_ac(
     compile_config: CompileConfig,

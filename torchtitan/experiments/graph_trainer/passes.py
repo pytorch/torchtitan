@@ -45,7 +45,19 @@ from torchtitan.tools.logging import logger
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("custom", {}).get("autograd_backward", False)
+    # This works under assumption that:
+    #    1. GraphTrainer must annotate the backward region with user explicit
+    #       tag.
+    # This must key off the explicit traced phase, not the ambient
+    # autograd_backward traceback marker. Ops like flex_attention can create
+    # nested backward tracing regions while building their own fw/bw graphs,
+    # which can leak autograd_backward metadata onto forward nodes. If we treat
+    # those nodes as "backward", the remat pass skips the wrong region and SAC
+    # stops applying correctly; remat_using_tags_for_fwd_loss_bwd_graph will
+    # later fail because the forward/backward split it expects has been
+    # corrupted. The tracer's custom["phase"] annotation marks the backward
+    # partition that remat should respect.
+    return node.meta.get("custom", {}).get("phase") == "backward"
 
 
 def construct_default_graph_passes(
@@ -381,14 +393,12 @@ def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
 
     Tags forward nodes with recompute policy via apply_sac_pass (backward
-    nodes are skipped automatically via the autograd_backward annotation), then
+    nodes are skipped automatically via ``custom["phase"] == "backward"``), then
     applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
     PREFER_RECOMPUTE forward ops before backward and DCE originals.
 
     The model must have been annotated with annotate_ac_regions before
     tracing so that nodes have custom["ac_region_id"] metadata.
-    Backward nodes must be tagged with custom["autograd_backward"] (done by
-    ``torch.compiler._patch_autograd_grad()`` during tracing).
     """
     from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
         remat_using_tags_for_fwd_loss_bwd_graph,

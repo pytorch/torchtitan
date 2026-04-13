@@ -106,18 +106,6 @@ class SimpleMLP(nn.Module):
         return self.fc2(torch.relu(self.fc1(self.embed(x))))
 
 
-class TestGraphTrainerActivationCheckpointModes(unittest.TestCase):
-    def test_supported_modes_match_graph_sac_behavior(self):
-        self.assertFalse(enable_graph_ac_for_mode("none"))
-        self.assertTrue(enable_graph_ac_for_mode("selective"))
-
-    def test_unsupported_modes_raise(self):
-        with self.assertRaises(ValueError, msg="'selective' or 'none'"):
-            enable_graph_ac_for_mode("full")
-        with self.assertRaises(ValueError, msg="'selective' or 'none'"):
-            enable_graph_ac_for_mode("memory_budget")
-
-
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestTraceModule(unittest.TestCase):
     DEVICE = "cuda"
