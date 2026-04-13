@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from torchtitan.components.state_dict_transforms import StateDictTransforms
 from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
 
 
@@ -134,7 +133,6 @@ class TestFTCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.test_folder,
             ft_manager=self.ft_manager,
         )

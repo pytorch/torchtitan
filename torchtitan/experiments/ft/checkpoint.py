@@ -80,7 +80,7 @@ class FTCheckpointManager(CheckpointManager):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        sd_transforms: StateDictTransforms,
+        sd_transforms: StateDictTransforms | None = None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
         model_converters: ModelConvertersContainer | None = None,

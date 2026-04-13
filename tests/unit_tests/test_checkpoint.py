@@ -17,7 +17,6 @@ import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.state_dict_transforms import StateDictTransforms
 
 
 class FakeOptimizersContainer:
@@ -176,7 +175,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -209,7 +207,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -250,7 +247,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -273,7 +269,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
         self.assertFalse(manager.load(step=-1))
@@ -297,7 +292,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
         res = manager.load(step=-1)
@@ -327,7 +321,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -361,7 +354,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
         manager1.save(curr_step=1, last_step=True)
@@ -381,7 +373,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
         r1 = manager2.load(step=1)
@@ -436,7 +427,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=checkpoint_config,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -477,7 +467,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=states,
             config=checkpoint_config,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -514,7 +503,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -540,7 +528,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -586,7 +573,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -624,7 +610,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -651,7 +636,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -692,7 +676,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_transforms=StateDictTransforms(),
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -711,6 +694,8 @@ class TestCheckpointManager(unittest.TestCase):
     def test_last_save_in_hf_uses_hf_writer(self, mock_get_sd, mock_save, mock_rank):
         """Regression: last_save_in_hf=True must reach HuggingFaceStorageWriter."""
         from torch.distributed.checkpoint import HuggingFaceStorageWriter
+
+        from torchtitan.components.state_dict_transforms import StateDictTransforms
 
         mock_adapter = mock.Mock()
         mock_adapter.to_hf.side_effect = lambda sd: {
@@ -773,12 +758,12 @@ class TestModelWrapper(unittest.TestCase):
         side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
     )
     def test_export_without_transform_returns_full_dict(self, mock_get_sd):
-        """state_dict(mode='export') returns full dict when no transform is set."""
-        from torchtitan.components.checkpoint import ModelWrapper
+        """state_dict(mode=EXPORT) returns full dict when no transform is set."""
+        from torchtitan.components.checkpoint import ModelWrapper, StateDictMode
 
         model = nn.Linear(2, 2)
         wrapper = ModelWrapper(model)
-        exported = wrapper.state_dict(mode="export")
+        exported = wrapper.state_dict(mode=StateDictMode.EXPORT)
         self.assertIn("weight", exported)
         self.assertIn("bias", exported)
 
@@ -804,11 +789,11 @@ class TestModelWrapper(unittest.TestCase):
     )
     def test_lora_base_state_dict(self, mock_get_sd):
         """base mode: excludes LoRA keys (for saving base model only)."""
-        from torchtitan.components.checkpoint import ModelWrapper
+        from torchtitan.components.checkpoint import ModelWrapper, StateDictMode
 
         model = nn.Linear(2, 2)
         wrapper = ModelWrapper(model, key_filter=lambda k: "lora" in k)
-        sd = wrapper.state_dict(mode="base")
+        sd = wrapper.state_dict(mode=StateDictMode.BASE)
         self.assertEqual(set(sd.keys()), {"weight", "bias"})
 
     @mock.patch(
@@ -817,7 +802,7 @@ class TestModelWrapper(unittest.TestCase):
     )
     def test_lora_export_state_dict(self, mock_get_sd):
         """export mode: merges LoRA into base weights, drops LoRA keys."""
-        from torchtitan.components.checkpoint import ModelWrapper
+        from torchtitan.components.checkpoint import ModelWrapper, StateDictMode
 
         def lora_merge(sd):
             merged = dict(sd)
@@ -831,100 +816,13 @@ class TestModelWrapper(unittest.TestCase):
         wrapper = ModelWrapper(
             model, key_filter=lambda k: "lora" in k, state_dict_transform=lora_merge
         )
-        sd = wrapper.state_dict(mode="export")
+        sd = wrapper.state_dict(mode=StateDictMode.EXPORT)
         self.assertEqual(set(sd.keys()), {"weight", "bias"})
 
         lora_a = torch.tensor([[0.1, 0.2]])
         lora_b = torch.tensor([[0.3], [0.4]])
         expected = torch.tensor([1.0, 2.0]) + (lora_b @ lora_a).squeeze()
         torch.testing.assert_close(sd["weight"], expected)
-
-
-class TestMultiSourceLoading(unittest.TestCase):
-    """Tests that additional_load_path triggers a second dcp.load."""
-
-    @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    def test_additional_load_path(self, mock_save, mock_load, mock_rank):
-        """Primary + additional_load_path triggers two dcp.load calls (DCP and HF)."""
-        cases = [
-            ("dcp", None),  # no converter adapter → DCP fallback
-            ("hf", True),  # with converter adapter → HF via adapter
-        ]
-        for fmt, use_adapter in cases:
-            with self.subTest(format=fmt):
-                mock_save.reset_mock()
-                mock_load.reset_mock()
-
-                temp_dir = tempfile.mkdtemp()
-                adapter_dir = os.path.join(temp_dir, "adapter")
-                os.makedirs(adapter_dir)
-                try:
-                    mock_save.side_effect = lambda *a, **kw: os.makedirs(
-                        kw.get("checkpoint_id", a[1] if len(a) > 1 else ""),
-                        exist_ok=True,
-                    )
-                    mock_load.side_effect = lambda *a, **kw: None
-
-                    lora_filter = lambda k: "lora" in k  # noqa: E731
-                    converter_adapter = None
-                    model_converters = None
-
-                    if use_adapter:
-                        converter_adapter = mock.Mock()
-                        converter_adapter.to_hf.return_value = {
-                            "peft_key": torch.tensor([1.0])
-                        }
-                        converter_adapter.from_hf.return_value = {
-                            "lora_a.weight": torch.tensor([1.0])
-                        }
-                        converter_adapter.get_hf_storage_reader.return_value = (
-                            mock.Mock()
-                        )
-                        model_converters = mock.Mock()
-                        model_converters.key_filter.return_value = lora_filter
-                        model_converters.state_dict_transform.return_value = None
-                        model_converters.converter_sd_adapters.return_value = [
-                            (converter_adapter, lora_filter)
-                        ]
-
-                    cfg = CheckpointManager.Config(
-                        enable=True,
-                        async_mode="disabled",
-                        folder="",
-                        interval=1,
-                        keep_latest_k=0,
-                        last_save_model_only=False,
-                        export_dtype="float32",
-                        exclude_from_loading=[],
-                        initial_load_path=None,
-                        initial_load_model_only=False,
-                        additional_load_path=adapter_dir,
-                    )
-                    with mock.patch("torch.distributed.new_group", return_value="pg"):
-                        manager = CheckpointManager(
-                            dataloader=FakeDataLoader(),
-                            model_parts=[nn.Linear(2, 2)],
-                            optimizers=FakeOptimizersContainer(),
-                            lr_schedulers=FakeLRSchedulersContainer(),
-                            states={},
-                            config=cfg,
-                            sd_transforms=StateDictTransforms(),
-                            base_folder=temp_dir,
-                            model_converters=model_converters,
-                        )
-
-                    manager.save(curr_step=1)
-                    manager.load(step=1)
-
-                    # Both formats trigger two dcp.load calls
-                    self.assertEqual(mock_load.call_count, 2)
-
-                    if use_adapter:
-                        converter_adapter.from_hf.assert_called_once()
-                finally:
-                    shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
