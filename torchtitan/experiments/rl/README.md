@@ -73,7 +73,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torch
 
 7. Run inference with torchtitan model definition:
 ```bash
-torchrun --nproc_per_node=2 torchtitan/experiments/rl/inference_example.py
+torchrun --nproc_per_node=4 torchtitan/experiments/rl/inference_example.py
 ```
 
 **NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
