@@ -431,18 +431,17 @@ class CheckpointManager(Configurable):
         self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
         self.keep_latest_k = config.keep_latest_k
 
-        # Runtime state defaults.
-        self.async_mode: AsyncMode = AsyncMode.DISABLED
-        self.pg: dist.ProcessGroup | None = None
-        self.enable_staging: bool = False
-        self.staging: bool = False
-        self.staging_future: Future | None = None
-        self.save_future: Future | None = None
-        self.stager: DefaultStager | None = None
-        self.purge_thread: threading.Thread | None = None
+        async_mode = config.async_mode.lower()
+        self.enable_staging = (
+            self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+        )
 
         if not self.enable:
             return
+
+        self.staging = False
+        self.stager = None
+        self.pg: dist.ProcessGroup | None = None
 
         # Validation that only matters when checkpointing is active.
         if self.last_save_in_hf and self.sd_transforms.sd_adapter is None:
@@ -451,11 +450,14 @@ class CheckpointManager(Configurable):
             )
 
         # Async checkpoint related fields.
-        self.async_mode = AsyncMode(config.async_mode.lower())
-        if self.async_mode in (AsyncMode.ASYNC, AsyncMode.ASYNC_WITH_PINNED_MEM):
+        async_mode = config.async_mode.lower()
+        if (
+            async_mode == AsyncMode.ASYNC
+            or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+        ):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
-        self.enable_staging = self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
 
+        self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
@@ -468,6 +470,17 @@ class CheckpointManager(Configurable):
             )
             self.purge_thread.start()
 
+        self.staging_future = None
+        self.save_future = None
+        if async_mode == AsyncMode.DISABLED:
+            self.async_mode = AsyncMode.DISABLED
+        elif async_mode == AsyncMode.ASYNC:
+            self.async_mode = AsyncMode.ASYNC
+        elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
+        else:
+            raise ValueError(f"Unknown checkpoint async_mode {config.async_mode}")
+
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
         )
@@ -476,13 +489,17 @@ class CheckpointManager(Configurable):
         self.close()
 
     def close(self):
-        if not self.enable:
-            return
-        if self.purge_thread is not None and self.purge_thread.is_alive():
-            self.purge_queue.put(Terminate())
-            self.purge_thread.join()
-        if self.stager is not None:
-            self.stager.close()
+        if hasattr(self, "enable") and self.enable:
+            if (
+                hasattr(self, "purge_thread")
+                and self.purge_thread
+                and self.purge_thread.is_alive()
+            ):
+                self.purge_queue.put(Terminate())
+                self.purge_thread.join()
+
+            if self.stager is not None:
+                self.stager.close()
 
     @torch.no_grad()
     def dcp_save(
@@ -1058,17 +1075,17 @@ class CheckpointManager(Configurable):
         return False
 
     def _async_wait(self) -> None:
-        if self.save_future is None:
-            return
-        if self.async_mode == AsyncMode.DISABLED:
+        if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            if self.save_future is not None:
+                self.save_future.result()
+        elif self.async_mode == AsyncMode.ASYNC:
+            if self.save_future is not None:
+                self.save_future.result()
+                self.save_future = None
+        elif self.save_future is not None:
             raise RuntimeError(
                 "self.save_future is not None, but self.async_mode is not enabled."
             )
-        self.save_future.result()
-        # ASYNC_WITH_PINNED_MEM: the stager manages the future's lifecycle,
-        # so we do not clear it here.  For ASYNC we clear it ourselves.
-        if self.async_mode == AsyncMode.ASYNC:
-            self.save_future = None
 
     def _should_purge(self) -> bool:
         """Whether this rank should purge stale checkpoints.
