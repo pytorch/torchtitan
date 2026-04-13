@@ -1,0 +1,28 @@
+[profile]
+# Required: short name used as --repo flag value and workspace directory name
+name = "torchtitan"
+
+# Required: GitHub owner/repo (used for issue fetching and PR links)
+github_repo = "pytorch/torchtitan"
+
+# Required: Python module to import for smoke-testing the venv
+smoke_test_import = "torchtitan"
+
+# Required: import statement used to identify repro scripts in issue bodies
+repro_import_hint = "import torchtitan"
+
+# Optional: set to true if the repo has git submodules that need recursive init
+# (default: false — uses standard `git worktree add`)
+uses_custom_worktree = false
+
+# Optional: set to true if the repo requires a C++ build step
+# (default: false — uses lightweight venv clone + editable install)
+needs_cpp_build = false
+
+# Optional: lint command to run before generating diffs (omit or "" to skip)
+lint_cmd = ""
+
+# Optional: custom install command run from the worktree root after venv creation
+# {job_python} is replaced with the path to the job's python binary
+# (default: uv pip install --python {job_python} -e .)
+install_cmd = "uv pip install --python {job_python} -e '.[dev]'"
