@@ -484,6 +484,19 @@ def _14b() -> Qwen3Model.Config:
     )
 
 
+def _14b_varlen() -> Qwen3Model.Config:
+    config = _14b()
+    varlen_cfg = VarlenAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = varlen_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
+    return config
+
+
 def _32b() -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
@@ -642,6 +655,7 @@ qwen3_configs = {
     "8B": _8b,
     "8B_varlen": _8b_varlen,
     "14B": _14b,
+    "14B_varlen": _14b_varlen,
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,

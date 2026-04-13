@@ -107,6 +107,45 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     )
 
 
+def rl_grpo_qwen3_14b() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
+    model_spec = model_registry("14B_varlen")
+    return RLTrainer.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
+        num_steps=10,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=8,
+            ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=8,
+                data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+        ),
+    )
+
+
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
     model_spec = model_registry("debugmodel_varlen")
