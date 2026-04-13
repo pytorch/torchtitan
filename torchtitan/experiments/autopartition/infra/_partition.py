@@ -589,18 +589,30 @@ def partition_model_layers(
     *,
     virtual_stages_per_rank: int | None = None,
 ) -> PipelinePartitionPlan:
-    # Public DP baseline:
-    # choose contiguous stage partitions by balancing compute time only.  The
-    # returned plan already contains stage-level inputs for the simulator.
-    # Current partition objective:
-    # - convert each layer's forward/backward FLOPs into compute time
-    # - ignore communication when choosing the partition
-    # - minimize the slowest logical stage by a contiguous block DP
-    #
-    # `communication_volume`, `network_bandwidth`, and `n_microbatches` are
-    # still accepted and validated so this interface already matches the inputs
-    # needed by the full simulator and can be extended later to communication-
-    # aware partitioning without changing call sites.
+    """Build the compute-balanced baseline partition plan.
+
+    This function converts layer-level forward/backward FLOPs into modeled
+    compute times, expands the requested schedule into a logical stage count,
+    and applies a contiguous DP partitioner that minimizes the slowest stage
+    under a compute-only objective.
+
+    Args:
+        schedule_type (str | PipelineScheduleType): The pipeline schedule type.
+        forward_flops (list[int]): The per-layer forward FLOPs.
+        backward_flops (list[int]): The per-layer backward FLOPs.
+        communication_volume (int | list[int]): The communication volume, either
+            shared across boundaries or specified per boundary.
+        device_compute_throughput (int | float): The device throughput in FLOP/s.
+        network_bandwidth (int | float): The network bandwidth in bytes/s.
+        pp_group_size (int): The number of physical pipeline ranks.
+        n_microbatches (int): The number of microbatches in the iteration.
+        virtual_stages_per_rank (int | None): Optional override for the number
+            of logical stages on each rank.
+
+    Returns:
+        PipelinePartitionPlan: The baseline partition plan with aggregated
+            stage-level metadata.
+    """
     schedule_kind = _normalize_schedule_type(schedule_type)
     _validate_partition_inputs(
         forward_flops,
@@ -661,6 +673,20 @@ def _compute_steady_phase_steps(
     pp_group_size: int,
     n_microbatches: int,
 ) -> tuple[int, int]:
+    """Compute the aligned schedule step range for the steady phase.
+
+    This helper identifies the steady-phase window in the aligned discrete
+    schedule by finding the first backward-side step and the last forward step.
+
+    Args:
+        schedule_type (PipelineScheduleType): The pipeline schedule type.
+        num_stages (int): The number of logical pipeline stages.
+        pp_group_size (int): The number of physical pipeline ranks.
+        n_microbatches (int): The number of microbatches in the iteration.
+
+    Returns:
+        tuple[int, int]: The inclusive start and end steps of the steady phase.
+    """
     compute_schedule = _build_compute_schedule(
         schedule_type,
         num_stages=num_stages,
@@ -712,6 +738,20 @@ def _build_action_step_index(
     pp_group_size: int,
     n_microbatches: int,
 ) -> dict[ActionSignature, int]:
+    """Map aligned schedule actions back to their discrete timestep.
+
+    This helper builds a lookup from `(stage, op_type, microbatch)` to the
+    aligned schedule step where that action appears.
+
+    Args:
+        schedule_type (PipelineScheduleType): The pipeline schedule type.
+        num_stages (int): The number of logical pipeline stages.
+        pp_group_size (int): The number of physical pipeline ranks.
+        n_microbatches (int): The number of microbatches in the iteration.
+
+    Returns:
+        dict[ActionSignature, int]: The action-to-step lookup table.
+    """
     compute_schedule = _build_compute_schedule(
         schedule_type,
         num_stages=num_stages,
@@ -754,11 +794,22 @@ def identify_steady_critical_stage(
     plan: PipelinePartitionPlan,
     result: PipelineSimulationResult,
 ) -> SteadyCriticalStageInfo:
-    # Public helper for debugging and visualization.
-    #
-    # Map the operation-level critical path back onto the aligned discrete
-    # schedule, restrict the accounting to steady phase, and report which stage
-    # contributes the most critical-path time there.
+    """Identify the stage dominating the steady phase of the critical path.
+
+    This function maps the operation-level critical path from the simulator
+    back onto the aligned schedule, restricts attribution to the steady-phase
+    window, and reports which stage contributes the most critical-path time.
+
+    Args:
+        schedule_type (str | PipelineScheduleType): The pipeline schedule type.
+        plan (PipelinePartitionPlan): The partition plan used for simulation.
+        result (PipelineSimulationResult): The simulation result containing the
+            recovered critical path.
+
+    Returns:
+        SteadyCriticalStageInfo: The steady-phase step range, per-stage
+            critical-path duration, and the identified critical stage.
+    """
     schedule_kind = _normalize_schedule_type(schedule_type)
     steady_start, steady_end = _compute_steady_phase_steps(
         schedule_kind,
@@ -822,6 +873,24 @@ def _simulate_partition_plan(
     backward_input_flops: list[int] | None,
     backward_weight_flops: list[int] | None,
 ) -> PipelineSimulationResult:
+    """Simulate a partition plan with optional split-backward metadata.
+
+    This helper aggregates any optional per-layer backward split metadata to
+    stage level and forwards the resulting plan to the main schedule simulator.
+
+    Args:
+        schedule_type (PipelineScheduleType): The pipeline schedule type.
+        plan (PipelinePartitionPlan): The partition plan to simulate.
+        device_compute_throughput (int | float): The device throughput in FLOP/s.
+        network_bandwidth (int | float): The network bandwidth in bytes/s.
+        backward_input_flops (list[int] | None): Optional per-layer backward-input
+            FLOPs.
+        backward_weight_flops (list[int] | None): Optional per-layer backward-weight
+            FLOPs.
+
+    Returns:
+        PipelineSimulationResult: The modeled timing result for the plan.
+    """
     stage_backward_input = _aggregate_optional_partition_values(
         plan.stage_partitions,
         backward_input_flops,
@@ -1015,6 +1084,34 @@ def optimize_partition_model_layers(
     backward_input_flops: list[int] | None = None,
     backward_weight_flops: list[int] | None = None,
 ) -> PipelinePartitionSearchResult:
+    """Optimize the baseline partition with schedule-aware local search.
+
+    This function starts from the compute-balanced DP baseline, simulates it
+    under the requested schedule, identifies the steady-phase critical stage,
+    and explores nearby contiguous repartitioning candidates around that
+    bottleneck.
+
+    Args:
+        schedule_type (str | PipelineScheduleType): The pipeline schedule type.
+        forward_flops (list[int]): The per-layer forward FLOPs.
+        backward_flops (list[int]): The per-layer backward FLOPs.
+        communication_volume (int | list[int]): The communication volume, either
+            shared across boundaries or specified per boundary.
+        device_compute_throughput (int | float): The device throughput in FLOP/s.
+        network_bandwidth (int | float): The network bandwidth in bytes/s.
+        pp_group_size (int): The number of physical pipeline ranks.
+        n_microbatches (int): The number of microbatches in the iteration.
+        virtual_stages_per_rank (int | None): Optional override for the number
+            of logical stages on each rank.
+        backward_input_flops (list[int] | None): Optional per-layer backward-input
+            FLOPs for split-backward schedules.
+        backward_weight_flops (list[int] | None): Optional per-layer backward-weight
+            FLOPs for split-backward schedules.
+
+    Returns:
+        PipelinePartitionSearchResult: The baseline plan, the best plan found
+            by local search, and their corresponding timing results.
+    """
     # Public heuristic search:
     # start from the DP baseline, simulate it, identify the steady-phase
     # critical stage, and try to lighten that stage by moving one boundary
@@ -1164,6 +1261,31 @@ def _get_1f1b_rank_ops(
     num_1f1b_microbatches: int = 0,
     enable_zero_bubble: bool = False,
 ) -> list[_Action | None]:
+    """Build the local action stream for one rank in a 1F1B-style schedule.
+
+    This helper emits the rank-local sequence of forward and backward-side
+    actions for warmup, steady state, and cooldown. It is reused by the
+    interleaved and zero-bubble schedule builders through stage-index mapping
+    callbacks.
+
+    Args:
+        n_local_stages (int): The number of logical stages on the rank.
+        pp_group_size (int): The number of physical pipeline ranks.
+        warmup_ops (int): The number of warmup operations on this rank.
+        fwd_bwd_ops (int): The number of overlapped forward/backward operations.
+        cooldown_ops (int): The number of cooldown operations on this rank.
+        rank (int): The physical rank id.
+        forward_stage_index (Callable[[int], int]): Maps a local step to the
+            logical stage executing the forward op.
+        backward_stage_index (Callable[[int], int]): Maps a local step to the
+            logical stage executing the backward op.
+        num_1f1b_microbatches (int): Zero-bubble helper controlling when delayed
+            weight work becomes eligible.
+        enable_zero_bubble (bool): Whether to emit split-backward actions.
+
+    Returns:
+        list[_Action | None]: The aligned local action stream for the rank.
+    """
     fwd_stage_mb_index: dict[int, int] = defaultdict(int)
     bwd_stage_mb_index: dict[int, int] = defaultdict(int)
     weight_stage_mb_index: dict[int, int] = defaultdict(int)
@@ -1311,9 +1433,21 @@ def _build_compute_schedule(
     pp_group_size: int,
     n_microbatches: int,
 ) -> ScheduleByRank:
-    # Keep schedule generation identical to the logic in schedules.py:
-    # - 1F1B uses one stage per rank.
-    # - Interleaved schedules use loop-style stage placement.
+    """Build the aligned compute schedule for the requested schedule type.
+
+    This dispatcher selects the schedule builder matching the requested
+    pipeline schedule family and returns the aligned rank-indexed compute
+    schedule used by the simulator and visualization helpers.
+
+    Args:
+        schedule_type (PipelineScheduleType): The pipeline schedule type.
+        num_stages (int): The number of logical pipeline stages.
+        pp_group_size (int): The number of physical pipeline ranks.
+        n_microbatches (int): The number of microbatches in the iteration.
+
+    Returns:
+        ScheduleByRank: The aligned rank-indexed compute schedule.
+    """
     if schedule_type == PipelineScheduleType.ONE_F_ONE_B:
         if pp_group_size != num_stages:
             raise ValueError(
@@ -1342,6 +1476,22 @@ def _build_interleaved_compute_schedule(
     n_microbatches: int,
     zero_bubble: bool,
 ) -> dict[int, list[_Action | None]]:
+    """Build the aligned compute schedule for interleaved execution.
+
+    This function constructs the rank-indexed discrete compute schedule for
+    `Interleaved1F1B` and `InterleavedZeroBubble`, including the local stage
+    traversal pattern used by each rank.
+
+    Args:
+        pp_group_size (int): The number of physical pipeline ranks.
+        num_stages (int): The number of logical pipeline stages.
+        n_microbatches (int): The number of microbatches in the iteration.
+        zero_bubble (bool): Whether to build the zero-bubble variant.
+
+    Returns:
+        dict[int, list[_Action | None]]: The aligned rank-indexed compute
+            schedule.
+    """
     if pp_group_size <= 0:
         raise ValueError(f"pp_group_size must be positive, got {pp_group_size}.")
     if num_stages % pp_group_size != 0:
@@ -1473,8 +1623,22 @@ def _add_send_recv(
     stage_to_rank: Callable[[int], int],
     num_stages: int,
 ) -> ScheduleWithComms:
-    # This lowering mirrors schedules.py: comm ops are inserted only when the
-    # next/previous stage is on a different rank.
+    """Insert SEND and RECV actions into a compute-only schedule.
+
+    This function lowers a compute-only schedule into a compute-plus-
+    communication schedule by materializing explicit SEND/RECV actions only for
+    stage boundaries that cross rank boundaries.
+
+    Args:
+        compute_actions (ScheduleByRank): The rank-indexed compute-only schedule.
+        stage_to_rank (Callable[[int], int]): Maps a logical stage id to a
+            physical rank id.
+        num_stages (int): The number of logical pipeline stages.
+
+    Returns:
+        ScheduleWithComms: The lowered schedule containing both compute and
+            communication actions.
+    """
     comm_actions: ScheduleWithComms = {rank: [] for rank in compute_actions}
     prev_actions: dict[int, set[_Action]] = {rank: set() for rank in compute_actions}
 
@@ -1612,8 +1776,22 @@ def _simulate_comms_compute(
     stage_to_rank: Callable[[int], int],
     num_stages: int,
 ) -> ScheduleByRank:
-    # This is the same dry-run style simulator used in schedules.py to align a
-    # compute+comm schedule into discrete timesteps with bubbles.
+    """Align a compute-plus-communication schedule into discrete timesteps.
+
+    This helper performs a dry-run simulation of the lowered action stream and
+    inserts explicit bubble slots whenever a rank's next action is not yet
+    data-ready.
+
+    Args:
+        pipeline_order (ScheduleWithComms): The rank-indexed schedule containing
+            compute and communication actions.
+        stage_to_rank (Callable[[int], int]): Maps a logical stage id to a
+            physical rank id.
+        num_stages (int): The number of logical pipeline stages.
+
+    Returns:
+        ScheduleByRank: The aligned clocked schedule with explicit bubble slots.
+    """
     pending: dict[int, list[_Action]] = {
         rank: [action for action in pipeline_order[rank] if action is not None]
         for rank in sorted(pipeline_order)
@@ -1768,8 +1946,28 @@ def _simulate_action_graph(
     backward_weight_times: list[float],
     communication_times: list[float],
 ) -> PipelineSimulationResult:
-    # Build a global action list so we can model dependencies as a DAG.
-    #
+    """Simulate the schedule by building and solving an action DAG.
+
+    This function converts the rank-indexed action stream into a dependency
+    graph, adds resource and data-dependency edges, assigns action durations,
+    and computes the modeled iteration time together with one recovered
+    critical path.
+
+    Args:
+        schedule (dict[int, list[_Action]]): The rank-indexed action schedule.
+        stage_to_rank (Callable[[int], int]): Maps a logical stage id to a
+            physical rank id.
+        num_stages (int): The number of logical pipeline stages.
+        forward_times (list[float]): The per-stage forward durations.
+        backward_times (list[float]): The per-stage full-backward durations.
+        backward_input_times (list[float]): The per-stage backward-input durations.
+        backward_weight_times (list[float]): The per-stage backward-weight durations.
+        communication_times (list[float]): The per-boundary communication durations.
+
+    Returns:
+        PipelineSimulationResult: The modeled iteration time, recovered critical
+            path, and all scheduled operations with timestamps.
+    """
     # Resource constraints:
     # - Compute work on the same rank is serialized.  This approximates one
     #   logical compute stream per rank for forward / backward kernels.
@@ -2416,21 +2614,32 @@ def simulate_pipeline_schedule(
     device_compute_throughput: int | float = 1.0,
     network_bandwidth: int | float = 1.0,
 ) -> PipelineSimulationResult:
-    # Main public simulator entry point.
-    #
-    # Inputs stay in hardware-meaningful units:
-    # - computation is expressed in FLOPs,
-    # - communication is expressed in bytes,
-    # - hardware is expressed as FLOP/s and bytes/s.
-    #
-    # The simulator then generates the selected schedule, inserts the required
-    # SEND/RECV actions, builds the timing DAG, and recovers iteration time
-    # together with one critical path.
-    # Hardware-aware simulator:
-    # - FLOPs are converted into seconds through device_compute_throughput
-    #   (FLOP/s).
-    # - Communication volume is converted into seconds through
-    #   network_bandwidth (bytes/s).
+    """Simulate one pipeline iteration for the requested schedule.
+
+    This function normalizes stage-level compute and communication inputs into
+    modeled durations, builds the aligned compute schedule, lowers it with
+    SEND/RECV actions, and runs the timing DAG simulator.
+
+    Args:
+        schedule_type (str | PipelineScheduleType): The pipeline schedule type.
+        forward_flops (list[int]): The per-stage forward FLOPs.
+        backward_flops (list[int]): The per-stage backward FLOPs.
+        communication_volume (int | list[int]): The communication volume, either
+            shared across boundaries or specified per boundary.
+        n_microbatches (int): The number of microbatches in the iteration.
+        pp_group_size (int | None): Optional override for the number of
+            physical pipeline ranks.
+        backward_input_flops (list[int] | None): Optional per-stage backward-input
+            FLOPs for split-backward schedules.
+        backward_weight_flops (list[int] | None): Optional per-stage backward-weight
+            FLOPs for split-backward schedules.
+        device_compute_throughput (int | float): The device throughput in FLOP/s.
+        network_bandwidth (int | float): The network bandwidth in bytes/s.
+
+    Returns:
+        PipelineSimulationResult: The modeled iteration time, recovered critical
+            path, and all scheduled operations with timestamps.
+    """
     if n_microbatches <= 0:
         raise ValueError(f"n_microbatches must be positive, got {n_microbatches}.")
     if len(forward_flops) == 0 or len(backward_flops) == 0:
