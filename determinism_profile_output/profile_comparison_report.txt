@@ -1,0 +1,70 @@
+================================================================================
+  Deterministic vs Non-Deterministic Training Comparison
+================================================================================
+  Warmup steps skipped: 3
+  Steps compared: 12 (nondet) / 12 (det)
+================================================================================
+
+Metric                      Non-Det            Det       Change
+---------------------------------------------------------------
+Avg Loss                   10.67120       10.62526       -0.43%
+Avg TPS                       4,343          3,346      -22.94%
+Avg TFLOPS                   135.99         104.80      -22.94%
+Avg MFU                      13.75%         10.60%      -22.94%
+Avg Memory (GiB)              69.24          69.24       +0.00%
+Avg Memory (%)               72.83%         72.83%       +0.00%
+Avg Grad Norm               20.7707        20.1635       -2.92%
+
+================================================================================
+  Per-Step Comparison
+================================================================================
+Step     ND Loss     D Loss      ND TPS      D TPS   ND TFLOPS   D TFLOPS    ND Mem    D Mem
+--------------------------------------------------------------------------------------------
+   1 *  12.75068   12.75068         651        710       20.39      22.25    49.61G   49.61G
+   2 *  14.05163   14.05091       3,512      2,913      109.97      91.21    69.24G   69.24G
+   3 *  14.83167   14.83226       4,625      3,604      144.83     112.86    69.24G   69.24G
+   4    13.54444   13.54312       4,689      3,575      146.83     111.96    69.24G   69.24G
+   5    12.34139   12.34129       4,692      3,581      146.91     112.14    69.24G   69.24G
+   6    11.80525   11.80357       4,671      3,565      146.26     111.62    69.24G   69.24G
+   7    12.55507   12.54969       2,369      2,049       74.17      64.17    69.24G   69.24G
+   8    10.68109   10.69320       4,655      3,570      145.75     111.80    69.24G   69.24G
+   9     9.83077    9.84012       4,658      3,567      145.86     111.68    69.24G   69.24G
+  10     9.03318    9.05011       4,666      3,567      146.09     111.71    69.24G   69.24G
+  11     9.50319    9.20448       3,059      2,362       95.79      73.96    69.24G   69.24G
+  12    10.48746   10.30093       4,660      3,578      145.91     112.04    69.24G   69.24G
+  13     9.66555    9.56732       4,674      3,582      146.36     112.18    69.24G   69.24G
+  14     9.49480    9.49045       4,656      3,579      145.79     112.07    69.24G   69.24G
+  15     9.11226    9.11882       4,667      3,583      146.13     112.21    69.24G   69.24G
+
+  (* = warmup step, excluded from averages)
+
+==============================================================================================================
+  Kernel Duration Diff (Deterministic vs Non-Deterministic)
+==============================================================================================================
+
+Kernel                                                        ND Avg(us)   D Avg(us)    Diff(us)    Change  ND #   D #
+----------------------------------------------------------------------------------------------------------------------
+void (anonymous namespace)::indexing_backward_kernel<c1...         304.1      4027.2 +    3723.1 +1224.41%    72   120
+ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorag...       13170.8      9641.9    -3528.9   -26.79%    51    51
+ncclDevKernel_ReduceScatter_Sum_f32_RING_LL(ncclDevKern...       15002.1     17582.0 +    2579.9   +17.20%    26    26
+void at::native::indexFuncLargeIndex<c10::BFloat16, lon...        1593.6         0.0    -1593.6  -100.00%    48     0
+ncclDevKernel_AllReduce_Sum_u64_RING_LL(ncclDevKernelAr...         127.5      1523.7 +    1396.2 +1095.45%     2     2
+void cutlass::device_kernel<at::cuda::detail::enable_3x...        2341.1      1787.9     -553.2   -23.63%    48    48
+void at::native::(anonymous namespace)::cunn_SoftMaxFor...       12651.6     12183.7     -467.8    -3.70%     1     1
+void cutlass::device_kernel<at::cuda::detail::enable_3x...        1810.5      1471.6     -338.9   -18.72%    48    48
+triton_per_fused_flex_attention_backward_mul_0                      64.0       316.6 +     252.6  +394.98%    24    24
+void cutlass::device_kernel<at::cuda::detail::enable_3x...        2512.6      2347.3     -165.3    -6.58%    96    96
+ncclDevKernel_AllReduce_Sum_f32_RING_LL(ncclDevKernelAr...          85.3       162.9 +      77.6   +90.96%     4     4
+void at::native::elementwise_kernel<128, 4, at::native:...         457.4       382.3      -75.1   -16.42%    48    48
+void at::native::(anonymous namespace)::cunn_SoftMaxBac...       12088.9     12019.3      -69.6    -0.58%     1     1
+void at::native::elementwise_kernel<128, 4, at::native:...         319.7       266.0      -53.8   -16.82%    72    72
+void at::native::vectorized_elementwise_kernel<8, at::n...          35.7        76.7 +      41.0  +114.69%   313  1791
+at::native::detail::split_with_sizes_copy_out_contiguou...        1680.0      1719.2 +      39.2    +2.33%    51    51
+triton_tem_fused_flex_attention_backward_mul_1                    3322.6      3291.9      -30.7    -0.92%    24    24
+void at::native::vectorized_elementwise_kernel<8, at::n...         188.2       218.4 +      30.3   +16.08%    72   120
+nvjet_tst_192x192_64x3_1x2_h_bz_coopB_NTN                        13924.3     13952.2 +      27.9    +0.20%     1     1
+triton_tem_fused_flex_attention_0                                 1241.4      1266.8 +      25.4    +2.05%    48    48
+
+  Total unique kernels: 152
+  Showing top 20 by absolute duration diff
+
