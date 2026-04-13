@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
+from torch._guards import TracingContext, tracing
 from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
@@ -32,6 +33,7 @@ from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_b
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch._inductor.output_code import OutputCode
 from torch._logging import trace_structured
+from torch.fx.graph import CodeGen
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
@@ -62,6 +64,8 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
 
 def construct_default_graph_passes(
     traced_result: TracedResult,
+    *,
+    compile_pass_names: list[str] | None = None,
 ) -> list[Callable]:
     """Build the default pass list for the aot_fx_trace compile path.
 
@@ -75,9 +79,25 @@ def construct_default_graph_passes(
     Returns:
         An ordered list of graph passes ready to apply.
     """
+    compile_pass_names = compile_pass_names or []
+    supported_compile_passes = {"cudagraph", "regional_inductor"}
+    unsupported_compile_passes = sorted(
+        set(compile_pass_names) - supported_compile_passes
+    )
+    if unsupported_compile_passes:
+        raise ValueError(
+            "aot_fx_trace compile mode only supports the following "
+            f"--compile.passes: {sorted(supported_compile_passes)}. "
+            f"Got unsupported passes: {unsupported_compile_passes}"
+        )
+
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
     ]
+
+    if "regional_inductor" in compile_pass_names:
+        passes.append(annotate_flex_attention_for_regional_inductor_pass)
+        passes.append(regional_inductor_pass)
 
     # cudagraph should be the last pass.
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
@@ -193,24 +213,49 @@ def regional_inductor_pass(
     so that regional_inductor wraps its output in RegionalOutputCode,
     and overrides the ops filter to allow distributed collective ops.
     """
-    if serializable:
-        with torch._functorch.config.patch("force_autograd_cache", True):
-            result = regional_inductor(gm, example_inputs)
-        from torch._inductor.output_code import RegionalOutputCode
+    def _compile():
+        if serializable:
+            with torch._functorch.config.patch("force_autograd_cache", True):
+                result = regional_inductor(gm, *example_inputs)
+            from torch._inductor.output_code import RegionalOutputCode
 
-        # Override the ops filter after compilation so that
-        # serialization (which happens later) allows distributed
-        # collective ops like _c10d_functional through GraphPickler.
-        if isinstance(result, RegionalOutputCode):
-            result._ops_filter = _ops_filter_with_distributed
-            result._node_metadata_key_filter = _node_metadata_key_filter_distributed
-        else:
-            logger.warning(
-                "regional_inductor with serializable=True did not produce "
-                "RegionalOutputCode; distributed ops may not serialize correctly."
-            )
+            # Override the ops filter after compilation so that
+            # serialization (which happens later) allows distributed
+            # collective ops like _c10d_functional through GraphPickler.
+            if isinstance(result, RegionalOutputCode):
+                result._ops_filter = _ops_filter_with_distributed
+                result._node_metadata_key_filter = _node_metadata_key_filter_distributed
+            else:
+                logger.warning(
+                    "regional_inductor with serializable=True did not produce "
+                    "RegionalOutputCode; distributed ops may not serialize correctly."
+                )
+            return result
+
+        result = regional_inductor(gm, *example_inputs)
+        if isinstance(result, torch.fx.GraphModule):
+            result.graph.set_codegen(CodeGen())
+            result.recompile()
         return result
-    return regional_inductor(gm, example_inputs)
+
+    tracing_context = TracingContext.try_get()
+    if tracing_context is not None:
+        return _compile()
+
+    fake_mode = None
+    for node in gm.graph.nodes:
+        if node.op != "placeholder" or "val" not in node.meta:
+            continue
+        val = node.meta["val"]
+        if isinstance(val, torch.Tensor) and hasattr(val, "fake_mode"):
+            fake_mode = val.fake_mode
+            break
+
+    if fake_mode is None:
+        return _compile()
+
+    with tracing(TracingContext(fake_mode)):
+        return _compile()
 
 
 def cudagraph_pass(
@@ -334,8 +379,9 @@ def apply_sac_pass(
 
         custom_meta = node.meta.get("custom", {})
 
-        # Skip backward nodes — they must not carry recompute tags,
-        # otherwise the remat pass would try to duplicate backward ops.
+        # Skip nodes explicitly traced under the backward phase. The broader
+        # autograd_backward bit can be copied onto some forward HOP nodes in the
+        # make_fx path, so it is not precise enough for SAC filtering here.
         if _is_backward_node(node):
             continue
 
@@ -392,6 +438,7 @@ def apply_sac_pass(
 def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
 
+<<<<<<< HEAD
     Tags forward nodes with recompute policy via apply_sac_pass (backward
     nodes are skipped automatically via ``custom["phase"] == "backward"``), then
     applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
@@ -399,6 +446,17 @@ def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 
     The model must have been annotated with annotate_ac_regions before
     tracing so that nodes have custom["ac_region_id"] metadata.
+=======
+    Tags forward nodes with recompute policy via apply_sac_pass, skipping nodes
+    explicitly annotated with custom["phase"] == "backward", then applies
+    remat_using_tags_for_fwd_loss_bwd_graph to duplicate PREFER_RECOMPUTE
+    forward ops before backward and DCE originals.
+
+    The model must have been annotated with annotate_ac_regions before
+    tracing so that nodes have custom["ac_region_id"] metadata.
+    Backward nodes must be traced under the backward traceback annotation from
+    ``make_fwd_bwd_step`` so they carry custom["phase"] == "backward".
+>>>>>>> d8e92f4e (Add regional inductor)
     """
     from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
         remat_using_tags_for_fwd_loss_bwd_graph,

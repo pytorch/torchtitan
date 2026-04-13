@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import operator
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -21,6 +24,7 @@ from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
+    construct_default_graph_passes,
     reassign_to_pg_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
@@ -51,6 +55,45 @@ class ToyModel(Module):
                 use_reentrant=False,
             )
         return x
+
+
+class TestAotFxTracePassConstruction(TestCase):
+    def test_regional_inductor_runs_before_default_cudagraph(self):
+        gm = torch.fx.symbolic_trace(torch.nn.Identity())
+        traced_result = SimpleNamespace(gm=gm, num_static_inputs=1)
+
+        with mock.patch(
+            "torchtitan.experiments.graph_trainer.cudagraph.is_cudagraph_compatible",
+            return_value=True,
+        ):
+            passes = construct_default_graph_passes(
+                traced_result, compile_pass_names=["regional_inductor"]
+            )
+
+        pass_names = [
+            pass_fn.func.__name__
+            if isinstance(pass_fn, functools.partial)
+            else pass_fn.__name__
+            for pass_fn in passes
+        ]
+        self.assertEqual(
+            pass_names,
+            [
+                "tlparse_log_graph_pass",
+                "annotate_flex_attention_for_regional_inductor_pass",
+                "regional_inductor_pass",
+                "cudagraph_pass",
+            ],
+        )
+
+    def test_unsupported_aot_fx_trace_compile_pass_raises(self):
+        gm = torch.fx.symbolic_trace(torch.nn.Identity())
+        traced_result = SimpleNamespace(gm=gm, num_static_inputs=1)
+
+        with self.assertRaisesRegex(ValueError, "only supports"):
+            construct_default_graph_passes(
+                traced_result, compile_pass_names=["auto_bucketing"]
+            )
 
 
 class TestReassignToPgPass(FSDPTest):
