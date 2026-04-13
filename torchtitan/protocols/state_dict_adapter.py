@@ -21,12 +21,9 @@ class BaseStateDictAdapter(ABC):
     This class defines the interface for converting between native model
     state dict format and other model state dict formats (e.g. HuggingFace).
 
-    Subclasses implement ``to_hf`` and ``from_hf`` as explicit procedural
-    conversions — each adapter reads one function and sees every key rename
-    and value transform for that model.
-
-    The base class constructor handles ``model_config``,
-    ``hf_assets_path``, and ``fqn_to_index_mapping``.
+    The base class constructor handles ``hf_assets_path`` and
+    ``fqn_to_index_mapping`` setup. Subclasses implement ``to_hf``
+    and ``from_hf`` for model-specific key mapping.
 
     Args:
         model_config: model-specific configuration object.
