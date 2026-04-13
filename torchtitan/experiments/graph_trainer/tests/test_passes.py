@@ -22,6 +22,9 @@ from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
     reassign_to_pg_pass,
+    remove_detach_pass,
+    remove_identity_slice_pass,
+    remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.linear import Linear
@@ -404,6 +407,493 @@ class TestApplySACPass(TestCase):
         for node, (target, policy) in zip(nodes, expected):
             self.assertEqual(node.target, target)
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
+
+
+class TestRemoveDetachPass(TestCase):
+    """Unit tests for the remove_detach_pass graph pass."""
+
+    def _build_detach_gm(self, op_targets):
+        """Build a GraphModule with a chain of call_function nodes.
+
+        Each op in op_targets becomes a call_function node chained sequentially:
+        placeholder(x) -> op1(x) -> op2(...) -> ... -> output.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        last = x
+        for target in op_targets:
+            last = graph.call_function(target, args=(last,))
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _count_detach_nodes(self, gm):
+        """Count aten.detach.default call_function nodes."""
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.detach.default
+        )
+
+    def _count_call_function_nodes(self, gm):
+        """Count all call_function nodes."""
+        return sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+    def test_detach_nodes_removed(self):
+        """Detach nodes are removed from a simple graph containing them."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        self.assertEqual(self._count_detach_nodes(gm), 1)
+
+        result = remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(result), 0)
+        # relu and neg should remain
+        self.assertEqual(self._count_call_function_nodes(result), 2)
+
+    def test_graph_without_detach_unchanged(self):
+        """Graphs without detach nodes are returned unchanged."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        num_nodes_before = len(list(gm.graph.nodes))
+
+        result = remove_detach_pass(gm)
+
+        self.assertIs(result, gm)
+        self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
+
+    def test_numerics_preserved(self):
+        """Forward outputs are preserved after removing detach nodes."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        x = torch.randn(4, 4)
+        expected = torch.neg(torch.detach_copy(torch.relu(x)))
+
+        remove_detach_pass(gm)
+        actual = gm(x)
+
+        self.assertEqual(actual, expected)
+
+    def test_detach_with_multiple_users(self):
+        """Detach node with multiple users: all uses are replaced."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        detach = graph.call_function(torch.ops.aten.detach.default, args=(x,))
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(detach,))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(detach,))
+        graph.output((relu, neg))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        self.assertEqual(self._count_detach_nodes(gm), 1)
+
+        remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(gm), 0)
+
+        # Both relu and neg should now consume the placeholder directly
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target in (
+                torch.ops.aten.relu.default,
+                torch.ops.aten.neg.default,
+            ):
+                self.assertEqual(node.args[0].op, "placeholder")
+
+        # Verify numerics
+        x = torch.randn(4, 4)
+        relu_out, neg_out = gm(x)
+        self.assertEqual(relu_out, torch.relu(x))
+        self.assertEqual(neg_out, torch.neg(x))
+
+    def test_nested_detach_chain(self):
+        """Nested detach chain (detach -> detach -> detach) is fully removed."""
+        gm = self._build_detach_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.detach.default,
+                torch.ops.aten.neg.default,
+            ]
+        )
+        self.assertEqual(self._count_detach_nodes(gm), 3)
+
+        remove_detach_pass(gm)
+
+        self.assertEqual(self._count_detach_nodes(gm), 0)
+        self.assertEqual(self._count_call_function_nodes(gm), 2)
+
+        # Verify numerics
+        x = torch.randn(4, 4)
+        expected = torch.neg(torch.relu(x))
+        self.assertEqual(gm(x), expected)
+
+
+class TestRemoveIdentityViewPass(TestCase):
+    """Unit tests for the remove_identity_view_pass graph pass."""
+
+    _VIEW_TARGETS = [
+        torch.ops.aten.view.default,
+        torch.ops.aten.reshape.default,
+        torch.ops.aten._unsafe_view.default,
+    ]
+
+    def _build_view_gm(self, op_targets, *, shapes=None):
+        """Build a GraphModule with a chain of call_function nodes.
+
+        Each op in ``op_targets`` becomes a call_function node chained
+        sequentially: placeholder(x) -> op1(x, shape) -> op2(..., shape) -> output.
+
+        If ``shapes`` is provided it must have the same length as
+        ``op_targets`` and supplies the shape argument for each view-like
+        node.  Non-view nodes ignore the corresponding entry.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        last = x
+        for i, target in enumerate(op_targets):
+            if target in (
+                torch.ops.aten.view.default,
+                torch.ops.aten.reshape.default,
+                torch.ops.aten._unsafe_view.default,
+            ):
+                shape = shapes[i] if shapes else [4, 4]
+                last = graph.call_function(target, args=(last, shape))
+            else:
+                last = graph.call_function(target, args=(last,))
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _attach_fake_meta(self, gm, input_shape):
+        """Attach fake tensor metadata to all nodes based on op semantics."""
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            fake_input = torch.randn(input_shape)
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_input
+            elif node.op == "call_function":
+                if node.target in (
+                    torch.ops.aten.view.default,
+                    torch.ops.aten.reshape.default,
+                    torch.ops.aten._unsafe_view.default,
+                ):
+                    target_shape = node.args[1]
+                    with fake_mode:
+                        node.meta["val"] = torch.randn(target_shape)
+                else:
+                    # For unary ops like relu/neg, output shape == input shape.
+                    node.meta["val"] = node.args[0].meta.get("val")
+
+    def _count_view_nodes(self, gm):
+        """Count view/reshape/_unsafe_view call_function nodes."""
+        targets = {
+            torch.ops.aten.view.default,
+            torch.ops.aten.reshape.default,
+            torch.ops.aten._unsafe_view.default,
+        }
+        return sum(
+            1 for n in gm.graph.nodes if n.op == "call_function" and n.target in targets
+        )
+
+    def _count_call_function_nodes(self, gm):
+        """Count all call_function nodes."""
+        return sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+    def test_identity_view_removed(self):
+        """Identity view (same shape in and out) is removed for each op type."""
+        for target in self._VIEW_TARGETS:
+            with self.subTest(target=target):
+                gm = self._build_view_gm(
+                    [torch.ops.aten.relu.default, target, torch.ops.aten.neg.default],
+                    shapes=[None, [4, 4], None],
+                )
+                self._attach_fake_meta(gm, (4, 4))
+                self.assertEqual(self._count_view_nodes(gm), 1)
+
+                result = remove_identity_view_pass(gm)
+
+                self.assertEqual(self._count_view_nodes(result), 0)
+                self.assertEqual(self._count_call_function_nodes(result), 2)
+
+    def test_non_identity_view_preserved(self):
+        """Non-identity view (shape changes) is kept."""
+        gm = self._build_view_gm(
+            [torch.ops.aten.view.default],
+            shapes=[[2, 8]],
+        )
+        self._attach_fake_meta(gm, (4, 4))
+        self.assertEqual(self._count_view_nodes(gm), 1)
+
+        remove_identity_view_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 1)
+
+    def test_view_without_metadata_skipped(self):
+        """Nodes without tensor metadata are skipped safely."""
+        gm = self._build_view_gm(
+            [torch.ops.aten.view.default],
+            shapes=[[4, 4]],
+        )
+        # Do NOT attach fake meta — nodes have no "val" in meta.
+
+        # Should not raise and should not modify the graph.
+        remove_identity_view_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 1)
+
+    def test_numerics_preserved(self):
+        """Forward outputs are preserved after removing identity views."""
+        gm = self._build_view_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.view.default,
+                torch.ops.aten.neg.default,
+            ],
+            shapes=[None, [4, 4], None],
+        )
+        self._attach_fake_meta(gm, (4, 4))
+
+        x = torch.randn(4, 4)
+        expected = torch.neg(torch.relu(x).view(4, 4))
+
+        remove_identity_view_pass(gm)
+        actual = gm(x)
+
+        self.assertEqual(actual, expected)
+
+    def test_view_with_multiple_users(self):
+        """Identity view with multiple users: all uses are replaced."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        view = graph.call_function(torch.ops.aten.view.default, args=(x, [4, 4]))
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(view,))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(view,))
+        graph.output((relu, neg))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # Attach metadata
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            fake_input = torch.randn(4, 4)
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_input
+            elif node.target is torch.ops.aten.view.default:
+                node.meta["val"] = fake_input  # same shape
+            elif node.op == "call_function":
+                node.meta["val"] = fake_input
+
+        self.assertEqual(self._count_view_nodes(gm), 1)
+
+        remove_identity_view_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 0)
+
+        # Both relu and neg should now consume the placeholder directly
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target in (
+                torch.ops.aten.relu.default,
+                torch.ops.aten.neg.default,
+            ):
+                self.assertEqual(node.args[0].op, "placeholder")
+
+        # Verify numerics
+        x = torch.randn(4, 4)
+        relu_out, neg_out = gm(x)
+        self.assertEqual(relu_out, torch.relu(x))
+        self.assertEqual(neg_out, torch.neg(x))
+
+    def test_chain_of_identity_views(self):
+        """Chain of identity views (view -> view -> view) is fully removed."""
+        gm = self._build_view_gm(
+            [
+                torch.ops.aten.relu.default,
+                torch.ops.aten.view.default,
+                torch.ops.aten.reshape.default,
+                torch.ops.aten._unsafe_view.default,
+                torch.ops.aten.neg.default,
+            ],
+            shapes=[None, [4, 4], [4, 4], [4, 4], None],
+        )
+        self._attach_fake_meta(gm, (4, 4))
+        self.assertEqual(self._count_view_nodes(gm), 3)
+
+        remove_identity_view_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 0)
+        self.assertEqual(self._count_call_function_nodes(gm), 2)
+
+        # Verify numerics
+        x = torch.randn(4, 4)
+        expected = torch.neg(torch.relu(x))
+        self.assertEqual(gm(x), expected)
+
+    def test_graph_without_views_unchanged(self):
+        """Graphs without view nodes are returned unchanged."""
+        gm = self._build_view_gm(
+            [torch.ops.aten.relu.default, torch.ops.aten.neg.default],
+            shapes=[None, None],
+        )
+        self._attach_fake_meta(gm, (4, 4))
+        num_nodes_before = len(list(gm.graph.nodes))
+
+        result = remove_identity_view_pass(gm)
+
+        self.assertIs(result, gm)
+        self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
+
+
+class TestRemoveIdentitySlicePass(TestCase):
+    """Unit tests for the remove_identity_slice_pass graph pass."""
+
+    def _build_slice_gm(self, input_shape, dim, start, end, step=1):
+        """Build a GraphModule with a single aten.slice.Tensor node.
+
+        Creates: placeholder(x) -> slice(x, dim, start, end, step) -> output.
+        The placeholder is annotated with fake tensor metadata of the given shape.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        sliced = graph.call_function(
+            torch.ops.aten.slice.Tensor, args=(x, dim, start, end, step)
+        )
+        graph.output(sliced)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # Annotate placeholder with fake tensor metadata
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode() as fake_mode:
+            fake_val = fake_mode.from_tensor(torch.empty(*input_shape))
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_val
+        return gm
+
+    def _count_slice_nodes(self, gm):
+        """Count aten.slice.Tensor nodes in the graph."""
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.slice.Tensor
+        )
+
+    def test_full_dim_slice_is_removed(self):
+        """A slice selecting the full dimension (start=0, end>=dim_size, step=1)
+        should be removed."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=0, end=8, step=1)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def test_full_dim_slice_large_end_is_removed(self):
+        """A slice with end > dim_size should also be removed (identity)."""
+        import sys
+
+        gm = self._build_slice_gm(
+            input_shape=(8, 16), dim=0, start=0, end=sys.maxsize, step=1
+        )
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def test_partial_slice_start_preserved(self):
+        """A slice with start > 0 is not an identity and should be preserved."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=2, end=8, step=1)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_partial_slice_end_preserved(self):
+        """A slice with end < dim_size is not an identity and should be preserved."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=0, end=4, step=1)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_partial_slice_step_preserved(self):
+        """A slice with step > 1 is not an identity and should be preserved."""
+        gm = self._build_slice_gm(input_shape=(8, 16), dim=0, start=0, end=8, step=2)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_no_metadata_skipped(self):
+        """Slice nodes without fake tensor metadata should be skipped safely."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        sliced = graph.call_function(
+            torch.ops.aten.slice.Tensor, args=(x, 0, 0, 100, 1)
+        )
+        graph.output(sliced)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # No metadata set -- pass should not crash
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_multi_dim_slice(self):
+        """Identity slice on a non-zero dimension should be removed."""
+        gm = self._build_slice_gm(
+            input_shape=(8, 16, 32), dim=2, start=0, end=32, step=1
+        )
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def test_numerics_preserved(self):
+        """The pass should not change the numerical output of the graph."""
+        gm = self._build_slice_gm(input_shape=(4, 8), dim=0, start=0, end=4, step=1)
+
+        # Run before the pass
+        x = torch.randn(4, 8)
+        out_before = gm(x)
+
+        remove_identity_slice_pass(gm)
+
+        out_after = gm(x)
+        self.assertTrue(torch.equal(out_before, out_after))
+
+    def test_chained_identity_slices(self):
+        """Multiple chained identity slices should all be removed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        s1 = graph.call_function(torch.ops.aten.slice.Tensor, args=(x, 0, 0, 8, 1))
+        s2 = graph.call_function(torch.ops.aten.slice.Tensor, args=(s1, 1, 0, 16, 1))
+        graph.output(s2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode() as fake_mode:
+            fake_val = fake_mode.from_tensor(torch.empty(8, 16))
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_val
+
+        # Also annotate s1 with metadata so s2 can check its input's shape
+        for node in gm.graph.nodes:
+            if (
+                node.op == "call_function"
+                and node.target is torch.ops.aten.slice.Tensor
+            ):
+                node.meta["val"] = fake_val
+                break  # Only need the first slice node (s1)
+
+        self.assertEqual(self._count_slice_nodes(gm), 2)
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 0)
 
 
 if __name__ == "__main__":

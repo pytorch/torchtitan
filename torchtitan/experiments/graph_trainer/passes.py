@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import operator
+import sys
 from collections import defaultdict
 from collections.abc import Callable
 
@@ -44,6 +45,143 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
+def remove_detach_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove ``aten.detach.default`` nodes from the graph.
+
+    In a traced fwd+bwd graph there is no autograd context, so detach is
+    semantically a no-op.  Removing these nodes simplifies the graph for
+    downstream passes.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with all detach nodes removed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op == "call_function" and node.target is torch.ops.aten.detach.default:
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} aten.detach.default node(s) from the graph")
+
+    return gm
+
+
+_IDENTITY_VIEW_TARGETS = {
+    torch.ops.aten._unsafe_view.default,
+    torch.ops.aten.view.default,
+    torch.ops.aten.reshape.default,
+}
+
+
+def remove_identity_view_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity ``view``, ``reshape``, and ``_unsafe_view`` nodes.
+
+    In a traced graph these ops are no-ops when the output shape equals
+    the input shape.  Removing them simplifies the graph for downstream
+    passes (bucketing, scheduling, cudagraph).
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with identity view nodes removed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target not in _IDENTITY_VIEW_TARGETS:
+            continue
+
+        # Skip nodes without fake tensor metadata (e.g. symbolic or opaque).
+        inp = node.args[0]
+        inp_val = inp.meta.get("val") if isinstance(inp, torch.fx.Node) else None
+        out_val = node.meta.get("val")
+        if inp_val is None or out_val is None:
+            continue
+        if not isinstance(inp_val, torch.Tensor) or not isinstance(
+            out_val, torch.Tensor
+        ):
+            continue
+
+        if inp_val.shape == out_val.shape:
+            node.replace_all_uses_with(inp)
+            gm.graph.erase_node(node)
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} identity view/reshape node(s) from the graph")
+
+    return gm
+
+
+def remove_identity_slice_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove identity aten.slice.Tensor ops that select the full dimension.
+
+    An ``aten.slice.Tensor(input, dim, start, end, step)`` is a no-op when
+    ``start == 0``, ``end >= dim_size``, and ``step == 1``.  This pass
+    replaces such nodes with their input tensor, reducing graph noise from
+    decompositions and simplifying downstream passes.
+
+    Default args for ``aten.slice.Tensor``: dim=0, start=0, end=sys.maxsize,
+    step=1.
+    """
+    count = 0
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if node.target is not torch.ops.aten.slice.Tensor:
+            continue
+
+        args = node.args
+        input_node = args[0]
+
+        # Parse args with defaults matching aten.slice.Tensor signature
+        dim = args[1] if len(args) > 1 else 0
+        start = args[2] if len(args) > 2 else 0
+        end = args[3] if len(args) > 3 else sys.maxsize
+        step = args[4] if len(args) > 4 else 1
+
+        if start != 0 or step != 1:
+            continue
+
+        # Use fake tensor metadata to determine the actual dimension size.
+        # Skip nodes without metadata (e.g. from hand-built test graphs).
+        val = input_node.meta.get("val")
+        if val is None:
+            continue
+
+        shape = val.shape
+        dim_size = shape[dim]
+
+        if end >= dim_size:
+            node.replace_all_uses_with(input_node)
+            gm.graph.erase_node(node)
+            count += 1
+
+    if count > 0:
+        logger.info(f"Removed {count} identity slice node(s)")
+
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -59,8 +197,22 @@ def construct_default_graph_passes(
     Returns:
         An ordered list of graph passes ready to apply.
     """
+    from torchtitan.models.common.attention import FlexAttention
+
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
+        remove_detach_pass,
+        remove_identity_view_pass,
+        remove_identity_slice_pass,
+        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # produce bitwise identical results to the eager Trainer path.
+        # When left uncompiled, flex_attention still runs correctly but
+        # produces different numerical results.
+        functools.partial(
+            annotate_flex_attention_for_regional_inductor_pass,
+            flex_compile_config=FlexAttention.inductor_configs,
+        ),
+        regional_inductor_pass,
     ]
 
     # cudagraph should be the last pass.
@@ -163,15 +315,58 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
 def regional_inductor_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
 ) -> torch.fx.GraphModule:
-    """
-    Apply regional inductor compilation based on user annotation.
+    """Compile tagged graph regions with ``regional_inductor``.
 
-    When serializable=True (precompile mode), sets force_autograd_cache
-    so that regional_inductor wraps its output in RegionalOutputCode,
-    and overrides the ops filter to allow distributed collective ops.
+    Scans the graph for nodes whose ``node.meta["custom"]`` contains a
+    ``compile_with_inductor`` key and compiles those regions with
+    TorchInductor.  Nodes without this tag are left unchanged.  If no
+    nodes are tagged the pass is a no-op.
+
+    Inductor is configured for bitwise-equal numerics so that the
+    compiled regions match eager execution exactly.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs for shape propagation.
+        serializable: When True (precompile mode), sets
+            ``force_autograd_cache`` so that ``regional_inductor`` wraps
+            its output in ``RegionalOutputCode``, and overrides the ops
+            filter to allow distributed collective ops.
     """
+    import torch._inductor.config as ic
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
+        """Extract the FakeTensorMode from a graph module's placeholder metadata."""
+        for node in gm.graph.nodes:
+            if node.op == "placeholder" and "val" in node.meta:
+                val = node.meta["val"]
+                if isinstance(val, FakeTensor):
+                    return val.fake_mode
+        return None
+
+    # Ensure inductor produces bitwise-equal numerics vs eager.
+    ic.eager_numerics.division_rounding = True
+    # Recommended by inductor team — uncomment as needed:
+    # ic.emulate_precision_casts = True
+    # ic.eager_numerics.disable_ftz = True
+    # ic.eager_numerics.use_pytorch_libdevice = True
+    # ic.fallback_random = True
+
+    # regional_inductor calls standalone_compile with
+    # dynamic_shapes="from_tracing_context", which requires an active
+    # TracingContext with a FakeTensorMode.  When this pass is called
+    # outside torch.compile (e.g. after make_fx tracing in graph_trainer),
+    # no TracingContext exists, so we create one from the graph's fake
+    # tensor metadata.
+    fake_mode = _get_fake_mode_from_gm(gm)
+    tracing_ctx = torch._guards.TracingContext(fake_mode)
+
     if serializable:
-        with torch._functorch.config.patch("force_autograd_cache", True):
+        with (
+            torch._guards.tracing(tracing_ctx),
+            torch._functorch.config.patch("force_autograd_cache", True),
+        ):
             result = regional_inductor(gm, example_inputs)
         from torch._inductor.output_code import RegionalOutputCode
 
@@ -187,7 +382,15 @@ def regional_inductor_pass(
                 "RegionalOutputCode; distributed ops may not serialize correctly."
             )
         return result
-    return regional_inductor(gm, example_inputs)
+
+    with torch._guards.tracing(tracing_ctx):
+        gm = regional_inductor(gm, example_inputs)
+
+    # regional_inductor may switch to boxed calling convention; reset to
+    # default so the graph can be called with positional args as usual.
+    gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    gm.recompile()
+    return gm
 
 
 def cudagraph_pass(
@@ -229,7 +432,11 @@ def cudagraph_pass(
 
 
 def annotate_flex_attention_for_regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    flex_compile_config: dict | None,
+    mask_compile_config: dict | None = None,
 ) -> torch.fx.GraphModule:
     """Tag flex attention HOPs with compile_with_inductor for regional_inductor.
 
@@ -238,28 +445,54 @@ def annotate_flex_attention_for_regional_inductor_pass(
     1. The HOP node itself (flex_attention / flex_attention_backward)
     2. The get_attr nodes referencing score_mod / mask_mod submodules.
     3. All nodes inside those submodule graphs.
-    """
-    from torchtitan.models.common.attention import FlexAttention
 
-    annotation = {"inductor_configs": FlexAttention.inductor_configs}
+    Args:
+        gm: The graph module to annotate.
+        example_inputs: Example inputs (unused, required by pass interface).
+        flex_compile_config: Inductor config dict for flex attention HOP
+            nodes and their get_attr submodule references. When provided,
+            wrapped as ``{"inductor_configs": flex_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+        mask_compile_config: Inductor config dict for nodes inside mask_mod
+            subgraphs. When provided, wrapped as
+            ``{"inductor_configs": mask_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+    """
+    flex_compile_annotation: dict = (
+        {"inductor_configs": flex_compile_config}
+        if flex_compile_config is not None
+        else {}
+    )
+    mask_compile_annotation: dict = (
+        {"inductor_configs": mask_compile_config}
+        if mask_compile_config is not None
+        else {}
+    )
+
     for node in gm.graph.nodes:
         if node.target not in {
             torch.ops.higher_order.flex_attention,
             torch.ops.higher_order.flex_attention_backward,
         }:
             continue
-        node.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+        node.meta.setdefault("custom", {})[
+            "compile_with_inductor"
+        ] = flex_compile_annotation
         for inp in node.all_input_nodes:
             if inp.op != "get_attr":
                 continue
             submod = getattr(gm, inp.target, None)
             if not isinstance(submod, torch.fx.GraphModule):
                 continue
-            inp.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+            inp.meta.setdefault("custom", {})[
+                "compile_with_inductor"
+            ] = flex_compile_annotation
+
+            # Following are the nodes in mask_mod subgraph
             for sub_node in submod.graph.nodes:
                 sub_node.meta.setdefault("custom", {})[
                     "compile_with_inductor"
-                ] = annotation
+                ] = mask_compile_annotation
     return gm
 
 
@@ -588,6 +821,5 @@ AVAILABLE_COMPILER_PASSES = {
 AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "annotate_flex_attention_for_regional_inductor": annotate_flex_attention_for_regional_inductor_pass,
     "apply_sac": apply_sac_pass,
 }

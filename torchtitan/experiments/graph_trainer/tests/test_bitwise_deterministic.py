@@ -102,8 +102,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
     model_registry: Callable
     annotate_model: Callable
-
-    model_flavor: str = "debugmodel"
+    model_flavor: str
 
     def setUp(self):
         if not hasattr(self, "model_registry"):
@@ -151,18 +150,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         return loss.detach().clone(), hash_model(model), hash_gradient(model)
 
-    def test_graph_trainer_enable_passes_true_vs_false(self):
-        """aot_fx_trace with passes enabled vs disabled produces identical results."""
-        _set_deterministic()
-        run_with = self._run_steps(
-            copy.deepcopy(self.model), GraphTrainer, enable_passes=True
-        )
-        _set_deterministic()
-        run_without = self._run_steps(
-            copy.deepcopy(self.model), GraphTrainer, enable_passes=False
-        )
-        self._assert_runs_match(run_with, run_without, "enable_passes True vs False: ")
-
     def _assert_runs_match(
         self,
         run_a: tuple[torch.Tensor, str, str],
@@ -186,14 +173,8 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 debug model."""
 
     model_registry = staticmethod(llama3_model_registry)
+    model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_llama)
-
-    def test_aot_fx_trace_vs_eager(self):
-        """aot_fx_trace and eager produce bitwise identical losses and grads."""
-        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
-        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
-
-        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
@@ -216,19 +197,20 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
             """66bbbbc98b4c1635e42a133ac1fbd499a2b8633ca879f4121cf206708c21dbdf""",
         )
 
-
-class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
-    """Bitwise determinism tests for DeepSeek-v3 debug model."""
-
-    model_registry = staticmethod(dsv3_model_registry)
-    annotate_model = staticmethod(annotate_deepseekv3)
-
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace and eager produce bitwise identical losses and grads."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+
+class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for DeepSeek-v3 debug model."""
+
+    model_registry = staticmethod(dsv3_model_registry)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_deepseekv3)
 
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
@@ -251,14 +233,19 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
             """30d87367fe7227032c71fe4fab7d5162bbc4b7311a4049711f2edd02442679f6""",
         )
 
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
 
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
-    """Self-consistency test for Llama3 with FlexAttention (debugmodel_flex_attn).
+    """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
-    Eager vs aot_fx_trace is not bitwise identical here because eager uses the
-    unfused Math fallback while aot_fx_trace compiles FlexAttention HOPs via
-    regional_inductor into fused Triton kernels. Instead, we verify that
-    aot_fx_trace results match hardcoded expected values.
+    aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
+    Triton kernels and produces bitwise identical results to eager.
     """
 
     model_registry = staticmethod(llama3_model_registry)
@@ -268,32 +255,36 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
-    def test_aot_fx_trace_self_deterministic(self):
-        """aot_fx_trace results match hardcoded expected values.
+    def test_eager_self_deterministic(self):
+        """Eager results match hardcoded expected values.
 
         Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` to update the inline expected values.
         """
         loss, model_hash, grad_hash = self._run_steps(
-            copy.deepcopy(self.model), GraphTrainer
+            copy.deepcopy(self.model), Trainer
         )
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """6d5b743db1c09f1ad3241eb450185e04d80e9cf2806861f26f875ff05f274c9e""",
+            """dde585df73ff27f7fae624399dbddbda7123bf6fdc0b65a8d19a3941437739e0""",
         )
         assert_expected_inline(
             grad_hash,
-            """18159ff30a8a18f40fb0d2d5e21a48b422551c971ea9f60bff97389747bff465""",
+            """d4c46d7717cb303c7b19e97cd6b4be4af79d73acabafcba6bb1f6ca244159096""",
         )
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace with passes and eager produce bitwise identical results."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
-    """Self-consistency test for DSv3 with FlexAttention (debugmodel_flex_attn).
+    """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
-    Eager vs aot_fx_trace is not bitwise identical here because eager uses the
-    unfused Math fallback while aot_fx_trace compiles FlexAttention HOPs via
-    regional_inductor into fused Triton kernels. Instead, we verify that
-    aot_fx_trace results match hardcoded expected values.
+    aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
+    Triton kernels and produces bitwise identical results to eager.
     """
 
     model_registry = staticmethod(dsv3_model_registry)
@@ -303,23 +294,34 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
-    def test_aot_fx_trace_self_deterministic(self):
-        """aot_fx_trace results match hardcoded expected values.
+    def test_eager_self_deterministic(self):
+        """Eager results match hardcoded expected values.
 
         Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` to update the inline expected values.
         """
         loss, model_hash, grad_hash = self._run_steps(
-            copy.deepcopy(self.model), GraphTrainer
+            copy.deepcopy(self.model), Trainer
         )
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """ad64082a7ce5cc4149ebbe1c8bc733e5411bcbc66ba75313fa647d984b22afff""",
+            """1dbbbbe1c8cb02de609bc7a2da96b279715a01ab4e47188a8c7f359b5f17c3ac""",
         )
         assert_expected_inline(
             grad_hash,
-            """13c459deb2ab985f7e3f4faafb8d45ccb9a895cdd3451331133ee413c996e15b""",
+            """b86ab441a965db4cabab84f702f59613f9a5bf1cb3df18154c63b52d5b0932ad""",
         )
+
+    # TODO: OOMs during flex_attention compilation on A100 GPUs.
+    # Revisit when GraphTrainer addresses peak memory during compilation.
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on A100"
+    )
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace with passes and eager produce bitwise identical results."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
 if __name__ == "__main__":
