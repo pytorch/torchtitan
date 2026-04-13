@@ -5,9 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import json
+import logging
 import os
 import subprocess
 import time
+from pathlib import Path
+
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from torchtitan.tools.logging import logger
 
@@ -23,6 +28,9 @@ _TEST_SUITES_FUNCTION = {
     "h100": build_h100_tests_list,
 }
 
+TB_MAX_RESERVED_TAG = "memory/max_reserved(GiB)"
+TB_MAX_ACTIVE_TAG = "memory/max_active(GiB)"
+
 
 def _run_cmd(cmd, timeout=None):
     return subprocess.run(
@@ -35,11 +43,49 @@ def _run_cmd(cmd, timeout=None):
     )
 
 
+def _read_peak_memory(tb_root: Path) -> dict[str, float | int]:
+    if not tb_root.exists():
+        raise FileNotFoundError(f"TensorBoard directory not found: {tb_root}")
+    run_dirs = [path for path in tb_root.iterdir() if path.is_dir()]
+    if len(run_dirs) != 1:
+        raise RuntimeError(
+            f"Expected exactly one TensorBoard run directory under {tb_root}, found {run_dirs}"
+        )
+
+    tensorboard_logger = logging.getLogger("tensorboard")
+    original_level = tensorboard_logger.level
+    tensorboard_logger.setLevel(logging.WARNING)
+    event_accumulator = EventAccumulator(str(run_dirs[0]))
+    try:
+        event_accumulator.Reload()
+    finally:
+        tensorboard_logger.setLevel(original_level)
+
+    scalar_tags = event_accumulator.Tags().get("scalars", [])
+
+    def _peak_for_tag(tag: str) -> tuple[float, int]:
+        if tag not in scalar_tags:
+            raise KeyError(f"Scalar tag {tag!r} not found in {run_dirs[0]}: {scalar_tags}")
+        peak = max(event_accumulator.Scalars(tag), key=lambda scalar: scalar.value)
+        return peak.value, peak.step
+
+    reserved_gib, reserved_step = _peak_for_tag(TB_MAX_RESERVED_TAG)
+    active_gib, active_step = _peak_for_tag(TB_MAX_ACTIVE_TAG)
+    return {
+        "max_reserved_gib": reserved_gib,
+        "max_reserved_step": reserved_step,
+        "max_active_gib": active_gib,
+        "max_active_step": active_step,
+    }
+
+
 def run_single_test(
     test_flavor: OverrideDefinitions,
     output_dir: str,
     module: str | None = None,
     config: str | None = None,
+    *,
+    collect_peak_memory: bool = False,
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
@@ -48,6 +94,7 @@ def run_single_test(
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
+        tb_folder = f"tb_{idx}"
         cmd = ""
         if module is not None:
             cmd += f"MODULE={module} "
@@ -59,6 +106,11 @@ def run_single_test(
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
         cmd += " " + dump_folder_arg
+        if collect_peak_memory:
+            cmd += (
+                f" --metrics.enable_tensorboard --metrics.log_freq=1 "
+                f"--metrics.save_tb_folder={tb_folder}"
+            )
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
@@ -89,10 +141,30 @@ def run_single_test(
                 f"Command: {cmd}\n"
                 f"stderr: {result.stderr}\n"
             )
+        if collect_peak_memory:
+            tb_root = Path(output_dir) / test_name / tb_folder
+            peak_memory = _read_peak_memory(tb_root)
+            summary_path = Path(output_dir) / test_name / f"peak_memory_{idx}.json"
+            summary_path.write_text(
+                json.dumps(peak_memory, indent=2)
+            )
+            logger.info(
+                f"Peak memory for {test_name}[{idx}]: "
+                f"reserved={peak_memory['max_reserved_gib']:.3f} GiB "
+                f"at step {peak_memory['max_reserved_step']}, "
+                f"active={peak_memory['max_active_gib']:.3f} GiB "
+                f"at step {peak_memory['max_active_step']}"
+            )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
+def run_tests(
+    args,
+    test_list: list[OverrideDefinitions],
+    module=None,
+    config=None,
+):
     """Run all integration tests to test the core features of TorchTitan"""
+    collect_peak_memory = getattr(args, "collect_peak_memory", False)
 
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
@@ -123,7 +195,13 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
             )
         else:
             try:
-                run_single_test(test_flavor, args.output_dir, module, config)
+                run_single_test(
+                    test_flavor,
+                    args.output_dir,
+                    module,
+                    config,
+                    collect_peak_memory=collect_peak_memory,
+                )
             except Exception as e:
                 logger.error(str(e))
                 failed_tests.append((test_flavor.test_name, str(e)))
@@ -192,6 +270,12 @@ def main():
         "--exclude",
         default=None,
         help="Comma-separated list of test names to skip",
+    )
+    parser.add_argument(
+        "--collect_peak_memory",
+        default=False,
+        action="store_true",
+        help="Collect peak reserved/active CUDA memory from TensorBoard logs.",
     )
     args = parser.parse_args()
 
