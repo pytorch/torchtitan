@@ -48,10 +48,10 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
+4. Install PyTorch nightly, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
 ```bash
 # Install vllm with nightly torch
-uv pip install torch vllm xformers  --pre \
+uv pip install torch vllm torchcomms  --pre \
 --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
 --index-strategy unsafe-best-match
 ```
