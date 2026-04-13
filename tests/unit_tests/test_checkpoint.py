@@ -825,5 +825,94 @@ class TestModelWrapper(unittest.TestCase):
         torch.testing.assert_close(sd["weight"], expected)
 
 
+class TestMultiSourceLoading(unittest.TestCase):
+    """Tests that additional_load_path triggers a second dcp.load."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.adapter_dir = os.path.join(self.temp_dir, "adapter")
+        os.makedirs(self.adapter_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_additional_load_path(self, mock_save, mock_load, mock_rank):
+        """Primary + additional_load_path triggers two dcp.load calls (DCP and HF)."""
+        from torchtitan.components.state_dict_transforms import StateDictTransforms
+
+        cases = [
+            ("dcp", None),  # no converter adapter → DCP fallback
+            ("hf", True),  # with converter adapter → HF via adapter
+        ]
+        for fmt, use_adapter in cases:
+            with self.subTest(format=fmt):
+                mock_save.reset_mock()
+                mock_load.reset_mock()
+
+                mock_save.side_effect = lambda *a, **kw: os.makedirs(
+                    kw.get("checkpoint_id", a[1] if len(a) > 1 else ""),
+                    exist_ok=True,
+                )
+                mock_load.side_effect = lambda *a, **kw: None
+
+                lora_filter = lambda k: "lora" in k  # noqa: E731
+                converter_adapter = None
+                model_converters = None
+
+                if use_adapter:
+                    converter_adapter = mock.Mock()
+                    converter_adapter.to_hf.return_value = {
+                        "peft_key": torch.tensor([1.0])
+                    }
+                    converter_adapter.from_hf.return_value = {
+                        "lora_a.weight": torch.tensor([1.0])
+                    }
+                    converter_adapter.get_hf_storage_reader.return_value = mock.Mock()
+                    model_converters = mock.Mock()
+                    model_converters.key_filter.return_value = lora_filter
+                    model_converters.state_dict_transform.return_value = None
+                    model_converters.converter_sd_adapters.return_value = [
+                        (converter_adapter, lora_filter)
+                    ]
+
+                cfg = CheckpointManager.Config(
+                    enable=True,
+                    async_mode="disabled",
+                    folder="",
+                    interval=1,
+                    keep_latest_k=0,
+                    last_save_model_only=False,
+                    export_dtype="float32",
+                    exclude_from_loading=[],
+                    initial_load_path=None,
+                    initial_load_model_only=False,
+                    additional_load_path=self.adapter_dir,
+                )
+                with mock.patch("torch.distributed.new_group", return_value="pg"):
+                    manager = CheckpointManager(
+                        dataloader=FakeDataLoader(),
+                        model_parts=[nn.Linear(2, 2)],
+                        optimizers=FakeOptimizersContainer(),
+                        lr_schedulers=FakeLRSchedulersContainer(),
+                        states={},
+                        config=cfg,
+                        sd_transforms=StateDictTransforms(),
+                        base_folder=self.temp_dir,
+                        model_converters=model_converters,
+                    )
+
+                manager.save(curr_step=1)
+                manager.load(step=1)
+
+                # Both formats trigger two dcp.load calls
+                self.assertEqual(mock_load.call_count, 2)
+
+                if use_adapter:
+                    converter_adapter.from_hf.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
