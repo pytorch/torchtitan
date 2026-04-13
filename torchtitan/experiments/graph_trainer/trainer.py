@@ -41,7 +41,11 @@ def make_fwd_bwd_step(loss_fn):
     ):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
         loss = loss_fn(pred, labels) / global_valid_tokens
-        params = [p for p in model.parameters() if p.requires_grad]
+        params = [
+            p
+            for _, p in model.named_parameters(remove_duplicate=False)
+            if p.requires_grad
+        ]
         with torch.fx.traceback.annotate({"phase": "backward"}):
             grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
@@ -87,8 +91,13 @@ class GraphTrainer(Trainer):
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
-
-        params = [p for p in model.parameters() if p.requires_grad]
+        # remove_duplicate=False to preserve duplicate parameter entries
+        # from weight tying (e.g. shared embedding/output weights).
+        params = [
+            p
+            for _, p in model.named_parameters(remove_duplicate=False)
+            if p.requires_grad
+        ]
         return self._make_fx_forward_backward_step(
             model,
             inputs,

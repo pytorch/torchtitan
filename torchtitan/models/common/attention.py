@@ -4,12 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-
-# TODO: Re-enable once we have closed
-# https://github.com/pytorch/torchtitan/issues/2722
-os.environ.setdefault("DISABLE_LLVM_OPT", "1")
-
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import ClassVar, NamedTuple
@@ -267,11 +261,18 @@ class FlexAttention(LocalMapInnerAttention):
         kernel_options: dict = field(default_factory=dict)
 
     inductor_configs: ClassVar[dict[str, bool]] = {
-        # TODO: turn on wrap_inductor_compiled_regions after PyTorch fix is
-        # landed again: https://github.com/pytorch/pytorch/pull/175733.
-        "wrap_inductor_compiled_regions": False,
-        "max_autotune": True,
-        "coordinate_descent_tuning": True,
+        "wrap_inductor_compiled_regions": True,
+        # Recommended workflow: run once with max_autotune=True to discover
+        # good kernel_options, then set kernel_options explicitly in the config
+        # and keep max_autotune disabled for faster compilation.
+        "max_autotune": False,
+        # When enabled, after max_autotune selects the best kernel config,
+        # coordinate descent iteratively tunes individual parameters (block
+        # sizes, num_warps, num_stages) one at a time -- doubling/halving each
+        # and accepting changes that improve runtime by >0.1%. This can also
+        # run without max_autotune but starts from a weaker baseline config.
+        # See torch/_inductor/runtime/coordinate_descent_tuner.py.
+        "coordinate_descent_tuning": False,
         "triton.cudagraphs": False,
     }
 
