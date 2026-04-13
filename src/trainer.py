@@ -235,7 +235,7 @@ def train(cfg: Config):
 
     # Parallelism: EP → AC → compile → FSDP (order matters)
     if parallel_dims.ep_enabled:
-        apply_moe_ep(model, parallel_dims.get_mesh("ep"))
+        apply_moe_ep(model, parallel_dims.get_mesh("ep"))  # * ✓
 
     compile_enabled = cfg.compile.enable
     if job_config.activation_checkpoint.mode != "none":
@@ -255,7 +255,7 @@ def train(cfg: Config):
 
         apply_compile(
             model, backend=cfg.compile.backend, ep_enabled=parallel_dims.ep_enabled
-        )
+        )  # * ✓
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         apply_fsdp(
@@ -266,11 +266,11 @@ def train(cfg: Config):
             ep_degree=cfg.parallelism.ep,
             edp_mesh=parallel_dims.get_optional_mesh("efsdp"),
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
-        )
+        )  # * ✓
 
-    model.to_empty(device=device)
-    model.init_weights(buffer_device=device)
-    model.train()
+    model.to_empty(device=device)  # * ✓
+    model.init_weights(buffer_device=device)  # * ✓
+    model.train()  # * ✓
 
     # Optimizer, LR scheduler, checkpoint
     optimizers = build_optimizers_with_moe_load_balancing(
