@@ -8,7 +8,6 @@ from torch import nn
 from src.config.config import ModelConfig
 from src.models.moe import FeedForward, build_moe
 
-
 # --- RMSNorm ---
 
 
@@ -116,7 +115,9 @@ class TransformerBlock(nn.Module):
         from src.models.moe import MoEArgs
 
         self.attention = Attention(cfg.dim, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim)
-        self.attention_norm = RMSNorm(cfg.dim, eps=cfg.norm_eps, use_quack=cfg.use_quack)
+        self.attention_norm = RMSNorm(
+            cfg.dim, eps=cfg.norm_eps, use_quack=cfg.use_quack
+        )
         self.ffn_norm = RMSNorm(cfg.dim, eps=cfg.norm_eps, use_quack=cfg.use_quack)
 
         self.moe_enabled = layer_id >= cfg.n_dense_layers

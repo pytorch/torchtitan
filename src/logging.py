@@ -53,7 +53,9 @@ def init_logger(log_dir: str | None = None) -> None:
 
     # Avoid attaching duplicate handlers on repeat calls
     for h in _stdlib_logger.handlers:
-        if isinstance(h, _stdlib_logging.FileHandler) and h.baseFilename == os.path.abspath(log_path):
+        if isinstance(
+            h, _stdlib_logging.FileHandler
+        ) and h.baseFilename == os.path.abspath(log_path):
             return
 
     handler = _stdlib_logging.FileHandler(log_path)

@@ -18,7 +18,6 @@ from src.components.tokenizer import BaseTokenizer
 from src.config import JobConfig
 from src.logging import logger
 
-
 # ---------------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------------
@@ -152,7 +151,9 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     dp_rank: int
     dp_world_size: int
 
-    def __init__(self, dataset: IterableDataset, dp_rank: int, dp_world_size: int, **kwargs):
+    def __init__(
+        self, dataset: IterableDataset, dp_rank: int, dp_world_size: int, **kwargs
+    ):
         self._validate_kwargs(kwargs)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank

@@ -32,7 +32,6 @@ class Job:
     """
 
 
-
 @dataclass
 class Metrics:
     log_freq: int = 10

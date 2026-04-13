@@ -18,8 +18,12 @@ class ModelConfig(BaseModel):
     norm_eps: float = 1e-5
     n_dense_layers: int = 0  # 0 = all layers use MoE
     depth_init: bool = True
-    force_load_balance: bool = False  # debug: round-robin routing for EP correctness checks
-    use_quack: bool = False  # use quack RMSNorm kernel (set internally from QuackConfig)
+    force_load_balance: bool = (
+        False  # debug: round-robin routing for EP correctness checks
+    )
+    use_quack: bool = (
+        False  # use quack RMSNorm kernel (set internally from QuackConfig)
+    )
 
 
 class TrainingConfig(BaseModel):
@@ -53,7 +57,9 @@ class DataConfig(BaseModel):
 
 class ActivationCheckpointConfig(BaseModel):
     mode: str = "none"  # "none", "selective", "full"
-    selective_ac_option: str = "op"  # "op" for op-level, or int like "2" for every nth layer
+    selective_ac_option: str = (
+        "op"  # "op" for op-level, or int like "2" for every nth layer
+    )
 
 
 class CompileConfig(BaseModel):
@@ -152,6 +158,8 @@ def build_job_config(cfg: Config):
 
     # Activation checkpoint
     jc.activation_checkpoint.mode = cfg.activation_checkpoint.mode  # type: ignore
-    jc.activation_checkpoint.selective_ac_option = cfg.activation_checkpoint.selective_ac_option
+    jc.activation_checkpoint.selective_ac_option = (
+        cfg.activation_checkpoint.selective_ac_option
+    )
 
     return jc

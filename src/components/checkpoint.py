@@ -29,11 +29,11 @@ from torch.distributed.checkpoint.state_dict_saver import (
 )
 from torch.distributed.checkpoint.stateful import Stateful
 
-from src.data import BaseDataLoader
 from src.components.lr_scheduler import LRSchedulersContainer
 from src.components.optimizer import OptimizersContainer
 from src.config import TORCH_DTYPE_MAP
 from src.config import Checkpoint as CheckpointConfig
+from src.data import BaseDataLoader
 from src.logging import logger
 from src.utils import GarbageCollection
 

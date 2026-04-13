@@ -1,7 +1,12 @@
 from functools import partial
 
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh, DTensor, Replicate, distribute_module
+from torch.distributed.tensor import (  # type: ignore
+    DeviceMesh,
+    DTensor,
+    Replicate,
+    distribute_module,
+)
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 

@@ -25,9 +25,9 @@ import torch.nn.functional as F
 from src.config import TORCH_DTYPE_MAP
 from src.config.config import ModelConfig
 from src.distributed import ParallelDims
+from src.logging import init_logger, logger
 from src.models.moe.model import MoETransformer
 from src.models.parallelize import apply_fsdp, apply_moe_ep
-from src.logging import init_logger, logger
 
 
 def main():
@@ -46,16 +46,31 @@ def main():
 
     # Build mesh: always dp_shard=4, only EP varies
     parallel_dims = ParallelDims(
-        dp_replicate=1, dp_shard=4, cp=1, tp=1, pp=1,
-        ep=ep, etp=1, world_size=4,
+        dp_replicate=1,
+        dp_shard=4,
+        cp=1,
+        tp=1,
+        pp=1,
+        ep=ep,
+        etp=1,
+        world_size=4,
     )
     parallel_dims.build_mesh()
 
     # Fixed tiny model config with force_load_balance for deterministic routing
     cfg = ModelConfig(
-        n_layers=2, dim=256, n_heads=4, n_kv_heads=2, head_dim=64,
-        num_experts=8, top_k=2, num_shared_experts=1, ffn_dim=128,
-        vocab_size=1024, rope_theta=500_000.0, n_dense_layers=0,
+        n_layers=2,
+        dim=256,
+        n_heads=4,
+        n_kv_heads=2,
+        head_dim=64,
+        num_experts=8,
+        top_k=2,
+        num_shared_experts=1,
+        ffn_dim=128,
+        vocab_size=1024,
+        rope_theta=500_000.0,
+        n_dense_layers=0,
         force_load_balance=True,
         max_seq_len=128,  # type: ignore[call-arg]
     )

@@ -10,8 +10,8 @@ from torch.distributed.tensor import Shard
 from torch.distributed.tensor.parallel import parallelize_module
 
 from src.distributed.expert_parallel import ExpertParallel
-from src.models.moe import moe as moe_module
 from src.logging import logger
+from src.models.moe import moe as moe_module
 
 
 def apply_fsdp(

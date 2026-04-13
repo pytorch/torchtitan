@@ -13,7 +13,11 @@ from torch.distributed.checkpoint.stateful import Stateful
 from src.components.checkpoint import CheckpointManager
 from src.components.lr_scheduler import build_lr_schedulers
 from src.components.optimizer import build_optimizers_with_moe_load_balancing
-from src.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer, resolve_tokenizer_path
+from src.components.tokenizer import (
+    BaseTokenizer,
+    HuggingFaceTokenizer,
+    resolve_tokenizer_path,
+)
 from src.config import TORCH_DTYPE_MAP
 from src.config.config import Config, build_job_config
 from src.data import DataloaderExhaustedError, build_text_dataloader
@@ -150,12 +154,14 @@ def train(cfg: Config):
     parallel_dims = ParallelDims(
         dp_replicate=1,
         dp_shard=cfg.parallelism.dp_shard,
-        cp=1, tp=1, pp=1,
+        cp=1,
+        tp=1,
+        pp=1,
         ep=cfg.parallelism.ep,
         etp=1,
         world_size=world_size,
-    )
-    parallel_dims.build_mesh()
+    )  # * ✓
+    parallel_dims.build_mesh()  # * ✓
 
     # Device and seeds
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
@@ -166,7 +172,7 @@ def train(cfg: Config):
 
     # Tokenizer
     tokenizer_path = resolve_tokenizer_path(cfg.data.tokenizer)
-    tokenizer = HuggingFaceTokenizer(tokenizer_path)
+    tokenizer = HuggingFaceTokenizer(tokenizer_path)  # TODO: read details
 
     # Model config: seq_len for RoPE, vocab_size from tokenizer (unless pinned), quack flag
     vocab_size = cfg.model.vocab_size or tokenizer.get_vocab_size()
@@ -197,9 +203,7 @@ def train(cfg: Config):
 
     # Gradient accumulation
     grad_accum_steps = cfg.training.grad_accum_steps
-    global_batch_size = (
-        cfg.training.local_batch_size * dp_world_size * grad_accum_steps
-    )
+    global_batch_size = cfg.training.local_batch_size * dp_world_size * grad_accum_steps
 
     # Build model on meta device
     logger.info(
@@ -243,7 +247,9 @@ def train(cfg: Config):
     if compile_enabled:
         from src.models.parallelize import apply_compile
 
-        apply_compile(model, backend=cfg.compile.backend, ep_enabled=parallel_dims.ep_enabled)
+        apply_compile(
+            model, backend=cfg.compile.backend, ep_enabled=parallel_dims.ep_enabled
+        )
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         apply_fsdp(
@@ -313,16 +319,17 @@ def train(cfg: Config):
                 return x
 
             @staticmethod
-            def backward(ctx, grad_output):
+            def backward(ctx, grad_output):  # type: ignore
                 return grad_output.contiguous()
 
-        def cross_entropy_fn(pred, labels):
+        def cross_entropy_fn(pred, labels):  # type: ignore
             pred_flat = pred.flatten(0, 1).float()
             labels_flat = labels.flatten(0, 1)
             per_token = quack_cross_entropy(pred_flat, labels_flat, reduction="none")
             per_token = _ContiguousGrad.apply(per_token)
             return per_token.mean()
     else:
+
         def cross_entropy_fn(pred, labels):
             return F.cross_entropy(pred.flatten(0, 1).float(), labels.flatten(0, 1))
 
