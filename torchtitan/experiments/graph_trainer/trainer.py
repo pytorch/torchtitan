@@ -63,6 +63,17 @@ class GraphTrainer(Trainer):
             raise ValueError(
                 "aot_fx_trace compile mode does not support Pipeline Parallel"
             )
+        if self.config.compile.mode == "aot_fx_trace":
+            unsupported_joint_passes = [
+                pass_name
+                for pass_name in self.config.compile.joint_passes
+                if pass_name != "apply_sac"
+            ]
+            if unsupported_joint_passes:
+                raise ValueError(
+                    "aot_fx_trace compile mode does not support these "
+                    f"--compile.joint_passes: {unsupported_joint_passes}"
+                )
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
@@ -132,7 +143,12 @@ class GraphTrainer(Trainer):
                 passes = []
                 if enable_graph_ac:
                     passes.append(graph_ac_pass)
-                passes.extend(construct_default_graph_passes(self._traced_step))
+                passes.extend(
+                    construct_default_graph_passes(
+                        self._traced_step,
+                        compile_pass_names=self.config.compile.passes,
+                    )
+                )
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
