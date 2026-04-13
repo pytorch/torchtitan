@@ -36,6 +36,7 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
+from torchtitan.experiments.graph_trainer.codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -80,6 +81,7 @@ def construct_default_graph_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
+        custom_codegen_pass,
     ]
 
     # cudagraph should be the last pass.
@@ -680,6 +682,7 @@ AVAILABLE_COMPILER_PASSES = {
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "custom_codegen": custom_codegen_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
