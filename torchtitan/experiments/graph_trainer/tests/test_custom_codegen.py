@@ -12,7 +12,7 @@ import types
 import torch
 from torch.testing._internal.common_utils import TestCase
 
-from torchtitan.experiments.graph_trainer.codegen import (
+from torchtitan.experiments.graph_trainer.custom_codegen import (
     _CodegenGraphModule,
     custom_codegen_pass,
 )

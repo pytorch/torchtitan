@@ -897,7 +897,7 @@ class TestRemoveIdentitySlicePass(TestCase):
 
 
 # Import TestCustomCodegenPass so it's discoverable when running this file
-from torchtitan.experiments.graph_trainer.tests.test_codegen import (  # noqa: F401
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
     TestCustomCodegenPass,
 )
 
