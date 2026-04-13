@@ -160,9 +160,11 @@ class VLLMGenerator(Actor, Configurable):
         *,
         model_spec: ModelSpec,
         model_path: str,
+        gpu_direct_weight_sync: bool = False,
     ):
         self.config = config
         self.model_spec = model_spec
+        self.gpu_direct_weight_sync = gpu_direct_weight_sync
 
         # Register TorchTitan model with vLLM before any engine creation
         register_model_to_vllm_model_registry(model_spec)
@@ -324,24 +326,20 @@ class VLLMGenerator(Actor, Configurable):
     async def pull_model_state_dict(self, version: int) -> None:
         """Pull latest weights from TorchStore.
 
-        When ``direct_rdma=True``, weights are read directly from the
-        trainer's GPU memory via one-sided RDMA, bypassing StorageVolumes.
-        When ``False``, data is fetched through StorageVolumes (which may
-        themselves use RDMA as their transport internally).
-
-        See ``push_model_state_dict`` for more details on the distinction.
+        When ``direct_rdma=True``, weights are transferred directly from
+        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
+        entirely. When ``False``, data goes through StorageVolumes
+        (which may themselves use RDMA as a transport internally).
 
         Args:
             version: New policy version number.
         """
-        from monarch.rdma import is_rdma_available
-
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=is_rdma_available(),
+            direct_rdma=self.gpu_direct_weight_sync,
         )
         self.policy_version = version
         logger.debug(

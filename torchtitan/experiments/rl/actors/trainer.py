@@ -78,10 +78,12 @@ class PolicyTrainer(Actor, Configurable):
         hf_assets_path: str = "",
         transfer_dtype: str = "",
         kl_coef: float = 0.0,
+        gpu_direct_weight_sync: bool = False,
     ):
         self.config = config
         self.model_spec = model_spec
         self.kl_coef = kl_coef
+        self.gpu_direct_weight_sync = gpu_direct_weight_sync
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
@@ -249,19 +251,11 @@ class PolicyTrainer(Actor, Configurable):
         GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
         entirely. When ``False``, data goes through StorageVolumes
         (which may themselves use RDMA as a transport internally).
-
-        Note: we couple ``is_rdma_available()`` with ``direct_rdma`` here,
-        but the two concepts are not identical — StorageVolumes can also
-        use RDMA as their transport layer. ``direct_rdma`` specifically
-        means "skip StorageVolumes and let the destination read directly
-        from the source's GPU memory".
         """
-        from monarch.rdma import is_rdma_available
-
         await ts.put_state_dict(
             self.model.state_dict(),
             "model_state_dict",
-            direct_rdma=is_rdma_available(),
+            direct_rdma=self.gpu_direct_weight_sync,
             transfer_dtype=self._transfer_dtype,
         )
 

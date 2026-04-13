@@ -131,6 +131,11 @@ class RLTrainer(Configurable):
         """KL divergence penalty coefficient. When > 0, a frozen reference model
         is built and KL divergence is added to the policy gradient loss."""
 
+        gpu_direct_weight_sync: bool = True
+        """Use GPU-direct RDMA for weight transfer between trainer and generator.
+        When True, weights are transferred directly from GPU to GPU, bypassing
+        TorchStore StorageVolumes. Requires RDMA-capable hardware."""
+
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
 
@@ -324,6 +329,7 @@ class RLTrainer(Configurable):
             hf_assets_path=config.hf_assets_path,
             transfer_dtype=config.generator.model_dtype,
             kl_coef=config.kl_coef,
+            gpu_direct_weight_sync=config.gpu_direct_weight_sync,
         )
         self.generator = generator_mesh.spawn(
             "generator",
@@ -331,6 +337,7 @@ class RLTrainer(Configurable):
             config.generator,
             model_spec=config.model_spec,
             model_path=config.hf_assets_path,
+            gpu_direct_weight_sync=config.gpu_direct_weight_sync,
         )
         self.grader = grader_mesh.spawn(
             "grader",
