@@ -12,8 +12,6 @@ import subprocess
 import time
 from pathlib import Path
 
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-
 from torchtitan.tools.logging import logger
 
 from tests.integration_tests import OverrideDefinitions
@@ -44,6 +42,15 @@ def _run_cmd(cmd, timeout=None):
 
 
 def _read_peak_memory(tb_root: Path) -> dict[str, float | int]:
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import (
+            EventAccumulator,
+        )
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Peak memory collection requires tensorboard to be installed."
+        ) from exc
+
     if not tb_root.exists():
         raise FileNotFoundError(f"TensorBoard directory not found: {tb_root}")
     run_dirs = [path for path in tb_root.iterdir() if path.is_dir()]

@@ -26,6 +26,7 @@ DTYPE = torch.bfloat16
 BATCH_SIZE = 2
 SEQ_LEN = 2048
 MAX_PEAK_MEMORY_RATIO = 1.10
+DEBUGMODEL = "debugmodel"
 
 
 def _set_deterministic() -> None:
@@ -34,8 +35,8 @@ def _set_deterministic() -> None:
     torch.use_deterministic_algorithms(True)
 
 
-def _build_model() -> nn.Module:
-    model_spec = llama3_registry("debugmodel")
+def _build_model(model_flavor: str) -> nn.Module:
+    model_spec = llama3_registry(model_flavor)
     with torch.device("meta"):
         model = model_spec.model.build()
     model.to_empty(device="cuda")
@@ -46,13 +47,19 @@ def _build_model() -> nn.Module:
     return model
 
 
-def _build_trainer(model: nn.Module, trainer_cls: type[Trainer]) -> Trainer:
+def _build_trainer(
+    model: nn.Module,
+    trainer_cls: type[Trainer],
+    *,
+    model_flavor: str,
+    ac_mode: str = "none",
+) -> Trainer:
     trainer = object.__new__(trainer_cls)
     trainer.model_parts = [model]
     trainer.loss_fn = cross_entropy_loss
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
     trainer.train_context = get_train_context(False)
-    trainer.model_config = llama3_registry("debugmodel").model
+    trainer.model_config = llama3_registry(model_flavor).model
     trainer.device = torch.device("cuda")
     trainer.tokenizer = None
 
@@ -64,8 +71,9 @@ def _build_trainer(model: nn.Module, trainer_cls: type[Trainer]) -> Trainer:
                 passes=[],
                 joint_passes=[],
             ),
-            activation_checkpoint=ActivationCheckpointConfig(mode="selective"),
+            activation_checkpoint=ActivationCheckpointConfig(mode=ac_mode),
         )
+        trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
         trainer.config = SimpleNamespace()
@@ -111,7 +119,7 @@ def _measure_step(
 class TestGraphSACPeakMemory(unittest.TestCase):
     def setUp(self):
         _set_deterministic()
-        model = _build_model()
+        model = _build_model(DEBUGMODEL)
         self.state_dict = {
             key: value.detach().cpu().clone()
             for key, value in model.state_dict().items()
@@ -125,14 +133,21 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         torch.use_deterministic_algorithms(False)
 
     def test_llama3_debugmodel_peak_memory_matches_eager_selective_ac(self):
-        eager_model = _build_model()
+        eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
         apply_ac(eager_model, ActivationCheckpointConfig(mode="selective"))
-        eager_trainer = _build_trainer(eager_model, Trainer)
+        eager_trainer = _build_trainer(
+            eager_model, Trainer, model_flavor=DEBUGMODEL
+        )
 
-        traced_model = _build_model()
+        traced_model = _build_model(DEBUGMODEL)
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
-        traced_trainer = _build_trainer(traced_model, GraphTrainer)
+        traced_trainer = _build_trainer(
+            traced_model,
+            GraphTrainer,
+            model_flavor=DEBUGMODEL,
+            ac_mode="selective",
+        )
 
         # Warm up both paths so allocator and one-time tracing setup do not skew
         # the measured peak memory.

@@ -111,10 +111,8 @@ class GraphTrainer(Trainer):
     ) -> torch.Tensor:
         if self._traced_step is None:
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-            enable_graph_ac = False
-            if hasattr(self.config, "activation_checkpoint"):
-                ac_mode = self.config.activation_checkpoint.mode
-                enable_graph_ac = enable_graph_ac_for_mode(ac_mode)
+            ac_mode = self.config.activation_checkpoint.mode
+            enable_graph_ac = enable_graph_ac_for_mode(ac_mode)
             if enable_graph_ac:
                 annotate_ac_regions(model)
             maybe_register_blockmask_pytree_node()

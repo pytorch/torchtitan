@@ -25,6 +25,7 @@ from tests.utils import hash_gradient, hash_model
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
@@ -85,7 +86,8 @@ def _build_trainer(
             compile=SimpleNamespace(
                 mode="aot_fx_trace",
                 enable_passes=enable_passes,
-            )
+            ),
+            activation_checkpoint=ActivationCheckpointConfig(mode="none"),
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
