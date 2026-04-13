@@ -67,11 +67,13 @@ class TextDataset(IterableDataset, Stateful):
         ds = load_text_dataset(dataset_path)
 
         self.dataset_path = dataset_path
-        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        self._data = split_dataset_by_node(
+            ds, dp_rank, dp_world_size
+        )  # ? hf datasets helper function to split dataset by node
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
-        self._sample_idx = 0
+        self._sample_idx = 0  # ? how many examples have been read so far
         self._token_buffer: list[int] = []
 
     def _get_data_iter(self):
@@ -80,28 +82,38 @@ class TextDataset(IterableDataset, Stateful):
                 return iter([])
             else:
                 return iter(self._data.skip(self._sample_idx))
-        return iter(self._data)
+        return iter(
+            self._data
+        )  # ? in this case, it will be a streaming dataset that only supports forward iteration
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
+        # ? each training example need seq_len input and need seq_len label
+        # ? so we need seq_len + 1 tokens in the buffer to yield one training example
 
-        while True:
-            for sample in self._get_data_iter():
+        while True:  # ? an infinite restart loop
+            for sample in self._get_data_iter():  # ? per-sample loop
                 sample_text = extract_text(sample)
                 sample_tokens = self._tokenizer.encode(
                     sample_text, add_bos=True, add_eos=True
                 )
-                self._token_buffer.extend(sample_tokens)
+                self._token_buffer.extend(sample_tokens)  # ? append to rolling buffer
                 self._sample_idx += 1
 
-                while len(self._token_buffer) >= max_buffer_token_len:
-                    x = torch.LongTensor(self._token_buffer[:max_buffer_token_len])
-                    self._token_buffer = self._token_buffer[max_buffer_token_len:]
+                while (
+                    len(self._token_buffer) >= max_buffer_token_len
+                ):  # ? buffer drain loop
+                    x = torch.LongTensor(
+                        self._token_buffer[:max_buffer_token_len]
+                    )  # ? take the first seq_len+1 tokens as a training example
+                    self._token_buffer = self._token_buffer[
+                        max_buffer_token_len:
+                    ]  # ? remove the tokens that are being yielded from the buffer
                     input = x[:-1]
                     label = x[1:]
                     yield {"input": input}, label
 
-            if not self.infinite:
+            if not self.infinite:  # ? if not infinite, we break out of the infinite restart loop after one pass through the dataset
                 logger.warning(f"Dataset at {self.dataset_path} has run out of data")
                 break
             else:
@@ -148,6 +160,50 @@ class BaseDataLoader(Stateful, ABC):
 
 # pyrefly: ignore [inconsistent-inheritance]
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
+    """StatefulDataLoader wrapper that adds DP-rank-aware checkpointing.
+
+    Iteration behavior is unchanged from ``StatefulDataLoader`` — this
+    class is purely a thin layer of bookkeeping for safe distributed
+    checkpointing and friendlier construction. Three responsibilities:
+
+    1. **Track DP coordinates.** Stores ``dp_rank`` and ``dp_world_size``
+        on the instance for use by checkpointing and logging.
+
+    2. **Namespace checkpoint state by rank.** ``state_dict`` keys this
+        rank's underlying state under ``f"dp_rank_{dp_rank}"`` (with the
+        state pickled to a bytes blob), so per-rank states don't collide
+        when aggregated by the checkpointing layer. ``load_state_dict``
+        pulls out only this rank's entry on restore.
+
+    3. **Guard against resharding.** ``state_dict`` also stores
+        ``world_size``; ``load_state_dict`` asserts the saved value
+        matches the current ``dp_world_size``. Resharding the dataloader
+        across a different number of DP ranks isn't supported, because
+        each rank's saved state corresponds to the data slice its index
+        would have produced under the old world size — changing the
+        world size would break that mapping.
+
+    Construction also validates kwargs against ``StatefulDataLoader``'s
+    signature (catching typos with a clear error and the list of valid
+    options) and silently strips ``persistent_workers`` /
+    ``prefetch_factor`` when ``num_workers == 0``, since those options
+    only apply with background worker processes.
+
+    The data parallelism itself (which sample each rank reads) is
+    handled upstream by ``split_dataset_by_node`` inside the dataset,
+    not by this class. By the time the dataset reaches here, it's
+    already pre-sharded for this rank.
+
+    Args:
+        dataset: An ``IterableDataset`` already sharded for this DP
+            rank (typically via ``split_dataset_by_node``).
+        dp_rank: This rank's index along the data-parallel axis.
+        dp_world_size: Total number of data-parallel ranks.
+        **kwargs: Forwarded to ``StatefulDataLoader.__init__``
+            (``batch_size``, ``num_workers``, etc.). Validated at
+            construction; passing ``dataset`` here is rejected.
+    """
+
     dp_rank: int
     dp_world_size: int
 

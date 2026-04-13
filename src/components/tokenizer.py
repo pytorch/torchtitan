@@ -63,11 +63,12 @@ class HuggingFaceTokenizer(BaseTokenizer):
         super().__init__()
         self.tokenizer_path = tokenizer_path
 
-        self.bos_id = None
+        # ? we start with none and try to infer they correctly
+        self.bos_id = None  # ? begining of sentence token id, a number
         # pyrefly: ignore [bad-assignment]
-        self.eos_id = None
-        self.bos_token = None
-        self.eos_token = None
+        self.eos_id = None  # ? end of sentence token id, a number
+        self.bos_token = None  # ? begining of sentence token, the actual token
+        self.eos_token = None  # ? end of sentence token, the actual token
 
         # Load tokenizer.json
         tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
@@ -98,11 +99,16 @@ class HuggingFaceTokenizer(BaseTokenizer):
         if not self.config:
             return
 
-        config_bos = self._get_token_from_config(self.config, "bos_token")
-        config_eos = self._get_token_from_config(self.config, "eos_token")
+        config_bos = self._get_token_from_config(
+            self.config, "bos_token"
+        )  # ? get the bos token from the config
+        config_eos = self._get_token_from_config(
+            self.config, "eos_token"
+        )  # ? get the eos token from the config
         added_tokens: list[AddedToken] = []
 
         # Process standard token keys
+        # ? walk through possible special tokens
         for key in [
             "bos_token",
             "eos_token",

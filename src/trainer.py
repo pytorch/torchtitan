@@ -138,19 +138,19 @@ def run_eval(
 
 def train(cfg: Config):
     """Run MoE model training from a resolved Config."""
-    init_logger(log_dir=cfg.logging.log_dump)
+    init_logger(log_dir=cfg.logging.log_dump)  # * ✓
 
     # quack and compile are mutually exclusive: CuTe-DSL kernels are opaque to Dynamo
-    if cfg.quack.enable and cfg.compile.enable:
+    if cfg.quack.enable and cfg.compile.enable:  # * ✓
         raise ValueError(
             "quack.enable and compile.enable are mutually exclusive: "
             "QuACK kernels cannot be traced by torch.compile"
         )
 
-    job_config = build_job_config(cfg)
+    job_config = build_job_config(cfg)  # * ✓
 
     # Init distributed
-    world_size = dist_utils.init_distributed(job_config.comm)
+    world_size = dist_utils.init_distributed(job_config.comm)  # * ✓
     parallel_dims = ParallelDims(
         dp_replicate=1,
         dp_shard=cfg.parallelism.dp_shard,
@@ -164,42 +164,46 @@ def train(cfg: Config):
     parallel_dims.build_mesh()  # * ✓
 
     # Device and seeds
-    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-    torch.cuda.set_device(device)
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")  # * ✓
+    torch.cuda.set_device(device)  # * ✓
+    # ? the seed used here is set in training
     dist_utils.set_determinism(
-        parallel_dims, device, job_config.debug, distinct_seed_mesh_dims=[]
-    )
+        parallel_dims,
+        device,
+        job_config.debug,
+        distinct_seed_mesh_dims=[],  # ? note the distict seed is empty because we did not use pp here.
+    )  # * ✓
 
     # Tokenizer
-    tokenizer_path = resolve_tokenizer_path(cfg.data.tokenizer)
-    tokenizer = HuggingFaceTokenizer(tokenizer_path)  # TODO: read details
+    tokenizer_path = resolve_tokenizer_path(cfg.data.tokenizer)  # * ✓
+    tokenizer = HuggingFaceTokenizer(tokenizer_path)  # * ✓
 
     # Model config: seq_len for RoPE, vocab_size from tokenizer (unless pinned), quack flag
-    vocab_size = cfg.model.vocab_size or tokenizer.get_vocab_size()
+    vocab_size = cfg.model.vocab_size or tokenizer.get_vocab_size()  # * ✓
     if cfg.model.vocab_size is None:
-        logger.info(f"Auto-detected vocab_size={vocab_size} from tokenizer")
+        logger.info(f"Auto-detected vocab_size={vocab_size} from tokenizer")  # * ✓
     model_cfg = cfg.model.model_copy(
         update={
             "max_seq_len": cfg.training.seq_len,
             "vocab_size": vocab_size,
             "use_quack": cfg.quack.enable,
         }
-    )
+    )  # * ✓
 
     # Dataloader
-    batch_mesh = parallel_dims.get_optional_mesh("batch")
+    batch_mesh = parallel_dims.get_optional_mesh("batch")  # * ✓
     if batch_mesh is not None:
-        dp_world_size = batch_mesh.size()
-        dp_rank = batch_mesh.get_local_rank()
+        dp_world_size = batch_mesh.size()  # * ✓
+        dp_rank = batch_mesh.get_local_rank()  # * ✓
     else:
-        dp_world_size = 1
-        dp_rank = 0
+        dp_world_size = 1  # * ✓
+        dp_rank = 0  # * ✓
     dataloader = build_text_dataloader(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
         job_config=job_config,
-    )
+    )  # * ✓
 
     # Gradient accumulation
     grad_accum_steps = cfg.training.grad_accum_steps

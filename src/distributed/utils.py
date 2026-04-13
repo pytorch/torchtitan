@@ -91,22 +91,18 @@ def set_determinism(
     debug_config: DebugConfig,
     distinct_seed_mesh_dims: list[str],
 ) -> None:
-    """
-    Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
-    across dimensions denoted by `distinct_seed_mesh_dims`. An example use case is pipeline parallelism,
-    where we want to have the same seed across SPMD groups, but different seeds across PP groups.
+    # ? used to set the random seed or rng state for all ranks
+    # ? we have tow competing goal here:
+    # ? 1. Ranks doing SPMD work should share the same seed. If TP ranks each hold a slice of the same weight matrix and that matrix is initialized randomly,
+    # ? they must agree on the RNG state — otherwise each slice gets a different random init and the combined matrix is corrupted. Same for FSDP ranks
+    # ? that all-gather weights: the gathered tensor must match what a single-rank init would have produced. DTensor handles this via its own RNG tracker,
+    # ? which coordinates seeds across the SPMD mesh.
+    # ? 2. Ranks that process genuinely different things should have different seeds. The canonical case is pipeline parallelism. PP stage 0 and PP stage 1
+    # ? hold different layers. If both stages use the same seed, any random operation (dropout, stochastic depth) on layer N at stage 0 and layer M at
+    # ? stage 1 would draw from the same sequence — introducing weird correlations across layers that shouldn't exist. PP stages need independent RNG
+    # ? streams.
 
-    Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
-    and DTensor manages its own RNG tracker, but we could extend to support both if needed.
-
-    Set Determinism flags for increased reproducibility with loss of performance.
-
-    Args:
-        world_mesh: Device mesh for distributed training
-        device: Device to use
-        debug_config: Debug config to use
-        distinct_seed_mesh_dims: List of mesh dimension names to have distinct seeds across.
-    """
+    # ? set deterministic algorithms if debug flag is on
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
@@ -119,7 +115,11 @@ def set_determinism(
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+    # ? the seed is passed from the config
     seed = debug_config.seed
+
+    # ? if we do not use any parallelism, then the seed setting is simple
+    # ? note the PYTHONHASHSEED is set for consistency in dict iteration order or set ordering
     if parallel_dims.world_size == 1:
         if seed is not None:
             torch.manual_seed(seed)
@@ -127,20 +127,21 @@ def set_determinism(
             logger.debug(f"Single-process job using seed: {seed}")
         return
 
-    # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
-    # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
+    # ? to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
+    # ? if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
     if seed is None:
-        # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
-        # seeds for unique SPMD groups
+        # ? Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
+        # ? seeds for unique SPMD groups
         seed_tensor = torch.get_rng_state()[:8].to(device)
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
     assert isinstance(seed, int)
 
-    # Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
-    # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
-    # and choose a unique seed for each rank on the PP mesh.
-    # We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
+    # * handle the distinct seed case, e.g. pp
+    # ? Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
+    # ? For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
+    # ? and choose a unique seed for each rank on the PP mesh.
+    # ? We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
     distinct_seed_meshes = [
         parallel_dims.get_optional_mesh(dim) for dim in distinct_seed_mesh_dims
     ]
@@ -170,6 +171,7 @@ def set_determinism(
     else:
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
+    # ? seed set here, everything except the distinct seed should have the same seed
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
     torch.manual_seed(seed)
     # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
@@ -179,10 +181,14 @@ def set_determinism(
     # all ranks of the SPMD mesh. If PP is also used, this seed is unique per PP rank.
     # TODO: remove the need of passing in a mesh once
     # torch.distributed.tensor._random.manual_seed doesn't require a mesh input.
-    if parallel_dims.world_size > parallel_dims.pp:
+    if (
+        parallel_dims.world_size > parallel_dims.pp
+    ):  # ? check if any SPMD parallelism is used, world_size = dp_replicate * dp_shard * cp * tp * pp
         # We just need to pass the world_mesh as the device_id is the only information
         # this API uses.
-        torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
+        torch.distributed.tensor._random.manual_seed(
+            seed, parallel_dims.world_mesh
+        )  # ? add dTensor rng seed is set to be the same to ensure consistency
 
 
 def create_context_parallel_ctx(
