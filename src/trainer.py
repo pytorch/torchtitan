@@ -206,8 +206,10 @@ def train(cfg: Config):
     )  # * ✓
 
     # Gradient accumulation
-    grad_accum_steps = cfg.training.grad_accum_steps
-    global_batch_size = cfg.training.local_batch_size * dp_world_size * grad_accum_steps
+    grad_accum_steps = cfg.training.grad_accum_steps  # * ✓
+    global_batch_size = (
+        cfg.training.local_batch_size * dp_world_size * grad_accum_steps
+    )  # * ✓
 
     # Build model on meta device
     logger.info(
@@ -215,7 +217,7 @@ def train(cfg: Config):
         f"{cfg.model.num_experts} experts, top_k={cfg.model.top_k}"
     )
     with torch.device("meta"):
-        model = MoETransformer(model_cfg)
+        model = MoETransformer(model_cfg)  # * ✓
 
     # Verify param groups
     expert_params = sum(

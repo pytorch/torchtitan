@@ -68,22 +68,77 @@ class FeedForward(nn.Module):
 # NOTE: keeping this for-loop implementation for comparison
 #       and readability, may remove later
 def _run_experts_for_loop(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w3: torch.Tensor,
-    x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
+    w1: torch.Tensor,  # ? stacked weight matrix for all experts, shape (num_experts, hidden_dim, dim)
+    w2: torch.Tensor,  # ? stacked weight matrix for all experts, shape (num_experts, dim, hidden_dim)
+    w3: torch.Tensor,  # ? stacked weight matrix for all experts, shape (num_experts, hidden_dim, dim)
+    x: torch.Tensor,  # ? the input tokens that need to be routed to experts, already sorted by expert index, (total_tokens, dim)
+    num_tokens_per_expert: torch.Tensor,  # ? how many tokens each expert is assigned, shape (num_experts,)
 ) -> torch.Tensor:
-    # NOTE: this would incur a synchronization between device and host
+    """Reference MoE expert computation using a Python for-loop over experts.
+
+    Slow but readable counterpart to ``_run_experts_grouped_mm``. Runs the
+    standard SwiGLU FFN ``w2(silu(w1(x)) * w3(x))`` once per expert, on
+    that expert's assigned tokens. Kept as a correctness reference and
+    for debugging; production runs use the grouped-mm path.
+
+    Expects tokens to be pre-sorted so that expert 0's tokens are
+    contiguous at the front of ``x``, then expert 1's, and so on. This
+    ordering is produced upstream by ``TokenReorderer``.
+
+    Performance notes:
+
+    - ``num_tokens_per_expert.tolist()`` forces a device-to-host sync,
+        stalling the GPU pipeline at this point.
+    - Each iteration launches three separate matmul kernels. For many
+        experts, kernel-launch overhead dominates and no parallelism
+        across experts is possible.
+    - The grouped-mm version avoids both issues (cumsum stays on
+        device, all experts computed in a single fused kernel).
+
+    Padding handling:
+
+    - This function does not need padding for its own correctness — the
+        for-loop handles any per-expert block size.
+    - The ``num_padding`` calculation and the trailing zero-vstack exist
+        purely to keep the function's input/output shape contract
+        identical to ``_run_experts_grouped_mm`` (which does need padding
+        for kernel tile alignment). In current call sites the for-loop
+        receives unpadded input, so ``num_padding == 0`` and those lines
+        are no-ops.
+
+    Args:
+        w1: Stacked up-projection weights for all experts,
+            shape ``(num_experts, hidden_dim, dim)``.
+        w2: Stacked down-projection weights,
+            shape ``(num_experts, dim, hidden_dim)``.
+        w3: Stacked gate-projection weights (second half of SwiGLU),
+            shape ``(num_experts, hidden_dim, dim)``.
+        x: Input tokens pre-sorted by assigned expert, shape
+            ``(total_tokens, dim)``. May include trailing padding rows
+            (only relevant for shape-compatibility with the grouped-mm
+            path; ignored during compute).
+        num_tokens_per_expert: Per-expert token counts, shape
+            ``(num_experts,)``. Values sum to the number of real
+            (non-padding) tokens in ``x``.
+
+    Returns:
+        Output tensor with the same shape as ``x``, each token
+        transformed by its assigned expert's SwiGLU FFN. Still in
+        expert-sorted order; un-sorting back to original token
+        positions happens downstream in ``MoE.forward``. Padding rows
+        (if any) are passed through as zeros.
+    """
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
     # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
+    num_padding = (
+        x.shape[0] - sum(num_tokens_per_expert_list)
+    )  # ? technically we do not need the padding here, we added here to just align the output for grouped gmm
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
+        x[: sum(num_tokens_per_expert_list)],  # ? depadding
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
@@ -109,6 +164,60 @@ def _run_experts_grouped_mm(
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
+    """Fast MoE expert computation using a fused grouped matrix multiply.
+
+    Applies the standard SwiGLU FFN ``w2(silu(w1(x)) * w3(x))`` for every
+    expert in a single fused kernel per matmul, rather than looping over
+    experts in Python. Three ``torch._grouped_mm`` calls cover the whole
+    layer: one up-projection, one gate-projection, one down-projection.
+
+    Why this is fast vs. the for-loop path:
+
+    - **One kernel launch per matmul** instead of ``num_experts`` launches,
+    amortizing launch overhead across all experts.
+    - **Cross-expert parallelism**: the kernel schedules thread blocks
+    from different experts concurrently on the GPU's SMs, keeping
+    hardware utilized even when individual experts have few tokens.
+    - **No device-to-host sync**: ``offsets`` stays on the GPU as the
+    kernel's input, unlike the for-loop which calls ``.tolist()``.
+
+    The price of admission is alignment: each expert's token block must
+    be padded to a multiple of the kernel's tile size. That padding is
+    handled upstream (by ``indices_padding_wrapper`` when EP is off, or
+    by the EP all-to-all when on); this function trusts ``x`` to arrive
+    pre-padded and simply passes ``offsets`` through.
+
+    Weight storage follows the ``nn.Linear`` convention
+    ``(out_features, in_features)``, so each matmul transposes the last
+    two axes of the weight tensor to get it into matmul-compatible
+    ``(in, out)`` shape. The transpose is a stride manipulation, not a
+    data copy.
+
+    All matmuls are done in ``bfloat16`` for speed; the final output is
+    cast back to ``x``'s dtype.
+
+    Args:
+        w1: Stacked up-projection weights for all experts,
+            shape ``(num_experts, hidden_dim, dim)``.
+        w2: Stacked down-projection weights,
+            shape ``(num_experts, dim, hidden_dim)``.
+        w3: Stacked gate-projection weights (second half of SwiGLU),
+            shape ``(num_experts, hidden_dim, dim)``.
+        x: Input tokens pre-sorted by assigned expert and pre-padded to
+            the kernel's tile alignment, shape
+            ``(total_padded_tokens, dim)``.
+        num_tokens_per_expert: Per-expert (padded) token counts,
+            shape ``(num_experts,)``. Converted to a cumulative-sum
+            offsets array for the kernel.
+
+    Returns:
+        Output tensor of the same shape as ``x``, each token transformed
+        by its assigned expert's SwiGLU FFN. Still in expert-sorted
+        order; un-sorting back to original token positions happens
+        downstream in ``MoE.forward``. Padding rows pass through as
+        whatever the kernel produces (ignored downstream).
+    """
+    # ? torch._grouped_mm is a single fused kernel that does all N matmuls in parallel
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
     h = F.silu(
@@ -130,11 +239,88 @@ class GroupedExperts(nn.Module):
         num_experts: int,
         use_grouped_mm: bool,
     ):
+        """MoE expert bank with stacked weights for efficient grouped computation.
+
+        Holds all experts' SwiGLU FFN weights as single 3-D parameter tensors
+        (leading ``num_experts`` axis) rather than as a list of independent
+        ``FeedForward`` modules. This layout enables ``torch._grouped_mm``, a
+        fused kernel that runs all experts' matmuls in parallel with one
+        launch — dramatically faster than a Python loop over experts.
+
+        Local-scope by design. The module has no distributed awareness: it
+        runs on whatever weights and tokens it is handed. Under Expert
+        Parallelism, each rank holds only its local shard of experts (e.g.
+        8 global experts across 4 EP ranks → 2 local experts per rank), and
+        this class treats those as if they were the complete set. The EP
+        all-to-all communication that routes tokens to the right rank and
+        sends outputs back is applied externally (via ``apply_moe_ep`` or
+        equivalent); ``forward`` just sees a flat, pre-routed token batch.
+
+        Forward-pass branching covers two independent concerns:
+
+        1. **DTensor → local tensor extraction.** When sharded (typically by
+        EP), ``self.w{1,2,3}`` are ``DTensor`` wrappers. DTensor requires
+        static shapes, but per-expert token counts are data-dependent
+        and vary every batch, so compute drops down to plain local
+        tensors via ``.to_local()``. Without sharding, the weights are
+        already plain tensors and no extraction is needed.
+
+        2. **Kernel choice.** ``use_grouped_mm`` selects the fast fused
+        path (``_run_experts_grouped_mm``) or the slow readable loop
+        (``_run_experts_for_loop``). The fused kernel requires each
+        expert's token block to be padded to tile alignment; this
+        padding is applied by ``indices_padding_wrapper`` here when EP
+        is not active, or trusted to be already done by EP's all-to-all
+        (which must pad anyway to equalize counts across ranks). The
+        DTensor/mesh check distinguishes the two cases.
+
+        Attributes:
+            num_experts: Number of experts this instance is responsible for
+                (local count under EP, global count otherwise).
+            w1: Stacked up-projection weights,
+                shape ``(num_experts, hidden_dim, dim)``.
+            w2: Stacked down-projection weights,
+                shape ``(num_experts, dim, hidden_dim)``.
+            w3: Stacked gate-projection weights (SwiGLU gate),
+                shape ``(num_experts, hidden_dim, dim)``.
+            use_grouped_mm: Whether ``forward`` uses the fused grouped-mm
+                kernel or falls back to a Python for-loop over experts.
+
+        Args to ``__init__``:
+            dim: Model hidden dimension (input and output width of each
+                expert).
+            hidden_dim: Inner width of each expert's SwiGLU FFN.
+            num_experts: Number of experts held in this instance. Under EP,
+                this is the local shard size (global experts divided by
+                EP degree); otherwise the global count.
+            use_grouped_mm: If ``True``, use ``torch._grouped_mm`` for the
+                expert compute. If ``False``, loop over experts in Python
+                (slower but easier to read and debug).
+
+        Args to ``forward``:
+            x: Tokens pre-sorted by assigned expert (and, under the fused
+                kernel path, pre-padded to tile alignment),
+                shape ``(total_tokens, dim)``.
+            num_tokens_per_expert: Per-expert token counts (local experts
+                only), shape ``(num_experts,)``.
+
+        Forward return:
+            Tensor of the same shape as ``x``, each token transformed by
+            its assigned expert's SwiGLU. Still in expert-sorted order;
+            un-sorting back to original token positions happens in the
+            enclosing ``MoE`` module.
+        """
         super().__init__()
         self.num_experts = num_experts
-        self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
+        self.w1 = nn.Parameter(
+            torch.empty(num_experts, hidden_dim, dim)
+        )  # ? three stacked weight tensor for all experts
+        self.w2 = nn.Parameter(
+            torch.empty(num_experts, dim, hidden_dim)
+        )  # ? this is designed so a dedicated single kernel oepration can be used
+        self.w3 = nn.Parameter(
+            torch.empty(num_experts, hidden_dim, dim)
+        )  # ? for all three expert computation
         self.use_grouped_mm = use_grouped_mm
 
     def forward(
@@ -145,6 +331,8 @@ class GroupedExperts(nn.Module):
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
+            # ? the dTensor expected static output shape, but the number of tokens pass each expert can be dynamic
+            # ? we simply by pass the DTensor and convert it to local tensor
             w1 = self.w1.to_local()
             # pyrefly: ignore [missing-attribute]
             w2 = self.w2.to_local()  # type: ignore
@@ -155,15 +343,16 @@ class GroupedExperts(nn.Module):
             w2 = self.w2
             w3 = self.w3
 
-        if self.use_grouped_mm:
+        if self.use_grouped_mm:  # ? if we use the fused kernel
             # NOTE: If EP is not used, we need to pad the indices
             #       to prepare for grouped_mm;
             #       otherwise, EP will handle the padding.
             if (
-                not isinstance(self.w1, DTensor)
+                not isinstance(self.w1, DTensor)  # ? if no sharding is applie
                 # pyrefly: ignore[unsupported-operation]
-                or "ep" not in self.w1.device_mesh.mesh_dim_names  # type: ignore
+                or "ep" not in self.w1.device_mesh.mesh_dim_names  # type: ignore #? or the ep is not in the parallel plan
             ):
+                # ? in that case, we need to pad
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
@@ -315,23 +504,30 @@ class TokenChoiceTopKRouter(nn.Module):
             scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
         _, selected_experts_indices = torch.topk(
             scores_for_choice, k=self.top_k, dim=-1, sorted=False
-        )
+        )  # ? (N, top_k)
 
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
+        top_scores = scores.gather(
+            dim=1, index=selected_experts_indices
+        )  # ? (N, top_k)
 
         # debug override: balanced round-robin routing
+        # ? used to isolating the bugs that may realted to routing
+        # ? throw away the routing result and force the token 0 to go to expert 0, token 1 to go to expert 1
         if self._debug_force_load_balance:
             (
                 selected_experts_indices,
                 top_scores,
             ) = self._debug_force_load_balance_routing(scores)
 
+        # ? optionally normalize the scores so that the sum of scores for each token across selected experts is 1
         if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
+
+        # ? optionally scale the scores
         top_scores = top_scores * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
@@ -468,14 +664,15 @@ class MoE(nn.Module):
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
         bs, slen, dim = x.shape
+        # ? flatten the input to shape (bs*slen, dim) for routing and expert processing
         x = x.view(-1, dim)
 
         # top_scores and selected_experts_indices shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
-            top_scores,
-            selected_experts_indices,
-            num_tokens_per_expert,
+            top_scores,  # ? gating weights from the original scores, shape (bs*slen, top_k)
+            selected_experts_indices,  # ? the expert index for each token, shape (bs*slen, top_k)
+            num_tokens_per_expert,  # ? how many tokens are assigned to each expert, shape (num_experts,)
         ) = self.router(x, self.expert_bias)
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
@@ -495,9 +692,9 @@ class MoE(nn.Module):
         #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
         #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
         (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
+            top_scores_experts_sorted,  # ? shape (bs*slen*top_k,)
+            token_indices_experts_sorted,  # ? shape (bs*slen*top_k,)
+            num_tokens_per_expert,  # ? shape (num_experts,)
         ) = self.reorderer(top_scores, selected_experts_indices)
 
         # shape (bs*slen*top_k, dim)
@@ -509,6 +706,7 @@ class MoE(nn.Module):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
+        # ? run the experts
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
