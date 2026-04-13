@@ -65,7 +65,6 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     return [
-        functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
@@ -121,6 +120,11 @@ def construct_default_graph_passes(
                 tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
+    passes.append(
+        functools.partial(
+            tlparse_log_graph_pass, graph_name="make_fx_graph_after_passes"
+        )
+    )
     return passes
 
 
