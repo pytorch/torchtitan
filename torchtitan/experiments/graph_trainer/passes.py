@@ -213,6 +213,7 @@ def construct_default_graph_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
+        autobucketing_reordering_pass,
     ]
 
     # cudagraph should be the last pass.

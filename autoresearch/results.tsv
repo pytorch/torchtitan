@@ -1,2 +1,4 @@
 commit	tps	memory_gib	status	mfu_pct	description
 4463e48	6938	46.9	keep	40.63	baseline
+xxxxxxx	6927	46.9	discard	40.57	regional inductor for all compute ops (no improvement)
+5b1ae19	7214	49.0	keep	42.24	autobucketing reordering pass for comm/compute overlap
