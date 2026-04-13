@@ -197,11 +197,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
             """66bbbbc98b4c1635e42a133ac1fbd499a2b8633ca879f4121cf206708c21dbdf""",
         )
 
-    # TODO: OOMs during flex_attention compilation on non-H100 GPUs.
-    # Revisit when GraphTrainer addresses peak memory during compilation.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on < H100"
-    )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace and eager produce bitwise identical losses and grads."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
@@ -238,11 +233,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
             """30d87367fe7227032c71fe4fab7d5162bbc4b7311a4049711f2edd02442679f6""",
         )
 
-    # TODO: OOMs during flex_attention compilation on non-H100 GPUs.
-    # Revisit when GraphTrainer addresses peak memory during compilation.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on < H100"
-    )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace and eager produce bitwise identical losses and grads."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
@@ -283,11 +273,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             """d4c46d7717cb303c7b19e97cd6b4be4af79d73acabafcba6bb1f6ca244159096""",
         )
 
-    # TODO: OOMs during flex_attention compilation on non-H100 GPUs.
-    # Revisit when GraphTrainer addresses peak memory during compilation.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on < H100"
-    )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace with passes and eager produce bitwise identical results."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)

@@ -560,7 +560,14 @@ def get_joint_custom_passes_from_config(
     # annotations. The validation is only relevant for regional_inductor.
     pass_names = getattr(compile_config, "passes", [])
     if "full_inductor_compilation" not in pass_names:
-        joint_custom_passes.append(annotate_flex_attention_for_regional_inductor_pass)
+        from torchtitan.models.common.attention import FlexAttention
+
+        joint_custom_passes.append(
+            functools.partial(
+                annotate_flex_attention_for_regional_inductor_pass,
+                flex_compile_config=FlexAttention.inductor_configs,
+            )
+        )
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])

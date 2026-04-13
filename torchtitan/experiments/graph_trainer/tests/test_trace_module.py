@@ -77,7 +77,12 @@ def _apply_regional_inductor(traced_result):
     from torch.fx.graph import CodeGen
     from torch.fx.passes.regional_inductor import regional_inductor
 
-    annotate_flex_attention_for_regional_inductor_pass(traced_result.gm)
+    from torchtitan.models.common.attention import FlexAttention
+
+    annotate_flex_attention_for_regional_inductor_pass(
+        traced_result.gm,
+        flex_compile_config=FlexAttention.inductor_configs,
+    )
 
     fake_mode = None
     for node in traced_result.gm.graph.nodes:
@@ -763,7 +768,12 @@ class TestTraceModels(unittest.TestCase):
         ]
         self.assertGreater(len(flex_nodes), 0, "No FlexAttentionHOP nodes found")
 
-        annotate_flex_attention_for_regional_inductor_pass(traced.gm)
+        from torchtitan.models.common.attention import FlexAttention
+
+        annotate_flex_attention_for_regional_inductor_pass(
+            traced.gm,
+            flex_compile_config=FlexAttention.inductor_configs,
+        )
 
         for node in flex_nodes:
             custom = node.meta.get("custom", {})

@@ -197,6 +197,8 @@ def construct_default_graph_passes(
     Returns:
         An ordered list of graph passes ready to apply.
     """
+    from torchtitan.models.common.attention import FlexAttention
+
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
@@ -206,7 +208,10 @@ def construct_default_graph_passes(
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
         # produces different numerical results.
-        annotate_flex_attention_for_regional_inductor_pass,
+        functools.partial(
+            annotate_flex_attention_for_regional_inductor_pass,
+            flex_compile_config=FlexAttention.inductor_configs,
+        ),
         regional_inductor_pass,
     ]
 
@@ -430,7 +435,8 @@ def annotate_flex_attention_for_regional_inductor_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    inductor_configs: dict | None = None,
+    flex_compile_config: dict | None,
+    mask_compile_config: dict | None = None,
 ) -> torch.fx.GraphModule:
     """Tag flex attention HOPs with compile_with_inductor for regional_inductor.
 
@@ -443,16 +449,25 @@ def annotate_flex_attention_for_regional_inductor_pass(
     Args:
         gm: The graph module to annotate.
         example_inputs: Example inputs (unused, required by pass interface).
-        inductor_configs: Per-region inductor config overrides for flex
-            attention nodes. Defaults to ``FlexAttention.inductor_configs``.
+        flex_compile_config: Inductor config dict for flex attention HOP
+            nodes and their get_attr submodule references. When provided,
+            wrapped as ``{"inductor_configs": flex_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+        mask_compile_config: Inductor config dict for nodes inside mask_mod
+            subgraphs. When provided, wrapped as
+            ``{"inductor_configs": mask_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
     """
-    if inductor_configs is None:
-        from torchtitan.models.common.attention import FlexAttention
-
-        inductor_configs = FlexAttention.inductor_configs
-
-    flex_compile_config = {"inductor_configs": inductor_configs}
-    mask_compile_config = {}
+    flex_compile_annotation: dict = (
+        {"inductor_configs": flex_compile_config}
+        if flex_compile_config is not None
+        else {}
+    )
+    mask_compile_annotation: dict = (
+        {"inductor_configs": mask_compile_config}
+        if mask_compile_config is not None
+        else {}
+    )
 
     for node in gm.graph.nodes:
         if node.target not in {
@@ -462,7 +477,7 @@ def annotate_flex_attention_for_regional_inductor_pass(
             continue
         node.meta.setdefault("custom", {})[
             "compile_with_inductor"
-        ] = flex_compile_config
+        ] = flex_compile_annotation
         for inp in node.all_input_nodes:
             if inp.op != "get_attr":
                 continue
@@ -471,13 +486,13 @@ def annotate_flex_attention_for_regional_inductor_pass(
                 continue
             inp.meta.setdefault("custom", {})[
                 "compile_with_inductor"
-            ] = flex_compile_config
+            ] = flex_compile_annotation
 
             # Following are the nodes in mask_mod subgraph
             for sub_node in submod.graph.nodes:
                 sub_node.meta.setdefault("custom", {})[
                     "compile_with_inductor"
-                ] = mask_compile_config
+                ] = mask_compile_annotation
     return gm
 
 
@@ -806,6 +821,5 @@ AVAILABLE_COMPILER_PASSES = {
 AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "annotate_flex_attention_for_regional_inductor": annotate_flex_attention_for_regional_inductor_pass,
     "apply_sac": apply_sac_pass,
 }
