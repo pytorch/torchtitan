@@ -79,6 +79,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         return hf
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert from hf format state dict to tt model state dict."""
         RENAME = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             "model.norm.weight": "norm.weight",

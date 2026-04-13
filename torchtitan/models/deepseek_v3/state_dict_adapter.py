@@ -19,6 +19,8 @@ _HF_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
+    """StateDictAdapter for DeepSeekV3 model."""
+
     _HF_EXPERT_RE = re.compile(
         r"""
         ^model\.layers\.(\d+)           # layer index

@@ -49,6 +49,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
         if os.path.exists(os.path.join(hf_assets_path, "model_index.json")):
             hf_assets_path = os.path.join(hf_assets_path, "transformers")
 
+        # Check if safetensors index file exists
         index_files = [
             "model.safetensors.index.json",
             "diffusion_pytorch_model.safetensors.index.json",

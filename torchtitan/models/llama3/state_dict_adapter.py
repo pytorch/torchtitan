@@ -40,7 +40,7 @@ class Llama3StateDictAdapter(BaseStateDictAdapter):
         self._key_value_dim = head_dim * n_kv_heads
         self._dim = dim
 
-    # -- RoPE permutation helpers --
+    # -- RoPE permutation helpers (from HF conversion script) --
 
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
         if dim1 is None:
