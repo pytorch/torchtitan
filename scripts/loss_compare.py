@@ -58,6 +58,14 @@ Example usages:
 10. Run baseline with specific options and export the losses:
     loss_compare.py . . --baseline-options='--parallelism.dp=2' \
         --export-result=my_config_losses.txt
+
+11. Verify checkpoint resume produces identical loss:
+    loss_compare.py . . --test-checkpoint-resume --steps=20 \
+        --import-result=tests/assets/losses/llama3_cuda.txt --assert-equal
+
+12. Verify checkpoint resume with custom interval:
+    loss_compare.py . . --test-checkpoint-resume --test-checkpoint-interval=5 \
+        --steps=20 --assert-equal
 """
 
 import argparse
@@ -148,9 +156,9 @@ def extract_losses_from_tensorboard(
 ) -> dict[int, float]:
     """Extract full-precision loss values from TensorBoard event files.
 
-    The TB directory is cleared before each run (see ``run_training``), so
-    there is exactly one timestamped subdirectory.  We find it and point
-    ``EventAccumulator`` at it directly.
+    Reads all timestamped subdirectories under the TB folder and merges
+    their losses.  Normally there is one subdir (single training run),
+    but checkpoint resume produces two (phase 1 + phase 2).
 
     Args:
         job_dump_folder: The --job-dump-folder value (e.g., "outputs")
@@ -165,35 +173,34 @@ def extract_losses_from_tensorboard(
     if not os.path.exists(base_path):
         raise FileNotFoundError(f"TensorBoard path does not exist: {base_path}")
 
-    # Find the single timestamped subdirectory (e.g., "20260306-1618")
+    # Find timestamped subdirectories (e.g., "20260306-1618").
+    # Normally one subdir per run; checkpoint resume produces two.
     subdirs = [
         d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))
     ]
-    if len(subdirs) == 1:
-        event_dir = os.path.join(base_path, subdirs[0])
-    else:
-        # Should not happen since we clear the directory before each run
-        raise RuntimeError(
-            f"Expected exactly one subdirectory under {base_path}, "
-            f"found {len(subdirs)}: {subdirs}"
-        )
-
-    log_print(f"Loading TensorBoard events from: {event_dir}")
-
-    event_acc = EventAccumulator(event_dir)
-    event_acc.Reload()
+    if not subdirs:
+        raise RuntimeError(f"No subdirectories found under {base_path}")
 
     scalar_tag = TB_LOSS_TAG
-    available_tags = event_acc.Tags().get("scalars", [])
+    losses: dict[int, float] = {}
 
-    if scalar_tag not in available_tags:  # pyrefly: ignore [not-iterable]
-        raise KeyError(
-            f"Scalar tag '{scalar_tag}' not found in TensorBoard events. "
-            f"Available tags: {available_tags}"
-        )
+    for subdir in sorted(subdirs):
+        event_dir = os.path.join(base_path, subdir)
+        log_print(f"Loading TensorBoard events from: {event_dir}")
 
-    scalars = event_acc.Scalars(scalar_tag)
-    losses = {scalar.step: scalar.value for scalar in scalars}
+        event_acc = EventAccumulator(event_dir)
+        event_acc.Reload()
+
+        available_tags = event_acc.Tags().get("scalars", [])
+        if scalar_tag not in available_tags:  # pyrefly: ignore [not-iterable]
+            raise KeyError(
+                f"Scalar tag '{scalar_tag}' not found in {event_dir}. "
+                f"Available tags: {available_tags}"
+            )
+
+        scalars = event_acc.Scalars(scalar_tag)
+        for scalar in scalars:
+            losses[scalar.step] = scalar.value
 
     log_print(f"Extracted {len(losses)} steps from TensorBoard events")
     return losses
@@ -225,6 +232,7 @@ def validate_arguments(
     assert_equal: bool,
     export_result: str | None,
     import_result: str | None,
+    test_checkpoint_resume: bool = False,
 ) -> bool:
     """Validate command line arguments.
 
@@ -239,7 +247,11 @@ def validate_arguments(
     options_differ = baseline_options != test_options
 
     all_identical = not (
-        commits_differ or configs_differ or modules_differ or options_differ
+        commits_differ
+        or configs_differ
+        or modules_differ
+        or options_differ
+        or test_checkpoint_resume
     )
 
     # Determine baseline-only mode:
@@ -531,8 +543,15 @@ def run_training(
     job_dump_folder: str,
     ngpus: int,
     tb_folder: str = "tb",
+    checkpoint_resume_interval: int | None = None,
 ) -> str:
-    """Run training for a specific scenario. Returns the log file path."""
+    """Run training for a specific scenario. Returns the log file path.
+
+    When ``checkpoint_resume_interval`` is set, training runs in two phases:
+    phase 1 trains to the interval step and saves a checkpoint, phase 2
+    resumes from the checkpoint and trains to ``steps``.  TensorBoard data
+    from both phases is preserved so that losses for all steps are available.
+    """
     log_file = get_log_path(scenario, output_folder)
     log_print(
         f"Running training with {scenario} commit and logging output " f"to {log_file}"
@@ -544,21 +563,55 @@ def run_training(
         log_print(f"Removing stale TensorBoard directory: {tb_dir}")
         shutil.rmtree(tb_dir)
 
-    # Build the final command
-    full_cmd = build_training_command(
-        module,
-        config,
-        options,
-        steps,
-        enable_seed_checkpoint,
-        job_dump_folder,
-        tb_folder=tb_folder,
-    )
-
     env = os.environ.copy()
     env["NGPU"] = str(ngpus)
 
-    run_with_realtime_output(full_cmd, log_file, env)
+    if checkpoint_resume_interval is not None:
+        # Phase 1: train to checkpoint interval and save
+        log_print(
+            f"Checkpoint resume mode: phase 1 — "
+            f"train {checkpoint_resume_interval} steps and save checkpoint"
+        )
+        phase1_cmd = build_training_command(
+            module,
+            config,
+            f"{options} --checkpoint.enable",
+            checkpoint_resume_interval,
+            enable_seed_checkpoint,
+            job_dump_folder,
+            tb_folder=tb_folder,
+        )
+        run_with_realtime_output(phase1_cmd, log_file, env)
+
+        # Phase 2: resume from checkpoint, train to final step
+        # Don't clear TB — we want losses from both phases
+        log_print(
+            f"Checkpoint resume mode: phase 2 — "
+            f"resume from step {checkpoint_resume_interval}, train to step {steps}"
+        )
+        phase2_log = get_log_path(f"{scenario}_resume", output_folder)
+        phase2_cmd = build_training_command(
+            module,
+            config,
+            f"{options} --checkpoint.enable",
+            steps,
+            enable_seed_checkpoint,
+            job_dump_folder,
+            tb_folder=tb_folder,
+        )
+        run_with_realtime_output(phase2_cmd, phase2_log, env)
+    else:
+        # Build the final command
+        full_cmd = build_training_command(
+            module,
+            config,
+            options,
+            steps,
+            enable_seed_checkpoint,
+            job_dump_folder,
+            tb_folder=tb_folder,
+        )
+        run_with_realtime_output(full_cmd, log_file, env)
 
     return log_file
 
@@ -992,6 +1045,24 @@ Examples:
         default=8,
         help="Number of GPUs for test run (default: 8)",
     )
+    parser.add_argument(
+        "--test-checkpoint-resume",
+        action="store_true",
+        help=(
+            "Run the test scenario in two phases: train to checkpoint "
+            "interval and save, then resume to --steps.  Verifies that "
+            "checkpoint save/load does not corrupt training state."
+        ),
+    )
+    parser.add_argument(
+        "--test-checkpoint-interval",
+        type=int,
+        default=0,
+        help=(
+            "Checkpoint interval for --test-checkpoint-resume. "
+            "Defaults to steps // 2 if not specified."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1029,6 +1100,7 @@ def run_scenario(
     job_dump_folder: str,
     ngpus: int,
     tb_folder: str = "tb",
+    checkpoint_resume_interval: int | None = None,
 ) -> str:
     """Run training for a specific scenario (baseline or test).
 
@@ -1044,6 +1116,8 @@ def run_scenario(
         job_dump_folder: Job dump folder path
         ngpus: Number of GPUs to use
         tb_folder: TensorBoard subfolder name for this scenario
+        checkpoint_resume_interval: If set, run training in two phases
+            (save at this step, then resume to ``steps``).
 
     Returns:
         Path to the log file
@@ -1061,6 +1135,7 @@ def run_scenario(
         job_dump_folder,
         ngpus,
         tb_folder=tb_folder,
+        checkpoint_resume_interval=checkpoint_resume_interval,
     )
 
     return log_file
@@ -1083,6 +1158,7 @@ def main() -> None:
         args.assert_equal,
         args.export_result,
         args.import_result,
+        args.test_checkpoint_resume,
     )
 
     # Setup environment
@@ -1151,6 +1227,23 @@ def main() -> None:
             args.job_dump_folder, baseline_tb_folder
         )
 
+        # Resolve checkpoint resume interval
+        checkpoint_resume_interval = None
+        if args.test_checkpoint_resume:
+            checkpoint_resume_interval = args.test_checkpoint_interval
+            if checkpoint_resume_interval <= 0:
+                checkpoint_resume_interval = args.steps // 2
+            if checkpoint_resume_interval >= args.steps:
+                log_print(
+                    f"Error: --test-checkpoint-interval ({checkpoint_resume_interval}) "
+                    f"must be less than --steps ({args.steps})"
+                )
+                sys.exit(1)
+            log_print(
+                f"Checkpoint resume enabled: save at step "
+                f"{checkpoint_resume_interval}, resume to step {args.steps}"
+            )
+
         # Run test training (skip in baseline-only mode)
         test_log = None
         test_losses = None
@@ -1167,6 +1260,7 @@ def main() -> None:
                 args.job_dump_folder,
                 args.test_ngpus,
                 tb_folder=test_tb_folder,
+                checkpoint_resume_interval=checkpoint_resume_interval,
             )
 
             # Extract test losses from TensorBoard (full precision)
