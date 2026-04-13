@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Adapted from torchtitan/models/llama3/state_dict_adapter.py
+
 import re
 from typing import Any
 
