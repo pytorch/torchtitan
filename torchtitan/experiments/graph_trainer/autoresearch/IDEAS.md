@@ -11,7 +11,13 @@ passes added to `apply_default_graph_passes` in `passes.py`.
 
 - [ ] **CUDA graph wrapping**: Wrap the entire flat traced graph (or static subregions) in CUDA graphs to eliminate per-step kernel launch overhead. Needs careful handling of dynamic shapes and collective ops.
 
-- [ ] **Regional Inductor compilation**: Apply torch Inductor to compute-heavy subgraphs (matmuls, attention, MLPs) while leaving collectives as eager. Similar to `regional_inductor_pass` in AOT mode but adapted for the flat graph.
+- [ ] **Regional Inductor compilation — tag more nodes**: The `regional_inductor_pass` infrastructure already works but only compiles flex attention HOPs (via `annotate_flex_attention_for_regional_inductor_pass`). Write a new annotation pass that tags additional node regions with `compile_with_inductor` so regional inductor compiles them too. Candidates include:
+  - Compute-heavy regions: matmul clusters, MLP blocks (linear + activation + linear), attention projections.
+  - Repeated small-compute patterns: RMSNorm components (pow + mean + rsqrt + mul), pointwise chains (bias + activation, residual add + norm), embedding lookups + scaling.
+  - The key insight: even small ops benefit from Inductor fusion when they repeat hundreds of times across layers. Inductor can fuse elementwise chains into single kernels, reducing launch overhead and memory traffic.
+  - Leave collectives (`_c10d_functional.*`) and their `wait_tensor` consumers untagged — these must stay as eager ops.
+  - Use `annotate_flex_attention_for_regional_inductor_pass` as a reference for the tagging pattern: set `node.meta["custom"]["compile_with_inductor"]` on target nodes.
+  - Start simple: tag all non-collective `call_function` nodes and measure. Then selectively exclude patterns that hurt numerics or perf.
 
 - [ ] **Selective activation checkpointing**: Apply SAC-style memory/compute tradeoffs on the flat graph. Since fwd and bwd are unified, the pass can directly see recomputation costs and make global decisions rather than per-partition heuristics.
 

@@ -12,7 +12,7 @@ GraphTrainer to improve training performance.
 
 To set up a new experiment, work with the user to:
 
-1. **Create the branch**: `git checkout -b graph_trainer/autoresearch` from current commit.
+1. **Create the branch**: `git checkout -b graph_trainer/autoresearch_<YYYY-MM-DD>` from current commit (use today's date).
 2. **Read the in-scope files**: Read these files for full context:
    - `torchtitan/experiments/graph_trainer/.claude/autoresearch.md` — this file.
    - `torchtitan/experiments/graph_trainer/passes.py` — **the primary file you modify**. Contains all graph passes (bucketing, SAC, inductor, cudagraph, etc.). Read it to understand existing pass patterns and the pass signature convention.
@@ -28,6 +28,8 @@ To set up a new experiment, work with the user to:
 3. **Establish the baseline**: Run the benchmark as-is (see Running below) and record the result.
 4. **Initialize results.tsv**: Create `autoresearch/results.tsv` with just the header row. Record the baseline after the first run.
 5. **Confirm and go**: Confirm setup looks good.
+
+Your `@identity` for IDEAS.md comments is `@claude`. Use this consistently.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -69,7 +71,7 @@ Use `--training.steps 20` for benchmarks (first few steps include compilation ov
 
 **The first run**: Your very first run should always be to establish the baseline, so you will run the benchmark as-is.
 
-**Graph inspection**: Before attempting optimizations, dump and study the FX graph to understand what ops, collectives, and patterns are present. Add a temporary `gm.print_readable()` or `gm.graph.print_tabular()` call inside `apply_default_graph_passes` in `passes.py`, run 1-2 steps, and inspect the output. Remove the debug prints before benchmarking. Understanding the graph structure is essential for designing effective passes.
+**Graph inspection**: Before attempting optimizations, dump and study the FX graph to understand what ops, collectives, and patterns are present. Use the `dump_gm` helper documented in `.claude/CLAUDE.md` ("Dumping Graph Modules for Debugging") to dump the graph before/after passes in `construct_default_graph_passes` in `passes.py`. Run 1-2 steps and inspect the output. Remove the debug dumps before benchmarking. Understanding the graph structure is essential for designing effective passes.
 
 ## Output format
 
@@ -181,7 +183,9 @@ Each entry follows this format:
 
 **Crashes**: If a run crashes (OOM, bug, numerics mismatch), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the TSV, and move on.
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read the model code for new angles, study the graph structure, try combining previous near-misses, try more radical graph transformations. The loop runs until the human interrupts you, period.
+**DON'T STOP PREMATURELY**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working autonomously. If you run out of ideas, think harder — read the model code for new angles, study the graph structure, try combining previous near-misses, try more radical graph transformations.
+
+**Stopping criterion**: Stop the loop if the last 10 consecutive experiments all failed to improve TPS (i.e., 10 straight `discard` or `crash` results with no `keep`). When this happens, write a final summary to `autoresearch/EXPERIMENT_LOG.md` explaining what was tried, what worked overall, and what avenues remain unexplored, then stop.
 
 ## Learnings
 
@@ -229,4 +233,4 @@ All graph passes must follow the signature documented in `.claude/CLAUDE.md`:
 def my_pass(gm: torch.fx.GraphModule, example_inputs, *, other_kwargs) -> torch.fx.GraphModule:
 ```
 
-To add a new pass, include it in `apply_default_graph_passes` in `passes.py`.
+To add a new pass, include it in `construct_default_graph_passes` in `passes.py`.
