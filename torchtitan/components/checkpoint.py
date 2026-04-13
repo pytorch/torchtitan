@@ -415,22 +415,6 @@ class CheckpointManager(Configurable):
             model_converters.converter_sd_adapters() if model_converters else []
         )
 
-        # Config fields — always initialized so the object has a consistent
-        # shape regardless of whether checkpointing is enabled.
-        self.folder = os.path.join(base_folder, config.folder)
-        self.sd_transforms = sd_transforms or StateDictTransforms()
-        self.initial_load_model_only = config.initial_load_model_only
-        self.initial_load_in_hf = config.initial_load_in_hf
-        self.initial_load_path = config.initial_load_path
-        self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
-        self.last_save_model_only = config.last_save_model_only
-        self.last_save_in_hf = config.last_save_in_hf
-        self.exclude_from_loading = config.exclude_from_loading
-        self.additional_load_path = config.additional_load_path
-        self.interval = config.interval
-        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
-        self.keep_latest_k = config.keep_latest_k
-
         async_mode = config.async_mode.lower()
         self.enable_staging = (
             self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
@@ -443,11 +427,25 @@ class CheckpointManager(Configurable):
         self.stager = None
         self.pg: dist.ProcessGroup | None = None
 
-        # Validation that only matters when checkpointing is active.
-        if self.last_save_in_hf and self.sd_transforms.sd_adapter is None:
-            raise ValueError(
-                "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-            )
+        self.folder = os.path.join(base_folder, config.folder)
+
+        # Checkpoint policy related fields.
+        self.sd_transforms = sd_transforms or StateDictTransforms()
+        self.initial_load_model_only = config.initial_load_model_only
+        self.initial_load_in_hf = config.initial_load_in_hf
+        self.initial_load_path = config.initial_load_path
+        self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
+        self.last_save_model_only = config.last_save_model_only
+        self.last_save_in_hf = config.last_save_in_hf
+        if self.last_save_in_hf:
+            if self.sd_transforms.sd_adapter is None:
+                raise ValueError(
+                    "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+                )
+        self.exclude_from_loading = config.exclude_from_loading
+        self.additional_load_path = config.additional_load_path
+        self.interval = config.interval
+        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
         # Async checkpoint related fields.
         async_mode = config.async_mode.lower()
@@ -457,6 +455,7 @@ class CheckpointManager(Configurable):
         ):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
+        self.keep_latest_k = config.keep_latest_k
         self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
             if self.keep_latest_k == 1:
@@ -470,6 +469,7 @@ class CheckpointManager(Configurable):
             )
             self.purge_thread.start()
 
+        self.mp = None
         self.staging_future = None
         self.save_future = None
         if async_mode == AsyncMode.DISABLED:
@@ -490,6 +490,10 @@ class CheckpointManager(Configurable):
 
     def close(self):
         if hasattr(self, "enable") and self.enable:
+            if hasattr(self, "mp") and self.mp and self.mp.is_alive():
+                # pyrefly: ignore [missing-attribute]
+                self.mp_queue_send.put(Terminate())
+                self.mp.join()
             if (
                 hasattr(self, "purge_thread")
                 and self.purge_thread
