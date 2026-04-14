@@ -502,6 +502,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """Config for DeepEP/HybridEP token dispatcher.
 
         Args:
+            ep_degree: Expert parallel degree.
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
             hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
                 float in (0, 1] = non-blocking mode; controls the fused-permute
