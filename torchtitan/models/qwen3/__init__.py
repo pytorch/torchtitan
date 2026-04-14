@@ -79,10 +79,6 @@ def _qwen3_norm(dim: int) -> RMSNorm.Config:
     return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
 
 
-def _qwen3_q_norm(dim: int) -> RMSNorm.Config:
-    return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
-
-
 def _build_qwen3_layers(
     *,
     n_layers: int,
@@ -115,8 +111,7 @@ def _build_qwen3_layers(
                     ),
                     mask_type=mask_type,
                     rope_backend="cos_sin",
-                    q_norm=_qwen3_q_norm(head_dim),
-                    k_norm=_qwen3_q_norm(head_dim),
+                    qk_norm=_qwen3_norm(head_dim),
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
@@ -156,8 +151,7 @@ def _build_qwen3_moe_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=ScaledDotProductAttention.Config(),
                     rope_backend="cos_sin",
-                    q_norm=_qwen3_q_norm(head_dim),
-                    k_norm=_qwen3_q_norm(head_dim),
+                    qk_norm=_qwen3_norm(head_dim),
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,

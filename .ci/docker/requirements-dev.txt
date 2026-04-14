@@ -1,6 +1,7 @@
-expecttest==0.1.6
+expecttest>=0.2.0
 pytest==7.3.2
 pytest-cov
 pre-commit
 pyrefly==0.45.1
 transformers
+numpy

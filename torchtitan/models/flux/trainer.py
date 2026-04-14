@@ -238,19 +238,18 @@ class FluxTrainer(Trainer):
             )
 
         with self.train_context():
-            with self.maybe_enable_amp:
-                latent_noise_pred = model(
-                    img=latents,
-                    img_ids=latent_pos_enc,
-                    txt=t5_encodings,
-                    txt_ids=text_pos_enc,
-                    y=clip_encodings,
-                    timesteps=timesteps,
-                )
+            latent_noise_pred = model(
+                img=latents,
+                img_ids=latent_pos_enc,
+                txt=t5_encodings,
+                txt_ids=text_pos_enc,
+                y=clip_encodings,
+                timesteps=timesteps,
+            )
 
-                # Scale loss as we used SUM reduction for mse loss function
-                # pyrefly: ignore [unsupported-operation]
-                loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
+            # Scale loss as we used SUM reduction for mse loss function
+            # pyrefly: ignore [unsupported-operation]
+            loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]
