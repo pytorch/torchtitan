@@ -183,6 +183,7 @@ def parallelize_llama(
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
         gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+        chunked_loss=training.loss_num_chunks > 1,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -308,6 +309,7 @@ def apply_fsdp(
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
+    chunked_loss: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -339,7 +341,33 @@ def apply_fsdp(
         reshard_after_forward_policy, pp_enabled
     )
 
-    if getattr(model, "enable_weight_tying", False):
+    if chunked_loss:
+        # ChunkedCELoss needs to independently manage the output (lm_head)
+        # reshard settings during the chunk loop. All three modules
+        # (tok_embeddings, norm, output) must be separate FSDP units.
+        # With weight tying this causes a duplicate all-gather of the shared
+        # weight, but the cost is small relative to the memory savings.
+        if model.tok_embeddings is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                model.tok_embeddings,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+        if model.norm is not None:
+            fully_shard(
+                model.norm,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
+        if model.output is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                model.output,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
+    elif getattr(model, "enable_weight_tying", False):
         modules = [
             m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
         ]
@@ -357,14 +385,12 @@ def apply_fsdp(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-        # Do not reshard_after_forward the last layers by default since FSDP
-        # would prefetch them immediately after the forward pass.
-        # norm and output are separate FSDP units so that ChunkedCELoss can
-        # independently manage the output (lm_head) reshard/sync settings
-        # without affecting norm.
-        if model.norm is not None:
+        # As an optimization, do not reshard_after_forward the last layers
+        # by default since FSDP would prefetch them immediately.
+        if model.norm is not None and model.output is not None:
+            # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                model.norm,
+                [model.norm, model.output],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )

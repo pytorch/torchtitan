@@ -161,6 +161,7 @@ def parallelize_deepseekv3(
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
         gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+        chunked_loss=training.loss_num_chunks > 1,
     )
 
     logger.info("Applied fully_shard to the model")

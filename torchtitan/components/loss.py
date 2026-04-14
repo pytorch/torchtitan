@@ -134,6 +134,10 @@ class GradAccumulator:
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
+        # Extract local tensor if DTensor (e.g. when TP is enabled)
+        if hasattr(chunk_grad, "to_local"):
+            chunk_grad = chunk_grad.to_local()
+
         if chunk_grad.dtype != self._buffer.dtype:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
 
@@ -309,6 +313,16 @@ class ChunkedCELoss:
 
         # Backward through the decoder with accumulated gradients.
         accumulated_grad = grad_accumulator.result()
-        hidden_states.backward(accumulated_grad.to(hidden_states.dtype))
+        accumulated_grad = accumulated_grad.to(hidden_states.dtype)
+
+        # Wrap as DTensor if hidden_states is a DTensor (TP enabled)
+        if isinstance(hidden_states, DTensor):
+            accumulated_grad = DTensor.from_local(
+                accumulated_grad,
+                device_mesh=hidden_states.device_mesh,
+                placements=hidden_states.placements,
+            )
+
+        hidden_states.backward(accumulated_grad)
 
         return total_loss / global_valid_tokens

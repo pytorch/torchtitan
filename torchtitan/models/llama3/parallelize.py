@@ -316,21 +316,12 @@ def apply_fsdp(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-        # Do not reshard_after_forward the last layers by default since FSDP
-        # would prefetch them immediately after the forward pass.
-        # norm and output are separate FSDP units so that ChunkedCELoss can
-        # independently manage the output (lm_head) reshard/sync settings
-        # without affecting norm.
-        if model.norm is not None:
-            fully_shard(
-                model.norm,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
-        if model.output is not None:
+        # As an optimization, do not reshard_after_forward the last layers
+        # by default since FSDP would prefetch them immediately.
+        if model.norm is not None and model.output is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                model.output,
+                [model.norm, model.output],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
