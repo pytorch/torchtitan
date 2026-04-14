@@ -571,7 +571,11 @@ deepseekv3_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str = "standard",
+) -> ModelSpec:
     config = deepseekv3_configs[flavor]()
     return ModelSpec(
         name="deepseek_v3",

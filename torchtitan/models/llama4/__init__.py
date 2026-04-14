@@ -325,7 +325,11 @@ llama4_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str = "standard",
+) -> ModelSpec:
     config = llama4_configs[flavor]()
     return ModelSpec(
         name="llama4",

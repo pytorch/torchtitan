@@ -650,7 +650,11 @@ qwen3_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str = "standard",
+) -> ModelSpec:
     config = qwen3_configs[flavor]()
     return ModelSpec(
         name="qwen3",

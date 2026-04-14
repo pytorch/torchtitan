@@ -27,7 +27,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization import find_pad_multiple, QuantizationConverter
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -41,7 +41,6 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.models.common.config_utils import apply_ep
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -120,29 +119,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     raise NotImplementedError(
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
-            if (
-                self.model_spec is not None
-                and hasattr(self.model_spec.model, "layers")
-                and self.parallelism.expert_parallel_degree > 1
-            ):
-                # Sequence parallel: when EP borrows from TP (ETP=1),
-                # split tokens across EP ranks along the sequence dim.
-                sp_size = 1
-                if (
-                    self.parallelism.tensor_parallel_degree > 1
-                    and self.parallelism.expert_tensor_parallel_degree == 1
-                ):
-                    sp_size = self.parallelism.expert_parallel_degree
-
-                apply_ep(
-                    self.model_spec.model.layers,
-                    ep_degree=self.parallelism.expert_parallel_degree,
-                    sp_size=sp_size,
-                    comm_backend=self.parallelism.expert_parallel_comm_backend,
-                    hybridep_non_blocking_expert_capacity_factor=self.parallelism.hybridep_non_blocking_expert_capacity_factor,
-                    pad_multiple=find_pad_multiple(self.model_converters.converters),
-                )
-
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):

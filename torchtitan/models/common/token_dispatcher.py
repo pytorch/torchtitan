@@ -51,13 +51,11 @@ class LocalTokenDispatcher(Configurable):
         num_experts: int
         top_k: int
         score_before_experts: bool = True
-        ep_degree: int = 1
 
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
-        self.ep_degree = config.ep_degree
 
     def dispatch(
         self,
@@ -163,12 +161,14 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
+        ep_degree: int
         # Sequence parallel degree. When EP borrows from TP (ETP=1),
         # set to EP degree to split tokens across ranks.
         sp_size: int = 1
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.ep_degree = config.ep_degree
         # Set by ExpertParallel / ExpertTensorParallel._apply()
         self.ep_group: dist.ProcessGroup
         self.sp_size = config.sp_size
@@ -502,6 +502,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """Config for DeepEP/HybridEP token dispatcher.
 
         Args:
+            ep_degree: Expert parallel degree.
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
             hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
                 float in (0, 1] = non-blocking mode; controls the fused-permute
@@ -511,12 +512,14 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 None means no padding.
         """
 
+        ep_degree: int
         comm_backend: str
         hybridep_non_blocking_expert_capacity_factor: float | None = None
         pad_multiple: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.ep_degree = config.ep_degree
         self.comm_backend = config.comm_backend
         self.hybridep_non_blocking_expert_capacity_factor = (
             config.hybridep_non_blocking_expert_capacity_factor
