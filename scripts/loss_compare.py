@@ -1164,7 +1164,7 @@ def main() -> None:
             args.job_dump_folder,
         )
         # Run baseline training
-        baseline_log, _ = run_scenario(
+        baseline_log = run_scenario(
             "baseline",
             args.baseline_commit,
             args.baseline_module,
