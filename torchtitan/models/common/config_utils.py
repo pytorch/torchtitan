@@ -141,7 +141,7 @@ def make_token_dispatcher_config(
     top_k: int,
     score_before_experts: bool = True,
     comm_backend: str = "standard",
-    ep_degree: int = 1,
+    ep_size: int = 1,
     sp_size: int = 1,
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -160,31 +160,31 @@ def make_token_dispatcher_config(
     - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
       (pad_multiple is handled internally by the DeepEP/HybridEP library)
     """
-    if ep_degree > 1 and comm_backend in ("deepep", "hybridep"):
+    if ep_size > 1 and comm_backend in ("deepep", "hybridep"):
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            ep_size=ep_degree,
+            ep_size=ep_size,
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=pad_multiple,
         )
-    elif ep_degree > 1 and pad_multiple is not None:
+    elif ep_size > 1 and pad_multiple is not None:
         return TorchAOTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            ep_size=ep_degree,
+            ep_size=ep_size,
             sp_size=sp_size,
             pad_multiple=pad_multiple,
         )
-    elif ep_degree > 1:
+    elif ep_size > 1:
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            ep_size=ep_degree,
+            ep_size=ep_size,
             sp_size=sp_size,
         )
     else:
@@ -198,7 +198,7 @@ def make_token_dispatcher_config(
 def apply_ep(
     layers: list,
     *,
-    ep_degree: int,
+    ep_size: int,
     sp_size: int = 1,
     comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
@@ -216,7 +216,7 @@ def apply_ep(
                 num_experts=td.num_experts,
                 top_k=td.top_k,
                 score_before_experts=td.score_before_experts,
-                ep_size=ep_degree,
+                ep_size=ep_size,
                 sp_size=sp_size,
                 comm_backend=comm_backend,
                 hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
@@ -233,7 +233,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    ep_degree: int = 1,
+    ep_size: int = 1,
     comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -249,7 +249,7 @@ def make_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            ep_size=ep_degree,
+            ep_size=ep_size,
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=pad_multiple,
