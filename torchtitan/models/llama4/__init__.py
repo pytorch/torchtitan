@@ -9,18 +9,9 @@ from functools import partial
 
 import torch.nn as nn
 
-from torch.distributed.tensor import Replicate, Shard
-
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.distributed.sharding import (
-    colwise_spec,
-    rowwise_spec,
-    sequence_parallel_spec,
-    set_decoder_sharding_spec,
-)
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
     Embedding,
@@ -39,10 +30,10 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 from .parallelize import parallelize_llama
+from .sharding import set_llama4_sharding_spec
 from .state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
@@ -329,66 +320,6 @@ llama4_configs = {
     "17bx16e": _17bx16e,
     "17bx128e": _17bx128e,
 }
-
-
-TP = MeshDimName.TP
-
-
-def set_llama4_sharding_spec(
-    config,
-    parallel_dims: ParallelDims,
-    *,
-    loss_parallel: bool,
-) -> None:
-    """Fill ``sharding_spec`` on all Llama4 sub-configs.
-
-    No-op when TP is not enabled.
-    """
-    if not parallel_dims.tp_enabled:
-        return
-
-    set_decoder_sharding_spec(config, loss_parallel)
-    for layer_cfg in config.layers:
-        _set_llama4_layer_sharding(layer_cfg)
-
-
-def _set_llama4_layer_sharding(layer_cfg) -> None:
-    """Set sharding on one Llama4 transformer layer.
-
-    Attention and norms are sharded on all blocks (MoE and non-MoE).
-    Dense FFN is only sharded on non-MoE blocks — MoE FFN stays
-    under apply_moe_ep_tp.
-    """
-    # Norms: SequenceParallel
-    layer_cfg.attention_norm.sharding_spec = sequence_parallel_spec()
-    layer_cfg.ffn_norm.sharding_spec = sequence_parallel_spec()
-
-    # Attention: same as Llama3
-    layer_cfg.attention.sharding_spec = ShardingSpec(
-        input_layouts={
-            "x": {TP: Shard(1)},
-            "rope_cache": {TP: Replicate()},
-        },
-        in_shardings={
-            "x": {TP: Replicate()},
-            "rope_cache": {TP: Replicate()},
-        },
-    )
-    for w in (layer_cfg.attention.wq, layer_cfg.attention.wkv):
-        w.sharding_spec = colwise_spec()
-    layer_cfg.attention.wo.sharding_spec = rowwise_spec(out_shardings={TP: Shard(1)})
-
-    # Dense FFN (non-MoE layers only)
-    if layer_cfg.feed_forward is not None:
-        layer_cfg.feed_forward.sharding_spec = ShardingSpec(
-            input_layouts={"x": {TP: Shard(1)}},
-            in_shardings={"x": {TP: Replicate()}},
-        )
-        layer_cfg.feed_forward.w1.sharding_spec = colwise_spec()
-        layer_cfg.feed_forward.w3.sharding_spec = colwise_spec()
-        layer_cfg.feed_forward.w2.sharding_spec = rowwise_spec(
-            out_shardings={TP: Shard(1)}
-        )
 
 
 def model_registry(flavor: str) -> ModelSpec:
