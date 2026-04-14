@@ -4,15 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
-from torch.utils._pytree import register_pytree_node, tree_map
+from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
@@ -68,6 +67,16 @@ def register_blockmask_pytree_node():
             flatten_with_keys_fn=BlockMask._flatten_with_keys,
             serialized_type_name="torch.nn.attention.flex_attention.BlockMask",
         )
+
+
+def maybe_register_blockmask_pytree_node() -> None:
+    """Register flex-attention pytree helpers if they are missing."""
+    from torch.nn.attention.flex_attention import _MaskModWrapper, BlockMask
+
+    if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
+        register_blockmask_pytree_node()
+    if _MaskModWrapper not in torch.utils._pytree.SUPPORTED_NODES:
+        register_constant(_MaskModWrapper)
 
 
 def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
@@ -146,25 +155,6 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-@contextmanager
-def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
-    """Annotate FlexAttention.forward so regional_inductor compiles flex attention HOPs.
-
-    Uses the same inductor configs as FlexAttention._compiled_flex_attn
-    to ensure bitwise-identical kernels between eager and regional_inductor paths.
-    """
-    from torchtitan.models.common.attention import FlexAttention
-
-    orig = FlexAttention.forward
-    FlexAttention.forward = annotate_fn(
-        {"compile_with_inductor": {"inductor_configs": FlexAttention.inductor_configs}}
-    )(orig)
-    try:
-        yield
-    finally:
-        FlexAttention.forward = orig
-
-
 def apply_graph_ac(
     compile_config: CompileConfig,
     ac_config: "ActivationCheckpointConfig",
@@ -177,7 +167,7 @@ def apply_graph_ac(
     if ac_config.mode != "selective":
         raise ValueError(
             f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got '{ac_config.mode}'. Use 'selective' for graph-based SAC."
+            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
         )
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])

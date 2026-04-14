@@ -7,6 +7,7 @@ on:
       - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
@@ -61,17 +62,22 @@ jobs:
         # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
-        # 3. Install PyTorch nightly, vllm, and xformers
-        uv pip install torch vllm xformers --pre \
+        # 3. Install Flash Attention 3 (required for H100/H200)
+        uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
+
+        # 4. Install PyTorch nightly, vllm, and xformers
+        # torchvision must be installed from the nightly channel alongside torch
+        # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
+        uv pip install torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
           --index-strategy unsafe-best-match
         uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
-        # 4. Install torchtitan in editable mode because integration test spawns
+        # 5. Install torchtitan in editable mode because integration test spawns
         # python simple_grpo_sum_digits.py as a subprocess
         uv pip install -e .
 
-        # 5. Download HF model checkpoint for tests
+        # 6. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

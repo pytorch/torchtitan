@@ -7,6 +7,7 @@ on:
       - 'torchtitan/experiments/transformers_modeling_backend/**'
       - '.github/workflows/integration_test_8gpu_transformers_modeling_backend.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/transformers_modeling_backend/**'
       - '.github/workflows/integration_test_8gpu_transformers_modeling_backend.yaml'

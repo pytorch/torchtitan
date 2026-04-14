@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.fx.traceback import annotate_fn
-
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -34,21 +32,10 @@ from torchtitan.tools.logging import logger
 def annotate_llama(model: GraphTrainerLlama3Model) -> None:
     """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
-    - Flex attention annotation: Tags FlexAttention.forward with
-      {"compile_with_inductor": "flex_attention"} so the compiler can apply
-      regional inductor pass based on the annotation. Regional inductor is now only
-      supported in AOT mode.
-
     - AC region annotation: Tags each transformer block's forward with a unique
       ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
       boundaries for the min-cut partitioner.
     """
-    from torchtitan.models.common.attention import FlexAttention
-
-    FlexAttention.forward = annotate_fn({"compile_with_inductor": "flex_attention"})(
-        FlexAttention.forward
-    )
-
     annotate_ac_regions(model)
 
 

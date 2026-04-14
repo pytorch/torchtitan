@@ -607,6 +607,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "sft",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable",
+                    "--checkpoint.create_seed_checkpoint",
+                ],
+            ],
+            "Seed checkpoint creation",
+            "seed_checkpoint",
+            ngpu=1,
+            timeout=30,
+        ),
     ]
 
     return integration_tests_flavors

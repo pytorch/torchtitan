@@ -77,6 +77,10 @@ class ParallelDims:
             assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
+        if name == "fsdp":
+            # Always keep fsdp mesh with real backend so fully_shard()
+            # can apply MixedPrecisionPolicy even at degree 1.
+            return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
             # FSDP wrapping to help the MoE layers do mixed precision training.
@@ -239,7 +243,9 @@ class ParallelDims:
         Returns:
             DeviceMesh for the requested dimension(s), or None if:
             - The dimension size is 1 (parallelism not enabled)
-            - The dimension doesn't exist (except efsdp which can exist even if size is 1 when ep > 1)
+            - The dimension doesn't exist
+            Note: 'fsdp' always exists (for mixed precision via fully_shard()),
+            and 'efsdp' exists when ep > 1, even if their size is 1.
 
         Raises:
             ValueError: If the requested dimension name(s) is not valid.
@@ -368,13 +374,6 @@ class ParallelDims:
     @property
     def etp_enabled(self):
         return self.etp > 1
-
-    @property
-    def fsdp_gradient_divide_factor(self) -> int:
-        # This is needed for FSDP-sharded experts when Expert Parallel is enabled.
-        # Although the FSDP sharding of experts is done on a mesh of a different size than
-        # other parameters, the gradient division factor should be consistent with data.
-        return self.dp_replicate * self.dp_shard * self.cp
 
     @property
     def non_data_parallel_size(self):

@@ -127,6 +127,10 @@ class RLTrainer(Configurable):
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
 
+        kl_coef: float = 0.0
+        """KL divergence penalty coefficient. When > 0, a frozen reference model
+        is built and KL divergence is added to the policy gradient loss."""
+
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
 
@@ -319,6 +323,7 @@ class RLTrainer(Configurable):
             model_spec=config.model_spec,
             hf_assets_path=config.hf_assets_path,
             transfer_dtype=config.generator.model_dtype,
+            kl_coef=config.kl_coef,
         )
         self.generator = generator_mesh.spawn(
             "generator",

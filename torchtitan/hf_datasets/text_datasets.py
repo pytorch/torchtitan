@@ -283,7 +283,8 @@ class ChatDataset(IterableDataset, Stateful):
                 "ChatDataset requires a tokenizer with a valid EOS token."
             )
 
-        self._data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
+        self._original_data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
+        self._data = self._original_data
         self._tokenizer = tokenizer
         self._eos_id = tokenizer.eos_id
         self.seq_len = seq_len
@@ -392,8 +393,8 @@ class ChatDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # pyrefly: ignore [bad-argument-type]
                 result = self._tokenize_sample(sample)
-                self._sample_idx += 1
                 if result is None:
+                    self._sample_idx += 1
                     continue
 
                 input_ids, label_ids = result
@@ -412,6 +413,7 @@ class ChatDataset(IterableDataset, Stateful):
                 self._inputs_buffer.extend(input_ids)
                 self._labels_buffer.extend(label_ids)
                 self._positions_buffer.extend(range(len(input_ids)))
+                self._sample_idx += 1
 
                 if len(self._inputs_buffer) == self.seq_len:
                     yield self._flush_buffers()
@@ -434,7 +436,7 @@ class ChatDataset(IterableDataset, Stateful):
                 self._epoch += 1
                 if isinstance(self._data, Dataset):
                     self._data = cast(
-                        Dataset, self._data.shuffle(seed=42 + self._epoch)
+                        Dataset, self._original_data.shuffle(seed=42 + self._epoch)
                     )
                 elif hasattr(self._data, "set_epoch"):
                     self._data.set_epoch(self._epoch)
@@ -478,7 +480,9 @@ class ChatDataset(IterableDataset, Stateful):
             self._sample_idx = state_dict["sample_idx"]
             # Replay shuffles so _data matches the order at checkpoint time
             if self._epoch > 0:
-                self._data = cast(Dataset, self._data.shuffle(seed=42 + self._epoch))
+                self._data = cast(
+                    Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                )
         else:
             assert "data" in state_dict
             self._data.load_state_dict(state_dict["data"])
