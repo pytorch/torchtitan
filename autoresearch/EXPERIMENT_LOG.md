@@ -89,3 +89,43 @@ Cumulative log of all experiments. Never overwrite previous entries.
 - **Analysis**: Inductor's silu kernel works for Llama3 shapes but fails for DSv3 MoE shapes. Tried `eager_numerics.use_pytorch_libdevice=True` — still fails. The issue is fundamental to how Triton computes sigmoid vs eager CUDA.
 - **Lessons**: **Cannot use regional_inductor for silu/sigmoid if bitwise determinism is required across all models.** The +1.1% TPS gain for Llama3 is real but not achievable without breaking DSv3.
 
+## Constant folding — discard (xxxxxxx)
+
+- **Idea**: Use `torch._inductor.constant_folding.constant_fold` to fold constant subexpressions at compile time.
+- **Result**: TPS=7221 vs 7214 (±0.1%). No improvement.
+- **Analysis**: With cudagraph, constants are computed once during graph capture and reused. Folding them in the FX graph just moves the work from capture time to pass time.
+
+## In-place op conversion — discard (xxxxxxx)
+
+- **Idea**: Convert `add.Tensor` and `mul.Tensor` to in-place variants where the first input has no other users.
+- **Changes**: Added `convert_to_inplace_pass`. Converted 226 ops. Memory dropped 40 MB (48.91 vs 48.95 GiB).
+- **Result**: TPS=7225 vs 7214 (±0.15%). No meaningful TPS improvement.
+- **Analysis**: With cudagraph, all memory is pre-allocated at capture time. In-place ops don't avoid allocation since the memory pool is fixed. The 40 MB memory savings is minor.
+
+---
+
+## Final Summary
+
+**Stopping after 10 consecutive non-keeps following the autobucketing result.**
+
+### What worked
+- **Autobucketing reordering** (`schedule_overlap_bucketing` with `collective_bucketing=True`): **+3.9% TPS** (6938 → 7214). This is the only successful optimization. It reorders FSDP/TP collectives relative to compute to maximize comm/compute overlap, and buckets small collectives into larger ones (reduced from 1820 to 1382 collective ops).
+
+### What was tried but didn't work
+1. **Regional inductor (all compute ops)**: No improvement — cudagraph makes kernel launch overhead zero
+2. **Regional inductor (elementwise only)**: No improvement — collectives fragment graph into tiny 2-3 node regions
+3. **Regional inductor (RoPE/complex ops)**: Breaks numerics — inductor decomposes complex multiplication differently
+4. **Regional inductor (silu+mul fusion)**: +1.1% TPS but breaks DSv3 numerics — Triton sigmoid != eager
+5. **Dead code elimination**: No improvement — existing passes already clean the graph
+6. **Removing cudagraph**: -30% TPS catastrophic regression
+7. **Separate FSDP PG for AG/RS**: No improvement — autobucketing already schedules well
+8. **Aggressive autobucketing params**: Worse than default
+9. **Constant folding**: No improvement — cudagraph already caches constants
+10. **In-place op conversion**: -40 MB memory but no TPS gain
+
+### Avenues that remain unexplored
+- **Manual transformer block bucketing**: Requires `nn_module_stack` metadata (currently disabled in make_fx). Could provide better structured overlap than autobucketing.
+- **Full inductor compilation** (compile_fx_inner on entire graph): Potentially faster than eager+cudagraph but requires `inductor_decomposition` joint pass and careful numerics validation.
+- **Selective activation checkpointing**: Could trade memory for compute to enable larger batch sizes (if batch size were variable).
+- **Model-specific optimizations**: e.g., fusing RoPE complex multiplication as a custom kernel that guarantees bitwise identity.
+

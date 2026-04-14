@@ -10,3 +10,5 @@ xxxxxxx	7159	49.0	discard	41.92	aggressive autobucketing params (worse than defa
 xxxxxxx	7200	49.0	discard	42.16	elementwise-only regional inductor (bug: 0 nodes tagged)
 xxxxxxx	0	0.0	crash	0.0	RoPE+MLP regional inductor (1920 nodes; numerics failed - complex mul/silu)
 xxxxxxx	0	0.0	crash	0.0	silu+mul only inductor (160 nodes; DSv3 numerics failed - sigmoid rounding)
+xxxxxxx	7221	49.0	discard	42.29	constant folding (no improvement)
+xxxxxxx	7225	48.9	discard	42.31	in-place op conversion (226 ops; no TPS improvement; -40MB memory)
