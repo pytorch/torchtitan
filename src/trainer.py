@@ -275,10 +275,10 @@ def train(cfg: Config):
     # Optimizer, LR scheduler, checkpoint
     optimizers = build_optimizers_with_moe_load_balancing(
         [model], job_config.optimizer, parallel_dims
-    )
+    )  # * ✓
     lr_schedulers = build_lr_schedulers(
         optimizers, job_config.lr_scheduler, cfg.training.max_steps
-    )
+    )  # * ✓
     train_state = TrainState()
     checkpointer = CheckpointManager(
         dataloader=dataloader,

@@ -69,7 +69,9 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
             params = [p for p in model.parameters() if p.requires_grad]
             self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
             all_params.extend(params)
-        self._validate_length(len(self.model_parts))
+        self._validate_length(
+            len(self.model_parts)
+        )  # ? sanity check to make sure we have one model part per optimizer
         self._post_init(all_params, optimizer_kwargs)
 
     def __iter__(self) -> Iterator[T]:
@@ -193,7 +195,8 @@ def build_optimizers(
         optimizer_config (OptimizerConfig): Optimizer config containing the optimizer name and parameters.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
-    optim_in_bwd = optimizer_config.early_step_in_backward
+    optim_in_bwd = optimizer_config.early_step_in_backward  # ? this the a flap to enable the early optimizer step in backward. once this is enabled, the optimizer backward will execute right after the gradient is compute instead of the whole backward
+    # ? the purpose to enable this is to save memory by freeing the gradient as soon as the optimizer is updated
     if optim_in_bwd:
         if parallel_dims.ep_enabled:
             raise NotImplementedError(
@@ -233,6 +236,7 @@ def build_optimizers(
         raise NotImplementedError(f"Optimizer {name} not added.")
     optimizer_cls = optimizer_classes[name]
 
+    # ? two distinct container: one standard, one for early step back
     if optim_in_bwd:
         return OptimizersInBackwardContainer(
             model_parts, optimizer_cls, optimizer_kwargs
@@ -252,6 +256,7 @@ def build_optimizers_with_moe_load_balancing(
         parallel_dims=parallel_dims,
     )
 
+    # ? check if the moe is enabled
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
             # pyrefly: ignore [not-callable]
@@ -263,6 +268,7 @@ def build_optimizers_with_moe_load_balancing(
                     return bool(transformer_block.moe.load_balance_coeff)  # type: ignore
         return False
 
+    # ? check if the gradient checkpointing is enabled. if so,  the tokens_per_expert is double-counted due to the recomputation, we need to divide by 2 to get the correct load balancing metrics
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
         return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
@@ -275,6 +281,7 @@ def build_optimizers_with_moe_load_balancing(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_list = []
+        # ? for every MoE layer
         for model_part in model_parts:
             # pyrefly: ignore [not-callable]
             for transformer_block in model_part.layers.values():  # type: ignore
@@ -296,14 +303,17 @@ def build_optimizers_with_moe_load_balancing(
 
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
+        # ? the local count only represents the token on each rank
+        # ? we need to sync across all ranks
         if loss_mesh is not None:
             if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
-                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(  # ? if it is a dtensor, we can directly redistribute to the loss mesh so each rank will have the global view
                     placements=[Replicate()]
                     * tokens_per_expert_by_layer.device_mesh.ndim
                 )
             else:
                 # Perform single all-reduce to get global statistics across all processes
+                # ? if it is not DtTesor, we use nccl to sync
                 pg = loss_mesh.get_group()
                 torch.distributed.all_reduce(
                     tokens_per_expert_by_layer,
@@ -336,6 +346,7 @@ def build_optimizers_with_moe_load_balancing(
                     moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
 
+    # ? call the hook to update the load balancing bias. note, the load balancing bias is a buffer, not parameter
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
             lambda *args, **kwargs: _update_expert_bias(
