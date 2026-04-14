@@ -12,9 +12,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.utils._pytree as pytree
-from torch._functorch._aot_autograd.logging_utils import (
-    setup_stacktrace_preservation_hooks,
-)
 from torch._guards import tracing, TracingContext
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx

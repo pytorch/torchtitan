@@ -12,7 +12,6 @@ import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    enable_graph_ac_for_mode,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
