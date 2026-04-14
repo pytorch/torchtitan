@@ -314,7 +314,7 @@ def _debugmodel(
 
 
 def _16b(
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     **kwargs,
 ) -> DeepSeekV3Model.Config:
@@ -378,7 +378,7 @@ def _16b(
 
 
 def _236b(
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     **kwargs,
 ) -> DeepSeekV3Model.Config:
@@ -446,7 +446,7 @@ def _236b(
 
 
 def _671b(
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     **kwargs,
 ) -> DeepSeekV3Model.Config:

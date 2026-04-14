@@ -175,7 +175,7 @@ def _build_llama4_layers(
 
 
 def _debugmodel(
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     **kwargs,
 ) -> Llama4Model.Config:
@@ -222,7 +222,7 @@ def _debugmodel(
 
 
 def _17bx16e(
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     **kwargs,
 ) -> Llama4Model.Config:
@@ -280,7 +280,7 @@ def _17bx16e(
 
 
 def _17bx128e(
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     **kwargs,
 ) -> Llama4Model.Config:

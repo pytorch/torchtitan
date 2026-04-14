@@ -26,7 +26,7 @@ def llama4_debugmodel() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend="flex"),
+        model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -60,7 +60,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend="flex"),
+        model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -99,7 +99,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
 def llama4_17bx128e() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-4-Maverick-17B-128E",
-        model_spec=model_registry("17bx128e", attn_backend="flex"),
+        model_spec=model_registry("17bx128e"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -127,7 +127,7 @@ def llama4_17bx128e() -> Trainer.Config:
 def llama4_17bx16e() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-4-Scout-17B-16E",
-        model_spec=model_registry("17bx16e", attn_backend="flex"),
+        model_spec=model_registry("17bx16e"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
