@@ -153,7 +153,13 @@ class TestGradAccumulator(unittest.TestCase):
         reference = torch.randn(B, L, D)
         chunks = torch.chunk(reference, num_chunks, dim=1)
 
-        acc = GradAccumulator(reference, num_chunks=num_chunks, seq_dim=1)
+        acc = GradAccumulator(
+            (B, L, D),
+            device="cpu",
+            dtype=reference.dtype,
+            num_chunks=num_chunks,
+            seq_dim=1,
+        )
         for chunk in chunks:
             acc.add(chunk)
 
@@ -168,7 +174,9 @@ class TestGradAccumulator(unittest.TestCase):
         reference = torch.randn(B, L, D)
         bf16_chunks = [c.bfloat16() for c in torch.chunk(reference, num_chunks, dim=1)]
 
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
+        acc = GradAccumulator(
+            (B, L, D), device="cpu", dtype=torch.float32, num_chunks=num_chunks
+        )
         for chunk in bf16_chunks:
             acc.add(chunk)
 
@@ -180,8 +188,9 @@ class TestGradAccumulator(unittest.TestCase):
 
     def test_too_many_adds_raises(self):
         """Verify error when adding more chunks than expected."""
-        reference = torch.randn(2, 8, 16)
-        acc = GradAccumulator(reference, num_chunks=2)
+        acc = GradAccumulator(
+            (2, 8, 16), device="cpu", dtype=torch.float32, num_chunks=2
+        )
         acc.add(torch.randn(2, 4, 16))
         acc.add(torch.randn(2, 4, 16))
         with self.assertRaises(ValueError):
@@ -208,8 +217,6 @@ class _FakeDecoder(nn.Module):
 class TestChunkedCELoss(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedCELoss for testing."""
-        from torchtitan.models.common.decoder import Decoder
-
         model = _FakeDecoder(dim, vocab_size)
         # Patch class check: ChunkedCELoss asserts isinstance(model, Decoder)
         # For unit testing without full model infra, we monkey-patch.
@@ -223,7 +230,9 @@ class TestChunkedCELoss(unittest.TestCase):
             self_loss.loss_fn = loss_fn
 
         ChunkedCELoss.__init__ = patched_init
-        chunked_loss = ChunkedCELoss(model, num_chunks=num_chunks, loss_fn=cross_entropy_loss)
+        chunked_loss = ChunkedCELoss(
+            model, num_chunks=num_chunks, loss_fn=cross_entropy_loss
+        )
         ChunkedCELoss.__init__ = original_init
         return model, chunked_loss
 
@@ -262,20 +271,28 @@ class TestChunkedCELoss(unittest.TestCase):
 
         # Verify loss values match
         torch.testing.assert_close(
-            loss_chunked, scaled_loss_std, atol=1e-5, rtol=1e-5,
+            loss_chunked,
+            scaled_loss_std,
+            atol=1e-5,
+            rtol=1e-5,
             msg="Chunked and standard loss values should match",
         )
 
         # Verify hidden state gradients match
         torch.testing.assert_close(
-            grad_chunked.float(), grad_std.float(), atol=1e-5, rtol=1e-5,
+            grad_chunked.float(),
+            grad_std.float(),
+            atol=1e-5,
+            rtol=1e-5,
             msg="Chunked and standard hidden state gradients should match",
         )
 
         # Verify lm_head weight gradients match
         torch.testing.assert_close(
-            lm_head_grad_chunked.float(), lm_head_grad_std.float(),
-            atol=1e-5, rtol=1e-5,
+            lm_head_grad_chunked.float(),
+            lm_head_grad_std.float(),
+            atol=1e-5,
+            rtol=1e-5,
             msg="Chunked and standard lm_head gradients should match",
         )
 
@@ -302,7 +319,9 @@ class TestChunkedCELoss(unittest.TestCase):
 
         for i in range(1, len(losses)):
             self.assertAlmostEqual(
-                losses[0], losses[i], places=5,
+                losses[0],
+                losses[i],
+                places=5,
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
 

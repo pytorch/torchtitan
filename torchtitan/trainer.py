@@ -20,12 +20,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import (
-    ChunkedCELoss,
-    ChunkedCELossFactory,
-    IGNORE_INDEX,
-    LossFunction,
-)
+from torchtitan.components.loss import ChunkedCELoss, IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -323,14 +318,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.compile, parallel_dims=parallel_dims
         )
 
-        # Wrap loss function with ChunkedCELoss if configured
-        if config.training.loss_num_chunks > 1:
-            if not isinstance(self.loss_fn, ChunkedCELossFactory):
-                self.loss_fn = ChunkedCELossFactory(
-                    num_chunks=config.training.loss_num_chunks,
-                    loss_fn=self.loss_fn,
-                )
-
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
         if global_batch_size < 0:
@@ -422,16 +409,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
-        # If build_loss_fn returned a ChunkedCELossFactory, initialize
-        # ChunkedCELoss now with the model so it can access lm_head.
-        if isinstance(self.loss_fn, ChunkedCELossFactory):
-            # For non-PP, use the single model part; for PP, use the last stage
+        # Wrap loss with ChunkedCELoss if configured. This must happen after
+        # model construction since ChunkedCELoss needs the model's lm_head.
+        loss_num_chunks = config.training.loss_num_chunks
+        if loss_num_chunks > 1:
             model_for_loss = self.model_parts[-1]
-            self.loss_fn = self.loss_fn(model_for_loss)
-            logger.info(
-                f"Initialized ChunkedCELoss with "
-                f"{self.loss_fn.num_chunks} chunks"
+            self.loss_fn = ChunkedCELoss(
+                model_for_loss,
+                num_chunks=loss_num_chunks,
+                loss_fn=self.loss_fn,
             )
+            logger.info(f"Initialized ChunkedCELoss with {loss_num_chunks} chunks")
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
