@@ -75,7 +75,7 @@ jobs:
         # torchvision must be installed from the nightly channel alongside torch
         # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
         uv pip install torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match
         uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
