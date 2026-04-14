@@ -50,7 +50,7 @@ class LocalTokenDispatcher(Configurable):
     class Config(Configurable.Config):
         num_experts: int
         top_k: int
-        score_before_experts: bool
+        score_before_experts: bool = True
         ep_degree: int = 1
 
     def __init__(self, config: Config):

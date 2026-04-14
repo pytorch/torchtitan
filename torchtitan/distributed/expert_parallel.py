@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
 import torch.nn as nn
 from torch.distributed.tensor import (
     DeviceMesh,
@@ -44,13 +43,6 @@ class TensorParallel(ParallelStyle):
 
 
 class ExpertParallel(ParallelStyle):
-    def __init__(self):
-        super().__init__()
-        self.input_splits = None
-        self.output_splits = None
-        self.input_shape: torch.Size | None = None
-        self.permuted_indices = None
-
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         from torchtitan.models.common.token_dispatcher import (
             AllToAllTokenDispatcher,
@@ -119,10 +111,3 @@ class ExpertTensorParallel(ExpertParallel):
             (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
         ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
         mod.token_dispatcher.ep_group = device_mesh["ep"].get_group()
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn=self._partition_fn,
-        )
