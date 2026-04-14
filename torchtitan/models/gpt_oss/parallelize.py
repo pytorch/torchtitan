@@ -300,15 +300,9 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            if tp_mesh is not None:
-                # ETP=1: EP borrows from TP. Each EP rank processes a
-                # disjoint token subset (sequence parallel).
-                # sp_size is set via AllToAllTokenDispatcher.Config.
-                experts_plan = ExpertParallel()
-            else:
-                # Weight sharding only — dispatch/combine handled by
-                # the token dispatcher.
-                experts_plan = ExpertParallel()
+            # sp_size is set via AllToAllTokenDispatcher.Config when
+            # EP borrows from TP (ETP=1).
+            experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
                 raise NotImplementedError(

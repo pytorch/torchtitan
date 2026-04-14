@@ -592,15 +592,9 @@ def apply_moe_ep_tp(
                         "Use hybridep or standard comm backend instead."
                     )
                     logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            if tp_mesh is not None and comm_backend not in ("deepep", "hybridep"):
-                # ETP=1: EP borrows from TP. Each EP rank processes a
-                # disjoint token subset (sequence parallel).
-                # sp_size is set via AllToAllTokenDispatcher.Config.
-                experts_plan = ExpertParallel()
-            else:
-                # Weight sharding only — dispatch/combine handled by
-                # the token dispatcher.
-                experts_plan = ExpertParallel()
+            # sp_size is set via AllToAllTokenDispatcher.Config when
+            # EP borrows from TP (ETP=1).
+            experts_plan = ExpertParallel()
         else:
             if pad_multiple is not None:
                 raise NotImplementedError(
