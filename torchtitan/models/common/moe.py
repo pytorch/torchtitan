@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
@@ -14,6 +14,8 @@ from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+
+from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.protocols.module import Module
 
 
@@ -71,9 +73,9 @@ def _run_experts_grouped_mm(
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        hidden_dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        dim: int
+        hidden_dim: int
+        num_experts: int
         use_grouped_mm: bool = True
 
     def __init__(self, config: Config):
@@ -125,22 +127,19 @@ class TokenChoiceTopKRouter(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = field(init=False)
-        num_experts: int = field(init=False)
+        num_experts: int
+        gate: Linear.Config
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
-        gate: Linear.Config = field(default_factory=Linear.Config)
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
-        self.gate = config.gate.build(
-            in_features=config.dim, out_features=config.num_experts
-        )
+        self.gate = config.gate.build()
         self.num_experts = config.num_experts
         self.num_expert_groups = config.num_expert_groups
         self.num_limited_groups = config.num_limited_groups
@@ -324,6 +323,7 @@ class TokenReorderer(Module):
         )
 
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
         return (
             top_scores_experts_sorted,
@@ -336,32 +336,23 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
+        experts: GroupedExperts.Config
+        router: TokenChoiceTopKRouter.Config
         score_before_experts: bool = True
         load_balance_coeff: float | None = 1e-3
-        # Expert hidden dimension (replaces old moe_inter_dim)
-        hidden_dim: int = 0
-        experts: GroupedExperts.Config = field(default_factory=GroupedExperts.Config)
-        router: TokenChoiceTopKRouter.Config = field(
-            default_factory=TokenChoiceTopKRouter.Config
-        )
         shared_experts: FeedForward.Config | None = None
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        hidden_dim = config.hidden_dim
-        self.experts = config.experts.build(
-            dim=dim, hidden_dim=hidden_dim, num_experts=num_experts
-        )
-        self.router = config.router.build(dim=dim, num_experts=num_experts)
+        self.experts = config.experts.build()
+        self.router = config.router.build()
         self.reorderer = TokenReorderer(
             num_experts=num_experts, top_k=config.router.top_k
         )
         self.shared_experts = (
-            config.shared_experts.build(dim=dim)
-            if config.shared_experts is not None
-            else None
+            config.shared_experts.build() if config.shared_experts is not None else None
         )
         self.score_before_experts = config.score_before_experts
 
@@ -451,7 +442,7 @@ class MoE(Module):
         ) = self.reorderer(top_scores, selected_experts_indices)
 
         # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted // self.router.top_k]
+        routed_input = x[token_indices_experts_sorted]
 
         if self.score_before_experts:
             routed_input = (
@@ -465,33 +456,25 @@ class MoE(Module):
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
-        out = self.shared_experts(x) if self.shared_experts is not None else None
+        out = (
+            self.shared_experts(x)
+            if self.shared_experts is not None
+            else torch.zeros_like(x)
+        )
 
-        # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            -1, self.router.top_k, dim
-        )
         if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
-            )
-        else:
-            out_experts = routed_output_unsorted.sum(dim=1)
+            routed_output = (
+                routed_output.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
+            ).to(x.dtype)
 
-        if out is None:
-            return out_experts.reshape(bs, slen, dim)
-        return (out + out_experts).reshape(bs, slen, dim)
+        out = deterministic_scatter_add(
+            out,
+            token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )
+        out = out.reshape(bs, slen, dim)
+        return out
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)

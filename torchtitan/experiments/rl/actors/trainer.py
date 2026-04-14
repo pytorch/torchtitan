@@ -21,8 +21,14 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.configs import (
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
@@ -62,42 +68,51 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
         compile: CompileConfig = field(default_factory=CompileConfig)
+        debug: DebugConfig = field(default_factory=DebugConfig)
 
     def __init__(
         self,
         config: Config,
         *,
         model_spec: ModelSpec,
-        batch_invariant_mode: bool,
         hf_assets_path: str = "",
         transfer_dtype: str = "",
+        kl_coef: float = 0.0,
     ):
         self.config = config
         self.model_spec = model_spec
+        self.kl_coef = kl_coef
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
         requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
         self._transfer_dtype = requested if requested != training_dtype else None
 
+        # The policy and ref models share code objects, so dynamo's
+        # per-code-object cache must hold entries for both grad modes
+        # (grad for policy, no_grad for ref). The default limit of 8
+        # is not enough; 16 accommodates both without recompile storms.
+        # TODO: @Lucaskabela fix recompiles in general as these increase startup
+        torch._dynamo.config.cache_size_limit = 16
+
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         device_module.set_device(self.device)
 
+        # Enable batch-invariant mode BEFORE init_distributed
+        set_batch_invariance(config.debug.batch_invariant)
+
         world_size = dist_utils.init_distributed(config.comm)
 
-        # Build parallel dims
-        parallelism_config = config.parallelism
-        self.parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+
+        # Set determinism flags and seed via core torchtitan utility
+        dist_utils.set_determinism(
+            self.parallel_dims,
+            self.device,
+            config.debug,
+            distinct_seed_mesh_dims=["pp"],
         )
 
         # Initialize state dict adapter for HF checkpoint loading
@@ -109,22 +124,22 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(
-            model_spec, config, device_type, batch_invariant_mode, hf_assets_path
-        )
+        model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
         self.model = model
         self.model_parts = [model]
 
-        # Create reference model for KL divergence (frozen copy of initial policy)
-        # TODO: Move ref_model to a separate actor so it can live on different GPUs
-        ref_model = self._build_model(
-            model_spec, config, device_type, batch_invariant_mode, hf_assets_path
-        )
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        self.ref_model = ref_model
+        # Conditionally build frozen reference model for KL penalty
+        if kl_coef > 0:
+            ref_model = self._build_model(
+                model_spec, config, device_type, hf_assets_path
+            )
+            ref_model.eval()
+            ref_model.requires_grad_(False)
+            self.ref_model = ref_model
+            logger.info(f"Built frozen reference model (kl_coef={kl_coef})")
+        else:
+            self.ref_model = None
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -184,7 +199,6 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         config: Config,
         device_type: str,
-        batch_invariant_mode: bool,
         hf_assets_path: str,
     ):
         """Build, parallelize, and initialize a model from checkpoint.
@@ -194,7 +208,6 @@ class PolicyTrainer(Actor, Configurable):
             model_spec: Model specification for building and parallelizing.
             config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
             device_type: Device type string (e.g. "cuda").
-            batch_invariant_mode: Whether to patch attention for vLLM compatibility.
             hf_assets_path: Path to HF assets folder for checkpoint loading.
 
         Returns:
@@ -205,7 +218,7 @@ class PolicyTrainer(Actor, Configurable):
         from torchtitan.models.common.attention import VarlenAttention
 
         assert isinstance(
-            model_spec.model.layer.attention.inner_attention, VarlenAttention.Config
+            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
 
         with torch.device("meta"):
@@ -294,27 +307,24 @@ class PolicyTrainer(Actor, Configurable):
         my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
         my_advantages = advantages[my_indices]
 
-        # Compute reference log probs using frozen ref_model (local shard only)
-        ref_token_log_probs = []
-        device = next(self.model.parameters()).device
-        with torch.no_grad():
-            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
-                token_lps = compute_token_log_probs(
-                    self.ref_model,
-                    prompt_toks,
-                    gen_toks,
-                    device,
-                )
-                ref_token_log_probs.append(token_lps)
+        # Compute reference model log probs if KL penalty is enabled
+        ref_token_log_probs = None
+        if self.ref_model is not None:
+            ref_token_log_probs = []
+            with torch.no_grad():
+                for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
+                    ref_lps = compute_token_log_probs(
+                        self.ref_model, prompt_toks, gen_toks, self.device
+                    )
+                    ref_token_log_probs.append(ref_lps)
 
-        # Compute loss on this rank's shard
         loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
             self.model,
             my_token_ids,
             my_prompt_token_ids,
             my_advantages,
-            ref_token_log_probs,
-            kl_coef=0.1,
+            ref_token_log_probs=ref_token_log_probs,
+            kl_coef=self.kl_coef,
         )
 
         # Verify logprob identity (local shard)
@@ -322,6 +332,7 @@ class PolicyTrainer(Actor, Configurable):
             my_token_log_probs,
             batch_token_log_probs,
         )
+
         logger.debug(
             f"Logprob verification: bitwise_identical={verification_result['logprob_bitwise_identical']}, "
             f"max_delta={verification_result['logprob_max_delta']:.6e}, "
@@ -333,13 +344,6 @@ class PolicyTrainer(Actor, Configurable):
         # Update weights
         self.optimizers.zero_grad()
         loss.backward()
-
-        # All-reduce gradients across DP ranks so all ranks have consistent
-        # weight updates despite processing different data shards.
-        if self.dp_enabled:
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
         # Gradient clipping
         grad_norm = dist_utils.clip_grad_norm_(

@@ -323,11 +323,6 @@ class FaultTolerantTrainer(Trainer):
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
-        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
-            parallel_dims,
-            config.training.mixed_precision_param,
-            device_type,
-        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -350,7 +345,6 @@ class FaultTolerantTrainer(Trainer):
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
-                maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.seq_len,
                 local_batch_size=config.training.local_batch_size,
@@ -394,18 +388,8 @@ class FaultTolerantTrainer(Trainer):
         self.ft_manager = config.fault_tolerance.build()
 
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = config.parallelism
 
-        return ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        return ParallelDims.from_config(config.parallelism, world_size)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -545,8 +529,8 @@ class FaultTolerantTrainer(Trainer):
                 ft_manager=self.ft_manager,
                 model=self.model_parts[0],
                 n_layers=(
-                    self.model_config.n_layers
-                    if hasattr(self.model_config, "n_layers")
+                    len(self.model_config.layers)
+                    if hasattr(self.model_config, "layers")
                     else 0
                 ),
                 optimizer=self.optimizers,

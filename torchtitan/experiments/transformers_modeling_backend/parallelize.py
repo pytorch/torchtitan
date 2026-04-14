@@ -414,24 +414,12 @@ def parallelize_hf_transformers(
             dp_mod_ep_mesh=edp_mesh,
         )
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
 
-        if parallel_dims.cp_enabled:
-            model.set_cp_mesh(parallel_dims.get_mesh("cp"))
-            logger.info("Applied Context Parallel to the model")
-
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
-    elif parallel_dims.dp_replicate_enabled:
-        apply_replicate(
-            model,
-            parallel_dims.get_mesh("dp_replicate"),
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        )
+    if parallel_dims.cp_enabled:
+        model.set_cp_mesh(parallel_dims.get_mesh("cp"))
+        logger.info("Applied Context Parallel to the model")
 
     # Register experts_to_local hooks AFTER apply_fsdp so they fire after
     # FSDP unshard. Native titan does to_local() inside GroupedExperts.forward;
@@ -816,7 +804,11 @@ def apply_fsdp(
             - "never" will disable `reshard_after_forward` for all forward passes.
 
     """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()

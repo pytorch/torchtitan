@@ -60,7 +60,6 @@ class Validator(BaseValidator):
         parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
         validation_context: Context manager for validation
-        maybe_enable_amp: Context manager for AMP
         metrics_processor: Metrics processor
         pp_schedule: Pipeline schedule (optional)
         pp_has_first_stage: Whether this rank has the first PP stage (optional)
@@ -92,8 +91,6 @@ class Validator(BaseValidator):
                 self.steps > 0 or self.steps == -1
             ), "validation steps must be positive or -1"
 
-    validation_dataloader: BaseDataLoader
-
     # TODO: improve the constructor signature
     def __init__(
         self,
@@ -106,7 +103,6 @@ class Validator(BaseValidator):
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
-        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor,
         seq_len: int,
         local_batch_size: int,
@@ -121,16 +117,12 @@ class Validator(BaseValidator):
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         # pyrefly: ignore [unexpected-keyword]
-        dl_config = replace(config.dataloader, infinite=config.steps != -1)
-        self.validation_dataloader = dl_config.build(
-            dp_world_size=dp_world_size,
-            dp_rank=dp_rank,
-            tokenizer=tokenizer,
-            seq_len=seq_len,
-            local_batch_size=local_batch_size,
-        )
+        self.dl_config = replace(config.dataloader, infinite=config.steps != -1)
+        self.dp_world_size = dp_world_size
+        self.dp_rank = dp_rank
+        self.seq_len = seq_len
+        self.local_batch_size = local_batch_size
         self.validation_context = validation_context
-        self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
@@ -245,7 +237,15 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
+        validation_dataloader = self.dl_config.build(
+            dp_world_size=self.dp_world_size,
+            dp_rank=self.dp_rank,
+            tokenizer=self.tokenizer,
+            seq_len=self.seq_len,
+            local_batch_size=self.local_batch_size,
+        )
+
+        for input_dict, labels in validation_dataloader:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
@@ -299,20 +299,17 @@ class Validator(BaseValidator):
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss_sum = (
+                if self.pp_has_last_stage:
+                    assert losses is not None
                     # using sum because loss_fn already uses reduction='sum'
-                    torch.sum(torch.stack(losses)).to(device_type)
-                    if self.pp_has_last_stage
-                    else torch.tensor([-1.0], device=device_type)
-                )
+                    loss_sum = torch.sum(torch.stack(losses)).to(device_type)
+                else:
+                    loss_sum = torch.tensor([-1.0], device=device_type)
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
-                    with self.maybe_enable_amp:
-                        predictions = model_parts[0](
-                            inputs, **extra_inputs, **extra_kwargs
-                        )
-                        loss_sum = self.loss_fn(predictions, labels)
+                    predictions = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    loss_sum = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1
