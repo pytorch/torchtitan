@@ -32,6 +32,7 @@ from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import ExpertParallel
 from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.token_dispatcher import TorchAOTokenDispatcher
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -91,17 +92,12 @@ def parallelize_gptoss(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
-            pad_multiple=pad_multiple,
             enable_sp=True,
         )
 
@@ -246,7 +242,6 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
-    pad_multiple: int | None = None,
     enable_sp: bool = True,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -297,7 +292,10 @@ def apply_moe_ep_tp(
             # EP borrows from TP (ETP=1).
             experts_plan = ExpertParallel()
         else:
-            if pad_multiple is not None:
+            # pad_multiple is set on the token dispatcher config at config time.
+            # pyrefly: ignore [missing-attribute]
+            dispatcher = transformer_block.moe.experts.token_dispatcher
+            if isinstance(dispatcher, TorchAOTokenDispatcher):
                 raise NotImplementedError(
                     "Quantized grouped GEMMs (FP8/MXFP8) with Expert Tensor "
                     "Parallelism (ETP) is not yet supported."
