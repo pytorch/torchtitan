@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
-
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import (
@@ -127,86 +125,4 @@ class ExpertTensorParallel(ExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
-        )
-
-
-class ExpertSequenceParallel(ExpertParallel):
-    """ExpertParallel + Sequence Parallel for ETP=1.
-
-    When EP borrows from all TP and part of DP, this class combines
-    ExpertParallel weight sharding with Sequence Parallel input/output
-    hooks (splitting tokens along the sequence dim across ranks),
-    all in a single distribute_module call.
-    """
-
-    def _prepare_input_fn(
-        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
-    ) -> tuple:
-        x, top_scores, selected_experts_indices = inputs
-        # x shape (batch_size*seq_len, dim)
-        num_tokens = x.shape[0]
-
-        # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
-        # if top_scores.shape[0] % device_mesh.size() != 0:
-        #     num_tokens = top_scores.shape[0]
-        #     tp_size = device_mesh.size()
-        #     n_pad = (num_tokens // tp_size + 1) * tp_size - num_tokens
-        #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
-        #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
-
-        def _split_along_first_dim(x: torch.Tensor) -> torch.Tensor:
-            assert x.is_contiguous()
-            if num_tokens % device_mesh.size() != 0:
-                raise ValueError(
-                    "Uneven split of tokens is not supported yet. "
-                    "Requires EP degree dividing batch size * seq len."
-                )
-            local_num_tokens = num_tokens // device_mesh.size()
-            local_rank = device_mesh.get_local_rank()
-            offset = local_rank * local_num_tokens
-            output = x[offset : offset + local_num_tokens]
-
-            return output
-
-        x = _split_along_first_dim(x)
-        top_scores = _split_along_first_dim(top_scores)
-        selected_experts_indices = _split_along_first_dim(selected_experts_indices)
-
-        # shape (batch_size * seq_len // ep_degree, top_k)
-        return x, top_scores, selected_experts_indices
-
-    def _prepare_output_fn(
-        self, mod: nn.Module, outputs: tuple, device_mesh: DeviceMesh
-    ) -> tuple:
-        routed_output, metadata = outputs
-
-        local_rank = device_mesh.get_local_rank()
-        if not hasattr(mod.token_dispatcher, "top_k"):
-            raise ValueError(
-                "Expert's TokenDispatcher class in MoE should always have top_k attribute."
-            )
-        num_local_tokens = (
-            metadata.token_indices_experts_sorted.shape[0] // mod.token_dispatcher.top_k
-        )  # pyrefly: ignore [missing-attribute]
-
-        # As we shard routed tokens along bs*slen dim across the TP ranks,
-        # the MoE gather and scatter still require global token indices.
-        # Offset local token indices to global positions for scatter_add.
-        adjusted_metadata = dataclasses.replace(
-            metadata,
-            token_indices_experts_sorted=(
-                metadata.token_indices_experts_sorted + local_rank * num_local_tokens
-            ),
-        )
-        return routed_output, adjusted_metadata
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn=self._partition_fn,
-            # pyrefly: ignore [bad-argument-type]
-            input_fn=self._prepare_input_fn,
-            # pyrefly: ignore [bad-argument-type]
-            output_fn=self._prepare_output_fn,
         )

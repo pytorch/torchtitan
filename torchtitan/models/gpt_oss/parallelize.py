@@ -30,10 +30,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.expert_parallel import (
-    ExpertParallel,
-    ExpertSequenceParallel,
-)
+from torchtitan.distributed.expert_parallel import ExpertParallel
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama3.parallelize import apply_replicate
@@ -306,7 +303,8 @@ def apply_moe_ep_tp(
             if tp_mesh is not None:
                 # ETP=1: EP borrows from TP. Each EP rank processes a
                 # disjoint token subset (sequence parallel).
-                experts_plan = ExpertSequenceParallel()
+                # sp_size is set via AllToAllTokenDispatcher.Config.
+                experts_plan = ExpertParallel()
             else:
                 # Weight sharding only — dispatch/combine handled by
                 # the token dispatcher.

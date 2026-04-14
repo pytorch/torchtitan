@@ -121,9 +121,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and hasattr(self.model_spec.model, "layers")
                 and self.parallelism.expert_parallel_degree > 1
             ):
+                # Sequence parallel: when EP borrows from TP (ETP=1),
+                # split tokens across EP ranks along the sequence dim.
+                sp_size = 1
+                if (
+                    self.parallelism.tensor_parallel_degree > 1
+                    and self.parallelism.expert_tensor_parallel_degree == 1
+                ):
+                    sp_size = self.parallelism.expert_parallel_degree
+
                 apply_ep(
                     self.model_spec.model.layers,
                     ep_degree=self.parallelism.expert_parallel_degree,
+                    sp_size=sp_size,
                     comm_backend=self.parallelism.expert_parallel_comm_backend,
                     hybridep_non_blocking_expert_capacity_factor=self.parallelism.hybridep_non_blocking_expert_capacity_factor,
                     pad_multiple=find_pad_multiple(self.model_converters.converters),

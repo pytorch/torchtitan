@@ -144,6 +144,7 @@ def make_token_dispatcher_config(
     score_before_experts: bool = True,
     comm_backend: str = "standard",
     ep_degree: int = 1,
+    sp_size: int = 1,
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> (
@@ -177,6 +178,7 @@ def make_token_dispatcher_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             ep_degree=ep_degree,
+            sp_size=sp_size,
             pad_multiple=pad_multiple,
         )
     elif ep_degree > 1:
@@ -185,6 +187,7 @@ def make_token_dispatcher_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             ep_degree=ep_degree,
+            sp_size=sp_size,
         )
     else:
         return LocalTokenDispatcher.Config(
@@ -198,6 +201,7 @@ def apply_ep(
     layers: list,
     *,
     ep_degree: int,
+    sp_size: int = 1,
     comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -215,6 +219,7 @@ def apply_ep(
                 top_k=td.top_k,
                 score_before_experts=td.score_before_experts,
                 ep_degree=ep_degree,
+                sp_size=sp_size,
                 comm_backend=comm_backend,
                 hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
                 pad_multiple=pad_multiple,

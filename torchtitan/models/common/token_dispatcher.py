@@ -163,12 +163,33 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        pass
+        # Sequence parallel degree. When EP borrows from TP (ETP=1),
+        # set to EP degree to split tokens across ranks.
+        sp_size: int = 1
 
     def __init__(self, config: Config):
         super().__init__(config)
         # Set by ExpertParallel / ExpertTensorParallel._apply()
         self.ep_group: dist.ProcessGroup
+        self.sp_size = config.sp_size
+
+    def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
+        """Split tensors along the first dim across EP ranks for sequence parallel."""
+        sp_size = self.sp_size
+        sp_rank = dist.get_rank(self.ep_group)
+        results = []
+        for t in tensors:
+            assert t.is_contiguous()
+            num_tokens = t.shape[0]
+            if num_tokens % sp_size != 0:
+                raise ValueError(
+                    "Uneven split of tokens is not supported yet. "
+                    "Requires EP degree dividing batch size * seq len."
+                )
+            local_num_tokens = num_tokens // sp_size
+            offset = sp_rank * local_num_tokens
+            results.append(t[offset : offset + local_num_tokens])
+        return results
 
     def dispatch(
         self,
@@ -178,8 +199,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     ) -> tuple[torch.Tensor, torch.Tensor, AllToAllDispatchMetadata]:
         """Reorder tokens, then all-to-all dispatch to expert-parallel ranks.
 
+        When sp_size > 1 (sequence parallel), inputs are first split along
+        the token dim so each EP rank processes a disjoint subset.
+
         Args:
-            x: (num_tokens, dim) all input tokens
+            x: (num_tokens, dim) all input tokens (global if sp_size > 1)
             top_scores: (num_tokens, top_k) routing scores
             selected_experts_indices: (num_tokens, top_k) expert indices per token
 
@@ -188,6 +212,20 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert_local: (num_local_experts,) token counts
             metadata: AllToAllDispatchMetadata for combine()
         """
+        if self.sp_size > 1:
+            # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
+            # if top_scores.shape[0] % device_mesh.size() != 0:
+            #     num_tokens = top_scores.shape[0]
+            #     tp_size = device_mesh.size()
+            #     n_pad = (num_tokens // tp_size + 1) * tp_size - num_tokens
+            #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
+            #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
+
+            # shape (batch_size * seq_len // ep_degree, top_k)
+            x, top_scores, selected_experts_indices = self._split_along_sp(
+                x, top_scores, selected_experts_indices
+            )
+
         ep_degree = self.ep_degree
 
         # TODO: Extract this local reordering block (histc, argsort, score
@@ -329,10 +367,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert,
         )
 
-    def _unpermute(self, out, input_shape, permuted_indices):
+    def _unpermute(self, routed_output, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
-        out_unpermuted = out.new_empty(input_shape)
-        out_unpermuted[permuted_indices, :] = out
+        out_unpermuted = routed_output.new_empty(input_shape)
+        out_unpermuted[permuted_indices, :] = routed_output
         return out_unpermuted
 
     # pyrefly: ignore [bad-override]
@@ -348,14 +386,18 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         shared_experts overlaps with the async all-to-all combine — it runs
         while the a2a is in flight on the NCCL stream. scatter_add forces sync.
 
+        When sp_size > 1 (sequence parallel), x is the global input and is
+        split to the local shard before scatter_add and shared_experts.
+
         Args:
             routed_output: (R, dim) expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
-            x: (num_tokens, dim) original input tokens
+            x: (num_tokens, dim) original input tokens (global if sp_size > 1)
             shared_experts: optional shared expert module to overlap
 
         Returns:
             (num_tokens, dim) combined output with shared_experts added.
+            When sp_size > 1, num_tokens is the local shard size.
         """
         # Reverse expert-major reordering
         routed_output = self._unpermute(
@@ -370,6 +412,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             metadata.output_splits,
             self.ep_group,
         )
+
+        # When sequence_parallel is active, x is the global input — split it
+        # to the local shard so scatter_add and shared_experts use local tokens.
+        if self.sp_size > 1:
+            (x,) = self._split_along_sp(x)
 
         # shared_experts overlaps with the async a2a (NCCL stream).
         # Score application + scatter_add forces the a2a to sync.
@@ -426,10 +473,10 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             num_tokens_per_expert_group_padded,
         )
 
-    def _unpermute(self, routed_output, metadata):
+    def _unpermute(self, routed_output, input_shape, permuted_indices):
         # Strip the padding sentinel row added by permute_and_pad
-        out_unpermuted = routed_output.new_empty(metadata.input_shape)
-        out_unpermuted[metadata.permuted_indices, :] = routed_output
+        out_unpermuted = routed_output.new_empty(input_shape)
+        out_unpermuted[permuted_indices, :] = routed_output
         return out_unpermuted[:-1]
 
 
