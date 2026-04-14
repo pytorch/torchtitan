@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.distributed.sharding import set_llama3_sharding_spec
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
     Embedding,
@@ -409,4 +410,5 @@ def model_registry(flavor: str) -> ModelSpec:
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
+        set_sharding_spec_fn=set_llama3_sharding_spec,
     )

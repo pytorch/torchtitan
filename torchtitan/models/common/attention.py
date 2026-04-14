@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -595,6 +595,10 @@ class GQAttention(BaseAttention):
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+        # Set by set_sharding_spec() for inner attention local_map.
+        # None when TP is off or when the backend supports DTensor (SDPA).
+        # Uses Any type to avoid circular import with sharding.py.
+        inner_attention_local_map: Any | None = None  # LocalMapSpec | None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -627,6 +631,14 @@ class GQAttention(BaseAttention):
         self.wo = config.wo.build()
 
         self.inner_attention = config.inner_attention.build()
+
+        # Propagate local_map spec to inner attention for parallelize()
+        if config.inner_attention_local_map is not None:
+            from torchtitan.protocols.sharding import ShardingSpec
+
+            self.inner_attention._sharding_spec = ShardingSpec(
+                local_map=config.inner_attention_local_map
+            )
 
     def forward(
         self,
