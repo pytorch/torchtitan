@@ -59,14 +59,14 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel_flex_attn")
+    config.model_spec = model_registry("debugmodel", attn_backend="flex")
     return config
 
 
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry("16B"),
+        model_spec=model_registry("16B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -97,7 +97,7 @@ def deepseek_v3_16b() -> Trainer.Config:
 def deepseek_v3_671b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_registry("671B"),
+        model_spec=model_registry("671B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),

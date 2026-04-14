@@ -85,16 +85,16 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     # Check if using DeepEP/HybridEP for MoE communication
-    comm_backend = parallelism.expert_parallel_comm_backend
-    if comm_backend in ("deepep", "hybridep"):
+    moe_comm_backend = parallelism.expert_parallel_comm_backend
+    if moe_comm_backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
             raise ValueError(
-                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
+                f"{moe_comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
                 "Please set expert_parallel_degree > 1 or use standard communication backend."
             )
         if parallel_dims.etp_enabled:
             raise NotImplementedError(
-                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
+                f"{moe_comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
@@ -105,7 +105,7 @@ def parallelize_deepseekv3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         )
 
     if parallel_dims.cp_enabled:

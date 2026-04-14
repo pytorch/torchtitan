@@ -9,7 +9,6 @@ from functools import partial
 from typing import Any
 
 import torch.nn as nn
-
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
@@ -44,7 +43,7 @@ def _get_dict(obj) -> dict[str, Any]:
 
 
 def _debugmodel() -> Llama3Siglip2Transformer.Config:
-    base = llama3_configs["debugmodel_flex_attn"]()
+    base = llama3_configs["debugmodel"](attn_backend="flex")
     dim = 128
     ffn_dim = 256
     n_layers = 4

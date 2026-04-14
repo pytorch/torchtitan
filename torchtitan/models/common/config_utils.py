@@ -13,7 +13,13 @@ fields set at config creation time.
 from collections.abc import Callable
 from typing import Literal
 
-from torchtitan.models.common.attention import GQAttention, LocalMapInnerAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    GQAttention,
+    LocalMapInnerAttention,
+    ScaledDotProductAttention,
+    VarlenAttention,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
@@ -24,6 +30,37 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     TorchAOTokenDispatcher,
 )
+
+
+def get_attention_config(
+    attn_backend: str,
+) -> tuple[LocalMapInnerAttention.Config, str]:
+    """Map attn_backend string to (inner_attention config, mask_type)."""
+    if attn_backend == "sdpa":
+        return ScaledDotProductAttention.Config(), "causal"
+    elif attn_backend == "flex":
+        return FlexAttention.Config(), "block_causal"
+    elif attn_backend == "flex_flash":
+        from torchtitan.tools.utils import has_cuda_capability
+
+        if has_cuda_capability(10, 0):
+            block_size = (256, 128)
+        elif has_cuda_capability(9, 0):
+            block_size = (128, 128)
+        else:
+            raise ValueError(
+                "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+            )
+        return (
+            FlexAttention.Config(
+                block_size=block_size, kernel_options={"BACKEND": "FLASH"}
+            ),
+            "block_causal",
+        )
+    elif attn_backend == "varlen":
+        return VarlenAttention.Config(), "block_causal"
+    else:
+        raise ValueError(f"Unknown attn_backend: {attn_backend}")
 
 
 def make_gqa_config(
@@ -140,7 +177,7 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    comm_backend: str = "standard",
+    moe_comm_backend: str = "standard",
     ep_size: int = 1,
     sp_size: int = 1,
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
@@ -160,13 +197,23 @@ def make_token_dispatcher_config(
     - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
       (pad_multiple is handled internally by the DeepEP/HybridEP library)
     """
-    if ep_size > 1 and comm_backend in ("deepep", "hybridep"):
+    if moe_comm_backend not in ("standard", "deepep", "hybridep"):
+        raise ValueError(
+            f"Unknown moe_comm_backend: '{moe_comm_backend}'. "
+            "Must be one of 'standard', 'deepep', 'hybridep'."
+        )
+    if ep_size == 1 and moe_comm_backend != "standard":
+        raise ValueError(
+            f"moe_comm_backend='{moe_comm_backend}' requires ep_size > 1, "
+            f"but ep_size={ep_size}."
+        )
+    if ep_size > 1 and moe_comm_backend in ("deepep", "hybridep"):
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
             ep_size=ep_size,
-            comm_backend=comm_backend,
+            comm_backend=moe_comm_backend,
             hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=pad_multiple,
         )
@@ -200,7 +247,7 @@ def apply_ep(
     *,
     ep_size: int,
     sp_size: int = 1,
-    comm_backend: str = "standard",
+    moe_comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> None:
@@ -218,7 +265,7 @@ def apply_ep(
                 score_before_experts=td.score_before_experts,
                 ep_size=ep_size,
                 sp_size=sp_size,
-                comm_backend=comm_backend,
+                moe_comm_backend=moe_comm_backend,
                 hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
                 pad_multiple=pad_multiple,
             )
@@ -234,7 +281,8 @@ def make_experts_config(
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
     ep_size: int = 1,
-    comm_backend: str = "standard",
+    sp_size: int = 1,
+    moe_comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> GroupedExperts.Config:
@@ -250,7 +298,8 @@ def make_experts_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             ep_size=ep_size,
-            comm_backend=comm_backend,
+            sp_size=sp_size,
+            moe_comm_backend=moe_comm_backend,
             hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=pad_multiple,
         ),

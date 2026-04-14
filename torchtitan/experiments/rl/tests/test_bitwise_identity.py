@@ -33,10 +33,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-
-from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.sampling_params import RequestOutputKind
-
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -58,6 +54,8 @@ from torchtitan.experiments.rl.plugin import (
 from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.tools import utils
+from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.sampling_params import RequestOutputKind
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -215,7 +213,6 @@ def build_trainer_model(config):
     # generator's uncompiled varlen_attn_out path.
     if config.batch_invariant_mode:
         from torch.nn.attention.varlen import varlen_attn
-
         from torchtitan.models.common.attention import VarlenAttentionWrapper
 
         VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn
@@ -261,7 +258,7 @@ def build_trainer_model(config):
 
 def _test_config() -> RLTrainer.Config:
     """Test-specific config: greedy sampling, fewer tokens, single sample."""
-    model_spec = model_registry("0.6B_varlen")
+    model_spec = model_registry("0.6B", attn_backend="varlen")
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -378,7 +375,7 @@ def main():
         logger.info("=" * 60)
 
         assert result["logprob_bitwise_identical"], (
-            f"FAIL: vLLM and trainer log-probs are NOT bitwise identical.\n"
+            "FAIL: vLLM and trainer log-probs are NOT bitwise identical.\n"
             f"  max_delta={result['logprob_max_delta']:.6e}, "
             f"  diff_max={result['logprob_diff_max']:.6e}"
         )
