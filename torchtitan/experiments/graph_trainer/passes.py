@@ -81,6 +81,15 @@ def construct_default_graph_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
         custom_codegen_pass,
     ]
 
