@@ -72,7 +72,9 @@ def _read_peak_memory(tb_root: Path) -> dict[str, float | int]:
 
     def _peak_for_tag(tag: str) -> tuple[float, int]:
         if tag not in scalar_tags:
-            raise KeyError(f"Scalar tag {tag!r} not found in {run_dirs[0]}: {scalar_tags}")
+            raise KeyError(
+                f"Scalar tag {tag!r} not found in {run_dirs[0]}: {scalar_tags}"
+            )
         peak = max(event_accumulator.Scalars(tag), key=lambda scalar: scalar.value)
         return peak.value, peak.step
 
@@ -152,9 +154,7 @@ def run_single_test(
             tb_root = Path(output_dir) / test_name / tb_folder
             peak_memory = _read_peak_memory(tb_root)
             summary_path = Path(output_dir) / test_name / f"peak_memory_{idx}.json"
-            summary_path.write_text(
-                json.dumps(peak_memory, indent=2)
-            )
+            summary_path.write_text(json.dumps(peak_memory, indent=2))
             logger.info(
                 f"Peak memory for {test_name}[{idx}]: "
                 f"reserved={peak_memory['max_reserved_gib']:.3f} GiB "
