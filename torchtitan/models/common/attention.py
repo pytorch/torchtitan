@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -82,11 +82,12 @@ class LocalMapInnerAttention(Module):
 
     Placements and device mesh are inferred from the input DTensors.
 
-    TODO: This runtime DTensor detection is a legacy path for models that
-    have not yet adopted config-based sharding. Once all models use
-    config-based sharding, ``local_map`` will be applied statically by
-    ``Module.parallelize()`` via ``LocalMapSpec``, and this class's
-    ``__call__`` override should be removed.
+    TODO: This entire class is a legacy path for models that have not yet
+    adopted config-based sharding. Once all models use config-based
+    sharding, ``local_map`` will be applied statically by
+    ``Module.parallelize()`` via ``LocalMapSpec``, and this class
+    should be removed — subclasses should inherit from ``Module``
+    directly.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -601,13 +602,6 @@ class GQAttention(BaseAttention):
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
-        # Set by set_sharding_spec() for inner attention local_map.
-        # None when TP is off or when the backend supports DTensor (SDPA).
-        # Uses Any type to avoid circular import with sharding.py.
-        # TODO: Remove once all models use config-based sharding. At that
-        # point, inner attention's ShardingSpec (with LocalMapSpec) should
-        # be set directly on its own Config by set_sharding_spec().
-        inner_attention_local_map: Any | None = None  # LocalMapSpec | None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -640,14 +634,6 @@ class GQAttention(BaseAttention):
         self.wo = config.wo.build()
 
         self.inner_attention = config.inner_attention.build()
-
-        # Propagate local_map spec to inner attention for parallelize()
-        if config.inner_attention_local_map is not None:
-            from torchtitan.protocols.sharding import ShardingSpec
-
-            self.inner_attention._sharding_spec = ShardingSpec(
-                local_map=config.inner_attention_local_map
-            )
 
     def forward(
         self,

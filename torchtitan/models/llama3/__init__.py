@@ -37,7 +37,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
 from .parallelize import parallelize_llama
@@ -457,21 +457,6 @@ def _set_llama3_layer_sharding(layer_cfg) -> None:
     ):
         w.sharding_spec = colwise_spec()
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(out_shardings={TP: Shard(1)})
-
-    # Inner attention: local_map for backends that don't support DTensor.
-    # SDPA supports DTensor natively; FlexAttention and Varlen do not.
-    inner_attn_cfg = layer_cfg.attention.inner_attention
-    if isinstance(inner_attn_cfg, (FlexAttention.Config, VarlenAttention.Config)):
-        qkv_placements = (Shard(1),)
-        layer_cfg.attention.inner_attention_local_map = LocalMapSpec(
-            in_placements=(qkv_placements, qkv_placements, qkv_placements),
-            out_placements=(qkv_placements,),
-            in_grad_placements=(
-                qkv_placements,
-                qkv_placements,
-                qkv_placements,
-            ),
-        )
 
     # FFN: input x is Shard(1) from sequence-parallel norm,
     # needs all-gather to Replicate.
