@@ -81,6 +81,12 @@ class LocalMapInnerAttention(Module):
     DTensors **after** all ``forward_hook``s complete.
 
     Placements and device mesh are inferred from the input DTensors.
+
+    TODO: This runtime DTensor detection is a legacy path for models that
+    have not yet adopted config-based sharding. Once all models use
+    config-based sharding, ``local_map`` will be applied statically by
+    ``Module.parallelize()`` via ``LocalMapSpec``, and this class's
+    ``__call__`` override should be removed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -598,6 +604,9 @@ class GQAttention(BaseAttention):
         # Set by set_sharding_spec() for inner attention local_map.
         # None when TP is off or when the backend supports DTensor (SDPA).
         # Uses Any type to avoid circular import with sharding.py.
+        # TODO: Remove once all models use config-based sharding. At that
+        # point, inner attention's ShardingSpec (with LocalMapSpec) should
+        # be set directly on its own Config by set_sharding_spec().
         inner_attention_local_map: Any | None = None  # LocalMapSpec | None
 
     def __init__(self, config: Config):

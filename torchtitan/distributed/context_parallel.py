@@ -25,7 +25,12 @@ from torch.distributed.tensor.experimental._context_parallel._attention import (
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    FlexAttention,
+    ScaledDotProductAttention,
+    VarlenAttention,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -47,11 +52,6 @@ def apply_cp_to_attention_module(
     Raises:
         NotImplementedError: If the attention type does not support CP
     """
-    from torchtitan.models.common.attention import (
-        FlexAttention,
-        ScaledDotProductAttention,
-    )
-
     first = attention_modules[0]
     if isinstance(first, FlexAttention):
         cp_plan = _ContextParallel(
@@ -89,19 +89,18 @@ def apply_cp_to_forward(
     Must be called **before** ``Module.parallelize()`` so the CP wrapper
     is captured inside parallelize's ``local_map`` wrapping.
 
-    Replaces ``_ContextParallel`` hooks with direct forward wrapping.
     The attention type is inferred via isinstance on the first module.
+
+    TODO: This is a temporary workaround that manually allgathers K/V
+    (FlexAttention) or wraps inputs as CP-sharded DTensors (SDPA).
+    Once all models adopt config-based sharding with full DTensor,
+    CP redistribution should be expressed declaratively via
+    ShardingSpec and this function should be removed.
 
     Args:
         attention_modules: Sequence of inner attention modules to apply CP to.
         cp_mesh: Device mesh for context parallel dimension.
     """
-    from torchtitan.models.common.attention import (
-        FlexAttention,
-        ScaledDotProductAttention,
-        VarlenAttention,
-    )
-
     first = attention_modules[0]
     if isinstance(first, FlexAttention):
         for mod in attention_modules:

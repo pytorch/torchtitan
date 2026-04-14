@@ -15,7 +15,7 @@ self-documenting and support multi-dim meshes.
 from dataclasses import dataclass, field
 from enum import Enum
 
-from torch.distributed.tensor import Placement
+from torch.distributed.tensor import Placement, Replicate
 
 
 class StrEnum(str, Enum):
@@ -107,6 +107,7 @@ class ShardingSpec:
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
+    # TODO: Remove once all inputs flow as DTensors (full DTensor regime).
     input_layouts: dict[str, NamedPlacement] | None = None
     in_shardings: dict[str, NamedPlacement] | None = None
     out_shardings: NamedPlacement | None = None
@@ -125,9 +126,6 @@ def resolve_placements(
 
     Unspecified mesh dims default to ``Replicate()``.
     """
-    from torch.distributed.tensor import Replicate
-
-    # MeshDimName is a str subclass so str lookup works at runtime.
     return tuple(
         named.get(MeshDimName(dim_name), Replicate()) for dim_name in mesh_dim_names
     )
