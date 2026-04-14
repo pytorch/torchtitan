@@ -36,7 +36,7 @@ jobs:
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
-      gpu-arch-version: "12.8"
+      gpu-arch-version: "13.0"
       docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
@@ -55,7 +55,7 @@ jobs:
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre \
-          torch --index-url https://download.pytorch.org/whl/nightly/cu128
+          torch --index-url https://download.pytorch.org/whl/nightly/cu130
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

@@ -311,11 +311,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """2dcc779af7bc5aeae2d39eff3898180a8156549b2f1582d77e8db237689e0c67""",
+            """09bb71bafdd888cf46c5f5c7ccddb5441266f843f9a2255d1569121613035be9""",
         )
         assert_expected_inline(
             grad_hash,
-            """b3f5b911dea6c9d36f508b08300220d7f39f142a7c34a49b7ef2543abb2065dc""",
+            """8bb6e647c3edaa229cc65872086ccc5c4e1b7f1647bb01da4506ab777a64a0db""",
         )
 
     # TODO: OOMs during flex_attention compilation on A100 GPUs.
