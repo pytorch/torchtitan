@@ -126,13 +126,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and self.parallelism.expert_parallel_degree > 1
             ):
                 # Sequence parallel: when EP borrows from TP (ETP=1),
-                # split tokens across EP ranks along the sequence dim.
+                # split tokens across TP ranks along the sequence dim.
                 sp_size = 1
                 if (
                     self.parallelism.tensor_parallel_degree > 1
                     and self.parallelism.expert_tensor_parallel_degree == 1
                 ):
-                    sp_size = self.parallelism.expert_parallel_degree
+                    sp_size = self.parallelism.tensor_parallel_degree
 
                 apply_ep(
                     self.model_spec.model.layers,
