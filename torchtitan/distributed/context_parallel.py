@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 import torch
-import torch.distributed as c10d
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
@@ -107,7 +107,7 @@ def apply_cp_to_forward(
             original_forward = mod.forward
 
             def _make_cp_forward(orig_fn, mesh):
-                pg_name = c10d._get_process_group_name(mesh.get_group())
+                pg_name = dist._get_process_group_name(mesh.get_group())
 
                 def cp_forward(q, k, v, **kwargs):
                     k = k.contiguous()

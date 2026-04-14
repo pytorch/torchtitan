@@ -405,14 +405,6 @@ llama3_configs = {
 }
 
 
-TP = MeshDimName.TP
-
-
-# ---------------------------------------------------------------------------
-# Sharding spec helpers
-# ---------------------------------------------------------------------------
-
-
 def set_llama3_sharding_spec(
     config,
     parallel_dims: ParallelDims,
@@ -434,13 +426,14 @@ def set_llama3_sharding_spec(
 def _set_llama3_layer_sharding(layer_cfg) -> None:
     """Set sharding on one Llama3 transformer layer.
 
-    Following PR 2149's full-DTensor approach:
-    - All modules use use_local_output=False (DTensors flow everywhere)
+    - DTensors flow everywhere (use_local_output=False in the original style)
     - ColwiseParallel outputs DTensor Shard(-1)
     - RowwiseParallel outputs DTensor Shard(1) (sequence parallel)
     - SequenceParallel norms keep DTensor
     - rope_cache is wrapped as DTensor Replicate via in_shardings
     """
+    TP = MeshDimName.TP
+
     # Norms: SequenceParallel
     layer_cfg.attention_norm.sharding_spec = sequence_parallel_spec()
     layer_cfg.ffn_norm.sharding_spec = sequence_parallel_spec()

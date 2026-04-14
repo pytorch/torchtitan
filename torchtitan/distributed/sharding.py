@@ -43,16 +43,13 @@ def sequence_parallel_spec() -> ShardingSpec:
 
 def set_decoder_sharding_spec(config, loss_parallel: bool) -> None:
     """Set sharding on tok_embeddings, norm, output — shared by all decoders."""
-    # tok_embeddings: RowwiseParallel — weight Shard(1), input Replicate, output Shard(1)
     config.tok_embeddings.sharding_spec = ShardingSpec(
         state_shardings={"weight": {TP: Shard(1)}},
         input_layouts={"input": {TP: Replicate()}},
         in_shardings={"input": {TP: Replicate()}},
         out_shardings={TP: Shard(1)},
     )
-    # norm: SequenceParallel
     config.norm.sharding_spec = sequence_parallel_spec()
-    # output: ColwiseParallel — all-gather input before matmul
     config.output.sharding_spec = ShardingSpec(
         state_shardings={"weight": {TP: Shard(0)}},
         input_layouts={"input": {TP: Shard(1)}},
