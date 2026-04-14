@@ -227,11 +227,13 @@ def main():
         compiler_passes, dump_folder=config.dump_folder
     )
 
-    # When cudagraphs are enabled, capture the static input indices for
-    # fwd/bwd while the GraphModule is still inspectable (before Inductor
-    # replaces it with OutputCode). These are stored in the artifact
-    # metadata so that the load-time CUDAGraphPolicy can use them instead
-    # of treating all inputs as dynamic.
+    # Capture static input indices for the regional cudagraph path.
+    # For full_inductor, Inductor's post_compile already gets static
+    # indices from the serialized CompiledFxGraph (fx_kwargs), but
+    # for regional compilation wrap_output wraps the entire
+    # RegionalOutputCode from the outside and needs these indices
+    # explicitly. We capture them here while the GraphModule is still
+    # inspectable (before Inductor replaces it with OutputCode).
     extra_metadata: dict = {}
     if use_inductor_cudagraphs:
         from torchtitan.experiments.graph_trainer.cudagraph import (

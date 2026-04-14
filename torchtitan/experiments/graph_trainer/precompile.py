@@ -150,18 +150,25 @@ def precompile_save(
 
 
 class _PrecompileCUDAGraphPolicy(CUDAGraphPolicy):
-    """CUDAGraphPolicy that uses torchtitan's CUDAGraphWrapper.
+    """CUDAGraphPolicy that swaps in torchtitan's CUDAGraphWrapper.
 
-    Plugs into Inductor's ``post_compile`` via
-    ``torch._inductor.config.cudagraph_policy`` so that precompile-loaded
-    artifacts are wrapped with ``CUDAGraphWrapper`` (which supports
-    explicit teardown for NCCL cleanup) instead of Inductor's built-in
-    ``cudagraph_trees``.
+    Deserialization (``deserialize_compile_artifacts``) runs Inductor's
+    ``wrap_post_compile`` internally, which compiles the FX graph into an
+    ``OutputCode`` — generated wrapper code + compiled Triton/C++ kernels.
+    The FX graph is gone after this step.  Cudagraph wrapping happens
+    *inside* ``post_compile``, per-``CompiledFxGraph`` (fwd, bwd), using
+    the static input indices already serialized in the artifact
+    (``fx_kwargs["static_input_idxs"]``).  This policy hooks into that
+    process to use ``CUDAGraphWrapper`` (which supports explicit teardown
+    for NCCL cleanup) instead of Inductor's built-in ``cudagraph_trees``.
 
-    For regional compilation (``is_regional=True``), inner
-    ``CompiledFxGraph`` objects are left unwrapped (``should_wrap``
-    returns ``False``) and the entire ``RegionalOutputCode`` is wrapped
-    at the outer level via ``wrap_output``.
+    For regional compilation (``is_regional=True``), per-``CompiledFxGraph``
+    wrapping is skipped (``should_wrap`` returns ``False``) and
+    ``wrap_output`` wraps the entire ``RegionalOutputCode`` at the outer
+    level.  Unlike the full-inductor path, the regional path needs
+    externally-provided static input indices (``fw_static_input_indices``,
+    ``bw_static_input_indices``) since there is no per-graph
+    ``CudagraphCachedInfo`` at the outer level.
     """
 
     def __init__(
@@ -252,16 +259,25 @@ def _deserialize_with_cudagraph(
 ) -> Callable:
     """Deserialize a compiled artifact, optionally applying CUDAGraphWrapper.
 
-    When ``cudagraph=True``, sets a ``CUDAGraphPolicy`` on Inductor's
-    config so that ``post_compile`` delegates cudagraph wrapping to
-    torchtitan's ``CUDAGraphWrapper`` instead of Inductor's built-in
-    ``cudagraph_trees``.  This keeps teardown behaviour consistent with
-    the non-precompile path (see Note [explicit cudagraph teardown] in
-    cudagraph.py).
+    Cudagraph wrapping is bundled with deserialization because
+    deserialization runs Inductor's ``post_compile`` internally (via
+    ``wrap_post_compile``), and ``post_compile`` is where per-
+    ``CompiledFxGraph`` cudagraph wrapping happens.  The result is an
+    ``OutputCode`` (generated wrapper code + compiled kernels), not an
+    FX GraphModule — so wrapping can't be applied as a separate step
+    afterwards at the same granularity.
 
-    For regional compilation the policy skips inner ``CompiledFxGraph``
-    wrapping and wraps the entire ``RegionalOutputCode`` at the outer
-    level via ``wrap_output``.
+    When ``cudagraph=True``, installs a ``_PrecompileCUDAGraphPolicy``
+    so that ``post_compile`` uses torchtitan's ``CUDAGraphWrapper``
+    (which supports explicit teardown for NCCL cleanup) instead of
+    Inductor's built-in ``cudagraph_trees``.
+
+    For regional compilation (``is_regional=True``), per-
+    ``CompiledFxGraph`` wrapping is skipped and the entire
+    ``RegionalOutputCode`` is wrapped at the outer level.  The
+    ``fw/bw_static_input_indices`` are only needed for this regional
+    path; the full-inductor path gets static indices from the
+    serialized ``CompiledFxGraph`` itself.
     """
     if not cudagraph:
         return BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
