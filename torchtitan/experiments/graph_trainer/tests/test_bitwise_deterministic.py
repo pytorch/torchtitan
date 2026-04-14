@@ -7,7 +7,7 @@
 """Bitwise deterministic guardrail for graph_trainer.
 
 Tests that Trainer (eager) and GraphTrainer (aot_fx_trace) produce bitwise
-identical losses and gradients on Llama3 and DeepSeek-v3 debug models.
+identical losses and gradients on Llama3, DeepSeek-v3, and Qwen3 debug models.
 
 Requires a CUDA GPU. Run with:
     pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -x
@@ -36,6 +36,10 @@ from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
 from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
+from torchtitan.experiments.graph_trainer.qwen3 import (
+    model_registry as qwen3_model_registry,
+)
+from torchtitan.experiments.graph_trainer.qwen3.parallelize import annotate_qwen3
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
@@ -327,6 +331,55 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         """aot_fx_trace with passes and eager produce bitwise identical results."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+
+class TestQwen3BitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for Qwen3 debug model."""
+
+    model_registry = staticmethod(qwen3_model_registry)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_qwen3)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+
+@unittest.skip("max_autotune breaks FlexAttn bitwise tests")
+class TestQwen3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for Qwen3 with FlexAttention (debugmodel_flex).
+
+    aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
+    Triton kernels and produces bitwise identical results to eager.
+    """
+
+    model_registry = staticmethod(qwen3_model_registry)
+    model_flavor = "debugmodel_flex"
+    annotate_model = staticmethod(annotate_qwen3)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace with passes and eager produce bitwise identical results."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+
+class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for Qwen3 MoE debug model."""
+
+    model_registry = staticmethod(qwen3_model_registry)
+    model_flavor = "debugmodel_moe"
+    annotate_model = staticmethod(annotate_qwen3)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
