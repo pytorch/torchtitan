@@ -8,12 +8,12 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+
+from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,
 )
-
-from torch import nn
 
 from torchtitan.config import Configurable
 from torchtitan.ops.scatter_add import deterministic_scatter_add

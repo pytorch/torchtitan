@@ -19,9 +19,9 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
-    AllToAllTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 

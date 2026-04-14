@@ -135,9 +135,7 @@ class GroupedExperts(Module):
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(
-            routed_output, metadata, x, shared_experts
-        )
+        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
 
 
 class TokenChoiceTopKRouter(Module):

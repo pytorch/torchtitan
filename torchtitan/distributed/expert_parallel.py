@@ -64,7 +64,9 @@ class ExpertParallel(ParallelStyle):
             mod.register_parameter(param_name, dist_param)
         # Set ep_group on the token dispatcher for all-to-all communication.
         # device_mesh here is the 1D EP mesh.
-        assert hasattr(mod, "token_dispatcher"), f"{type(mod)} missing token_dispatcher attribute"
+        assert hasattr(
+            mod, "token_dispatcher"
+        ), f"{type(mod)} missing token_dispatcher attribute"
         assert isinstance(
             mod.token_dispatcher,
             (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
@@ -111,7 +113,9 @@ class ExpertTensorParallel(ExpertParallel):
             DeepEPTokenDispatcher,
         )
 
-        assert hasattr(mod, "token_dispatcher"), f"{type(mod)} missing token_dispatcher attribute"
+        assert hasattr(
+            mod, "token_dispatcher"
+        ), f"{type(mod)} missing token_dispatcher attribute"
         assert isinstance(
             mod.token_dispatcher,
             (AllToAllTokenDispatcher, DeepEPTokenDispatcher),

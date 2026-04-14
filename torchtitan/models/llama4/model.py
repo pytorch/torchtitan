@@ -150,7 +150,6 @@ class Llama4Model(Decoder):
                         debug.moe_force_load_balance
                     )
 
-
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
                     "Context Parallel is not supported for Llama4 "
