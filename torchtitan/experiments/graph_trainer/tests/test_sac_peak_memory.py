@@ -7,17 +7,17 @@
 import copy
 import unittest
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 
-from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_registry,
+)
+from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
+    build_minimal_trainer,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
@@ -45,40 +45,6 @@ def _build_model(model_flavor: str) -> nn.Module:
     model.to(dtype=DTYPE)
     model.train()
     return model
-
-
-def _build_trainer(
-    model: nn.Module,
-    trainer_cls: type[Trainer],
-    *,
-    model_flavor: str,
-    ac_mode: str = "none",
-) -> Trainer:
-    trainer = object.__new__(trainer_cls)
-    trainer.model_parts = [model]
-    trainer.loss_fn = cross_entropy_loss
-    trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context(False)
-    trainer.model_config = llama3_registry(model_flavor).model
-    trainer.device = torch.device("cuda")
-    trainer.tokenizer = None
-
-    if trainer_cls is GraphTrainer:
-        trainer.config = SimpleNamespace(
-            compile=SimpleNamespace(
-                mode="aot_fx_trace",
-                enable_passes=True,
-                passes=[],
-                joint_passes=[],
-            ),
-            activation_checkpoint=ActivationCheckpointConfig(mode=ac_mode),
-        )
-        trainer._fwd_bwd_step_module = None
-        trainer._traced_step = None
-    else:
-        trainer.config = SimpleNamespace()
-
-    return trainer
 
 
 @dataclass(frozen=True)
@@ -136,17 +102,19 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
         apply_ac(eager_model, ActivationCheckpointConfig(mode="selective"))
-        eager_trainer = _build_trainer(
-            eager_model, Trainer, model_flavor=DEBUGMODEL
+        eager_trainer = build_minimal_trainer(
+            eager_model,
+            llama3_registry(DEBUGMODEL).model,
+            Trainer,
         )
 
         traced_model = _build_model(DEBUGMODEL)
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
-        traced_trainer = _build_trainer(
+        traced_trainer = build_minimal_trainer(
             traced_model,
+            llama3_registry(DEBUGMODEL).model,
             GraphTrainer,
-            model_flavor=DEBUGMODEL,
-            ac_mode="selective",
+            activation_checkpoint_mode="selective",
         )
 
         # Warm up both paths so allocator and one-time tracing setup do not skew
