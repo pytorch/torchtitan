@@ -48,10 +48,10 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
+4. Install PyTorch nightly, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
 ```bash
 # Install vllm with nightly torch
-uv pip install torch vllm xformers  --pre \
+uv pip install torch vllm torchcomms  --pre \
 --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
 --index-strategy unsafe-best-match
 ```
@@ -73,7 +73,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torch
 
 7. Run inference with torchtitan model definition:
 ```bash
-torchrun --nproc_per_node=2 torchtitan/experiments/rl/inference_example.py
+torchrun --nproc_per_node=4 torchtitan/experiments/rl/inference_example.py
 ```
 
 **NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
