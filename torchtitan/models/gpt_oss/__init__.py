@@ -9,12 +9,22 @@ from functools import partial
 
 import torch.nn as nn
 
+from torch.distributed.tensor import Replicate, Shard
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.sharding import (
+    colwise_spec,
+    rowwise_spec,
+    sequence_parallel_spec,
+    set_decoder_sharding_spec,
+)
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
 
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
@@ -294,6 +304,57 @@ gptoss_configs = {
 }
 
 
+TP = MeshDimName.TP
+
+
+def set_gptoss_sharding_spec(
+    config,
+    parallel_dims: ParallelDims,
+    *,
+    loss_parallel: bool,
+) -> None:
+    """Fill ``sharding_spec`` on all GPT-OSS sub-configs.
+
+    No-op when TP is not enabled.
+    """
+    if not parallel_dims.tp_enabled:
+        return
+
+    set_decoder_sharding_spec(config, loss_parallel)
+    for layer_cfg in config.layers:
+        _set_gptoss_layer_sharding(layer_cfg)
+
+
+def _set_gptoss_layer_sharding(layer_cfg) -> None:
+    """Set sharding on one GPT-OSS transformer layer.
+
+    All GPT-OSS blocks are MoE — only attention/norms are sharded here.
+    MoE FFN stays under apply_moe_ep_tp.
+    """
+    # Norms: SequenceParallel
+    layer_cfg.attention_norm.sharding_spec = sequence_parallel_spec()
+    layer_cfg.ffn_norm.sharding_spec = sequence_parallel_spec()
+
+    # Attention: input x needs all-gather, freqs_cis is Replicate.
+    # sinks parameter is sharded across heads via state_shardings.
+    layer_cfg.attention.sharding_spec = ShardingSpec(
+        state_shardings={"sinks": {TP: Shard(0)}},
+        input_layouts={
+            "x": {TP: Shard(1)},
+            "freqs_cis": {TP: Replicate()},
+        },
+        in_shardings={
+            "x": {TP: Replicate()},
+            "freqs_cis": {TP: Replicate()},
+        },
+    )
+    # wq/wkv: ColwiseParallel
+    for w in (layer_cfg.attention.wq, layer_cfg.attention.wkv):
+        w.sharding_spec = colwise_spec()
+    # wo: RowwiseParallel with reduce-scatter to Shard(1)
+    layer_cfg.attention.wo.sharding_spec = rowwise_spec(out_shardings={TP: Shard(1)})
+
+
 def model_registry(flavor: str) -> ModelSpec:
     config = gptoss_configs[flavor]()
     return ModelSpec(
@@ -305,4 +366,5 @@ def model_registry(flavor: str) -> ModelSpec:
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
+        set_sharding_spec_fn=set_gptoss_sharding_spec,
     )
