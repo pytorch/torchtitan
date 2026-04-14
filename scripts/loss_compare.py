@@ -573,6 +573,8 @@ def run_training(
 
     run_with_realtime_output(full_cmd, log_file, env)
 
+    return log_file
+
 
 # =============================================================================
 # LOG PROCESSING AND ANALYSIS
