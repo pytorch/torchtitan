@@ -11,6 +11,11 @@ import torch
 from torch.distributed.tensor import DTensor
 
 
+def _canonicalize_tensor_name(name: str) -> str:
+    """Normalize transparent wrapper segments so hashes reflect tensor contents."""
+    return name.replace("._checkpoint_wrapped_module", "")
+
+
 def _hash_model_impl(
     model: torch.nn.Module,
     algo: str,
@@ -29,6 +34,7 @@ def _hash_model_impl(
 
     def hash_named_tensor(name: str, obj) -> None:
         if isinstance(obj, torch.Tensor):
+            name = _canonicalize_tensor_name(name)
             if isinstance(obj, DTensor):
                 t = obj.to_local().cpu().contiguous()
             else:
