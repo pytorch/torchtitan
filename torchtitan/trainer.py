@@ -119,6 +119,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     raise NotImplementedError(
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
+
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):

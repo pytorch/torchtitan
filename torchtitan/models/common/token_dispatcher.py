@@ -161,22 +161,24 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        ep_degree: int
-        # Sequence parallel degree. When EP borrows from TP (ETP=1),
-        # set to EP degree to split tokens across ranks.
+        ep_size: int
+        # Sequence parallel size. When EP borrows from TP (ETP=1),
+        # set to TP group size to split tokens across ranks.
         sp_size: int = 1
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_degree = config.ep_degree
-        # Set by ExpertParallel / ExpertTensorParallel._apply()
-        self.ep_group: dist.ProcessGroup
+        self.ep_size = config.ep_size
         self.sp_size = config.sp_size
+        # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
+        self.ep_group: dist.ProcessGroup
+        # Set at runtime by apply_moe_ep_tp from tp_mesh.get_local_rank()
+        self.sp_rank: int = 0
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
         sp_size = self.sp_size
-        sp_rank = dist.get_rank(self.ep_group)
+        sp_rank = self.sp_rank
         results = []
         for t in tensors:
             assert t.is_contiguous()
@@ -214,19 +216,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         if self.sp_size > 1:
             # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
-            # if top_scores.shape[0] % device_mesh.size() != 0:
-            #     num_tokens = top_scores.shape[0]
-            #     tp_size = device_mesh.size()
-            #     n_pad = (num_tokens // tp_size + 1) * tp_size - num_tokens
-            #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
-            #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
-
-            # shape (batch_size * seq_len // ep_degree, top_k)
+            # shape (batch_size * seq_len // ep_size, top_k)
             x, top_scores, selected_experts_indices = self._split_along_sp(
                 x, top_scores, selected_experts_indices
             )
 
-        ep_degree = self.ep_degree
+        ep_size = self.ep_size
 
         # TODO: Extract this local reordering block (histc, argsort, score
         # application) into a shared helper — it's duplicated in
@@ -272,13 +267,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 num_tokens_per_expert_group
             )
             input_splits = (
-                num_tokens_per_expert.view(ep_degree, -1)
+                num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=True)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
-                num_tokens_per_expert_group.view(ep_degree, -1)
+                num_tokens_per_expert_group.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=False)
             )
@@ -299,7 +294,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
         # _permute reshuffles to:
         #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
-        num_local_experts = num_tokens_per_expert_group.shape[0] // ep_degree
+        num_local_experts = num_tokens_per_expert_group.shape[0] // ep_size
         (
             input_shape,
             routed_input,
@@ -308,7 +303,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ) = self._permute(
             routed_input,
             num_tokens_per_expert_group,
-            ep_degree,
+            ep_size,
             num_local_experts,
         )
 
@@ -323,7 +318,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         return routed_input, num_tokens_per_expert_group, metadata
 
     def _permute(
-        self, routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+        self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -334,12 +329,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         total = num_tokens_per_expert_group.sum()
 
         # [R, E] matrix of token counts per (rank, expert)
-        t_mat = num_tokens_per_expert_group.view(ep_degree, num_local_experts)
+        t_mat = num_tokens_per_expert_group.view(ep_size, num_local_experts)
 
         # Where each (r, e) segment starts in the input (rank-major order)
         input_starts = (
             num_tokens_per_expert_group.cumsum(0) - num_tokens_per_expert_group
-        ).view(ep_degree, num_local_experts)
+        ).view(ep_size, num_local_experts)
 
         # Transpose to expert-major [E, R] and flatten
         segment_lens = t_mat.t().reshape(-1)
@@ -443,7 +438,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         self.pad_multiple = config.pad_multiple
 
     def _permute(
-        self, routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+        self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
     ):
         # FP8/MXFP8 require groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
@@ -462,7 +457,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         ) = permute_and_pad(
             routed_input,
             num_tokens_per_expert_group,
-            ep_degree,
+            ep_size,
             num_local_experts,
             self.pad_multiple,  # pyrefly: ignore [bad-argument-type]
         )
@@ -502,7 +497,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """Config for DeepEP/HybridEP token dispatcher.
 
         Args:
-            ep_degree: Expert parallel degree.
+            ep_size: Expert parallel size.
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
             hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
                 float in (0, 1] = non-blocking mode; controls the fused-permute
@@ -512,20 +507,20 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 None means no padding.
         """
 
-        ep_degree: int
+        ep_size: int
         comm_backend: str
         hybridep_non_blocking_expert_capacity_factor: float | None = None
         pad_multiple: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_degree = config.ep_degree
+        self.ep_size = config.ep_size
         self.comm_backend = config.comm_backend
         self.hybridep_non_blocking_expert_capacity_factor = (
             config.hybridep_non_blocking_expert_capacity_factor
         )
         self.pad_multiple = config.pad_multiple
-        # Set by ExpertParallel / ExpertTensorParallel._apply()
+        # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup
 
         # Import to register custom ops so SAC saves communication outputs
@@ -542,7 +537,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        num_local_experts = self.num_experts // self.ep_degree
+        num_local_experts = self.num_experts // self.ep_size
 
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep.hybridep import dispatch_tokens

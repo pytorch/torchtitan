@@ -32,7 +32,10 @@ from torchtitan.distributed.compile import apply_compile_sparse
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import ExpertParallel
 from torchtitan.distributed.tensor_parallel import NoParallel
-from torchtitan.models.common.token_dispatcher import TorchAOTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -288,9 +291,14 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # sp_size is set via AllToAllTokenDispatcher.Config when
-            # EP borrows from TP (ETP=1).
+            # sp_size and sp_rank are set for sequence-parallel token splitting
+            # when EP borrows from TP (ETP=1).
             experts_plan = ExpertParallel()
+            if tp_mesh is not None:
+                # pyrefly: ignore [missing-attribute]
+                dispatcher = transformer_block.moe.experts.token_dispatcher
+                if isinstance(dispatcher, AllToAllTokenDispatcher):
+                    dispatcher.sp_rank = tp_mesh.get_local_rank()
         else:
             # pad_multiple is set on the token dispatcher config at config time.
             # pyrefly: ignore [missing-attribute]
