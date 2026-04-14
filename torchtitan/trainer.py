@@ -136,7 +136,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 apply_ep(
                     self.model_spec.model.layers,
-                    ep_degree=self.parallelism.expert_parallel_degree,
+                    ep_size=self.parallelism.expert_parallel_degree,
                     sp_size=sp_size,
                     comm_backend=self.parallelism.expert_parallel_comm_backend,
                     hybridep_non_blocking_expert_capacity_factor=self.parallelism.hybridep_non_blocking_expert_capacity_factor,
