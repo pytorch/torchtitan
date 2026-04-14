@@ -63,10 +63,7 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoPara
 from torchtitan.experiments.transformers_modeling_backend.compile import (
     apply_compile_sparse,
 )
-from torchtitan.models.llama3.parallelize import (
-    apply_replicate,
-    disable_fsdp_gradient_division,
-)
+from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
