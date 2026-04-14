@@ -369,8 +369,8 @@ class MoE(Module):
         # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
         #   w1/w3, Rowwise on w2) produce Partial output gradients.
         # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via ExpertSequenceParallel), so grad(x) is non-zero only at
-        #   each rank's token positions(Partial).
+        #   (via sequence-parallel token splitting in AllToAllTokenDispatcher),
+        #   so grad(x) is non-zero only at each rank's token positions (Partial).
         #
         # This holds for all MoE components (router.gate, routed experts, shared
         # experts) and regardless of score_before_experts.
