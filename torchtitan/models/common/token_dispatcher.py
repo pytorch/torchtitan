@@ -464,7 +464,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             num_tokens_per_expert_group,
             ep_degree,
             num_local_experts,
-            self.pad_multiple,
+            self.pad_multiple,  # pyrefly: ignore [bad-argument-type]
         )
         return (
             input_shape,
