@@ -48,6 +48,7 @@ from torchtitan.distributed.tensor_parallel import (
 )
 
 from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
@@ -591,9 +592,14 @@ def apply_moe_ep_tp(
                         "Use hybridep or standard comm backend instead."
                     )
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            # sp_size is set via AllToAllTokenDispatcher.Config when
-            # EP borrows from TP (ETP=1).
+            # sp_size and sp_rank are set for sequence-parallel token splitting
+            # when EP borrows from TP (ETP=1).
             experts_plan = ExpertParallel()
+            if tp_mesh is not None:
+                # pyrefly: ignore [missing-attribute]
+                dispatcher = transformer_block.moe.experts.token_dispatcher
+                if isinstance(dispatcher, AllToAllTokenDispatcher):
+                    dispatcher.sp_rank = tp_mesh.get_local_rank()
         else:
             # pad_multiple is set on the token dispatcher config at config time.
             # pyrefly: ignore [missing-attribute]
