@@ -173,11 +173,6 @@ def _apply_tp_to_vision_encoder(
     full hidden_states. Only the linear layers (qkv, proj, fc1, fc2) are
     sharded via ColwiseParallel/RowwiseParallel to save memory. Norms operate
     on Replicate DTensors directly.
-
-    The learned position embedding uses local_map to unwrap DTensor for
-    bilinear interpolation. TODO: Add a DTensor sharding prop rule for
-    F.interpolate (at least Replicate → Replicate) upstream in PyTorch,
-    then remove the local_map workaround in vision_encoder.py.
     """
     # NoParallel on patch_embed distributes its params as Replicate DTensors
     # on tp_mesh for FSDP mesh consistency. Its input hook wraps plain
@@ -187,8 +182,7 @@ def _apply_tp_to_vision_encoder(
 
     # pos_embed is an nn.Parameter (not a submodule), so it can't be targeted
     # by parallelize_module's plan dict. We distribute it as Replicate DTensor
-    # on tp_mesh for FSDP mesh consistency. The vision encoder's
-    # compute_position_embeddings uses local_map to unwrap it for interpolation.
+    # on tp_mesh for FSDP mesh consistency.
     vision_encoder.pos_embed = nn.Parameter(
         # pyrefly: ignore [bad-argument-type]
         distribute_tensor(vision_encoder.pos_embed.data, tp_mesh, [Replicate()]),
