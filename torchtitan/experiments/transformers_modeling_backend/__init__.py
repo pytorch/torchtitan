@@ -46,6 +46,7 @@ class TitanMoeModelConfig(TitanModelConfig):
     moe_intermediate_size: int = 768
     decoder_sparse_step: int = 1
     norm_topk_prob: bool = False
+    num_nextn_predict_layers: int | None = None
 
 
 flavors = {
@@ -70,6 +71,7 @@ flavors = {
             num_experts=8,
             num_experts_per_tok=2,
             moe_intermediate_size=128,
+            num_nextn_predict_layers=0,
         ),
     ),
     "full": HFTransformerModel.Config(

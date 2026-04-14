@@ -299,7 +299,24 @@ class HFTransformerModel(BaseModel):
                     (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
                 )
 
-            self.head_dim = self.dim // self.num_attention_heads
+            # MLA models (DeepSeek V3, GLM-5) set head_dim = qk_rope_head_dim
+            # in the HF config for RoPE; don't clobber it with the standard
+            # computation. Also force num_key_value_heads = num_attention_heads
+            # because MLA has no GQA — the KV LoRA path always produces
+            # num_attention_heads heads.
+            if hasattr(self, "qk_rope_head_dim"):
+                self.num_key_value_heads = self.num_attention_heads
+            else:
+                self.head_dim = self.dim // self.num_attention_heads
+
+            # Ensure expert groups are consistent with (possibly overridden)
+            # num_experts for models with group-level routing (DeepSeek V3).
+            # Each group needs >= 2 experts for the in-group topk(2).
+            if hasattr(self, "n_group") and hasattr(self, "n_routed_experts"):
+                while self.n_group > 1 and self.n_routed_experts // self.n_group < 2:
+                    self.n_group //= 2
+                if hasattr(self, "topk_group"):
+                    self.topk_group = min(self.topk_group, self.n_group)
 
             return self
 
@@ -329,11 +346,30 @@ class HFTransformerModel(BaseModel):
             try:
                 transformers_mod = importlib.import_module("transformers")
                 model_cls = getattr(transformers_mod, model_class_name)
-            except (ImportError, AttributeError) as e:
+            except (ImportError, AttributeError):
+                model_cls = None
+
+        if model_cls is None:
+            # Fallback: resolve via model_type → Auto mapping.
+            # Handles cases where the config's architecture name doesn't match
+            # the actual class name (e.g. PhiMoEForCausalLM vs PhimoeForCausalLM).
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+            )
+
+            model_type = getattr(config, "model_type", "")
+            resolved_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+            if resolved_name:
+                transformers_mod = importlib.import_module("transformers")
+                model_cls = getattr(transformers_mod, resolved_name, None)
+                if model_cls is not None:
+                    model_class_name = resolved_name
+
+            if model_cls is None:
                 raise ImportError(
                     f"Could not find model class '{model_class_name}' in globals or transformers. "
-                    f"Make sure the class is available. Original error: {e}"
-                ) from e
+                    f"Make sure the class is available."
+                )
 
         # Attempt to patch model weight initialization based on architecture type
         try:
@@ -580,7 +616,12 @@ class HFTransformerModel(BaseModel):
                     module.weight.data.normal_(mean=0.0, std=std)
 
                 if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
+                    try:
+                        module.weight.data[module.padding_idx].zero_()
+                    except RuntimeError:
+                        # DTensor indexing can fail on TP-sharded embeddings
+                        # when the local shard can't be redistributed cleanly.
+                        pass
 
             elif (
                 isinstance(

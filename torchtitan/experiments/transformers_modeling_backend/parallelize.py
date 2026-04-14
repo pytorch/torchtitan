@@ -691,6 +691,33 @@ def apply_moe_ep_tp(
                 NoParallel(local_output_grad_placements=(Partial(),)),
             )
 
+            # FSDP converts gate buffers (e.g. e_score_correction_bias in
+            # DeepSeek V3/GLM-4.7 routers) to DTensors for mesh alignment.
+            # The gate output is local (F.linear with FSDP-unsharded weight
+            # returns a local tensor), but the MoE block's route_tokens_to
+            # _experts accesses gate buffers directly (outside gate forward)
+            # and adds them to the local output, triggering a mixed
+            # DTensor/Tensor error.
+            # Fix: shadow DTensor buffers with local copies for the entire
+            # MoE block forward, not just the gate forward.
+            def _gate_buffers_to_local(gate):
+                def pre_hook(module, args):
+                    for name, buf in gate.named_buffers(recurse=False):
+                        if isinstance(buf, DTensor):
+                            gate.__dict__[name] = buf.to_local()
+
+                def post_hook(module, args, output):
+                    for name in list(gate.__dict__):
+                        if name in gate._buffers:
+                            del gate.__dict__[name]
+                    return output
+
+                return pre_hook, post_hook
+
+            pre_hook, post_hook = _gate_buffers_to_local(moe_block.gate)
+            moe_block.register_forward_pre_hook(pre_hook)
+            moe_block.register_forward_hook(post_hook)
+
             # TP-shard shared experts if present (e.g., Qwen2/3.5 MoE,
             # DeepSeek V3). The shared expert is a dense MLP — apply
             # ColwiseParallel/RowwiseParallel so its output is Partial,
