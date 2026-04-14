@@ -39,6 +39,7 @@ from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    collapse_view_chains_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
@@ -70,6 +71,7 @@ def construct_default_graph_passes(
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
+        collapse_view_chains_pass,
         remove_identity_slice_pass,
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.

@@ -103,6 +103,58 @@ def remove_identity_view_pass(
     return gm
 
 
+def collapse_view_chains_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Collapse chains of consecutive view/reshape ops into a single op.
+
+    When ``view(view(x, s1), s2)`` occurs and the intermediate result has
+    exactly one user (the outer view), the intermediate view is redundant --
+    the final output only depends on ``x`` and ``s2``.  This pass rewrites
+    such chains by replacing the outer view's input with the inner view's
+    input, then erasing the now-dead inner view node.
+
+    The single-use constraint is critical for correctness: if the
+    intermediate shape is consumed by other nodes, collapsing would change
+    semantics.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with redundant view chains collapsed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target not in _IDENTITY_VIEW_TARGETS:
+            continue
+
+        # The inner (input) node must also be a view-like op.
+        inp = node.args[0]
+        if not isinstance(inp, torch.fx.Node):
+            continue
+        if inp.op != "call_function" or inp.target not in _IDENTITY_VIEW_TARGETS:
+            continue
+
+        # Only collapse when the intermediate view has exactly one user.
+        if len(inp.users) != 1:
+            continue
+
+        # Replace the outer view's input with the inner view's input,
+        # keeping the outer view's target shape (args[1]).
+        node.args = (inp.args[0], node.args[1])
+        gm.graph.erase_node(inp)
+        count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Collapsed {count} redundant view/reshape chain(s) in the graph")
+
+    return gm
+
+
 def remove_identity_slice_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:

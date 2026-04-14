@@ -21,6 +21,7 @@ from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
+    collapse_view_chains_pass,
     reassign_to_pg_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
@@ -751,6 +752,154 @@ class TestRemoveIdentityViewPass(TestCase):
         num_nodes_before = len(list(gm.graph.nodes))
 
         result = remove_identity_view_pass(gm)
+
+        self.assertIs(result, gm)
+        self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
+
+
+class TestCollapseViewChainsPass(TestCase):
+    """Unit tests for the collapse_view_chains_pass graph pass."""
+
+    _VIEW_TARGETS = [
+        torch.ops.aten.view.default,
+        torch.ops.aten.reshape.default,
+        torch.ops.aten._unsafe_view.default,
+    ]
+
+    def _build_view_chain_gm(self, op_targets, *, shapes):
+        """Build a GraphModule with a chain of call_function nodes.
+
+        Each op in ``op_targets`` becomes a call_function node chained
+        sequentially: placeholder(x) -> op1(x, shape) -> op2(..., shape) -> output.
+
+        ``shapes`` must have the same length as ``op_targets`` and supplies
+        the shape argument for each view-like node.  Non-view nodes ignore
+        the corresponding entry (use None).
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        last = x
+        for i, target in enumerate(op_targets):
+            if target in (
+                torch.ops.aten.view.default,
+                torch.ops.aten.reshape.default,
+                torch.ops.aten._unsafe_view.default,
+            ):
+                last = graph.call_function(target, args=(last, shapes[i]))
+            else:
+                last = graph.call_function(target, args=(last,))
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _count_view_nodes(self, gm):
+        """Count view/reshape/_unsafe_view call_function nodes."""
+        targets = {
+            torch.ops.aten.view.default,
+            torch.ops.aten.reshape.default,
+            torch.ops.aten._unsafe_view.default,
+        }
+        return sum(
+            1 for n in gm.graph.nodes if n.op == "call_function" and n.target in targets
+        )
+
+    def test_single_use_chain_collapsed(self):
+        """view(view(x, s1), s2) -> view(x, s2) when intermediate has one user."""
+        for target in self._VIEW_TARGETS:
+            with self.subTest(target=target):
+                gm = self._build_view_chain_gm(
+                    [target, target],
+                    shapes=[[2, 8], [4, 4]],
+                )
+                self.assertEqual(self._count_view_nodes(gm), 2)
+
+                collapse_view_chains_pass(gm)
+
+                self.assertEqual(self._count_view_nodes(gm), 1)
+
+                # The remaining view should use the outer shape [4, 4].
+                for node in gm.graph.nodes:
+                    if node.op == "call_function":
+                        self.assertEqual(node.args[1], [4, 4])
+                        # Its input should be the placeholder, not another view.
+                        self.assertEqual(node.args[0].op, "placeholder")
+
+    def test_multi_use_intermediate_preserved(self):
+        """When the intermediate view has >1 user, the chain is not collapsed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        inner = graph.call_function(torch.ops.aten.view.default, args=(x, [2, 8]))
+        outer = graph.call_function(torch.ops.aten.view.default, args=(inner, [4, 4]))
+        # Add a second user of the inner view.
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(inner,))
+        graph.output((outer, neg))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        self.assertEqual(self._count_view_nodes(gm), 2)
+
+        collapse_view_chains_pass(gm)
+
+        # Both views should be preserved.
+        self.assertEqual(self._count_view_nodes(gm), 2)
+
+    def test_mixed_view_op_types(self):
+        """Chains of different view op types (view -> reshape) are collapsed."""
+        gm = self._build_view_chain_gm(
+            [torch.ops.aten.view.default, torch.ops.aten.reshape.default],
+            shapes=[[2, 8], [4, 4]],
+        )
+        self.assertEqual(self._count_view_nodes(gm), 2)
+
+        collapse_view_chains_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 1)
+
+    def test_longer_chain_collapsed(self):
+        """A chain of 3+ views is collapsed iteratively to a single view."""
+        gm = self._build_view_chain_gm(
+            [
+                torch.ops.aten.view.default,
+                torch.ops.aten.reshape.default,
+                torch.ops.aten._unsafe_view.default,
+            ],
+            shapes=[[2, 8], [8, 2], [4, 4]],
+        )
+        self.assertEqual(self._count_view_nodes(gm), 3)
+
+        collapse_view_chains_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 1)
+
+        # The remaining view should produce [4, 4] from the placeholder.
+        for node in gm.graph.nodes:
+            if node.op == "call_function":
+                self.assertEqual(node.args[1], [4, 4])
+                self.assertEqual(node.args[0].op, "placeholder")
+
+    def test_numerics_preserved(self):
+        """Forward outputs are preserved after collapsing view chains."""
+        gm = self._build_view_chain_gm(
+            [torch.ops.aten.view.default, torch.ops.aten.view.default],
+            shapes=[[2, 8], [4, 4]],
+        )
+
+        x = torch.randn(4, 4)
+        expected = x.view(2, 8).view(4, 4)
+
+        collapse_view_chains_pass(gm)
+        actual = gm(x)
+
+        self.assertEqual(actual, expected)
+
+    def test_no_views_unchanged(self):
+        """Graphs without view nodes are returned unchanged."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        num_nodes_before = len(list(gm.graph.nodes))
+
+        result = collapse_view_chains_pass(gm)
 
         self.assertIs(result, gm)
         self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
