@@ -607,37 +607,27 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "sft",
             ngpu=2,
         ),
-        # Chunked CE loss tests
+        # Chunked CE loss tests (4-GPU: FSDP, FSDP+TP, FSDP+CP, FSDP+compile)
         OverrideDefinitions(
             [
                 [
                     "--training.loss_num_chunks 4",
                 ],
-            ],
-            "Chunked CE loss with FSDP",
-            "chunked_loss_fsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
                 [
                     "--training.loss_num_chunks 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
-            ],
-            "Chunked CE loss with FSDP+TP (SP enabled)",
-            "chunked_loss_fsdp+tp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
                 [
                     "--training.loss_num_chunks 4",
                     "--parallelism.context_parallel_degree 2",
                 ],
+                [
+                    "--training.loss_num_chunks 4",
+                    "--compile.enable",
+                ],
             ],
-            "Chunked CE loss with FSDP+CP",
-            "chunked_loss_fsdp+cp",
+            "Chunked CE loss with FSDP, FSDP+TP, FSDP+CP, FSDP+compile",
+            "chunked_loss_4gpu",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -651,17 +641,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Chunked CE loss with FSDP+TP+CP",
             "chunked_loss_fsdp+tp+cp",
             ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.loss_num_chunks 4",
-                    "--compile.enable",
-                ],
-            ],
-            "Chunked CE loss with FSDP + compile",
-            "chunked_loss_fsdp+compile",
-            ngpu=4,
         ),
     ]
 
