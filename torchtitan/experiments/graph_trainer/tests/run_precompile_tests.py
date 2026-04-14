@@ -44,6 +44,7 @@ def _run_cmd(cmd):
 
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     full_inductor_precompile_dir = tempfile.mkdtemp(prefix="precompile_")
+    regional_precompile_dir = tempfile.mkdtemp(prefix="precompile_regional_")
     return [
         PrecompileTestDefinition(
             precompile_command=(
@@ -71,17 +72,30 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_name="aot_llama3_precompile_full_inductor",
             ngpu=8,
         ),
-        # TODO: Add precompile test for regional_inductor once the
-        # underlying issue is resolved. Currently, regional_inductor +
-        # precompile fails because serializable=True sets
-        # force_non_lazy_backward_lowering=True, which causes the
-        # backward compiler to run eagerly. When standalone_compile
-        # traces the scooped submodule (containing flex_attention HOPs
-        # with GraphModule subgraphs) via make_fx, the tracer hits
-        # NotImplementedError on GraphModuleImpl in create_arg.
-        # Without precompile, this same error is silently suppressed
-        # (graph_compile.py:2283-2298) and the backward is compiled
-        # lazily via a different code path.
+        PrecompileTestDefinition(
+            precompile_command=(
+                "python -m torchtitan.experiments.graph_trainer.precompile_main"
+                " --module graph_trainer.llama3"
+                " --config graph_trainer_llama3_debugmodel_flex_attn"
+                " --compile.mode aot"
+                " --compile.passes regional_inductor"
+                f" --compile.precompile_artifact_dir {regional_precompile_dir}"
+                " --parallelism.data_parallel_shard_degree 4"
+                " --parallelism.tensor_parallel_degree 2"
+            ),
+            override_args=[
+                "--module graph_trainer.llama3",
+                "--config graph_trainer_llama3_debugmodel_flex_attn",
+                "--compile.mode aot",
+                "--compile.passes regional_inductor",
+                f"--compile.precompile_artifact_dir {regional_precompile_dir}",
+                "--parallelism.data_parallel_shard_degree 4",
+                "--parallelism.tensor_parallel_degree 2",
+            ],
+            test_descr="AOT llama3 precompile regional_inductor (flex_attn)",
+            test_name="aot_llama3_precompile_regional_inductor",
+            ngpu=8,
+        ),
     ]
 
 

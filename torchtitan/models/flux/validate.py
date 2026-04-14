@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 
 import torch
@@ -43,7 +42,6 @@ class FluxValidator(Validator):
         parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
         validation_context: Context manager for validation
-        maybe_enable_amp: Context manager for AMP
         metrics_processor: Metrics processor
     """
 
@@ -80,7 +78,6 @@ class FluxValidator(Validator):
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
-        maybe_enable_amp: AbstractContextManager[None],
         local_batch_size: int,
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
@@ -107,7 +104,6 @@ class FluxValidator(Validator):
         self.dp_rank = dp_rank
         self.local_batch_size = local_batch_size
         self.validation_context = validation_context
-        self.maybe_enable_amp = maybe_enable_amp
         # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
 
@@ -276,15 +272,14 @@ class FluxValidator(Validator):
                 )
 
             with self.validation_context():
-                with self.maybe_enable_amp:
-                    latent_noise_pred = model(
-                        img=latents,
-                        img_ids=latent_pos_enc,
-                        txt=t5_encodings,
-                        txt_ids=text_pos_enc,
-                        y=clip_encodings,
-                        timesteps=timesteps,
-                    )
+                latent_noise_pred = model(
+                    img=latents,
+                    img_ids=latent_pos_enc,
+                    txt=t5_encodings,
+                    txt_ids=text_pos_enc,
+                    y=clip_encodings,
+                    timesteps=timesteps,
+                )
 
                 loss = self.loss_fn(latent_noise_pred, target)
 

@@ -409,6 +409,10 @@ class DebugConfig:
     """Enable torch.autograd anomaly detection to help track down NaN/Inf gradients.
     Note: incurs significant overhead; for debugging only."""
 
+    batch_invariant: bool = False
+    """Enable batch-invariant mode to use batch-invariant ops in model
+    forward and deterministic NCCL collective reduction order"""
+
     print_config: bool = False
     """Print the job configs to terminal"""
 
