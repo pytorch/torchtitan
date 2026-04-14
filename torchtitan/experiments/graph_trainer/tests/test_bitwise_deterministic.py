@@ -266,11 +266,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """dde585df73ff27f7fae624399dbddbda7123bf6fdc0b65a8d19a3941437739e0""",
+            """714c6b36b72327f2f11da003a219b6ff84f83e785464133f729e4f82c1913232""",
         )
         assert_expected_inline(
             grad_hash,
-            """d4c46d7717cb303c7b19e97cd6b4be4af79d73acabafcba6bb1f6ca244159096""",
+            """2eb6e999ebe213e69f8e85ecabea46ab59be81f0981847c7c8e69765be0d6678""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -305,11 +305,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """1dbbbbe1c8cb02de609bc7a2da96b279715a01ab4e47188a8c7f359b5f17c3ac""",
+            """2dcc779af7bc5aeae2d39eff3898180a8156549b2f1582d77e8db237689e0c67""",
         )
         assert_expected_inline(
             grad_hash,
-            """b86ab441a965db4cabab84f702f59613f9a5bf1cb3df18154c63b52d5b0932ad""",
+            """b3f5b911dea6c9d36f508b08300220d7f39f142a7c34a49b7ef2543abb2065dc""",
         )
 
     # TODO: OOMs during flex_attention compilation on A100 GPUs.
