@@ -15,10 +15,9 @@ from torch.distributed.tensor import DTensor, Partial
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
-from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import BaseTokenDispatcher
+from .token_dispatcher import LocalTokenDispatcher
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -79,7 +78,7 @@ class GroupedExperts(Module):
         hidden_dim: int
         num_experts: int
         use_grouped_mm: bool = True
-        token_dispatcher: BaseTokenDispatcher.Config
+        token_dispatcher: LocalTokenDispatcher.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -125,19 +124,20 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, object]:
-        """Dispatch tokens to experts, compute, and combine.
+        shared_experts: nn.Module | None = None,
+    ) -> torch.Tensor:
+        """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        Returns (routed_output, metadata). The caller is responsible for
-        scatter_add into the output buffer — this allows overlapping
-        shared_experts with the async combine all-to-all.
+        shared_experts is passed to combine() where it overlaps with the async
+        combine all-to-all (NCCL stream) or async DeepEP combine.
         """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        routed_output = self.token_dispatcher.combine(routed_output, metadata)
-        return routed_output, metadata
+        return self.token_dispatcher.combine(
+            routed_output, metadata, x, shared_experts
+        )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -305,12 +305,13 @@ class MoE(Module):
 
     The forward pass proceeds as:
     1. Router computes expert assignments
-    2. GroupedExperts.forward() runs dispatch → expert compute → combine:
-       a. dispatch — reorder tokens + optional all-to-all to expert-owning ranks
+    2. GroupedExperts.forward() handles:
+       a. dispatch — reorder tokens + optional EP communication to expert-owning ranks
        b. expert computation
-       c. combine — reverse the dispatch (async all-to-all for EP)
-    3. shared_experts overlaps with the async combine all-to-all
-    4. scatter_add routed_output into shared_experts output (forces sync)
+       c. combine — starts async EP communication (NCCL all-to-all or DeepEP combine),
+          runs shared_experts in parallel with the async communication,
+          then forces sync (scatter_add for NCCL AllToAll, sync_combine for DeepEP)
+          and produces final output
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -318,7 +319,6 @@ class MoE(Module):
         num_experts: int = 8
         experts: GroupedExperts.Config
         router: TokenChoiceTopKRouter.Config
-        score_before_experts: bool = True
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
 
@@ -331,7 +331,6 @@ class MoE(Module):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
-        self.score_before_experts = config.score_before_experts
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
@@ -401,37 +400,15 @@ class MoE(Module):
         # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
-        with torch.no_grad():
-            self.tokens_per_expert.add_(num_tokens_per_expert)
+        if self.load_balance_coeff is not None:
+            with torch.no_grad():
+                self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Dispatch tokens to experts, compute, and combine.
-        # For the standard EP path, combine returns an AsyncCollectiveTensor
-        # (the a2a is still in flight on the NCCL stream).
-        routed_output, metadata = self.experts(
+        out = self.experts(
             x,
             top_scores,
             selected_experts_indices,
-        )
-
-        # shared expert
-        # Note: we execute the shared expert before scoring the output of the routed expert
-        # to "implicitly" overlap the shared expert compute with token combine communication
-        out = (
-            self.shared_experts(x)
-            if self.shared_experts is not None
-            else torch.zeros_like(x)
-        )
-        # Score multiply + scatter_add force the a2a to sync
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        out = deterministic_scatter_add(
-            out,
-            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
-            routed_output,
+            shared_experts=self.shared_experts,
         )
 
         return out.reshape(bs, slen, dim)

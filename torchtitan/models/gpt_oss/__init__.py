@@ -153,7 +153,6 @@ def _build_gptoss_layers(
         )
         moe_cfg = GptOssMoE.Config(
             num_experts=num_experts,
-            score_before_experts=score_before_experts,
             load_balance_coeff=load_balance_coeff,
             experts=experts_cfg,
             router=TokenChoiceTopKRouter.Config(

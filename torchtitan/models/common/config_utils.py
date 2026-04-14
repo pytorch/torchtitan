@@ -19,10 +19,9 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.token_dispatcher import (
-    BaseTokenDispatcher,
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
-    TokenDispatcher,
+    AllToAllTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 
@@ -95,13 +94,11 @@ def make_moe_config(
     router: TokenChoiceTopKRouter.Config,
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
-    score_before_experts: bool = True,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
     return MoE.Config(
         num_experts=num_experts,
-        score_before_experts=score_before_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
         experts=experts,
@@ -149,12 +146,17 @@ def make_token_dispatcher_config(
     ep_degree: int = 1,
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
-) -> BaseTokenDispatcher.Config:
+) -> (
+    LocalTokenDispatcher.Config
+    | AllToAllTokenDispatcher.Config
+    | TorchAOTokenDispatcher.Config
+    | DeepEPTokenDispatcher.Config
+):
     """Build the appropriate token dispatcher config.
 
     Returns the right Config subclass based on parallelism settings:
     - EP=1 (default): LocalTokenDispatcher.Config → LocalTokenDispatcher
-    - EP>1, standard: TokenDispatcher.Config → TokenDispatcher
+    - EP>1, standard: AllToAllTokenDispatcher.Config → AllToAllTokenDispatcher
     - EP>1, standard, pad_multiple: TorchAOTokenDispatcher.Config → TorchAOTokenDispatcher
     - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
       (pad_multiple is handled internally by the DeepEP/HybridEP library)
@@ -178,7 +180,7 @@ def make_token_dispatcher_config(
             pad_multiple=pad_multiple,
         )
     elif ep_degree > 1:
-        return TokenDispatcher.Config(
+        return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,

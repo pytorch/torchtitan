@@ -8,22 +8,22 @@ import unittest
 
 import torch
 
-from torchtitan.models.common.token_dispatcher import TokenDispatcher
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
 
 class TestPermute(unittest.TestCase):
-    """Test TokenDispatcher._permute which reorders tokens from rank-major to expert-major layout.
+    """Test AllToAllTokenDispatcher._permute which reorders tokens from rank-major to expert-major layout.
 
     Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
     Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
     """
 
-    def _make_dispatcher(self) -> TokenDispatcher:
-        """Create a minimal TokenDispatcher for testing _permute."""
-        cfg = TokenDispatcher.Config(
+    def _make_dispatcher(self) -> AllToAllTokenDispatcher:
+        """Create a minimal AllToAllTokenDispatcher for testing _permute."""
+        cfg = AllToAllTokenDispatcher.Config(
             num_experts=1, top_k=1, score_before_experts=True, ep_degree=1
         )
-        return TokenDispatcher(cfg)
+        return AllToAllTokenDispatcher(cfg)
 
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""

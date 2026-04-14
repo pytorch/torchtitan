@@ -13,7 +13,10 @@ from torch.distributed._functional_collectives import (
     all_to_all_single_autograd,
 )
 
+from torch import nn
+
 from torchtitan.config import Configurable
+from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -25,8 +28,8 @@ class LocalDispatchMetadata:
 
 
 @dataclass(frozen=True, kw_only=True)
-class DispatchMetadata(LocalDispatchMetadata):
-    """Metadata returned by TokenDispatcher.dispatch() for use in combine()."""
+class AllToAllDispatchMetadata(LocalDispatchMetadata):
+    """Metadata returned by AllToAllTokenDispatcher.dispatch() for use in combine()."""
 
     input_shape: tuple  # for _unpermute
     permuted_indices: torch.Tensor  # for _unpermute
@@ -34,11 +37,11 @@ class DispatchMetadata(LocalDispatchMetadata):
     output_splits: list[int]
 
 
-class BaseTokenDispatcher(Configurable):
-    """Abstract base for token dispatchers in MoE.
+class LocalTokenDispatcher(Configurable):
+    """Token dispatcher for EP=1. Handles local token reordering only.
 
-    A token dispatcher handles the full token routing lifecycle:
-    dispatch (reorder + optional EP all-to-all) and combine (reverse).
+    Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher) which override dispatch() and combine().
 
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
@@ -62,7 +65,7 @@ class BaseTokenDispatcher(Configurable):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
-        """Reorder and (optionally) dispatch tokens to experts.
+        """Reorder tokens by expert assignment for local expert computation.
 
         Args:
             x: (num_tokens, dim) all input tokens
@@ -70,47 +73,13 @@ class BaseTokenDispatcher(Configurable):
             selected_experts_indices: (num_tokens, top_k) expert indices per token
 
         Returns:
-            routed_input: (R, dim) tokens ready for expert computation, padded for alignment
-            num_tokens_per_expert_local: (num_local_experts,) aligned token counts
-            metadata: state needed by combine()
+            routed_input: (num_tokens * top_k, dim) tokens sorted by expert index
+            num_tokens_per_expert: (num_experts,) token counts per expert
+            metadata: LocalDispatchMetadata for combine()
         """
-        raise NotImplementedError
-
-    def combine(
-        self,
-        routed_output: torch.Tensor,
-        metadata: LocalDispatchMetadata,
-    ) -> torch.Tensor:
-        """Reverse the dispatch: unpermute + optional all-to-all.
-
-        Args:
-            routed_output: (R, dim) expert outputs
-            metadata: state from dispatch()
-
-        Returns:
-            routed_output in local token order (not yet scatter_add'd).
-            For EP, this is an AsyncCollectiveTensor — the a2a runs on
-            the NCCL stream and won't block until accessed.
-        """
-        raise NotImplementedError
-
-
-class LocalTokenDispatcher(BaseTokenDispatcher):
-    """Token dispatcher for EP=1. Handles local token reordering only."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseTokenDispatcher.Config):
-        pass
-
-    def dispatch(
-        self,
-        x: torch.Tensor,
-        top_scores: torch.Tensor,
-        selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
         # TODO: Extract this local reordering block (histc, argsort, score
         # application) into a shared helper — it's duplicated in
-        # TokenDispatcher.dispatch.
+        # AllToAllTokenDispatcher.dispatch.
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
@@ -148,18 +117,52 @@ class LocalTokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
+        x: torch.Tensor,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
-        return routed_output
+        """Score, scatter_add, and optionally overlap shared_experts.
+
+        For EP=1, no communication is needed. shared_experts runs before
+        scatter_add (no async overlap benefit here, but keeps the interface
+        uniform with AllToAllTokenDispatcher).
+
+        Args:
+            routed_output: (num_tokens * top_k, dim) expert outputs
+            metadata: LocalDispatchMetadata from dispatch()
+            x: (num_tokens, dim) original input tokens
+            shared_experts: optional shared expert module to overlap
+
+        Returns:
+            (num_tokens, dim) combined output with shared_experts added.
+        """
+        out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
+
+        if not self.score_before_experts:
+            routed_output = (
+                routed_output.to(torch.float32)
+                * metadata.top_scores_experts_sorted.reshape(-1, 1)
+            ).to(routed_output.dtype)
+
+        dim = x.shape[-1]
+        out = deterministic_scatter_add(
+            out,
+            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )
+        return out
 
 
-class TokenDispatcher(BaseTokenDispatcher):
+class AllToAllTokenDispatcher(LocalTokenDispatcher):
     """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
+
+    Handles the full token routing lifecycle:
+    dispatch (reorder + EP all-to-all) and combine (reverse).
 
     ep_group is set by the parallelization code after construction.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseTokenDispatcher.Config):
+    class Config(LocalTokenDispatcher.Config):
         pass
 
     def __init__(self, config: Config):
@@ -172,7 +175,19 @@ class TokenDispatcher(BaseTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, DispatchMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, AllToAllDispatchMetadata]:
+        """Reorder tokens, then all-to-all dispatch to expert-parallel ranks.
+
+        Args:
+            x: (num_tokens, dim) all input tokens
+            top_scores: (num_tokens, top_k) routing scores
+            selected_experts_indices: (num_tokens, top_k) expert indices per token
+
+        Returns:
+            routed_input: (R, dim) tokens in expert-major order for local experts
+            num_tokens_per_expert_local: (num_local_experts,) token counts
+            metadata: AllToAllDispatchMetadata for combine()
+        """
         ep_degree = self.ep_degree
 
         # TODO: Extract this local reordering block (histc, argsort, score
@@ -259,7 +274,7 @@ class TokenDispatcher(BaseTokenDispatcher):
             num_local_experts,
         )
 
-        metadata = DispatchMetadata(
+        metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted=token_indices_experts_sorted,
             top_scores_experts_sorted=top_scores_experts_sorted,
             input_shape=input_shape,
@@ -324,26 +339,44 @@ class TokenDispatcher(BaseTokenDispatcher):
     def combine(
         self,
         routed_output: torch.Tensor,
-        metadata: DispatchMetadata,
+        metadata: AllToAllDispatchMetadata,
+        x: torch.Tensor,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
+        """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
+
+        shared_experts overlaps with the async all-to-all combine — it runs
+        while the a2a is in flight on the NCCL stream. scatter_add forces sync.
+
+        Args:
+            routed_output: (R, dim) expert outputs in expert-major order
+            metadata: AllToAllDispatchMetadata from dispatch()
+            x: (num_tokens, dim) original input tokens
+            shared_experts: optional shared expert module to overlap
+
+        Returns:
+            (num_tokens, dim) combined output with shared_experts added.
+        """
         # Reverse expert-major reordering
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
         )
 
-        # All-to-all combine: send tokens back to originating EP ranks.
-        # Returns an AsyncCollectiveTensor — the a2a runs on the NCCL stream
-        # and won't block until the tensor is accessed (e.g. by scatter_add
-        # in MoE.forward).
-        return all_to_all_single_autograd(
+        # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
+        # on the NCCL stream and won't block until the tensor is accessed.
+        routed_output = all_to_all_single_autograd(
             routed_output,
             metadata.input_splits,
             metadata.output_splits,
             self.ep_group,
         )
 
+        # shared_experts overlaps with the async a2a (NCCL stream).
+        # Score application + scatter_add forces the a2a to sync.
+        return super().combine(routed_output, metadata, x, shared_experts)
 
-class TorchAOTokenDispatcher(TokenDispatcher):
+
+class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     """Token dispatcher for EP>1 with token group padding for quantized grouped GEMMs.
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
@@ -355,7 +388,7 @@ class TorchAOTokenDispatcher(TokenDispatcher):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TokenDispatcher.Config):
+    class Config(AllToAllTokenDispatcher.Config):
         pad_multiple: int
 
     def __init__(self, config: Config):
@@ -407,7 +440,7 @@ class DeepEPDispatchMetadata:
     state: object  # deepep.DispatchState or hybridep.DispatchState
 
 
-class DeepEPTokenDispatcher(BaseTokenDispatcher):
+class DeepEPTokenDispatcher(LocalTokenDispatcher):
     """Token dispatcher using DeepEP/HybridEP for efficient token dispatch/combine.
 
     Uses DeepEP library kernels instead of standard all-to-all collectives for
@@ -418,7 +451,7 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseTokenDispatcher.Config):
+    class Config(LocalTokenDispatcher.Config):
         """Config for DeepEP/HybridEP token dispatcher.
 
         Args:
@@ -496,11 +529,18 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
         self,
         routed_output: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
+        x: torch.Tensor,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
+        """Combine tokens via DeepEP/HybridEP, overlapping shared_experts.
+
+        For the deepep backend, combine is async — shared_experts runs while
+        the combine is in flight, then sync_combine() waits before the addition.
+        """
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep
 
-            return hybridep.combine_tokens(
+            routed_output = hybridep.combine_tokens(
                 routed_output,
                 metadata.state,  # pyrefly: ignore [bad-argument-type]
                 pad_multiple=self.pad_multiple,
@@ -509,4 +549,19 @@ class DeepEPTokenDispatcher(BaseTokenDispatcher):
             from torchtitan.distributed.deepep.deepep import combine_tokens
 
             # pyrefly: ignore [bad-argument-type]
-            return combine_tokens(routed_output, metadata.state)
+            routed_output = combine_tokens(routed_output, metadata.state)
+
+        # shared_experts runs in parallel with combine communication.
+        # This is the key optimization - we overlap compute with communication.
+        shared_out = shared_experts(x) if shared_experts is not None else None
+
+        # Sync the combine operation before using routed_output.
+        # This inserts a CUDA stream wait, ensuring combine is complete before
+        # the subsequent addition or reshape operations read routed_output.
+        from torchtitan.distributed.deepep.deepep import sync_combine
+
+        sync_combine()
+
+        if shared_out is not None:
+            routed_output = routed_output + shared_out
+        return routed_output

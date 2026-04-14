@@ -51,13 +51,13 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     """
     from torchtitan.models.common.attention import FlexAttention
     from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import BaseTokenDispatcher
+    from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
-    BaseTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
-        BaseTokenDispatcher.dispatch
+    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        LocalTokenDispatcher.dispatch
     )
-    BaseTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
-        BaseTokenDispatcher.combine
+    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        LocalTokenDispatcher.combine
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 

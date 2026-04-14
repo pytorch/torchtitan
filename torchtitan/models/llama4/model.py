@@ -150,15 +150,6 @@ class Llama4Model(Decoder):
                         debug.moe_force_load_balance
                     )
 
-                    if parallelism.expert_parallel_comm_backend == "deepep":
-                        from torchtitan.models.common.moe_deepep import DeepEPMoE
-
-                        init_kwargs = {
-                            f.name: getattr(layer_cfg.moe, f.name)
-                            for f in dataclasses.fields(layer_cfg.moe)
-                            if f.init
-                        }
-                        layer_cfg.moe = DeepEPMoE.Config(**init_kwargs)
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(

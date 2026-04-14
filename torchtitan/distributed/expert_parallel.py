@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
-from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
@@ -16,12 +15,6 @@ from torch.distributed.tensor import (
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
-
-
-class BaseExpertParallel(ParallelStyle, ABC):
-    @abstractmethod
-    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
-        ...
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
@@ -52,7 +45,7 @@ class TensorParallel(ParallelStyle):
         )
 
 
-class ExpertParallel(BaseExpertParallel):
+class ExpertParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
         self.input_splits = None
@@ -61,14 +54,22 @@ class ExpertParallel(BaseExpertParallel):
         self.permuted_indices = None
 
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        from torchtitan.models.common.token_dispatcher import (
+            AllToAllTokenDispatcher,
+            DeepEPTokenDispatcher,
+        )
+
         for param_name, param in mod.named_parameters(recurse=False):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             mod.register_parameter(param_name, dist_param)
         # Set ep_group on the token dispatcher for all-to-all communication.
         # device_mesh here is the 1D EP mesh.
-        mod.token_dispatcher.ep_group = (
-            device_mesh.get_group()
-        )  # pyrefly: ignore [missing-attribute]
+        assert hasattr(mod, "token_dispatcher"), f"{type(mod)} missing token_dispatcher attribute"
+        assert isinstance(
+            mod.token_dispatcher,
+            (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
+        ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
+        mod.token_dispatcher.ep_group = device_mesh.get_group()
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -78,6 +79,8 @@ class ExpertParallel(BaseExpertParallel):
         )
 
 
+# TODO: Remove this class — all TP ranks within the same EP group perform
+# redundant all-to-all communication.
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ExpertParallel):
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
@@ -103,9 +106,17 @@ class ExpertTensorParallel(ExpertParallel):
         )  # Column-wise sharding
         # Set ep_group on the token dispatcher for all-to-all communication.
         # device_mesh is the 2D (EP, ETP) mesh; slice the EP dimension.
-        mod.token_dispatcher.ep_group = device_mesh[
-            "ep"
-        ].get_group()  # pyrefly: ignore [missing-attribute]
+        from torchtitan.models.common.token_dispatcher import (
+            AllToAllTokenDispatcher,
+            DeepEPTokenDispatcher,
+        )
+
+        assert hasattr(mod, "token_dispatcher"), f"{type(mod)} missing token_dispatcher attribute"
+        assert isinstance(
+            mod.token_dispatcher,
+            (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
+        ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
+        mod.token_dispatcher.ep_group = device_mesh["ep"].get_group()
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

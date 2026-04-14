@@ -593,7 +593,7 @@ def apply_moe_ep_tp(
                         "Use hybridep or standard comm backend instead."
                     )
                     logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            if tp_mesh is not None:
+            if tp_mesh is not None and comm_backend not in ("deepep", "hybridep"):
                 # ETP=1: EP borrows from TP. Each EP rank processes a
                 # disjoint token subset (sequence parallel).
                 experts_plan = ExpertSequenceParallel()

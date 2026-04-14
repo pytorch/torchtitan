@@ -161,7 +161,6 @@ def _build_qwen3_moe_layers(
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,
-                    score_before_experts=False,
                     router=make_router_config(
                         dim=dim,
                         num_experts=num_experts,
