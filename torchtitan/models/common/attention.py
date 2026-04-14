@@ -4,12 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-
-# TODO: Re-enable once we have closed
-# https://github.com/pytorch/torchtitan/issues/2722
-os.environ.setdefault("DISABLE_LLVM_OPT", "1")
-
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import ClassVar, NamedTuple
@@ -18,7 +12,12 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental import local_map
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
+)
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -29,6 +28,8 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 from torch.nn.attention.varlen import varlen_attn
+
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -156,6 +157,16 @@ class VarlenAttention(LocalMapInnerAttention):
     class Config(LocalMapInnerAttention.Config):
         pass
 
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+
+        from torchtitan.tools.utils import has_cuda_capability
+
+        # Hopper (SM 9.0) uses FA3
+        if has_cuda_capability(9, 0):
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+
     # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
@@ -190,6 +201,19 @@ class VarlenAttention(LocalMapInnerAttention):
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
 
+        varlen_kwargs = dict()
+
+        if is_in_batch_invariant_mode():
+            if current_flash_attention_impl() == "FA3":
+                # Fix split count to 1 to prevent non-deterministic split-k
+                # reductions that vary with batch composition.
+                # Only needed for FA3; FA2 is automatically batch-invariant.
+                varlen_kwargs["num_splits"] = 1
+
+        # Forward enable_gqa from GQAttention when Q and KV head counts differ
+        if kwargs.get("enable_gqa", False):
+            varlen_kwargs["enable_gqa"] = True
+
         out_packed = varlen_attn(
             xq_packed,
             xk_packed,
@@ -210,6 +234,7 @@ class VarlenAttention(LocalMapInnerAttention):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
+            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
@@ -236,11 +261,18 @@ class FlexAttention(LocalMapInnerAttention):
         kernel_options: dict = field(default_factory=dict)
 
     inductor_configs: ClassVar[dict[str, bool]] = {
-        # TODO: turn on wrap_inductor_compiled_regions after PyTorch fix is
-        # landed again: https://github.com/pytorch/pytorch/pull/175733.
-        "wrap_inductor_compiled_regions": False,
-        "max_autotune": True,
-        "coordinate_descent_tuning": True,
+        "wrap_inductor_compiled_regions": True,
+        # Recommended workflow: run once with max_autotune=True to discover
+        # good kernel_options, then set kernel_options explicitly in the config
+        # and keep max_autotune disabled for faster compilation.
+        "max_autotune": False,
+        # When enabled, after max_autotune selects the best kernel config,
+        # coordinate descent iteratively tunes individual parameters (block
+        # sizes, num_warps, num_stages) one at a time -- doubling/halving each
+        # and accepting changes that improve runtime by >0.1%. This can also
+        # run without max_autotune but starts from a weaker baseline config.
+        # See torch/_inductor/runtime/coordinate_descent_tuner.py.
+        "coordinate_descent_tuning": False,
         "triton.cudagraphs": False,
     }
 
@@ -552,32 +584,28 @@ class GQAttention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wqkv: Linear.Config
+        dim: int
+        wq: Linear.Config
+        wkv: Linear.Config
         wo: Linear.Config
-        q_norm: RMSNorm.Config | None = None
-        k_norm: RMSNorm.Config | None = None
+        qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
-        inner_attention: LocalMapInnerAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
-        )
+        inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
 
-        def __post_init__(self):
-            BaseAttention.Config.__post_init__(self)
-            if (self.q_norm is None) != (self.k_norm is None):
-                raise ValueError("q_norm and k_norm must be both None or both set")
-
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
         self.n_kv_heads = (
             config.n_heads if config.n_kv_heads is None else config.n_kv_heads
         )
         self.head_dim = (
-            config.head_dim if config.head_dim is not None else dim // config.n_heads
+            config.head_dim
+            if config.head_dim is not None
+            else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
         self.use_rope = config.use_rope
@@ -586,25 +614,17 @@ class GQAttention(BaseAttention):
         # Optional QK normalization (Qwen3-style)
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
-        if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
-            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
+        if config.qk_norm is not None:
+            self.q_norm = config.qk_norm.build()
+            self.k_norm = config.qk_norm.build()
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
-        self.wq = config.wqkv.build(
-            in_features=dim, out_features=self.n_heads * self.head_dim
-        )
-        self.wk = config.wqkv.build(
-            in_features=dim, out_features=self.n_kv_heads * self.head_dim
-        )
-        self.wv = config.wqkv.build(
-            in_features=dim, out_features=self.n_kv_heads * self.head_dim
-        )
-        self.wo = config.wo.build(
-            in_features=self.n_heads * self.head_dim, out_features=dim
-        )
+        self.wq = config.wq.build()
+        self.wk = config.wkv.build()
+        self.wv = config.wkv.build()
+        self.wo = config.wo.build()
 
         self.inner_attention = config.inner_attention.build()
 
@@ -626,9 +646,9 @@ class GQAttention(BaseAttention):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None:
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
             xq = self.q_norm(xq)
-        if self.k_norm is not None:
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings

@@ -7,7 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -50,11 +50,33 @@ def qwen3_debugmodel() -> Trainer.Config:
     )
 
 
+def qwen3_debugmodel_param_groups() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.optimizer = OptimizersContainer.Config(
+        lr=8e-4,
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r"tok_embeddings\.",
+                weight_decay_multiplier=0.0,
+            ),
+            ParamGroupConfig(
+                pattern=r"\.bias$",
+                weight_decay_multiplier=0.0,
+            ),
+            ParamGroupConfig(
+                pattern=r"(?:attention_norm|ffn_norm|norm)\.",
+                weight_decay_multiplier=0.0,
+            ),
+        ],
+    )
+    return config
+
+
 def qwen3_debugmodel_flex() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend_override="flex"),
+        model_spec=model_registry("debugmodel_flex"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -82,7 +104,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend_override="flex_flash"),
+        model_spec=model_registry("debugmodel_flex_flash"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -264,7 +286,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             },
         ]
 
-    model_spec = model_registry("8B", attn_backend_override="varlen")
+    model_spec = model_registry("8B_varlen")
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,

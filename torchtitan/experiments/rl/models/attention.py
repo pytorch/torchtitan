@@ -13,7 +13,9 @@ from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import LocalMapInnerAttention
+from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
@@ -24,9 +26,11 @@ from vllm.v1.attention.backends.flash_attn import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
+logger = logging.getLogger(__name__)
+
 
 @register_backend(AttentionBackendEnum.CUSTOM)
-class PyTorchFlashAttentionBackend(FlashAttentionBackend):
+class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -46,10 +50,10 @@ class PyTorchFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        return PyTorchFlashAttentionImpl
+        return PyTorchVarlenAttentionImpl
 
 
-class PyTorchFlashAttentionImpl(FlashAttentionImpl):
+class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
     """
     Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
     Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel
@@ -59,19 +63,18 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # FA3 requires SM 9.0+ (e.g. H100); check capability explicitly because
-        # activate_flash_attention_impl("FA3") succeeds even on SM80.
-        # Fall back to FA2 which requires page_size to be a multiple of 256.
+        self.enable_gqa = self.num_heads > self.num_kv_heads
+
+        # Hopper (SM 9.0) uses FA3
         if has_cuda_capability(9, 0):
+            # activate_flash_attention_impl() will restore internal global state
+            # and re-run register function, so we want to only call it once.
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
-            self._use_fa3 = True
         else:
-            logger.warning(
-                "FA3 not available (requires SM 9.0+), falling back to FA2. "
-                "vLLM block_size must be set to 256 for FA2 paged attention."
+            warn_once(
+                logger, "FA3 not available (requires SM 9.0+), falling back to FA2. "
             )
-            self._use_fa3 = False
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
@@ -157,7 +160,7 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
 
         # FA3 can infer cu_seqlens_k from block_table + seqused_k.
         # FA2 requires cu_seqlens_k to be explicitly set.
-        if self._use_fa3:
+        if current_flash_attention_impl() == "FA3":
             cu_seqlens_k = None
         else:
             num_seqs = seqused_k.shape[0]
@@ -165,6 +168,18 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
                 num_seqs + 1, dtype=torch.int32, device=query.device
             )
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
+        # FA3 + batch-invariant: fix num_splits=1 to prevent non-deterministic
+        # split-k reductions. FA2 is automatically batch-invariant and does
+        # not accept num_splits.
+        extra_kwargs = {}
+
+        # Disable split_kv in Flash Attention to ensure bitwise identical output.
+        # see https://github.com/pytorch/pytorch/pull/176905
+        if is_in_batch_invariant_mode() and current_flash_attention_impl() == "FA3":
+            extra_kwargs["num_splits"] = 1
+
+        if self.enable_gqa:
+            extra_kwargs["enable_gqa"] = True
 
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
@@ -179,10 +194,8 @@ class PyTorchFlashAttentionImpl(FlashAttentionImpl):
             window_size=sliding_window_size,
             block_table=block_table,
             seqused_k=seqused_k,
+            **extra_kwargs,
         )
-
-
-logger = logging.getLogger(__name__)
 
 
 class VLLMAttentionWrapper(LocalMapInnerAttention):
@@ -255,6 +268,7 @@ class VLLMAttentionWrapper(LocalMapInnerAttention):
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        # TODO: This need to be compatible with Pipeline Parallelism
         layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,

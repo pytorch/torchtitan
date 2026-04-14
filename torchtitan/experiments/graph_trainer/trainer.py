@@ -10,33 +10,43 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    maybe_register_blockmask_pytree_node,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    run_traced_module,
-    trace_module,
+    run_traced_train_step,
+    trace_train_step,
     TracedResult,
+)
+from torchtitan.experiments.graph_trainer.passes import (
+    apply_graph_passes,
+    construct_default_graph_passes,
 )
 from torchtitan.trainer import Trainer
 
 
-class FwdBwdStepModule(nn.Module):
-    """Wraps model + loss_fn + autograd.grad into a single traceable forward.
+def make_fwd_bwd_step(loss_fn):
+    """Return a plain function that traces the entire fwd+loss+bwd step.
 
-    This allows make_fx to trace through the entire fwd+loss+bwd as one graph.
+    ``loss_fn`` is captured in the closure so it is not a graph input.
     """
 
-    def __init__(self, model, loss_fn):
-        super().__init__()
-        self.model = model
-        self.loss_fn = loss_fn
-
-    def forward(self, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs):
-        pred = self.model(inputs, **extra_inputs, **extra_kwargs)
-        loss = self.loss_fn(pred, labels) / global_valid_tokens
-        params = [p for p in self.model.parameters() if p.requires_grad]
+    def fwd_bwd_step(
+        model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
+    ):
+        pred = model(inputs, **extra_inputs, **extra_kwargs)
+        loss = loss_fn(pred, labels) / global_valid_tokens
+        params = [
+            p
+            for _, p in model.named_parameters(remove_duplicate=False)
+            if p.requires_grad
+        ]
         grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
+
+    return fwd_bwd_step
 
 
 class GraphTrainer(Trainer):
@@ -55,7 +65,6 @@ class GraphTrainer(Trainer):
             )
 
         # Lazy state for aot_fx_trace mode
-        self._fwd_bwd_step_module: FwdBwdStepModule | None = None
         self._traced_step: TracedResult | None = None
 
     def forward_backward_step(
@@ -78,8 +87,13 @@ class GraphTrainer(Trainer):
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
-
-        params = [p for p in model.parameters() if p.requires_grad]
+        # remove_duplicate=False to preserve duplicate parameter entries
+        # from weight tying (e.g. shared embedding/output weights).
+        params = [
+            p
+            for _, p in model.named_parameters(remove_duplicate=False)
+            if p.requires_grad
+        ]
         return self._make_fx_forward_backward_step(
             model,
             inputs,
@@ -101,28 +115,39 @@ class GraphTrainer(Trainer):
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         if self._traced_step is None:
-            self._fwd_bwd_step_module = FwdBwdStepModule(model, self.loss_fn)
-
-            with self.train_context(), self.maybe_enable_amp:
-                self._traced_step = trace_module(
-                    self._fwd_bwd_step_module,
-                    (inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs),
+            fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
+            maybe_register_blockmask_pytree_node()
+            with self.train_context():
+                self._traced_step = trace_train_step(fwd_bwd_fn)(
+                    model,
+                    inputs,
+                    labels,
+                    global_valid_tokens,
+                    extra_inputs,
+                    extra_kwargs,
                 )
 
-        params_and_buffers = {
-            **dict(self._fwd_bwd_step_module.named_parameters(remove_duplicate=False)),
-            **dict(self._fwd_bwd_step_module.named_buffers(remove_duplicate=False)),
-        }
-        with self.train_context(), self.maybe_enable_amp:
-            outputs = run_traced_module(
+            if self.config.compile.enable_passes:
+                passes = construct_default_graph_passes(self._traced_step)
+                self._traced_step.gm = apply_graph_passes(
+                    self._traced_step.gm,
+                    self._traced_step.example_inputs,
+                    passes,
+                )
+        with self.train_context():
+            outputs = run_traced_train_step(
                 self._traced_step,
-                params_and_buffers,
-                (inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs),
+                model,
+                inputs,
+                labels,
+                global_valid_tokens,
+                extra_inputs,
+                extra_kwargs,
             )
         loss = outputs[0]
         grads = outputs[1:]
 
-        for param, grad in zip(params, grads):
+        for param, grad in zip(params, grads, strict=True):
             if param.grad is None:
                 param.grad = grad
             else:

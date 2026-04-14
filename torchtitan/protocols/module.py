@@ -11,7 +11,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from torchtitan.config import Configurable, Function
+from torchtitan.config import Configurable
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -35,7 +35,7 @@ class Module(nn.Module, Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        param_init: dict | Function.Config | None = None
+        param_init: dict | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.

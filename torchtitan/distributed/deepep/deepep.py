@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import torch
 from torch.distributed import ProcessGroup
+from torch.utils._python_dispatch import _disable_current_modes
 
 try:
     from deep_ep import Buffer  # pyrefly: ignore[missing-import]
@@ -422,18 +423,23 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
-    buffer = get_buffer(group, get_hidden_bytes(hidden_states))
+    # Hide buffer setup from SAC's __torch_dispatch__ via _disable_current_modes().
+    # Buffer.__init__ calls all_gather_object() which triggers aten._to_copy
+    # (CUDA→CPU), a MUST_SAVE op in our SAC policy. These are infrastructure
+    # ops, not model compute, and must not enter SAC's FIFO cache.
+    with _disable_current_modes():
+        buffer = get_buffer(group, get_hidden_bytes(hidden_states))
 
-    # Calculate dispatch layout before actual dispatch
-    (
-        num_tokens_per_rank,
-        num_tokens_per_rdma_rank,
-        num_tokens_per_expert_dispatch,
-        is_token_in_rank,
-        _,
-    ) = buffer.get_dispatch_layout(
-        topk_idx=selected_experts_indices, num_experts=num_experts
-    )
+        # Calculate dispatch layout before actual dispatch
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert_dispatch,
+            is_token_in_rank,
+            _,
+        ) = buffer.get_dispatch_layout(
+            topk_idx=selected_experts_indices, num_experts=num_experts
+        )
 
     # Dispatch tokens to experts
     (

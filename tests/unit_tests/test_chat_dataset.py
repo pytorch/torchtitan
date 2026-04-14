@@ -7,6 +7,8 @@
 import os
 import unittest
 
+from copy import deepcopy
+
 from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
@@ -329,6 +331,43 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             self.assertEqual(batch["input"].shape[0], seq_len)
             self.assertEqual(batch["positions"].shape[0], seq_len)
             self.assertEqual(labels.shape[0], seq_len)
+
+    def test_yield_same_data_multi_epoch(self):
+        tokenizer = _load_tokenizer()
+        ds = _load_dataset()
+        seq_len = 128
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=_process_sample,
+            seq_len=seq_len,
+            infinite=True,
+        )
+
+        # Consume at least 2 epochs
+        it = iter(chat_ds)
+        for i in range(25):
+            next(it)
+
+        state = deepcopy(chat_ds.state_dict())
+
+        # Restore
+        chat_ds2 = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=_process_sample,
+            seq_len=seq_len,
+            infinite=True,
+        )
+        chat_ds2.load_state_dict(state)
+
+        # verify yield gives same input data
+        # test assertion seveal times in order to empty potential input buffer.
+        it2 = iter(chat_ds2)
+        for _ in range(10):
+            self.assertEqual(
+                next(it)[0]["input"].tolist(), next(it2)[0]["input"].tolist()
+            )
 
 
 class TestChatDatasetInfiniteLooping(unittest.TestCase):

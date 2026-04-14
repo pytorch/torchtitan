@@ -501,3 +501,57 @@ class HuggingFaceTokenizer(BaseTokenizer):
     def id_to_token(self, token_id: int) -> str | None:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
+
+
+class MultiModalTokenizer(HuggingFaceTokenizer):
+    """Single source of truth for multimodal special tokens.
+
+    Requires 5 token strings via config, validates them against the vocabulary
+    at init, and exposes both string and ID attributes (e.g. ``image_token``,
+    ``image_id``). The multimodal data pipeline (``MMDataLoader``) requires
+    ``MultiModalTokenizer`` (not ``HuggingFaceTokenizer``) and reads these
+    attributes directly; the collator packs the IDs into a plain
+    ``dict[str, int]`` that travels through the batch to the model forward.
+    Adding a new VLM means filling in 5 config strings — no subclassing needed.
+
+    # TODO: All 5 fields are currently required. If a future VLM doesn't need
+    # some (e.g. no video, no vision_start/end markers), consider making fields
+    # optional.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(HuggingFaceTokenizer.Config):
+        image_token: str
+        """Token string for image placeholders, e.g. ``"<|image_pad|>"``."""
+
+        video_token: str
+        """Token string for video placeholders, e.g. ``"<|video_pad|>"``."""
+
+        vision_start_token: str
+        """Token string marking the start of a vision sequence."""
+
+        vision_end_token: str
+        """Token string marking the end of a vision sequence."""
+
+        pad_token: str
+        """Token string for padding."""
+
+    # Config field prefixes that follow the {name}_token pattern.
+    TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+
+    def __init__(self, config: Config, *, tokenizer_path: str):
+        super().__init__(config, tokenizer_path=tokenizer_path)
+
+        added_tokens = self.tokenizer.get_added_tokens_decoder()
+        token_to_id = {tok.content: tok_id for tok_id, tok in added_tokens.items()}
+
+        for name in self.TOKEN_FIELDS:
+            token_str: str = getattr(config, f"{name}_token")
+            if token_str not in token_to_id:
+                raise ValueError(
+                    f"Special token '{token_str}' (config field '{name}_token') "
+                    f"not found in tokenizer at '{tokenizer_path}'. "
+                    f"Available added tokens: {list(token_to_id.keys())}"
+                )
+            setattr(self, f"{name}_token", token_str)
+            setattr(self, f"{name}_id", token_to_id[token_str])
