@@ -7,7 +7,7 @@
 import copy
 import importlib
 import math
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 
 import torch
 from torch import nn
@@ -169,14 +169,12 @@ class HFTransformerModel(BaseModel):
             in the flavor, preserving model-specific HF attrs like
             ``qk_head_dim`` or ``n_routed_experts``.
             """
-            import dataclasses
-
             # Determine which fields were explicitly set (not defaults)
             explicit_overrides = {}
-            for field in dataclasses.fields(model_config):
+            for field in fields(model_config):
                 value = getattr(model_config, field.name)
                 default = field.default
-                if default is dataclasses.MISSING:
+                if default is MISSING:
                     # No default — always explicit
                     explicit_overrides[field.name] = value
                 elif value != default:
