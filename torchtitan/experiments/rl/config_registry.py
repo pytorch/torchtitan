@@ -173,6 +173,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             debug=batch_invariant_config,
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
