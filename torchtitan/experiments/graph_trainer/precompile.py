@@ -388,6 +388,10 @@ def precompile_fx_trace_load(
     remapping is needed.
     """
     data = storage.load(_FX_TRACE_ARTIFACT_KEY)
+    # Plain pickle is correct here: it unpacks the PrecompiledFxTraceArtifact
+    # dataclass whose fields are plain Python types. The GraphModule (with
+    # compiled Triton kernels) lives inside artifact.serialized_gm as an
+    # opaque bytes blob and is deserialized below via GraphPickler.loads.
     artifact: PrecompiledFxTraceArtifact = pickle.loads(data)
 
     _validate_config_fingerprint(artifact.config_fingerprint, expected_fingerprint)
