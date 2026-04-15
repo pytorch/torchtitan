@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torchstore as ts
 from monarch.actor import Actor, endpoint
@@ -154,10 +153,15 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Any | None = None
 
-        # Data parallelism: determine this rank's shard of the batch.
-        self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
-        self.dp_rank = dist.get_rank() // self.parallel_dims.non_data_parallel_size
+        # Data parallelism: mesh is available after _build_model triggers build_mesh
         self.dp_enabled = self.parallel_dims.dp_enabled
+        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
+        if batch_mesh is not None:
+            self.dp_size = batch_mesh.size()
+            self.dp_rank = batch_mesh.get_local_rank()
+        else:
+            self.dp_size = 1
+            self.dp_rank = 0
 
         logger.debug(
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
