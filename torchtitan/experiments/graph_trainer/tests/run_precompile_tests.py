@@ -43,15 +43,9 @@ def _run_cmd(cmd):
 
 
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
-    llama3_precompile_dir = tempfile.mkdtemp(prefix="precompile_llama3_")
-    fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
-    cudagraph_precompile_dir = tempfile.mkdtemp(prefix="precompile_cudagraph_")
-    dsv3_precompile_dir = tempfile.mkdtemp(prefix="precompile_dsv3_")
-    dsv3_regional_precompile_dir = tempfile.mkdtemp(prefix="precompile_dsv3_regional_")
+    full_inductor_precompile_dir = tempfile.mkdtemp(prefix="precompile_")
     regional_precompile_dir = tempfile.mkdtemp(prefix="precompile_regional_")
-    regional_cudagraph_precompile_dir = tempfile.mkdtemp(
-        prefix="precompile_regional_cudagraph_"
-    )
+    fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     return [
         PrecompileTestDefinition(
             precompile_command=(
@@ -61,7 +55,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 " --compile.mode aot"
                 " --compile.passes full_inductor_compilation"
                 " --compile.joint_passes inductor_decomposition"
-                f" --compile.precompile_artifact_dir {llama3_precompile_dir}"
+                f" --compile.precompile_artifact_dir {full_inductor_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2"
             ),
@@ -71,68 +65,12 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 "--compile.mode aot",
                 "--compile.passes full_inductor_compilation",
                 "--compile.joint_passes inductor_decomposition",
-                f"--compile.precompile_artifact_dir {llama3_precompile_dir}",
+                f"--compile.precompile_artifact_dir {full_inductor_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 4",
                 "--parallelism.tensor_parallel_degree 2",
             ],
             test_descr="AOT llama3 precompile full_inductor_compilation",
             test_name="aot_llama3_precompile_full_inductor",
-            ngpu=8,
-        ),
-        PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.llama3"
-                " --config graph_trainer_llama3_debugmodel"
-                " --compile.mode aot"
-                " --compile.passes full_inductor_compilation,cudagraph"
-                " --compile.joint_passes inductor_decomposition"
-                f" --compile.precompile_artifact_dir {cudagraph_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-            ),
-            override_args=[
-                "--module graph_trainer.llama3",
-                "--config graph_trainer_llama3_debugmodel",
-                "--compile.mode aot",
-                "--compile.passes full_inductor_compilation,cudagraph",
-                "--compile.joint_passes inductor_decomposition",
-                f"--compile.precompile_artifact_dir {cudagraph_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-            ],
-            test_descr="AOT llama3 precompile full_inductor_compilation + cudagraph",
-            test_name="aot_llama3_precompile_full_inductor_cudagraph",
-            ngpu=8,
-        ),
-        PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.deepseek_v3"
-                " --config graph_trainer_deepseek_v3_debugmodel"
-                " --compile.mode aot"
-                " --compile.passes full_inductor_compilation"
-                " --compile.joint_passes inductor_decomposition"
-                f" --compile.precompile_artifact_dir {dsv3_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-                " --parallelism.expert_parallel_degree 4"
-                " --parallelism.expert_tensor_parallel_degree 1"
-            ),
-            override_args=[
-                "--module graph_trainer.deepseek_v3",
-                "--config graph_trainer_deepseek_v3_debugmodel",
-                "--compile.mode aot",
-                "--compile.passes full_inductor_compilation",
-                "--compile.joint_passes inductor_decomposition",
-                f"--compile.precompile_artifact_dir {dsv3_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-                "--parallelism.expert_parallel_degree 4",
-                "--parallelism.expert_tensor_parallel_degree 1",
-            ],
-            test_descr="AOT deepseek_v3 precompile full_inductor_compilation (MoE)",
-            test_name="aot_dsv3_precompile_full_inductor",
             ngpu=8,
         ),
         PrecompileTestDefinition(
@@ -163,60 +101,24 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
                 " --module graph_trainer.llama3"
-                " --config graph_trainer_llama3_debugmodel_flex_attn"
-                " --compile.mode aot"
-                " --compile.passes regional_inductor,cudagraph"
-                f" --compile.precompile_artifact_dir {regional_cudagraph_precompile_dir}"
+                " --config graph_trainer_llama3_debugmodel"
+                " --compile.mode aot_fx_trace"
+                f" --compile.precompile_artifact_dir {fx_trace_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2"
             ),
             override_args=[
                 "--module graph_trainer.llama3",
-                "--config graph_trainer_llama3_debugmodel_flex_attn",
-                "--compile.mode aot",
-                "--compile.passes regional_inductor,cudagraph",
-                f"--compile.precompile_artifact_dir {regional_cudagraph_precompile_dir}",
+                "--config graph_trainer_llama3_debugmodel",
+                "--compile.mode aot_fx_trace",
+                f"--compile.precompile_artifact_dir {fx_trace_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 4",
                 "--parallelism.tensor_parallel_degree 2",
             ],
-            test_descr="AOT llama3 precompile regional_inductor + cudagraph (flex_attn)",
-            test_name="aot_llama3_precompile_regional_inductor_cudagraph",
+            test_descr="aot_fx_trace llama3 precompile FSDP+TP",
+            test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
             ngpu=8,
         ),
-        PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.deepseek_v3"
-                " --config graph_trainer_deepseek_v3_debugmodel_flex_attn"
-                " --compile.mode aot"
-                " --compile.passes regional_inductor"
-                f" --compile.precompile_artifact_dir {dsv3_regional_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-                " --parallelism.expert_parallel_degree 4"
-                " --parallelism.expert_tensor_parallel_degree 1"
-            ),
-            override_args=[
-                "--module graph_trainer.deepseek_v3",
-                "--config graph_trainer_deepseek_v3_debugmodel_flex_attn",
-                "--compile.mode aot",
-                "--compile.passes regional_inductor",
-                f"--compile.precompile_artifact_dir {dsv3_regional_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-                "--parallelism.expert_parallel_degree 4",
-                "--parallelism.expert_tensor_parallel_degree 1",
-            ],
-            test_descr="AOT deepseek_v3 precompile regional_inductor (MoE, flex_attn)",
-            test_name="aot_dsv3_precompile_regional_inductor",
-            ngpu=8,
-        ),
-        # TODO: DSv3 + cudagraph tests are not included because MoE routing
-        # copies tensors to CPU (int64 _to_copy to device='cpu' via histc,
-        # argsort, and tolist in moe.py), which is fundamentally incompatible
-        # with CUDA graph capture. This affects both precompile and plain AOT,
-        # and both full_inductor+cudagraph and regional_inductor+cudagraph.
-        # Enabling these requires MoE routing to avoid CPU tensor ops.
     ]
 
 

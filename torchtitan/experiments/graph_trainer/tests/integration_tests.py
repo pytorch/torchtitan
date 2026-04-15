@@ -473,9 +473,45 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_qwen3_tests() -> list[OverrideDefinitions]:
+    """Qwen3-based integration tests (dense + MoE)."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.qwen3",
+                    "--config graph_trainer_qwen3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace qwen3 FSDP+TP",
+            "aot_fx_trace_qwen3_fsdp_tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.qwen3",
+                    "--config graph_trainer_qwen3_debugmodel_moe",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                ],
+            ],
+            "aot_fx_trace qwen3 MoE FSDP+TP+EP",
+            "aot_fx_trace_qwen3_moe_fsdp_tp_ep",
+            ngpu=8,
+        ),
+    ]
+
+
 def build_graph_trainer_test_list() -> list[OverrideDefinitions]:
-    """All graph_trainer integration tests (Llama3 + DeepSeek-v3)."""
-    return _build_llama3_tests() + _build_deepseek_v3_tests()
+    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3)."""
+    return _build_llama3_tests() + _build_deepseek_v3_tests() + _build_qwen3_tests()
 
 
 def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
@@ -484,8 +520,8 @@ def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 tests only (for H100 machines)."""
-    return _build_deepseek_v3_tests()
+    """DeepSeek-v3 + Qwen3 tests (for H100 machines)."""
+    return _build_deepseek_v3_tests() + _build_qwen3_tests()
 
 
 _TEST_SUITES_FUNCTION = {

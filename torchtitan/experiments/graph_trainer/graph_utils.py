@@ -197,8 +197,9 @@ def joint_graph_builder(
         on_compile(fn, joint_with_descriptors.out_spec)
 
     def wrapper_fn(args, kwargs):
+        params = [p for _, p in model.named_parameters(remove_duplicate=False)]
         inputs = [
-            *model.parameters(),
+            *params,
             *model.buffers(),
             *args,
         ]
@@ -326,18 +327,9 @@ def compiler(
         # cudagraph pass is always the last pass if it is applied
         cg_pass = passes[-1]
 
-        # Pre-compute static input indices while gm is still a
-        # GraphModule. Prior passes (e.g. full_inductor_compilation)
-        # may replace gm with a non-GraphModule callable, making it
-        # impossible to inspect the graph later.
-        from torchtitan.experiments.graph_trainer.cudagraph import (
-            get_static_input_indices,
-        )
-
-        static_input_indices = get_static_input_indices(gm, is_forward)
-        _cg_pass = functools.partial(
-            cg_pass, is_forward=is_forward, static_input_indices=static_input_indices
-        )
+        # to identify static input indices, cudagraph passes behaves differently for
+        # forward and backward pass. so we explicitly pass the info.
+        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
 
         # keep the function name for debug log
         passes[-1] = functools.wraps(cg_pass)(_cg_pass)
@@ -351,6 +343,8 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
+    # Only try to print/dump if gm is still a GraphModule
+    # (compile_fx_inner returns a CompiledFxGraph which doesn't have print_readable)
     if hasattr(gm, "print_readable"):
         _dump_gm(dump_folder, gm, f"{name}_after_compiler")
 
@@ -566,7 +560,14 @@ def get_joint_custom_passes_from_config(
     # annotations. The validation is only relevant for regional_inductor.
     pass_names = getattr(compile_config, "passes", [])
     if "full_inductor_compilation" not in pass_names:
-        joint_custom_passes.append(annotate_flex_attention_for_regional_inductor_pass)
+        from torchtitan.models.common.attention import FlexAttention
+
+        joint_custom_passes.append(
+            functools.partial(
+                annotate_flex_attention_for_regional_inductor_pass,
+                flex_compile_config=FlexAttention.inductor_configs,
+            )
+        )
 
     # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])

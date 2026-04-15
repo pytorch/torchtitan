@@ -28,7 +28,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
@@ -106,6 +106,7 @@ def parallelize_gptoss(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             pad_multiple=pad_multiple,
+            enable_sp=True,
         )
 
     if parallel_dims.cp_enabled:
@@ -124,7 +125,7 @@ def parallelize_gptoss(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -250,8 +251,11 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
     pad_multiple: int | None = None,
+    enable_sp: bool = True,
 ):
     assert ep_mesh is not None or tp_mesh is not None
+
+    sp_layout = Shard(1) if enable_sp else Replicate()
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
@@ -261,15 +265,17 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
-                # input / output sharding on the seqlen dim
-                # all-gather for input, reduce-scatter for output
+                # With SP: all-gather (Shard→Replicate) for input,
+                # reduce-scatter (Partial→Shard) for output.
+                # Without SP: input is already Replicate,
+                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
-                    input_layouts=(Shard(1),),
+                    input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
                     # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
                     use_local_input=False,
                     output_layouts=(Partial(),),
-                    desired_output_layouts=(Shard(1),),
+                    desired_output_layouts=(sp_layout,),
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(
