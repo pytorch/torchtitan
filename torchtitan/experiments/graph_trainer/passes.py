@@ -67,6 +67,10 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # produce bitwise identical results to the eager Trainer path.
+        # When left uncompiled, flex_attention still runs correctly but
+        # produces different numerical results.
         functools.partial(
             annotate_flex_attention_for_regional_inductor_pass,
             flex_compile_config=FlexAttention.inductor_configs,
