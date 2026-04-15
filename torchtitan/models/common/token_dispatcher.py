@@ -269,13 +269,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_splits = (
                 num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=non_blocking)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
                 num_tokens_per_expert_group.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=non_blocking)
+                .to(torch.device("cpu"), non_blocking=False)
             )
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
