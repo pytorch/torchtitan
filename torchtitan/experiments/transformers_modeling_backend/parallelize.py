@@ -712,24 +712,22 @@ def apply_moe_ep_tp(
                 distribute_module(gate, tp_mesh)
 
                 def _router_params_to_local(gate_mod):
-                    # Use direct attribute access (not named_parameters)
-                    # to match the proven _experts_to_local pattern.
+                    # Use direct attribute access (not named_parameters).
                     # FSDP2 manages params at block level — after unshard,
                     # module.weight works but named_parameters may not.
+                    # The local tensor stays in __dict__ between forwards;
+                    # FSDP manages the DTensor via its own FSDPParamGroup
+                    # references, not module attribute access, so this is
+                    # safe. The pre-hook overwrites it each forward with
+                    # a fresh to_local() from the newly-unsharded DTensor.
                     def pre_hook(module, args):
                         weight = gate_mod.weight
                         if isinstance(weight, DTensor):
                             gate_mod.__dict__["weight"] = weight.to_local()
 
-                    def post_hook(module, args, output):
-                        gate_mod.__dict__.pop("weight", None)
-                        return output
+                    return pre_hook
 
-                    return pre_hook, post_hook
-
-                pre_hook, post_hook = _router_params_to_local(gate)
-                gate.register_forward_pre_hook(pre_hook)
-                gate.register_forward_hook(post_hook)
+                gate.register_forward_pre_hook(_router_params_to_local(gate))
             else:
                 parallelize_module(
                     gate,
@@ -747,22 +745,16 @@ def apply_moe_ep_tp(
             # Fix: shadow DTensor buffers with local copies for the entire
             # MoE block forward, not just the gate forward.
             def _gate_buffers_to_local(gate_mod):
+                # Local tensors stay in __dict__ between forwards;
+                # pre-hook overwrites each forward with fresh to_local().
                 def pre_hook(module, args):
                     for name, buf in gate_mod.named_buffers(recurse=False):
                         if isinstance(buf, DTensor):
                             gate_mod.__dict__[name] = buf.to_local()
 
-                def post_hook(module, args, output):
-                    for name in list(gate_mod.__dict__):
-                        if name in gate_mod._buffers:
-                            del gate_mod.__dict__[name]
-                    return output
+                return pre_hook
 
-                return pre_hook, post_hook
-
-            pre_hook, post_hook = _gate_buffers_to_local(gate)
-            moe_block.register_forward_pre_hook(pre_hook)
-            moe_block.register_forward_hook(post_hook)
+            moe_block.register_forward_pre_hook(_gate_buffers_to_local(gate))
 
             # TP-shard shared experts if present (e.g., Qwen2/3.5 MoE,
             # DeepSeek V3). The shared expert is a dense MLP — apply
