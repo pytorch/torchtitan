@@ -266,8 +266,8 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             fwd_node = seq_nr_to_fwd_node[seq_nr]
 
             custom = fwd_node.meta.get("custom")
-            if custom:
-                node.meta.setdefault("custom", {}).update(custom)
+            if custom and "custom" not in node.meta:
+                node.meta["custom"] = custom.copy()
             nn_module_stack = fwd_node.meta.get("nn_module_stack")
             if nn_module_stack is not None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
