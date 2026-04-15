@@ -674,6 +674,8 @@ def apply_moe_ep_tp(
 
         moe_block = transformer_block.mlp
         experts = moe_block.experts
+        # HF models use either "gate" or "router" for the routing module
+        gate = getattr(moe_block, "gate", None) or getattr(moe_block, "router", None)
 
         # --- EP: shard experts on dim 0, register dispatch/combine ---
         if ep_mesh is not None:
@@ -696,7 +698,7 @@ def apply_moe_ep_tp(
             # input/output via NoParallel. Same as native titan's
             # NoParallel on moe.router.gate.
             parallelize_module(
-                moe_block.gate,
+                gate,
                 tp_mesh,
                 NoParallel(local_output_grad_placements=(Partial(),)),
             )
@@ -710,21 +712,21 @@ def apply_moe_ep_tp(
             # DTensor/Tensor error.
             # Fix: shadow DTensor buffers with local copies for the entire
             # MoE block forward, not just the gate forward.
-            def _gate_buffers_to_local(gate):
+            def _gate_buffers_to_local(gate_mod):
                 def pre_hook(module, args):
-                    for name, buf in gate.named_buffers(recurse=False):
+                    for name, buf in gate_mod.named_buffers(recurse=False):
                         if isinstance(buf, DTensor):
-                            gate.__dict__[name] = buf.to_local()
+                            gate_mod.__dict__[name] = buf.to_local()
 
                 def post_hook(module, args, output):
-                    for name in list(gate.__dict__):
-                        if name in gate._buffers:
-                            del gate.__dict__[name]
+                    for name in list(gate_mod.__dict__):
+                        if name in gate_mod._buffers:
+                            del gate_mod.__dict__[name]
                     return output
 
                 return pre_hook, post_hook
 
-            pre_hook, post_hook = _gate_buffers_to_local(moe_block.gate)
+            pre_hook, post_hook = _gate_buffers_to_local(gate)
             moe_block.register_forward_pre_hook(pre_hook)
             moe_block.register_forward_hook(post_hook)
 

@@ -445,10 +445,9 @@ class HFTransformerModel(BaseModel):
             )
 
         for layer in self.model.model.layers.values():
-            # Detect MoE layers by checking for gate (router) and experts sub-modules
-            layer.moe_enabled = hasattr(layer.mlp, "gate") and hasattr(
-                layer.mlp, "experts"
-            )
+            # Detect MoE layers by checking for gate/router and experts sub-modules
+            has_gate = hasattr(layer.mlp, "gate") or hasattr(layer.mlp, "router")
+            layer.moe_enabled = has_gate and hasattr(layer.mlp, "experts")
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh

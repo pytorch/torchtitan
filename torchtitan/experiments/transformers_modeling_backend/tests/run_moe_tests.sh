@@ -231,7 +231,7 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "deepseek-ai/DeepSeek-V3"                       # deepseek_v3 (MLA attention)
         "zai-org/GLM-5"                                 # glm_moe_dsa (MLA attention)
         "microsoft/Phi-3.5-MoE-instruct"                # phimoe
-        # Qwen/Qwen3.5-35B-A3B — VLM (ForConditionalGeneration), needs different pipeline
+
     )
 
     for hf_model in "${SWEEP_MODELS[@]}"; do
@@ -242,12 +242,15 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
             --hf_model "$hf_model"
     done
 
-    # TP+EP sweep for shared expert models (verifies shared expert TP sharding)
+    # TP+EP sweep for all models (verifies TP + EP interaction, shared expert TP sharding)
     SWEEP_SHARED_MODELS=(
-        "Qwen/Qwen2-57B-A14B"                          # qwen2_moe
+        "Qwen/Qwen3-30B-A3B"                           # qwen3_moe (reference)
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"         # mixtral
+        "Qwen/Qwen2-57B-A14B"                          # qwen2_moe (shared experts)
         "zai-org/GLM-4.7"                               # glm4_moe_lite (shared experts)
         "deepseek-ai/DeepSeek-V3"                       # deepseek_v3 (MLA + shared experts)
         "zai-org/GLM-5"                                 # glm_moe_dsa (MLA + DSA + shared experts)
+        # microsoft/Phi-3.5-MoE-instruct — sparsemixer backward uses scatter_add_ incompatible with DTensor
     )
     for hf_model in "${SWEEP_SHARED_MODELS[@]}"; do
         run_half "TP=2+EP=2 $hf_model" \
