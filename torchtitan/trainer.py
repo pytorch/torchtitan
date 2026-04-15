@@ -17,6 +17,7 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -253,12 +254,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.model_config = model_config
 
+        if config.training.full_dtensor:
+            from torchtitan.distributed import full_dtensor
+
+            full_dtensor.validate_config(parallel_dims, model_config)
+
         # Fill sharding specs based on parallelism settings (before build)
         if model_spec.set_sharding_spec_fn is not None:
+            loss_parallel = not config.parallelism.disable_loss_parallel
             model_spec.set_sharding_spec_fn(
                 model_config,
                 parallel_dims,
-                loss_parallel=not config.parallelism.disable_loss_parallel,
+                loss_parallel=loss_parallel,
+                full_dtensor=config.training.full_dtensor,
             )
 
         logger.info(
@@ -419,6 +427,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # TODO: Change this back to init_weights once
                 # autoparallel contains the wrap_init_states
                 cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+            # init_weights may overwrite DTensor buffers with plain tensors
+            # (e.g. freqs_cis). Re-parallelize to convert them back.
+            if config.training.full_dtensor:
+                from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
+
+                spmd_mesh = get_dense_spmd_mesh(parallel_dims)
+                cast(BaseModel, model).parallelize(spmd_mesh)
             model.train()
 
             self.model_parts = [model]
@@ -652,6 +667,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.config.parallelism.context_parallel_load_balancer,
             )
 
+        # Convert inputs/labels to DTensors on the SPMD mesh
+        if self.config.training.full_dtensor:
+            from torchtitan.distributed import full_dtensor
+
+            inputs, labels = full_dtensor.parallelize_inputs(
+                self.parallel_dims, inputs, labels, extra_kwargs
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
@@ -707,6 +730,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                # In non-full-dtensor mode, config-based sharding may produce
+                # DTensor outputs. When loss_parallel is disabled, convert to
+                # local to avoid mixed DTensor/tensor in cross_entropy.
+                if (
+                    isinstance(pred, DTensor)
+                    and not self.config.training.full_dtensor
+                    and self.config.parallelism.disable_loss_parallel
+                ):
+                    pred = pred.to_local()
                 # Compute loss sum (reduction='sum')
                 loss_sum = self.loss_fn(pred, labels)
 

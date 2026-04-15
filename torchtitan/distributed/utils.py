@@ -44,14 +44,24 @@ def _dist_reduce(
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
     """
+    skip_mesh_reduce = False
     if isinstance(x, DTensor):
-        # functional collectives do not support DTensor inputs
+        # functional collectives do not support DTensor inputs.
+        # full_tensor() converts DTensor to plain tensor, performing
+        # any necessary reductions (Partial → all-reduce).
+        # When DTensor is fully Replicate or Partial, the value is already
+        # globally reduced — skip the subsequent mesh all-reduce.
+        skip_mesh_reduce = all(p.is_replicate() or p.is_partial() for p in x.placements)
         x = x.full_tensor()
 
     if extra_pg is not None:
+        assert not skip_mesh_reduce, (
+            "DTensor with Replicate/Partial placements should not be used with "
+            "extra_pg. full_dtensor does not support PP."
+        )
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
-    if mesh is None:
+    if mesh is None or skip_mesh_reduce:
         return float(x.item())
 
     assert x.numel() == 1  # required by `.item()`

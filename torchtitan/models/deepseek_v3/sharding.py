@@ -23,6 +23,7 @@ def set_deepseekv3_sharding_spec(
     parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
+    full_dtensor: bool = False,
 ) -> None:
     """Fill ``sharding_spec`` on all DeepSeek V3 sub-configs.
 

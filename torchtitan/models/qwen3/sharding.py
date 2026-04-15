@@ -23,6 +23,7 @@ def set_qwen3_sharding_spec(
     parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
+    full_dtensor: bool = False,
 ) -> None:
     """Fill ``sharding_spec`` on all Qwen3 sub-configs.
 

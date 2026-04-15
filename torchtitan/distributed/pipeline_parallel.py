@@ -158,6 +158,17 @@ def pipeline_llm(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
+    # Register SPMD mesh with PP stages for DTensor reconstruction
+    # after P2P recv in full DTensor mode.
+    if training.full_dtensor:
+        from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
+
+        spmd_mesh = get_dense_spmd_mesh(parallel_dims)
+        for stage in stages:
+            stage._mesh_cache._get_mesh_cb = (
+                lambda names, layout: spmd_mesh  # pyrefly: ignore[bad-assignment]
+            )
+
     pp_schedule = build_pipeline_schedule(
         parallelism=parallelism,
         local_batch_size=training.local_batch_size,

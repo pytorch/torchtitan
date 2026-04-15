@@ -180,11 +180,22 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
         )
 
+        # Full DTensor dense mesh: separate dp_shard and cp dims.
+        # The non-full-dtensor path uses dense_mesh (fsdp = dp_shard * cp).
+        # The full DTensor path uses this mesh with explicit separation so
+        # FSDP can shard on both dims via DataParallelMeshDims.
+        full_dtensor_dense_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+            (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
+        )
+
         self._global_meshes = {
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
             "dense": dense_mesh,
             "sparse": sparse_mesh,
+            "full_dtensor_dense": full_dtensor_dense_mesh,
         }
 
         self._meshes = {
@@ -192,6 +203,7 @@ class ParallelDims:
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
             "dp_replicate": dense_mesh["dp_replicate"],
+            "dp_shard": full_dtensor_dense_mesh["dp_shard"],
             "fsdp": dense_mesh["fsdp"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
@@ -217,6 +229,7 @@ class ParallelDims:
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
+            "dp_shard": self.dp_shard,
             "fsdp": self.dp_shard * self.cp,
             "cp": self.cp,
             "tp": self.tp,
@@ -345,6 +358,7 @@ class ParallelDims:
 
     @property
     def dp_shard_enabled(self):
+        """True when dp_shard > 1 (not counting cp folded into fsdp)."""
         return self.dp_shard > 1
 
     @property

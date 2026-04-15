@@ -181,7 +181,7 @@ class FlexAttention(Module):
         # Recommended workflow: run once with max_autotune=True to discover
         # good kernel_options, then set kernel_options explicitly in the config
         # and keep max_autotune disabled for faster compilation.
-        "max_autotune": False,
+        "max_autotune": True,
         # When enabled, after max_autotune selects the best kernel config,
         # coordinate descent iteratively tunes individual parameters (block
         # sizes, num_warps, num_stages) one at a time -- doubling/halving each

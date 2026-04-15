@@ -42,6 +42,7 @@ class Module(nn.Module, Configurable):
     _param_init: dict[str, Callable] | None = None
     _sharding_spec: ShardingSpec | None = None
     _pos_arg_list: list[str] | None = None
+    _forward_wrapped: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -159,12 +160,16 @@ class Module(nn.Module, Configurable):
 
         For each module with a ``sharding_spec``:
 
-        1. ``distribute_tensor`` on params per ``state_shardings``.
+        1. ``distribute_tensor`` on params/buffers per ``state_shardings``.
         2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
 
         The wrapping order is: ``shard_inputs → [local_map →] fn → shard_outputs``.
         CP (applied before ``parallelize``) is captured inside ``local_map``.
         FSDP hooks on ``__call__`` fire around the wrapped ``forward``.
+
+        Idempotent: a second call (e.g. after ``init_weights`` overwrites
+        buffers) only re-distributes plain tensors without double-wrapping
+        ``forward``.
         """
         # Recurse children first
         queue = list(self.children())
@@ -183,22 +188,31 @@ class Module(nn.Module, Configurable):
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named dims"
         mesh_dim_names = mesh.mesh_dim_names
 
-        # Distribute parameters and buffers
+        # Distribute parameters and buffers per state_shardings.
+        # Unconstrained dims default to Replicate for state distribution.
+        from torch.distributed.tensor import Replicate as _Replicate
+
+        def _resolve_state(named_pl):
+            pl = resolve_placements(named_pl, mesh_dim_names)
+            return tuple(
+                _Replicate() if isinstance(p, Unconstrained) else p for p in pl
+            )
+
         for name, param in self.named_parameters(recurse=False):
-            if name in spec.state_shardings:
-                placements = resolve_placements(
-                    spec.state_shardings[name], mesh_dim_names
-                )
+            if name in spec.state_shardings and not isinstance(param, DTensor):
+                placements = _resolve_state(spec.state_shardings[name])
                 self.register_parameter(
                     name,
                     nn.Parameter(distribute_tensor(param, mesh, list(placements))),
                 )
 
         for name, buffer in self.named_buffers(recurse=False):
-            if name in spec.state_shardings and buffer is not None:
-                placements = resolve_placements(
-                    spec.state_shardings[name], mesh_dim_names
-                )
+            if (
+                name in spec.state_shardings
+                and buffer is not None
+                and not isinstance(buffer, DTensor)
+            ):
+                placements = _resolve_state(spec.state_shardings[name])
                 persistent = name not in self._non_persistent_buffers_set
                 self.register_buffer(
                     name,
@@ -206,27 +220,29 @@ class Module(nn.Module, Configurable):
                     persistent=persistent,
                 )
 
-        # Pre-cache positional arg names before wrapping forward, so inspect.signature
-        # sees the original signature.
-        # _shard_inputs uses the cached list instead of calling inspect every forward.
-        _ = self._pos_arg_names  # noqa: F841
+        # Wrap forward with redistribution (+ local_map if needed).
+        # Skip if already wrapped (idempotent for post-init_weights calls).
+        if not self._forward_wrapped:
+            _ = self._pos_arg_names  # noqa: F841
 
-        fn = self.forward
-        if spec.local_map is not None:
-            fn = local_map(
-                fn,
-                in_placements=spec.local_map.in_placements,
-                out_placements=spec.local_map.out_placements,
-                in_grad_placements=spec.local_map.in_grad_placements,
-                device_mesh=mesh,
-            )
+            fn = self.forward
+            if spec.local_map is not None:
+                fn = local_map(
+                    fn,
+                    in_placements=spec.local_map.in_placements,
+                    out_placements=spec.local_map.out_placements,
+                    in_grad_placements=spec.local_map.in_grad_placements,
+                    device_mesh=mesh,
+                    redistribute_inputs=True,
+                )
 
-        def with_redistribution(*args, **kwargs):
-            args, kwargs = self._shard_inputs(mesh, args, kwargs)
-            outputs = fn(*args, **kwargs)
-            return self._shard_outputs(mesh, outputs)
+            def with_redistribution(*args, **kwargs):
+                args, kwargs = self._shard_inputs(mesh, args, kwargs)
+                outputs = fn(*args, **kwargs)
+                return self._shard_outputs(mesh, outputs)
 
-        self.forward = with_redistribution  # pyrefly: ignore [missing-attribute]
+            self.forward = with_redistribution  # pyrefly: ignore [missing-attribute]
+            self._forward_wrapped = True
 
     def _shard_inputs(
         self,
@@ -265,14 +281,23 @@ class Module(nn.Module, Configurable):
 
             # Step 1: Annotate plain tensor as DTensor using input_layouts
             if not isinstance(value, DTensor) and name in input_layouts:
+                from torch.distributed.tensor import Replicate as _Replicate
+
                 layout = resolve_placements(input_layouts[name], mesh_dim_names)
+                # Plain tensor needs concrete placements; Unconstrained → Replicate
+                layout = tuple(
+                    _Replicate() if isinstance(p, Unconstrained) else p for p in layout
+                )
                 value = DTensor.from_local(value, mesh, layout, run_check=False)
 
             # Step 2: Redistribute to desired placement if needed
             if name in in_shardings and isinstance(value, DTensor):
                 desired = resolve_placements(in_shardings[name], mesh_dim_names)
-                if any(isinstance(p, Unconstrained) for p in desired):
-                    continue
+                # Unconstrained dims preserve existing placement
+                desired = tuple(
+                    actual if isinstance(d, Unconstrained) else d
+                    for d, actual in zip(desired, value.placements)
+                )
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 
@@ -301,10 +326,14 @@ class Module(nn.Module, Configurable):
             return outputs
         assert mesh.mesh_dim_names is not None
         desired = resolve_placements(spec.out_shardings, mesh.mesh_dim_names)
-        if any(isinstance(p, Unconstrained) for p in desired):
-            return outputs
-        if isinstance(outputs, DTensor) and outputs.placements != desired:
-            outputs = outputs.redistribute(placements=desired, async_op=True)
+        if isinstance(outputs, DTensor):
+            # Unconstrained dims preserve existing placement
+            desired = tuple(
+                actual if isinstance(d, Unconstrained) else d
+                for d, actual in zip(desired, outputs.placements)
+            )
+            if outputs.placements != desired:
+                outputs = outputs.redistribute(placements=desired, async_op=True)
         return outputs
 
     @classmethod

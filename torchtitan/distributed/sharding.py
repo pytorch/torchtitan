@@ -42,7 +42,11 @@ def sequence_parallel_spec() -> ShardingSpec:
 
 
 def set_decoder_sharding_spec(config, loss_parallel: bool) -> None:
-    """Set sharding on tok_embeddings, norm, output — shared by all decoders."""
+    """Set sharding on tok_embeddings, norm, output, freqs_cis — shared by all decoders."""
+    # freqs_cis buffer on the decoder root: Replicate on all dims.
+    config.sharding_spec = ShardingSpec(
+        state_shardings={"freqs_cis": {TP: Replicate()}},
+    )
     config.tok_embeddings.sharding_spec = ShardingSpec(
         state_shardings={"weight": {TP: Shard(1)}},
         input_layouts={"input": {TP: Replicate()}},
