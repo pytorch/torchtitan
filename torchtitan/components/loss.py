@@ -30,6 +30,7 @@ class CrossEntropyLoss:
 
     def __init__(self, compile_config: CompileConfig | None = None):
         self._fn: LossFunction = self._compute
+        self._scale: torch.Tensor | None = None
         if (
             compile_config is not None
             and compile_config.enable
@@ -37,6 +38,10 @@ class CrossEntropyLoss:
         ):
             logger.info("Compiling the loss function with torch.compile")
             self._fn = torch.compile(self._fn, backend=compile_config.backend)
+
+    def set_scale(self, scale: torch.Tensor) -> None:
+        """Set a scaling factor applied to the loss output."""
+        self._scale = scale
 
     @staticmethod
     def _compute(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -48,7 +53,10 @@ class CrossEntropyLoss:
         )
 
     def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        return self._fn(pred, labels)
+        loss = self._fn(pred, labels)
+        if self._scale is not None:
+            loss = loss * self._scale
+        return loss
 
 
 class MSELoss:
@@ -56,6 +64,7 @@ class MSELoss:
 
     def __init__(self, compile_config: CompileConfig | None = None):
         self._fn: LossFunction = self._compute
+        self._scale: torch.Tensor | None = None
         if (
             compile_config is not None
             and compile_config.enable
@@ -64,6 +73,10 @@ class MSELoss:
             logger.info("Compiling the loss function with torch.compile")
             self._fn = torch.compile(self._fn, backend=compile_config.backend)
 
+    def set_scale(self, scale: torch.Tensor) -> None:
+        """Set a scaling factor applied to the loss output."""
+        self._scale = scale
+
     @staticmethod
     def _compute(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.mse_loss(
@@ -71,7 +84,10 @@ class MSELoss:
         )
 
     def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        return self._fn(pred, labels)
+        loss = self._fn(pred, labels)
+        if self._scale is not None:
+            loss = loss * self._scale
+        return loss
 
 
 # Standalone functions for use in tests and experiments that don't need
@@ -206,7 +222,7 @@ class ChunkedCELoss:
         self.loss_fn = CrossEntropyLoss(compile_config)
         self.pp_enabled = pp_enabled
         self.lm_head: nn.Module | None = None
-        self._global_valid_tokens: torch.Tensor | None = None
+        self._scale: torch.Tensor | None = None
 
     def init_lm_head(self, model: nn.Module) -> None:
         """Set the lm_head reference from the model. Must be called before
@@ -221,13 +237,9 @@ class ChunkedCELoss:
         ), "ChunkedCELoss requires the model to have an output (lm_head) layer"
         self.lm_head = model.output
 
-    def set_global_valid_tokens(self, global_valid_tokens: torch.Tensor) -> None:
-        """Set the global valid token count for loss scaling.
-
-        Must be called before each __call__. This is stored as instance state
-        to keep the __call__ signature aligned with standard loss functions.
-        """
-        self._global_valid_tokens = global_valid_tokens
+    def set_scale(self, scale: torch.Tensor) -> None:
+        """Set a scaling factor applied to each chunk's loss before backward."""
+        self._scale = scale
 
     def _chunked_lm_head_backward(
         self, hidden_states: torch.Tensor, labels: torch.Tensor
@@ -242,10 +254,8 @@ class ChunkedCELoss:
         from torch.distributed._composable.fsdp import FSDPModule
         from torch.distributed.tensor import DTensor, Replicate
 
-        assert (
-            self._global_valid_tokens is not None
-        ), "Call set_global_valid_tokens() before __call__"
-        global_valid_tokens = self._global_valid_tokens
+        assert self._scale is not None, "Call set_scale() before __call__"
+        scale = self._scale
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Call init_lm_head(model) before __call__"
@@ -301,8 +311,7 @@ class ChunkedCELoss:
             total_loss = total_loss + chunk_loss.detach()
 
             # Scale loss before backward so gradients are properly normalized
-            scaled_chunk_loss = chunk_loss / global_valid_tokens
-            scaled_chunk_loss.backward()
+            (chunk_loss * scale).backward()
 
             # Collect this chunk's gradient and free it before the next
             # chunk to keep only one chunk's activations in memory.
@@ -355,4 +364,4 @@ class ChunkedCELoss:
         else:
             # Non-PP mode: backward through the decoder ourselves.
             hidden_states.backward(accumulated_grad)
-            return total_loss / self._global_valid_tokens
+            return total_loss * self._scale
