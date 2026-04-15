@@ -15,6 +15,14 @@ from torchtitan.config import CompileConfig
 from torchtitan.tools.logging import logger
 
 
+def _has_hooks(module: nn.Module) -> bool:
+    """Check if a module or any of its children have forward hooks."""
+    for mod in module.modules():
+        if mod._forward_hooks or mod._forward_pre_hooks:
+            return True
+    return False
+
+
 def apply_compile_sparse(model: nn.Module, compile_config: CompileConfig):
     """HF variant of torchtitan's ``apply_compile_sparse``.
 
@@ -28,8 +36,11 @@ def apply_compile_sparse(model: nn.Module, compile_config: CompileConfig):
        ``grouped_mm`` via ``config._experts_implementation``.
 
     For non-MoE layers, compiles the whole block. For MoE layers, only
-    compiles the gate (when it has no TP hooks). The experts module is
-    skipped (FSDP hooks cause graph breaks) and runs eagerly.
+    compiles MLP sub-modules that have no TP/EP hooks (on themselves or
+    children). The experts module is always skipped (FSDP hooks cause
+    graph breaks). Gate/router and shared experts are skipped when they
+    have TP hooks — compiling them individually creates DTensor boundary
+    crossings that crash in backward when combined with compiled loss.
     """
     torch._dynamo.config.capture_scalar_outputs = True
     torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
@@ -52,10 +63,12 @@ def apply_compile_sparse(model: nn.Module, compile_config: CompileConfig):
                             # Skip experts — FSDP hooks cause graph breaks,
                             # and the HF for-loop runs eagerly.
                             continue
-                        if mlp_attr == "gate" and mlp_submod._forward_hooks:
-                            # Skip compiling the gate when it has TP hooks
-                            # (NoParallel). The DTensor ops in hooks are
-                            # incompatible with fullgraph=True.
+                        if _has_hooks(mlp_submod):
+                            # Skip sub-modules with TP hooks (on the module
+                            # itself or its children). Compiling these
+                            # individually creates DTensor boundary crossings
+                            # that crash in backward when combined with
+                            # compiled loss.
                             continue
                         setattr(
                             submod,
