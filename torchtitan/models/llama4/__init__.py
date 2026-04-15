@@ -33,6 +33,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 from .parallelize import parallelize_llama
+from .sharding import set_llama4_sharding_spec
 from .state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
@@ -332,4 +333,5 @@ def model_registry(flavor: str) -> ModelSpec:
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Llama4StateDictAdapter,
+        set_sharding_spec_fn=set_llama4_sharding_spec,
     )

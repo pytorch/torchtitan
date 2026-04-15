@@ -31,6 +31,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
 from .parallelize import parallelize_llama
+from .sharding import set_llama3_sharding_spec
 from .state_dict_adapter import Llama3StateDictAdapter
 
 __all__ = [
@@ -409,4 +410,5 @@ def model_registry(flavor: str) -> ModelSpec:
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
+        set_sharding_spec_fn=set_llama3_sharding_spec,
     )

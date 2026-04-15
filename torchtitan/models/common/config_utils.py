@@ -13,11 +13,12 @@ fields set at config creation time.
 from collections.abc import Callable
 from typing import Literal
 
-from torchtitan.models.common.attention import GQAttention, LocalMapInnerAttention
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.protocols.module import Module
 
 
 def make_gqa_config(
@@ -26,7 +27,7 @@ def make_gqa_config(
     n_heads: int,
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
-    inner_attention: LocalMapInnerAttention.Config,
+    inner_attention: Module.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     use_rope: bool = True,
