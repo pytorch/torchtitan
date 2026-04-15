@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import IGNORE_INDEX, ScaledLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
@@ -101,7 +101,7 @@ class Validator(BaseValidator):
         dp_rank: int,
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
-        loss_fn: LossFunction,
+        loss_fn: ScaledLoss,
         validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
@@ -273,6 +273,9 @@ class Validator(BaseValidator):
             else:
                 global_valid_tokens = local_valid_tokens.float()
 
+            # Set loss scale for this batch
+            self.loss_fn.set_scale(1.0 / global_valid_tokens)
+
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
                 assert self.pp_has_first_stage is not None
@@ -301,17 +304,19 @@ class Validator(BaseValidator):
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 if self.pp_has_last_stage:
                     assert losses is not None
-                    # using sum because loss_fn already uses reduction='sum'
-                    loss_sum = torch.sum(torch.stack(losses)).to(device_type)
+                    loss = torch.sum(torch.stack(losses)).to(device_type)
                 else:
-                    loss_sum = torch.tensor([-1.0], device=device_type)
+                    loss = torch.tensor([-1.0], device=device_type)
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
                     predictions = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    loss_sum = self.loss_fn(predictions, labels)
+                    loss = self.loss_fn(predictions, labels)
 
-            accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
+            # Reset scale after use
+            self.loss_fn.set_scale(None)
+
+            accumulated_losses.append(loss.detach())
             num_steps += 1
 
         # Compute average loss

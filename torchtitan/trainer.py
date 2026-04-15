@@ -705,6 +705,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del pred
                 loss.backward()
 
+        # Reset scale so it doesn't leak into validation or other callers.
+        self.loss_fn.set_scale(None)
+
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
