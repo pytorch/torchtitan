@@ -218,47 +218,96 @@ else
     done
 fi
 
-# ── Model sweep (EP-only, verifies different MoE architectures) ──
-# These require network access to download HF model configs.
+# ── Full model × parallelism matrix ──
+# Runs all 17 parallelism configs for each supported MoE model.
+# Requires network access to download HF model configs.
 # Set SKIP_MODEL_SWEEP=1 to skip in offline environments.
 if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
-    SWEEP_STEPS=${3:-10}
+    SWEEP_STEPS=${3:-2}
     SWEEP_MODELS=(
-        "Qwen/Qwen3-30B-A3B"                           # qwen3_moe (reference)
-        "mistralai/Mixtral-8x7B-Instruct-v0.1"         # mixtral
-        "Qwen/Qwen2-57B-A14B"                          # qwen2_moe (shared experts)
-        "zai-org/GLM-4.7"                               # glm4_moe_lite (shared experts)
-        "deepseek-ai/DeepSeek-V3"                       # deepseek_v3 (MLA attention)
-        "zai-org/GLM-5"                                 # glm_moe_dsa (MLA attention)
-        "microsoft/Phi-3.5-MoE-instruct"                # phimoe
+        "Qwen/Qwen3-30B-A3B"
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"
+        "Qwen/Qwen2-57B-A14B"
+        "zai-org/GLM-4.7"
+        "deepseek-ai/DeepSeek-V3"
+        "zai-org/GLM-5"
+        "microsoft/Phi-3.5-MoE-instruct"
+    )
 
+    # 4-GPU configs (run as parallel pairs or single halves)
+    CONFIGS_4GPU=(
+        "FSDP|--parallelism.data_parallel_shard_degree -1"
+        "EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2"
+        "EP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4"
+        "TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2"
+        "TP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 4"
+        "TP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
+        "TP=2+EP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4"
+        "EP=4+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --compile.enable"
+        "TP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --compile.enable"
+        "TP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --compile.enable"
+        "PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
+        "HSDP+EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2"
+        "EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none"
+        "TP=2+EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none"
+        "PP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable"
+    )
+
+    # 8-GPU configs (run sequentially on all GPUs)
+    CONFIGS_8GPU=(
+        "TP=2+PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
+        "HSDP+TP=2+EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
     )
 
     for hf_model in "${SWEEP_MODELS[@]}"; do
-        run_half "EP=2 $hf_model" \
-            --parallelism.data_parallel_shard_degree -1 \
-            --parallelism.expert_parallel_degree 2 \
-            --training.steps "$SWEEP_STEPS" \
-            --hf_model "$hf_model"
-    done
+        model_short="${hf_model##*/}"
+        echo ""
+        echo "################################################################"
+        echo "MODEL: $hf_model"
+        echo "################################################################"
 
-    # TP+EP sweep for all models (verifies TP + EP interaction, shared expert TP sharding)
-    SWEEP_SHARED_MODELS=(
-        "Qwen/Qwen3-30B-A3B"                           # qwen3_moe (reference)
-        "mistralai/Mixtral-8x7B-Instruct-v0.1"         # mixtral
-        "Qwen/Qwen2-57B-A14B"                          # qwen2_moe (shared experts)
-        "zai-org/GLM-4.7"                               # glm4_moe_lite (shared experts)
-        "deepseek-ai/DeepSeek-V3"                       # deepseek_v3 (MLA + shared experts)
-        "zai-org/GLM-5"                                 # glm_moe_dsa (MLA + DSA + shared experts)
-        "microsoft/Phi-3.5-MoE-instruct"                # phimoe (sparsemixer custom backward)
-    )
-    for hf_model in "${SWEEP_SHARED_MODELS[@]}"; do
-        run_half "TP=2+EP=2 $hf_model" \
-            --parallelism.data_parallel_shard_degree -1 \
-            --parallelism.tensor_parallel_degree 2 \
-            --parallelism.expert_parallel_degree 2 \
-            --training.steps "$SWEEP_STEPS" \
-            --hf_model "$hf_model"
+        # Run 4-GPU configs in parallel pairs
+        num_4gpu=${#CONFIGS_4GPU[@]}
+        for ((i=0; i<num_4gpu; i+=2)); do
+            cfg_a="${CONFIGS_4GPU[$i]}"
+            name_a="${cfg_a%%|*}"
+            args_a="${cfg_a#*|}"
+
+            if [ $((i+1)) -lt "$num_4gpu" ]; then
+                cfg_b="${CONFIGS_4GPU[$((i+1))]}"
+                name_b="${cfg_b%%|*}"
+                args_b="${cfg_b#*|}"
+
+                echo ""
+                echo "================================================================"
+                echo "PARALLEL: ${name_a} ${model_short}  |  ${name_b} ${model_short}"
+                echo "================================================================"
+
+                # shellcheck disable=SC2086
+                run_test "${name_a} ${model_short}" "0,1,2,3" 4 \
+                    --training.steps "$SWEEP_STEPS" --hf_model "$hf_model" $args_a &
+                pid_a=$!
+                # shellcheck disable=SC2086
+                run_test "${name_b} ${model_short}" "4,5,6,7" 4 \
+                    --training.steps "$SWEEP_STEPS" --hf_model "$hf_model" $args_b &
+                pid_b=$!
+                wait $pid_a $pid_b
+            else
+                # Odd config out — run solo
+                # shellcheck disable=SC2086
+                run_half "${name_a} ${model_short}" \
+                    --training.steps "$SWEEP_STEPS" --hf_model "$hf_model" $args_a
+            fi
+        done
+
+        # Run 8-GPU configs sequentially
+        for cfg in "${CONFIGS_8GPU[@]}"; do
+            name="${cfg%%|*}"
+            args="${cfg#*|}"
+            # shellcheck disable=SC2086
+            run_single "${name} ${model_short}" \
+                --training.steps "$SWEEP_STEPS" --hf_model "$hf_model" $args
+        done
     done
 fi
 
