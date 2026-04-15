@@ -61,7 +61,7 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 --collect_peak_memory
 
 
         # Run the numerics unit tests (dense models only; MoE tests run in the H100 workflow)
