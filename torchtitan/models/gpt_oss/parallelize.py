@@ -22,7 +22,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile_sparse
-from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
@@ -60,9 +60,10 @@ def parallelize_gptoss(
         compile_config.enable and "model" in compile_config.components
     )
 
-    # CP: apply before parallelize() so CP hooks are captured inside local_map
+    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+    # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
-        apply_cp_to_attention_module(
+        apply_cp_to_forward(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
