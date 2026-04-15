@@ -10,6 +10,7 @@ from typing import Literal
 
 import torch.nn as nn
 from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.config import ParallelismConfig
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
@@ -170,7 +171,8 @@ def _build_dsv3_layers(
     router_route_norm: bool = False,
     score_before_experts: bool = False,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    parallelism: ParallelismConfig | None = None,
+    pad_multiple: int | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -180,6 +182,8 @@ def _build_dsv3_layers(
     Router and expert inits are constructed per-layer so depth-scaled
     initializers are correct for each layer's position.
     """
+    if parallelism is None:
+        parallelism = ParallelismConfig()
     layers = []
     for layer_id in range(n_layers):
         attn_cfg = _make_dsv3_attn_config(
@@ -225,7 +229,10 @@ def _build_dsv3_layers(
                     top_k=router_top_k,
                     param_init=_depth_experts_init(layer_id),
                     score_before_experts=score_before_experts,
-                    moe_comm_backend=moe_comm_backend,
+                    moe_comm_backend=parallelism.expert_parallel_comm_backend,
+                    ep_size=parallelism.expert_parallel_degree,
+                    pad_multiple=pad_multiple,
+                    hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
                 ),
                 shared_experts=make_ffn_config(
                     dim=dim,
@@ -251,7 +258,8 @@ def _build_dsv3_layers(
 
 def _debugmodel(
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    parallelism: ParallelismConfig | None = None,
+    pad_multiple: int | None = None,
     **kwargs,
 ) -> DeepSeekV3Model.Config:
     dim = 256
@@ -284,7 +292,8 @@ def _debugmodel(
         router_score_func="softmax",
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        parallelism=parallelism,
+        pad_multiple=pad_multiple,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -315,7 +324,8 @@ def _debugmodel(
 
 def _16b(
     attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    parallelism: ParallelismConfig | None = None,
+    pad_multiple: int | None = None,
     **kwargs,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
@@ -348,7 +358,8 @@ def _16b(
         router_score_func="softmax",
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        parallelism=parallelism,
+        pad_multiple=pad_multiple,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -379,7 +390,8 @@ def _16b(
 
 def _236b(
     attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    parallelism: ParallelismConfig | None = None,
+    pad_multiple: int | None = None,
     **kwargs,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
@@ -416,7 +428,8 @@ def _236b(
         router_route_scale=16.0,
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        parallelism=parallelism,
+        pad_multiple=pad_multiple,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -447,7 +460,8 @@ def _236b(
 
 def _671b(
     attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    parallelism: ParallelismConfig | None = None,
+    pad_multiple: int | None = None,
     **kwargs,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
@@ -485,7 +499,8 @@ def _671b(
         router_route_norm=True,
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        parallelism=parallelism,
+        pad_multiple=pad_multiple,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -525,11 +540,13 @@ deepseekv3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    parallelism: ParallelismConfig | None = None,
+    pad_multiple: int | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        parallelism=parallelism,
+        pad_multiple=pad_multiple,
     )
     return ModelSpec(
         name="deepseek_v3",

@@ -8,6 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import (
     Float8GroupedMMConverter,
     Float8LinearConverter,
@@ -64,9 +65,14 @@ def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
 
 
 def deepseek_v3_16b() -> Trainer.Config:
+    parallelism = ParallelismConfig(
+        pipeline_parallel_schedule="Interleaved1F1B",
+        expert_parallel_degree=8,
+        expert_tensor_parallel_degree=1,
+    )
     return Trainer.Config(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry("16B"),
+        model_spec=model_registry("16B", parallelism=parallelism),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -81,11 +87,7 @@ def deepseek_v3_16b() -> Trainer.Config:
             seq_len=4096,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=8,
-            expert_tensor_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpoint=CheckpointManager.Config(interval=10),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
@@ -95,9 +97,15 @@ def deepseek_v3_16b() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
+    converters = [
+        Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
+        Float8GroupedMMConverter.Config(fqns=["experts"]),
+    ]
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_registry("671B"),
+        model_spec=model_registry(
+            "671B", pad_multiple=find_pad_multiple(converters)
+        ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -123,10 +131,5 @@ def deepseek_v3_671b() -> Trainer.Config:
             mode="selective",
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[
-                Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
-                Float8GroupedMMConverter.Config(fqns=["experts"]),
-            ],
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=converters),
     )

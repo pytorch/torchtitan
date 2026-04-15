@@ -242,34 +242,6 @@ def make_token_dispatcher_config(
         )
 
 
-def apply_ep(
-    layers: list,
-    *,
-    ep_size: int,
-    sp_size: int = 1,
-    moe_comm_backend: str = "standard",
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
-    pad_multiple: int | None = None,
-) -> None:
-    """Replace token dispatchers in MoE layers for expert parallelism.
-
-    Mutates layer configs in-place: for each MoE layer, replaces the
-    token_dispatcher with the appropriate config based on EP settings.
-    """
-    for layer_cfg in layers:
-        if layer_cfg.moe is not None:
-            td = layer_cfg.moe.experts.token_dispatcher
-            layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
-                num_experts=td.num_experts,
-                top_k=td.top_k,
-                score_before_experts=td.score_before_experts,
-                ep_size=ep_size,
-                sp_size=sp_size,
-                moe_comm_backend=moe_comm_backend,
-                hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-                pad_multiple=pad_multiple,
-            )
-
 
 def make_experts_config(
     *,
