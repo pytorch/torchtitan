@@ -265,14 +265,14 @@ class FlexAttention(LocalMapInnerAttention):
         # Recommended workflow: run once with max_autotune=True to discover
         # good kernel_options, then set kernel_options explicitly in the config
         # and keep max_autotune disabled for faster compilation.
-        "max_autotune": False,
+        "max_autotune": True,
         # When enabled, after max_autotune selects the best kernel config,
         # coordinate descent iteratively tunes individual parameters (block
         # sizes, num_warps, num_stages) one at a time -- doubling/halving each
         # and accepting changes that improve runtime by >0.1%. This can also
         # run without max_autotune but starts from a weaker baseline config.
         # See torch/_inductor/runtime/coordinate_descent_tuner.py.
-        "coordinate_descent_tuning": False,
+        "coordinate_descent_tuning": True,
         "triton.cudagraphs": False,
     }
 
