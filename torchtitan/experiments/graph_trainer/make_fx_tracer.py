@@ -361,8 +361,8 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
         ctx = TracingContext(fake_mode)
         # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-        # _skip_nested_compile lets this tracer run when an outer dynamo trace
-        # reaches torch.compile'd FlexAttention kernels.
+        # _skip_nested_compile lets the current make_fx trace inline through
+        # torch.compile'd FlexAttention kernels instead of erroring.
         # _non_strict_tracing_context is required by _patch_autograd_grad() and
         # marks this make_fx pass as the non-strict tracing flow, distinct from
         # other make_fx-based entry points such as non-strict export.
