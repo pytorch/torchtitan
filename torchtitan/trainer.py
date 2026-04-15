@@ -540,7 +540,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             ntokens_batch = labels.numel()
-            self.ntokens_seen += ntokens_batch
+            # Divide by cp_degree, because CP ranks process the same tokens
+            self.ntokens_seen += ntokens_batch // self.parallel_dims.cp
+
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
