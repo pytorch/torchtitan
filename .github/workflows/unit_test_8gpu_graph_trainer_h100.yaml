@@ -1,4 +1,4 @@
-name: GraphTrainer 8 GPU H100 Integration Tests
+name: GraphTrainer 8 GPU H100 Unit Tests
 
 on:
   push:
@@ -7,12 +7,12 @@ on:
       - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
-      - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
+      - '.github/workflows/unit_test_8gpu_graph_trainer_h100.yaml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
-      - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
+      - '.github/workflows/unit_test_8gpu_graph_trainer_h100.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -39,7 +39,6 @@ jobs:
       gpu-arch-version: "13.0"
       docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
-      upload-artifact: outputs
       timeout: 45
       script: |
         set -eux
@@ -58,11 +57,13 @@ jobs:
           torch --index-url https://download.pytorch.org/whl/nightly/cu130
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
-        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
-
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.
-        NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
-        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
+        # Run each test file in its own pytest invocation to avoid
+        # cross-test pollution (e.g. disable_global_flags from common_utils).
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v -m "sm90_only"
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py -v -m "sm90_only"
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_passes.py -v -m "sm90_only"
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v -m "sm90_only"
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -m "sm90_only"
