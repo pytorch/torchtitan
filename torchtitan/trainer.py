@@ -660,6 +660,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels
         )
 
+        # Set loss scale so gradients are properly normalized.
+        # This applies to both PP and non-PP paths uniformly.
+        self.loss_fn.set_scale(1.0 / global_valid_tokens)
+
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             with self.train_context():
@@ -687,11 +691,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             if self.pp_has_last_stage:
                 assert losses is not None
-                # Rescale PP loss to be "local loss sum / global valid tokens"
-                # because each microbatch could have different number of valid tokens
-                loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
-                    self.device
-                )
+                loss = torch.sum(torch.stack(losses)).to(self.device)
             else:
                 loss = torch.tensor([-1.0], device=self.device)
         else:
@@ -699,12 +699,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Compute loss sum (reduction='sum')
-                loss_sum = self.loss_fn(pred, labels)
-
-                # Scale the loss by the inverse of the total weight denominator before backward
-                # This ensures gradients are properly normalized across all microbatches
-                loss = loss_sum / global_valid_tokens
+                loss = self.loss_fn(pred, labels)
 
                 # need to free pred before bwd to avoid peaking memory
                 del pred

@@ -28,20 +28,47 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Common MSE loss function with sum reduction for Transformer models training."""
+    return torch.nn.functional.mse_loss(
+        pred.float(), labels.float().detach(), reduction="sum"
+    )
+
+
+class ScaledLoss:
+    """Wraps a loss function with optional per-step scaling.
+
+    Supports ``set_scale()`` to inject a scaling factor (e.g.
+    ``1 / global_valid_tokens``) before each step. This unifies
+    gradient scaling across PP and non-PP paths: both can call
+    ``set_scale()`` then ``loss_fn(pred, labels)`` and get correctly
+    normalized gradients without the caller needing to scale separately.
+
+    When no scale is set, the loss is returned unscaled (raw sum).
+    """
+
+    def __init__(self, loss_fn: LossFunction):
+        self._fn = loss_fn
+        self._scale: torch.Tensor | None = None
+
+    def set_scale(self, scale: torch.Tensor) -> None:
+        """Set a scaling factor applied to the loss output."""
+        self._scale = scale
+
+    def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        loss = self._fn(pred, labels)
+        if self._scale is not None:
+            loss = loss * self._scale
+        return loss
+
+
 def build_cross_entropy_loss(compile_config: CompileConfig, **kwargs):
     del kwargs  # delete any unused arguments
     loss_fn = cross_entropy_loss
     if compile_config.enable and "loss" in compile_config.components:
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
-    return loss_fn
-
-
-def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Common MSE loss function with sum reduction for Transformer models training."""
-    return torch.nn.functional.mse_loss(
-        pred.float(), labels.float().detach(), reduction="sum"
-    )
+    return ScaledLoss(loss_fn)
 
 
 def build_mse_loss(compile_config: CompileConfig, **kwargs):
@@ -50,4 +77,4 @@ def build_mse_loss(compile_config: CompileConfig, **kwargs):
     if compile_config.enable and "loss" in compile_config.components:
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
-    return loss_fn
+    return ScaledLoss(loss_fn)
