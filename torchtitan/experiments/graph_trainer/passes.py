@@ -49,7 +49,7 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
-def construct_precompile_graph_passes(
+def compile_time_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
     """Passes to apply at precompile time (before serialization).
@@ -75,7 +75,7 @@ def construct_precompile_graph_passes(
     ]
 
 
-def construct_load_graph_passes(
+def runtime_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
     """Passes to apply at load time (after deserialization).
@@ -106,8 +106,8 @@ def construct_default_graph_passes(
     Combines all precompile-time and load-time passes into a single list.
     Used when tracing happens at runtime (no precompiled artifact).
     """
-    passes = construct_precompile_graph_passes(traced_result)
-    passes.extend(construct_load_graph_passes(traced_result))
+    passes = compile_time_passes(traced_result)
+    passes.extend(runtime_passes(traced_result))
     return passes
 
 

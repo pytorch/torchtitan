@@ -168,8 +168,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
-            construct_load_graph_passes,
-            construct_precompile_graph_passes,
+            compile_time_passes,
+            runtime_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             precompile_fx_trace_load,
@@ -198,14 +198,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
             extra_kwargs,
         )
 
-        # Step 2: Apply precompile-time passes (cleanup + regional_inductor)
+        # Step 2: Apply compile-time passes (cleanup + regional_inductor)
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
-            precompile_passes = construct_precompile_graph_passes(traced_result)
+            passes = compile_time_passes(traced_result)
             traced_result.gm = apply_graph_passes(
                 traced_result.gm,
                 traced_result.example_inputs,
-                precompile_passes,
+                passes,
             )
 
         # Step 3: Save and load (serialize/deserialize roundtrip)
@@ -217,14 +217,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 storage, expected_fingerprint=""
             )
 
-        # Step 4: Apply load-time passes only (cudagraph)
+        # Step 4: Apply runtime passes only (cudagraph)
         if enable_passes:
-            load_passes = construct_load_graph_passes(loaded_result)
-            if load_passes:
+            passes = runtime_passes(loaded_result)
+            if passes:
                 loaded_result.gm = apply_graph_passes(
                     loaded_result.gm,
                     loaded_result.example_inputs,
-                    load_passes,
+                    passes,
                 )
 
         # Step 4: Run training steps using the loaded artifact
