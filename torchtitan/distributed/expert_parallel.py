@@ -160,10 +160,14 @@ class ExpertParallel(BaseExpertParallel):
             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
                 num_tokens_per_expert_group
             )
+            # non_blocking=True is safe in eager, but under torch.compile the
+            # async D2H transfer can race with the subsequent .tolist()/.item()
+            # calls, producing stale values and failing unbacked-symint guards.
+            non_blocking = not torch.compiler.is_compiling()
             input_splits = (
                 num_tokens_per_expert.view(ep_degree, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=non_blocking)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
@@ -498,10 +502,14 @@ class TorchAOExpertParallel(ExpertParallel):
             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
                 num_tokens_per_expert_group
             )
+            # non_blocking=True is safe in eager, but under torch.compile the
+            # async D2H transfer can race with the subsequent .tolist()/.item()
+            # calls, producing stale values and failing unbacked-symint guards.
+            non_blocking = not torch.compiler.is_compiling()
             input_splits = (
                 num_tokens_per_expert.view(ep_degree, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=non_blocking)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (

@@ -66,9 +66,9 @@ jobs:
             "name": "cuda",
             "runner": "${CUDA_RUNNER}",
             "gpu-arch-type": "cuda",
-            "gpu-arch-version": "12.8",
+            "gpu-arch-version": "13.0",
             "docker-image": "torchtitan-ubuntu-20.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/cu128",
+            "index-url": "https://download.pytorch.org/whl/nightly/cu130",
             "torch-version": ""
           }
           EOF
