@@ -9,8 +9,8 @@ from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -126,12 +126,9 @@ def _build_qwen3_moe_layers(
     num_experts: int,
     top_k: int,
     attn_backend: str = "sdpa",
-    parallelism: ParallelismConfig | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models with depth-scaled inits."""
-    if parallelism is None:
-        parallelism = ParallelismConfig()
     inner_attention, mask_type = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
@@ -168,10 +165,7 @@ def _build_qwen3_moe_layers(
                         top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
                         score_before_experts=False,
-                        moe_comm_backend=parallelism.expert_parallel_comm_backend,
-                        ep_size=parallelism.expert_parallel_degree,
-                        pad_multiple=pad_multiple,
-                        hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+                        moe_comm_backend=moe_comm_backend,
                     ),
                 ),
             )
@@ -441,8 +435,7 @@ def _32b(attn_backend: str = "sdpa", **kwargs) -> Qwen3Model.Config:
 
 def _debugmodel_moe(
     attn_backend: str = "sdpa",
-    parallelism: ParallelismConfig | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
     **kwargs,
 ) -> Qwen3Model.Config:
     dim = 256
@@ -477,16 +470,14 @@ def _debugmodel_moe(
             num_experts=64,
             top_k=8,
             attn_backend=attn_backend,
-            parallelism=parallelism,
-            pad_multiple=pad_multiple,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
 
 def _30b_a3b(
     attn_backend: str = "sdpa",
-    parallelism: ParallelismConfig | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
     **kwargs,
 ) -> Qwen3Model.Config:
     dim = 2048
@@ -521,16 +512,14 @@ def _30b_a3b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            parallelism=parallelism,
-            pad_multiple=pad_multiple,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
 
 def _235b_a22b(
     attn_backend: str = "sdpa",
-    parallelism: ParallelismConfig | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
     **kwargs,
 ) -> Qwen3Model.Config:
     dim = 4096
@@ -565,8 +554,7 @@ def _235b_a22b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            parallelism=parallelism,
-            pad_multiple=pad_multiple,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
@@ -588,13 +576,11 @@ qwen3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    parallelism: ParallelismConfig | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
 ) -> ModelSpec:
     config = qwen3_configs[flavor](
         attn_backend=attn_backend,
-        parallelism=parallelism,
-        pad_multiple=pad_multiple,
+        moe_comm_backend=moe_comm_backend,
     )
     return ModelSpec(
         name="qwen3",

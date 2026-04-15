@@ -161,18 +161,14 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        ep_size: int
-        # Sequence parallel size. When EP borrows from TP (ETP=1),
-        # set to TP group size to split tokens across ranks.
-        sp_size: int = 1
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_size = config.ep_size
-        self.sp_size = config.sp_size
         # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup
-        # Set at runtime by apply_moe_ep_tp from tp_mesh.get_local_rank()
+        # Set at runtime by apply_moe_ep_tp from tp_mesh
+        self.sp_size: int = 1
         self.sp_rank: int = 0
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
@@ -221,7 +217,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 x, top_scores, selected_experts_indices
             )
 
-        ep_size = self.ep_size
+        ep_size = self.ep_group.size()
 
         # TODO: Extract this local reordering block (histc, argsort, score
         # application) into a shared helper — it's duplicated in
@@ -431,11 +427,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AllToAllTokenDispatcher.Config):
-        pad_multiple: int
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.pad_multiple = config.pad_multiple
+        # Set at runtime by apply_moe_ep_tp
+        self.pad_multiple: int
 
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
@@ -497,29 +494,17 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """Config for DeepEP/HybridEP token dispatcher.
 
         Args:
-            ep_size: Expert parallel size.
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
-            hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
-                float in (0, 1] = non-blocking mode; controls the fused-permute
-                output tensor size (num_permuted_tokens). Only used with hybridep.
-            pad_multiple: Alignment size for token groups needed by quantized grouped
-                GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
-                None means no padding.
         """
 
-        ep_size: int
         comm_backend: str
-        hybridep_non_blocking_expert_capacity_factor: float | None = None
-        pad_multiple: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_size = config.ep_size
         self.comm_backend = config.comm_backend
-        self.hybridep_non_blocking_expert_capacity_factor = (
-            config.hybridep_non_blocking_expert_capacity_factor
-        )
-        self.pad_multiple = config.pad_multiple
+        # Set at runtime by apply_moe_ep_tp
+        self.pad_multiple: int | None = None
+        self.hybridep_capacity_factor: float | None = None
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup
 
@@ -537,7 +522,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        num_local_experts = self.num_experts // self.ep_size
+        num_local_experts = self.num_experts // self.ep_group.size()
 
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep.hybridep import dispatch_tokens
@@ -550,7 +535,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 self.num_experts,
                 self.ep_group,
                 score_before_experts=self.score_before_experts,
-                non_blocking_expert_capacity_factor=self.hybridep_non_blocking_expert_capacity_factor,
+                non_blocking_expert_capacity_factor=self.hybridep_capacity_factor,
                 pad_multiple=self.pad_multiple,
             )
         else:

@@ -8,7 +8,6 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import (
     Float8GroupedMMConverter,
     Float8LinearConverter,
@@ -72,7 +71,7 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
     return Trainer.Config(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry("16B", parallelism=parallelism),
+        model_spec=model_registry("16B", moe_comm_backend="standard"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -103,9 +102,7 @@ def deepseek_v3_671b() -> Trainer.Config:
     ]
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_registry(
-            "671B", pad_multiple=find_pad_multiple(converters)
-        ),
+        model_spec=model_registry("671B", moe_comm_backend="torchao"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),

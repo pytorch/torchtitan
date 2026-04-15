@@ -33,6 +33,9 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.sampling_params import RequestOutputKind
+
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -54,8 +57,6 @@ from torchtitan.experiments.rl.plugin import (
 from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.tools import utils
-from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.sampling_params import RequestOutputKind
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -213,6 +214,7 @@ def build_trainer_model(config):
     # generator's uncompiled varlen_attn_out path.
     if config.batch_invariant_mode:
         from torch.nn.attention.varlen import varlen_attn
+
         from torchtitan.models.common.attention import VarlenAttentionWrapper
 
         VarlenAttentionWrapper._compiled_varlen_attn = varlen_attn

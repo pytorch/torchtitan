@@ -26,6 +26,8 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
+
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -295,6 +297,8 @@ def parallelize_qwen3_vl(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=False,
+            hybridep_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     # Apply activation checkpointing

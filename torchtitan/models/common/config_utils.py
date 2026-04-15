@@ -177,11 +177,7 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    moe_comm_backend: str = "standard",
-    ep_size: int = 1,
-    sp_size: int = 1,
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
 ) -> (
     LocalTokenDispatcher.Config
     | AllToAllTokenDispatcher.Config
@@ -190,57 +186,42 @@ def make_token_dispatcher_config(
 ):
     """Build the appropriate token dispatcher config.
 
-    Returns the right Config subclass based on parallelism settings:
-    - EP=1 (default): LocalTokenDispatcher.Config → LocalTokenDispatcher
-    - EP>1, standard: AllToAllTokenDispatcher.Config → AllToAllTokenDispatcher
-    - EP>1, standard, pad_multiple: TorchAOTokenDispatcher.Config → TorchAOTokenDispatcher
-    - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
-      (pad_multiple is handled internally by the DeepEP/HybridEP library)
+    Returns the right Config subclass based on moe_comm_backend:
+    - "local": LocalTokenDispatcher.Config (no EP communication)
+    - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
+    - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
+    - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
-    if moe_comm_backend not in ("standard", "deepep", "hybridep"):
-        raise ValueError(
-            f"Unknown moe_comm_backend: '{moe_comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep'."
-        )
-    if ep_size == 1 and moe_comm_backend != "standard":
-        raise ValueError(
-            f"moe_comm_backend='{moe_comm_backend}' requires ep_size > 1, "
-            f"but ep_size={ep_size}."
-        )
-    if ep_size > 1 and moe_comm_backend in ("deepep", "hybridep"):
-        return DeepEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            comm_backend=moe_comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
-        )
-    elif ep_size > 1 and pad_multiple is not None:
-        return TorchAOTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            sp_size=sp_size,
-            pad_multiple=pad_multiple,
-        )
-    elif ep_size > 1:
-        return AllToAllTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            sp_size=sp_size,
-        )
-    else:
+    if moe_comm_backend == "local":
         return LocalTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
         )
-
+    elif moe_comm_backend in ("deepep", "hybridep"):
+        return DeepEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            comm_backend=moe_comm_backend,
+        )
+    elif moe_comm_backend == "torchao":
+        return TorchAOTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    elif moe_comm_backend == "standard":
+        return AllToAllTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    else:
+        raise ValueError(
+            f"Unknown moe_comm_backend: '{moe_comm_backend}'. "
+            "Must be one of 'local', 'standard', 'torchao', 'deepep', 'hybridep'."
+        )
 
 
 def make_experts_config(
@@ -252,11 +233,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    ep_size: int = 1,
-    sp_size: int = 1,
-    moe_comm_backend: str = "standard",
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
-    pad_multiple: int | None = None,
+    moe_comm_backend: str = "local",
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -269,10 +246,6 @@ def make_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            sp_size=sp_size,
             moe_comm_backend=moe_comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
         ),
     )

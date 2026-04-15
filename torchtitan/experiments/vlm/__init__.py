@@ -9,6 +9,7 @@ from functools import partial
 from typing import Any
 
 import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear

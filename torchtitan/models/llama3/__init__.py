@@ -8,6 +8,7 @@ from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (

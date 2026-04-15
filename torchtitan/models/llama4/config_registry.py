@@ -8,7 +8,6 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import Float8GroupedMMConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -62,9 +61,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry(
-            "debugmodel", pad_multiple=find_pad_multiple(converters)
-        ),
+        model_spec=model_registry("debugmodel", moe_comm_backend="torchao"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
