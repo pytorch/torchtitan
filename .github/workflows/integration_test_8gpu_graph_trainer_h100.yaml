@@ -4,12 +4,34 @@ on:
   push:
     branches: [ main ]
     paths:
+      - '.ci/docker/**'
+      - 'scripts/**'
+      - 'tests/**'
       - 'torchtitan/experiments/graph_trainer/**'
+      - 'torchtitan/__init__.py'
+      - 'torchtitan/trainer.py'
+      - 'torchtitan/components/**'
+      - 'torchtitan/config/**'
+      - 'torchtitan/distributed/**'
+      - 'torchtitan/models/**'
+      - 'torchtitan/protocols/**'
+      - 'torchtitan/tools/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
+      - '.ci/docker/**'
+      - 'scripts/**'
+      - 'tests/**'
       - 'torchtitan/experiments/graph_trainer/**'
+      - 'torchtitan/__init__.py'
+      - 'torchtitan/trainer.py'
+      - 'torchtitan/components/**'
+      - 'torchtitan/config/**'
+      - 'torchtitan/distributed/**'
+      - 'torchtitan/models/**'
+      - 'torchtitan/protocols/**'
+      - 'torchtitan/tools/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
   schedule:
     # Runs every 12 hours
