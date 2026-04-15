@@ -314,9 +314,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims
-        )
+        loss_num_chunks = config.training.loss_num_chunks
+        if loss_num_chunks > 1:
+            self.loss_fn = ChunkedCELoss(
+                num_chunks=loss_num_chunks,
+                compile_config=config.compile,
+                pp_enabled=parallel_dims.pp_enabled,
+            )
+            # Grab lm_head reference before PP strips it from non-last stages.
+            self.loss_fn.init_lm_head(model)
+            logger.info(f"Initialized ChunkedCELoss with {loss_num_chunks} chunks")
+        else:
+            self.loss_fn = model_spec.build_loss_fn(
+                config.compile, parallel_dims=parallel_dims
+            )
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -408,18 +419,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model.train()
 
             self.model_parts = [model]
-
-        # Wrap loss with ChunkedCELoss if configured. This must happen after
-        # model construction since ChunkedCELoss needs the model's lm_head.
-        loss_num_chunks = config.training.loss_num_chunks
-        if loss_num_chunks > 1:
-            model_for_loss = self.model_parts[-1]
-            self.loss_fn = ChunkedCELoss(
-                model_for_loss,
-                num_chunks=loss_num_chunks,
-                loss_fn=self.loss_fn,
-            )
-            logger.info(f"Initialized ChunkedCELoss with {loss_num_chunks} chunks")
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -671,22 +670,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
+            is_chunked = isinstance(self.loss_fn, ChunkedCELoss)
+            if is_chunked:
+                # ChunkedCELoss needs global_valid_tokens for per-chunk scaling.
+                # The PP schedule calls loss_fn(pred, target) on the last stage,
+                # where pred is hidden_states (skip_lm_head=True on last stage).
+                self.loss_fn.set_global_valid_tokens(global_valid_tokens)
+
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
+                # When chunked loss is enabled, the last stage should skip
+                # lm_head so ChunkedCELoss can handle it per-chunk.
+                extra_kwargs_pp = dict(extra_kwargs)
+                if is_chunked:
+                    extra_kwargs_pp["skip_lm_head"] = True
+
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
                         **extra_inputs,
-                        **extra_kwargs,
+                        **extra_kwargs_pp,
                         target=targets,
                         losses=losses,
                         return_outputs=False,
                     )
                 else:
                     self.pp_schedule.step(
-                        **extra_kwargs,
+                        **extra_kwargs_pp,
                         target=targets,
                         losses=losses,
                         return_outputs=False,
@@ -703,34 +715,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
             else:
                 loss = torch.tensor([-1.0], device=self.device)
-        elif isinstance(self.loss_fn, ChunkedCELoss):
-            # Chunked CE loss: model forward without lm_head, then chunked
-            # lm_head + loss computation with manual gradient assembly
-            assert len(model_parts) == 1
-            with self.train_context():
-                hidden_states = model_parts[0](
-                    inputs, **extra_inputs, **extra_kwargs, skip_lm_head=True
-                )
-
-                # ChunkedCELoss handles: detach, chunk, lm_head, ce_loss,
-                # per-chunk backward, gradient accumulation, and decoder backward.
-                # Returns scaled loss (loss_sum / global_valid_tokens).
-                loss = self.loss_fn(hidden_states, labels, global_valid_tokens)
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
+            is_chunked = isinstance(self.loss_fn, ChunkedCELoss)
             with self.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Compute loss sum (reduction='sum')
-                loss_sum = self.loss_fn(pred, labels)
+                pred = model_parts[0](
+                    inputs,
+                    **extra_inputs,
+                    **extra_kwargs,
+                    **({"skip_lm_head": True} if is_chunked else {}),
+                )
 
-                # Scale the loss by the inverse of the total weight denominator before backward
-                # This ensures gradients are properly normalized across all microbatches
-                loss = loss_sum / global_valid_tokens
-
-                # need to free pred before bwd to avoid peaking memory
-                del pred
-                loss.backward()
+                if is_chunked:
+                    # ChunkedCELoss handles lm_head, ce_loss, and backward
+                    # internally. Returns a detached loss for logging.
+                    self.loss_fn.set_global_valid_tokens(global_valid_tokens)
+                    loss = self.loss_fn(pred, labels)
+                else:
+                    loss_sum = self.loss_fn(pred, labels)
+                    loss = loss_sum / global_valid_tokens
+                    del pred
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss

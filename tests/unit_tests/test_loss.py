@@ -218,22 +218,9 @@ class TestChunkedCELoss(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedCELoss for testing."""
         model = _FakeDecoder(dim, vocab_size)
-        # Patch class check: ChunkedCELoss asserts isinstance(model, Decoder)
-        # For unit testing without full model infra, we monkey-patch.
-        original_init = ChunkedCELoss.__init__
-
-        def patched_init(self_loss, m, num_chunks, loss_fn):
-            assert hasattr(m, "output") and m.output is not None
-            self_loss.model = m
-            self_loss.lm_head = m.output
-            self_loss.num_chunks = num_chunks
-            self_loss.loss_fn = loss_fn
-
-        ChunkedCELoss.__init__ = patched_init
-        chunked_loss = ChunkedCELoss(
-            model, num_chunks=num_chunks, loss_fn=cross_entropy_loss
-        )
-        ChunkedCELoss.__init__ = original_init
+        chunked_loss = ChunkedCELoss(num_chunks=num_chunks)
+        # Bypass isinstance(model, Decoder) check for unit testing
+        chunked_loss.lm_head = model.output
         return model, chunked_loss
 
     def test_numerical_equivalence(self):
@@ -265,7 +252,8 @@ class TestChunkedCELoss(unittest.TestCase):
 
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
-        loss_chunked = chunked_loss(hidden_chunked, labels, global_valid_tokens)
+        chunked_loss.set_global_valid_tokens(global_valid_tokens)
+        loss_chunked = chunked_loss(hidden_chunked, labels)
         grad_chunked = hidden_chunked.grad.clone()
         lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
 
@@ -314,7 +302,8 @@ class TestChunkedCELoss(unittest.TestCase):
                 ref_state_dict = model.output.state_dict()
 
             h = hidden_states.detach().requires_grad_(True)
-            loss = chunked_loss(h, labels, global_valid_tokens)
+            chunked_loss.set_global_valid_tokens(global_valid_tokens)
+            loss = chunked_loss(h, labels)
             losses.append(loss.item())
 
         for i in range(1, len(losses)):

@@ -190,18 +190,27 @@ class ChunkedCELoss:
     Compile: ce_loss can be compiled independently; lm_head is not compiled.
 
     Args:
-        model: The decoder model. Must have an ``output`` attribute (the lm_head).
         num_chunks: Number of chunks to split the sequence into.
-        loss_fn: The base cross-entropy loss function (e.g. CrossEntropyLoss
-            instance or a plain callable).
+        compile_config: Optional compile config for the CE loss function.
+        pp_enabled: If True, returns a differentiable loss for PP schedule
+            backward. If False, does full backward internally.
     """
 
     def __init__(
         self,
-        model: nn.Module,
         num_chunks: int,
-        loss_fn: LossFunction,
+        compile_config: CompileConfig | None = None,
+        pp_enabled: bool = False,
     ):
+        self.num_chunks = num_chunks
+        self.loss_fn = CrossEntropyLoss(compile_config)
+        self.pp_enabled = pp_enabled
+        self.lm_head: nn.Module | None = None
+        self._global_valid_tokens: torch.Tensor | None = None
+
+    def init_lm_head(self, model: nn.Module) -> None:
+        """Set the lm_head reference from the model. Must be called before
+        the first __call__, after the model is constructed."""
         from torchtitan.models.common.decoder import Decoder
 
         assert isinstance(
@@ -210,46 +219,42 @@ class ChunkedCELoss:
         assert (
             model.output is not None
         ), "ChunkedCELoss requires the model to have an output (lm_head) layer"
-
         self.lm_head = model.output
-        self.num_chunks = num_chunks
-        self.loss_fn = loss_fn
 
-    def __call__(
-        self,
-        hidden_states: torch.Tensor,
-        labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute chunked cross-entropy loss with manual gradient assembly.
+    def set_global_valid_tokens(self, global_valid_tokens: torch.Tensor) -> None:
+        """Set the global valid token count for loss scaling.
 
-        This should be called after model forward with skip_lm_head=True.
-        Handles detach, chunking, per-chunk lm_head + ce_loss + backward,
-        gradient accumulation, and decoder backward internally.
+        Must be called before each __call__. This is stored as instance state
+        to keep the __call__ signature aligned with standard loss functions.
+        """
+        self._global_valid_tokens = global_valid_tokens
 
-        Args:
-            hidden_states: Output of the decoder (before lm_head), shape [B, L, D].
-                Must be connected to the model's autograd graph (not detached).
-            labels: Target labels, shape [B, L]. -100 for padding/ignored tokens.
-            global_valid_tokens: Total valid token count across all DP ranks,
-                used to scale each chunk's loss before backward.
+    def _chunked_lm_head_backward(
+        self, hidden_states: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run chunked lm_head + CE loss + per-chunk backward.
 
         Returns:
-            The scaled loss (loss_sum / global_valid_tokens) for logging.
+            total_loss: The unscaled loss sum (detached).
+            accumulated_grad: The accumulated gradient for hidden_states,
+                ready to be used for decoder backward.
         """
         from torch.distributed._composable.fsdp import FSDPModule
         from torch.distributed.tensor import DTensor, Replicate
 
+        assert (
+            self._global_valid_tokens is not None
+        ), "Call set_global_valid_tokens() before __call__"
+        global_valid_tokens = self._global_valid_tokens
         num_chunks = self.num_chunks
         lm_head = self.lm_head
+        assert lm_head is not None, "Call init_lm_head(model) before __call__"
         is_fsdp = isinstance(lm_head, FSDPModule)
 
-        # If SP is enabled, hidden states are Shard(1) on the TP mesh (each
-        # rank has [B, L/tp, D]). Redistribute to Replicate so that each rank
-        # has the full [B, L, D] before chunking. This all-gather ensures the
-        # chunked lm_head receives Replicate input, producing correct Shard(-1)
-        # output for loss parallel. The backward through redistribute converts
-        # the Replicate gradient back to Shard(1) for the decoder backward.
+        # If SP is enabled, hidden states are Shard(1) on the TP mesh.
+        # Redistribute to Replicate before chunking so that the lm_head
+        # receives Replicate input and produces correct Shard(-1) output
+        # for loss parallel.
         if isinstance(hidden_states, DTensor):
             placements = hidden_states.placements
             new_placements = tuple(
@@ -261,7 +266,6 @@ class ChunkedCELoss:
                 )
 
         # Detach hidden states to stop gradient propagation at this boundary.
-        # We'll manually backward through the decoder after all chunks.
         h_detached = hidden_states.detach().requires_grad_(True)
 
         # Split hidden states and labels into chunks along seq dim.
@@ -311,9 +315,7 @@ class ChunkedCELoss:
             lm_head.set_reshard_after_backward(True)
             lm_head.reshard()
 
-        # Backward through the decoder with accumulated gradients.
-        accumulated_grad = grad_accumulator.result()
-        accumulated_grad = accumulated_grad.to(hidden_states.dtype)
+        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
         # Wrap as DTensor if hidden_states is a DTensor (TP enabled)
         if isinstance(hidden_states, DTensor):
@@ -323,6 +325,34 @@ class ChunkedCELoss:
                 placements=hidden_states.placements,
             )
 
-        hidden_states.backward(accumulated_grad)
+        return total_loss, accumulated_grad
 
-        return total_loss / global_valid_tokens
+    def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute chunked cross-entropy loss.
+
+        Same signature as standard loss functions: ``loss_fn(pred, labels)``.
+        ``pred`` should be hidden states from model forward with
+        ``skip_lm_head=True``. Call ``set_global_valid_tokens()`` before this.
+
+        In non-PP mode: does full backward (lm_head + decoder) internally,
+        returns a detached loss for logging.
+
+        In PP mode: does chunked lm_head backward only, returns a
+        differentiable loss connected to ``pred`` so the PP schedule can
+        backward through the decoder layers.
+        """
+        hidden_states = pred
+        total_loss, accumulated_grad = self._chunked_lm_head_backward(
+            hidden_states, labels
+        )
+
+        if self.pp_enabled:
+            # PP mode: return a differentiable loss so the PP schedule can
+            # backward through the decoder. (h * grad).sum() creates a scalar
+            # connected to hidden_states' autograd graph.
+            decoder_loss = (hidden_states * accumulated_grad).sum()
+            return decoder_loss
+        else:
+            # Non-PP mode: backward through the decoder ourselves.
+            hidden_states.backward(accumulated_grad)
+            return total_loss / self._global_valid_tokens
