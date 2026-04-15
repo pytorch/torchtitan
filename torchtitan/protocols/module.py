@@ -4,14 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
+from torchtitan.protocols.sharding import (
+    resolve_placements,
+    ShardingSpec,
+    Unconstrained,
+)
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -32,10 +40,13 @@ class Module(nn.Module, Configurable):
     """
 
     _param_init: dict[str, Callable] | None = None
+    _sharding_spec: ShardingSpec | None = None
+    _pos_arg_list: list[str] | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
+        sharding_spec: ShardingSpec | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -44,6 +55,8 @@ class Module(nn.Module, Configurable):
             instance = Configurable.Config.build(self, **kwargs)
             if self.param_init is not None:
                 instance._param_init = self.param_init
+            if self.sharding_spec is not None:
+                instance._sharding_spec = self.sharding_spec
             return instance
 
     def init_states(
@@ -113,6 +126,186 @@ class Module(nn.Module, Configurable):
             buffer_device: Target device for buffer creation/initialization.
         """
         pass
+
+    @property
+    def _pos_arg_names(self) -> list[str]:
+        """Positional arg names of ``forward`` (excluding ``self``).
+
+        Computed once from the class-level ``forward`` signature and cached.
+        Must be accessed **before** ``forward`` is wrapped (i.e., in
+        ``parallelize``), so the introspection sees the original signature.
+        """
+        if self._pos_arg_list is not None:
+            return self._pos_arg_list
+        # pyrefly sees self.forward = ... in parallelize() and thinks forward
+        # is instance-only, but it's always defined on nn.Module subclasses.
+        sig = inspect.signature(
+            type(self).forward  # pyrefly: ignore[missing-attribute]
+        )
+        self._pos_arg_list = [
+            p.name
+            for p in sig.parameters.values()
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            and p.name != "self"
+        ]
+        return self._pos_arg_list
+
+    def parallelize(self, mesh: DeviceMesh) -> None:
+        """Parallelize this module and all Module children recursively.
+
+        For each module with a ``sharding_spec``:
+
+        1. ``distribute_tensor`` on params per ``state_shardings``.
+        2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
+
+        The wrapping order is: ``shard_inputs → [local_map →] fn → shard_outputs``.
+        CP (applied before ``parallelize``) is captured inside ``local_map``.
+        FSDP hooks on ``__call__`` fire around the wrapped ``forward``.
+        """
+        # Recurse children first
+        queue = list(self.children())
+        while queue:
+            child = queue.pop()
+            if isinstance(child, Module):
+                child.parallelize(mesh)
+            else:
+                # Look through non-Module wrappers (CheckpointWrapper, compile)
+                queue.extend(child.children())
+
+        spec = self._sharding_spec
+        if spec is None:
+            return
+
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named dims"
+        mesh_dim_names = mesh.mesh_dim_names
+
+        # Distribute parameters and buffers
+        for name, param in self.named_parameters(recurse=False):
+            if name in spec.state_shardings:
+                placements = resolve_placements(
+                    spec.state_shardings[name], mesh_dim_names
+                )
+                self.register_parameter(
+                    name,
+                    nn.Parameter(distribute_tensor(param, mesh, list(placements))),
+                )
+
+        for name, buffer in self.named_buffers(recurse=False):
+            if name in spec.state_shardings and buffer is not None:
+                placements = resolve_placements(
+                    spec.state_shardings[name], mesh_dim_names
+                )
+                persistent = name not in self._non_persistent_buffers_set
+                self.register_buffer(
+                    name,
+                    distribute_tensor(buffer, mesh, list(placements)),
+                    persistent=persistent,
+                )
+
+        # Pre-cache positional arg names before wrapping forward, so inspect.signature
+        # sees the original signature.
+        # _shard_inputs uses the cached list instead of calling inspect every forward.
+        _ = self._pos_arg_names  # noqa: F841
+
+        fn = self.forward
+        if spec.local_map is not None:
+            fn = local_map(
+                fn,
+                in_placements=spec.local_map.in_placements,
+                out_placements=spec.local_map.out_placements,
+                in_grad_placements=spec.local_map.in_grad_placements,
+                device_mesh=mesh,
+            )
+
+        def with_redistribution(*args, **kwargs):
+            args, kwargs = self._shard_inputs(mesh, args, kwargs)
+            outputs = fn(*args, **kwargs)
+            return self._shard_outputs(mesh, outputs)
+
+        self.forward = with_redistribution  # pyrefly: ignore [missing-attribute]
+
+    def _shard_inputs(
+        self,
+        mesh: DeviceMesh,
+        args: tuple,
+        kwargs: dict,
+    ) -> tuple[tuple, dict]:
+        """Redistribute inputs to desired placements.
+
+        Two-step process per input:
+        1. If plain tensor, wrap as DTensor using ``input_layouts`` (annotation).
+        2. If DTensor placements != ``in_shardings``, redistribute.
+
+        Step 1 is required because we have not in the regime of full dtensor yet.
+        """
+        spec = self._sharding_spec
+        assert spec is not None
+
+        if spec.in_shardings is None and spec.input_layouts is None:
+            return args, kwargs
+
+        # Use pre-cached positional arg names (populated in parallelize()) to
+        # merge positional args into a unified kwargs dict.
+        pos_arg_names = [name for name in self._pos_arg_names if name not in kwargs]
+        new_kwargs = dict(zip(pos_arg_names, args))
+        new_kwargs.update(kwargs)
+
+        assert mesh.mesh_dim_names is not None
+        mesh_dim_names = mesh.mesh_dim_names
+        in_shardings = spec.in_shardings or {}
+        input_layouts = spec.input_layouts or {}
+
+        for name, value in new_kwargs.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+
+            # Step 1: Annotate plain tensor as DTensor using input_layouts
+            if not isinstance(value, DTensor) and name in input_layouts:
+                layout = resolve_placements(input_layouts[name], mesh_dim_names)
+                value = DTensor.from_local(value, mesh, layout, run_check=False)
+
+            # Step 2: Redistribute to desired placement if needed
+            if name in in_shardings and isinstance(value, DTensor):
+                desired = resolve_placements(in_shardings[name], mesh_dim_names)
+                if any(isinstance(p, Unconstrained) for p in desired):
+                    continue
+                if value.placements != desired:
+                    value = value.redistribute(placements=desired, async_op=True)
+
+            new_kwargs[name] = value
+
+        new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
+        return new_args, new_kwargs
+
+    def _shard_outputs(
+        self,
+        mesh: DeviceMesh,
+        outputs: Any,
+    ) -> Any:
+        """Redistribute output to desired placement.
+
+        TODO: Currently only handles a single DTensor output. Extend to
+        support nested outputs (tuples, dicts) when models with
+        multi-tensor forward returns (e.g., Flux, MoE) adopt
+        config-based sharding. out_shardings would also need to become
+        a nested structure.
+        """
+        spec = self._sharding_spec
+        assert spec is not None
+
+        if spec.out_shardings is None:
+            return outputs
+        assert mesh.mesh_dim_names is not None
+        desired = resolve_placements(spec.out_shardings, mesh.mesh_dim_names)
+        if any(isinstance(p, Unconstrained) for p in desired):
+            return outputs
+        if isinstance(outputs, DTensor) and outputs.placements != desired:
+            outputs = outputs.redistribute(placements=desired, async_op=True)
+        return outputs
 
     @classmethod
     def from_nn_module(cls, nn_module_cls: type[nn.Module]) -> type["Module"]:

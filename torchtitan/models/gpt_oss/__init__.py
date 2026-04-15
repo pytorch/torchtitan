@@ -20,6 +20,7 @@ from .model import Attention, GptOssModel, GptOssTransformerBlock
 
 from .moe import GptOssGroupedExperts, GptOssMoE
 from .parallelize import parallelize_gptoss
+from .sharding import set_gptoss_sharding_spec
 from .state_dict_adapter import GptOssStateDictAdapter
 
 __all__ = [
@@ -305,4 +306,5 @@ def model_registry(flavor: str) -> ModelSpec:
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
+        set_sharding_spec_fn=set_gptoss_sharding_spec,
     )
