@@ -345,7 +345,7 @@ llama4_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "local",
 ) -> ModelSpec:
     config = llama4_configs[flavor](
