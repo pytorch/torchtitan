@@ -37,6 +37,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
@@ -80,6 +81,16 @@ def construct_default_graph_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
+        custom_codegen_pass,
     ]
 
     # cudagraph should be the last pass.
@@ -680,6 +691,7 @@ AVAILABLE_COMPILER_PASSES = {
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "custom_codegen": custom_codegen_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
