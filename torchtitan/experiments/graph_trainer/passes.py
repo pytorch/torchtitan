@@ -187,7 +187,7 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
 
 
 def construct_default_graph_passes(
-    traced_result: TracedResult,
+    traced_result: "TracedResult",
 ) -> list[Callable]:
     """Build the default pass list for the aot_fx_trace compile path.
 
@@ -205,6 +205,7 @@ def construct_default_graph_passes(
 
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
+        apply_ac_on_fwd_bwd_graph,
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
@@ -251,13 +252,6 @@ def apply_graph_passes(
     for pass_fn in passes:
         gm = pass_fn(gm, example_inputs)
     return gm
-
-
-def graph_ac_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
-) -> torch.fx.GraphModule:
-    """Apply graph-based SAC to a traced fwd+loss+bwd graph."""
-    return apply_ac_on_fwd_bwd_graph(gm)
 
 
 def autobucketing_reordering_pass(
@@ -553,8 +547,6 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
-        custom_meta = node.meta.get("custom", {})
-
         # Skip backward nodes — they must not carry recompute tags,
         # otherwise the remat pass would try to duplicate backward ops.
         if _is_backward_node(node):
@@ -577,6 +569,7 @@ def apply_sac_pass(
                 node.meta["recompute"] = parent.meta["recompute"]
                 node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
+        custom_meta = node.meta.get("custom", {})
         ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
         node.meta["ac_graph_id"] = ac_region_id
 
@@ -610,7 +603,9 @@ def apply_sac_pass(
     return gm
 
 
-def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+def apply_ac_on_fwd_bwd_graph(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
 
     Tags forward nodes with recompute policy via apply_sac_pass (backward

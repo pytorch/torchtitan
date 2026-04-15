@@ -11,8 +11,6 @@ import torch
 import torch.nn as nn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_ac_regions,
-    enable_graph_ac_for_mode,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -25,7 +23,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
-    graph_ac_pass,
 )
 from torchtitan.trainer import Trainer
 
@@ -119,10 +116,6 @@ class GraphTrainer(Trainer):
     ) -> torch.Tensor:
         if self._traced_step is None:
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-            ac_mode = self.config.activation_checkpoint.mode
-            enable_graph_ac = enable_graph_ac_for_mode(ac_mode)
-            if enable_graph_ac:
-                annotate_ac_regions(model)
             maybe_register_blockmask_pytree_node()
             with self.train_context():
                 self._traced_step = trace_train_step(fwd_bwd_fn)(
@@ -135,10 +128,7 @@ class GraphTrainer(Trainer):
                 )
 
             if self.config.compile.enable_passes:
-                passes = []
-                if enable_graph_ac:
-                    passes.append(graph_ac_pass)
-                passes.extend(construct_default_graph_passes(self._traced_step))
+                passes = construct_default_graph_passes(self._traced_step)
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
