@@ -87,7 +87,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
         ),
-        compile=CompileConfig(enable=False, components=["model", "loss"]),
+        compile=CompileConfig(enable=True, components=["model", "loss"]),
         model_converters=ModelConvertersContainer.Config(
             converters=[
                 Float8GroupedMMConverter.Config(fqns=["experts"]),
