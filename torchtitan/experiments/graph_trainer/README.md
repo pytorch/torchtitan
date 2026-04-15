@@ -16,11 +16,11 @@ The goal is to give users more explicit control over the compiler stack in terms
 
 ### Prerequisites
 
-GraphTrainer requires the latest PyTorch nightly, which can be installed (e.g., for CUDA 12.8) via:
+GraphTrainer requires the latest PyTorch nightly, which can be installed (e.g., for CUDA 13.0) via:
 ```bash
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu130 --force-reinstall
 ```
-You can replace `cu128` with another version of CUDA or an AMD GPU (e.g. `rocm6.3`).
+You can replace `cu130` with another version of CUDA or an AMD GPU (e.g. `rocm6.3`).
 
 ### Quick Start
 

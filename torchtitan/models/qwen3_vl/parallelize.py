@@ -36,7 +36,7 @@ from torchtitan.config import (
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_dense, apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
@@ -311,11 +311,11 @@ def parallelize_qwen3_vl(
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
     if compile_config.enable:
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
-            apply_compile_dense(model.vision_encoder, compile_config)
+            apply_compile(model.vision_encoder, compile_config)
 
     # Apply FSDP / HSDP unconditionally (fully_shard handles dp_shard=1)
     dp_mesh_names = (
