@@ -112,11 +112,11 @@ pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly
 
 ### Nightly builds
 
-This method requires the nightly build of PyTorch. You can replace `cu128` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).
+This method requires the nightly build of PyTorch. You can replace `cu130` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).
 
 ```sh
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
-pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu128
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu130 --force-reinstall
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu130
 ```
 
 ### Stable releases

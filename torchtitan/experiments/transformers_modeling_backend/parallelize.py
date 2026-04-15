@@ -56,7 +56,7 @@ from torchtitan.config import (
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_dense
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.expert_parallel import BaseExpertParallel
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
@@ -383,7 +383,7 @@ def parallelize_hf_transformers(
         if has_moe:
             apply_compile_sparse(model, compile_config)
         else:
-            apply_compile_dense(model, compile_config)
+            apply_compile(model, compile_config)
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
