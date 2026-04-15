@@ -268,8 +268,10 @@ class ParallelismConfig:
       computes the exact num_permuted_tokens on the host.  No token dropping.
     - 1.0 = non-blocking, worst-case sizing: every token can reach every local
       expert, no drops, highest memory.
-    - < 1.0 = non-blocking, reduced memory; safe in practice when forced load
-      balancing (e.g. aux-loss / round-robin) keeps distribution roughly uniform.
+    - < 1.0 = non-blocking, reduced memory; controls the fused-permute output
+      tensor size (num_permuted_tokens). Safe in practice when forced load
+      balancing (e.g. aux-loss / round-robin) keeps distribution roughly
+      uniform.
 
     Note: this factor has no lasting effect on the all-to-all communication
     buffer.  HybridEP's dispatch_with_permute internally passes the actual

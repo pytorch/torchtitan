@@ -507,6 +507,9 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         self.comm_backend = config.comm_backend
         # Set at runtime by apply_moe_ep_tp
+        # pad_multiple: Alignment size for token groups needed by quantized
+        # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
+        # with hybridep. None means no padding.
         self.pad_multiple: int | None = None
         self.hybridep_capacity_factor: float | None = None
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
