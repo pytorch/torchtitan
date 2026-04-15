@@ -367,7 +367,7 @@ def _precompile_aot_fx_trace(
         traced_result.gm, traced_result.example_inputs, passes
     )
     logger.info(
-        f"Applied {len(precompile_passes)} precompile graph passes, "
+        f"Applied {len(passes)} precompile graph passes, "
         f"graph now has {len(list(traced_result.gm.graph.nodes))} nodes"
     )
 
