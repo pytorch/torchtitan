@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import json
 import os
 import subprocess
 import time
+from pathlib import Path
 
 from torchtitan.tools.logging import logger
 
@@ -40,6 +42,8 @@ def run_single_test(
     output_dir: str,
     module: str | None = None,
     config: str | None = None,
+    *,
+    collect_peak_memory: bool = False,
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
@@ -48,6 +52,7 @@ def run_single_test(
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
+        peak_memory_path = Path(output_dir) / test_name / f"peak_memory_{idx}.json"
         cmd = ""
         if module is not None:
             cmd += f"MODULE={module} "
@@ -59,6 +64,9 @@ def run_single_test(
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
         cmd += " " + dump_folder_arg
+        if collect_peak_memory:
+            cmd = f'TORCHTITAN_PEAK_MEMORY_JSON="{peak_memory_path}" ' + cmd
+            cmd += " --metrics.log_freq=1"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
@@ -89,6 +97,19 @@ def run_single_test(
                 f"Command: {cmd}\n"
                 f"stderr: {result.stderr}\n"
             )
+        if collect_peak_memory:
+            if not peak_memory_path.exists():
+                raise FileNotFoundError(
+                    f"Peak memory summary not found: {peak_memory_path}"
+                )
+            peak_memory = json.loads(peak_memory_path.read_text())
+            logger.info(
+                f"Peak memory for {test_name}[{idx}]: "
+                f"reserved={peak_memory['max_reserved_gib']:.3f} GiB "
+                f"at step {peak_memory['max_reserved_step']}, "
+                f"active={peak_memory['max_active_gib']:.3f} GiB "
+                f"at step {peak_memory['max_active_step']}"
+            )
 
 
 def run_tests(
@@ -98,6 +119,7 @@ def run_tests(
     config=None,
 ):
     """Run all integration tests to test the core features of TorchTitan"""
+    collect_peak_memory = getattr(args, "collect_peak_memory", False)
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
@@ -132,6 +154,7 @@ def run_tests(
                     args.output_dir,
                     module,
                     config,
+                    collect_peak_memory=collect_peak_memory,
                 )
             except Exception as e:
                 logger.error(str(e))
@@ -201,6 +224,12 @@ def main():
         "--exclude",
         default=None,
         help="Comma-separated list of test names to skip",
+    )
+    parser.add_argument(
+        "--collect_peak_memory",
+        default=False,
+        action="store_true",
+        help="Collect peak reserved/active CUDA memory directly from the run.",
     )
     args = parser.parse_args()
 

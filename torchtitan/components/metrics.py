@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import os
 import time
 from collections import namedtuple
@@ -353,6 +354,9 @@ class MetricsProcessor(Configurable):
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
+        self.peak_memory_summary_path = os.getenv("TORCHTITAN_PEAK_MEMORY_JSON")
+        self.pp_schedule = pp_schedule
+        self.peak_memory_summary: dict[str, float | int] | None = None
 
         self.has_quantization = has_quantization
 
@@ -361,6 +365,48 @@ class MetricsProcessor(Configurable):
         self.optimizers = None
         self.lr_schedulers = None
         self.model_parts = None
+
+    def _should_write_peak_memory(self) -> bool:
+        return self.peak_memory_summary_path is not None and (
+            not torch.distributed.is_initialized()
+            or torch.distributed.get_rank()
+            == _get_metrics_rank(
+                parallel_dims=self.parallel_dims, pp_schedule=self.pp_schedule
+            )
+        )
+
+    def _update_peak_memory_summary(
+        self, device_mem_stats: DeviceMemStats, step: int
+    ) -> None:
+        if not self._should_write_peak_memory():
+            return
+
+        if self.peak_memory_summary is None:
+            self.peak_memory_summary = {
+                "max_reserved_gib": device_mem_stats.max_reserved_gib,
+                "max_reserved_step": step,
+                "max_active_gib": device_mem_stats.max_active_gib,
+                "max_active_step": step,
+            }
+            return
+
+        if (
+            device_mem_stats.max_reserved_gib
+            > self.peak_memory_summary["max_reserved_gib"]
+        ):
+            self.peak_memory_summary["max_reserved_gib"] = (
+                device_mem_stats.max_reserved_gib
+            )
+            self.peak_memory_summary["max_reserved_step"] = step
+
+        if (
+            device_mem_stats.max_active_gib
+            > self.peak_memory_summary["max_active_gib"]
+        ):
+            self.peak_memory_summary["max_active_gib"] = (
+                device_mem_stats.max_active_gib
+            )
+            self.peak_memory_summary["max_active_step"] = step
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.config.log_freq == 0
@@ -496,6 +542,7 @@ class MetricsProcessor(Configurable):
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
+        self._update_peak_memory_summary(device_mem_stats, step)
 
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
@@ -545,6 +592,7 @@ class MetricsProcessor(Configurable):
         time_delta = time.perf_counter() - self.time_last_log
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
+        self._update_peak_memory_summary(device_mem_stats, step)
 
         # tokens per second per device, abbreviated as tps
         tps = self.ntokens_since_last_log / (
@@ -579,4 +627,7 @@ class MetricsProcessor(Configurable):
         self.device_memory_monitor.reset_peak_stats()
 
     def close(self):
+        if self._should_write_peak_memory() and self.peak_memory_summary is not None:
+            with open(self.peak_memory_summary_path, "w") as f:
+                json.dump(self.peak_memory_summary, f, indent=2)
         self.logger.close()
