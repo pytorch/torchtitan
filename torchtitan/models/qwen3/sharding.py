@@ -13,7 +13,7 @@ from torchtitan.distributed.sharding import (
     sequence_parallel_spec,
     set_decoder_sharding_spec,
 )
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
@@ -60,6 +60,18 @@ def _set_qwen3_layer_sharding(layer_cfg) -> None:
         w.sharding_spec = colwise_spec()
     # wo: RowwiseParallel with reduce-scatter to Shard(1)
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(out_shardings={TP: Shard(1)})
+
+    # Inner attention: local_map to convert TP DTensors to local tensors.
+    # q/k/v are (bs, seq, heads, head_dim) from GQAttention, heads at dim 2.
+    qkv_placements = (Shard(2),)
+    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
+        local_map=LocalMapSpec(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,),
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
+
     # QK norms: SequenceParallel on head dim (dim=2)
     if layer_cfg.attention.qk_norm is not None:
         qk_norm_spec = ShardingSpec(

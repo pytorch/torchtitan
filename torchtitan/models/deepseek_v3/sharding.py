@@ -13,7 +13,7 @@ from torchtitan.distributed.sharding import (
     sequence_parallel_spec,
     set_decoder_sharding_spec,
 )
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
@@ -62,6 +62,17 @@ def _set_deepseekv3_layer_sharding(layer_cfg) -> None:
     layer_cfg.attention.wkv_b.sharding_spec = colwise_spec()
     # wo: RowwiseParallel with reduce-scatter to Shard(1)
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(out_shardings={TP: Shard(1)})
+
+    # Inner attention: local_map to convert TP DTensors to local tensors.
+    # MLA: q/k/v are (bs, seq, heads, head_dim) — no transpose, heads at dim 2.
+    qkv_placements = (Shard(2),)
+    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
+        local_map=LocalMapSpec(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,),
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
 
     # Query projection: depends on q_lora_rank
     if layer_cfg.attention.q_lora_rank == 0:

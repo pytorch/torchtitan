@@ -13,7 +13,7 @@ from torchtitan.distributed.sharding import (
     sequence_parallel_spec,
     set_decoder_sharding_spec,
 )
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
@@ -61,6 +61,17 @@ def _set_llama4_layer_sharding(layer_cfg) -> None:
     for w in (layer_cfg.attention.wq, layer_cfg.attention.wkv):
         w.sharding_spec = colwise_spec()
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(out_shardings={TP: Shard(1)})
+
+    # Inner attention: local_map to convert TP DTensors to local tensors.
+    # q/k/v are (bs, seq, heads, head_dim) from GQAttention, heads at dim 2.
+    qkv_placements = (Shard(2),)
+    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
+        local_map=LocalMapSpec(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,),
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
