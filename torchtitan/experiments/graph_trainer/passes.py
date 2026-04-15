@@ -215,6 +215,13 @@ def cudagraph_pass(
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
     """
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure cudagraph is not combined with passes that replace the "
+            f"GraphModule (e.g. full_inductor_compilation)."
+        )
+
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
     from torchtitan.experiments.graph_trainer.cudagraph import (

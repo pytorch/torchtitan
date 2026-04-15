@@ -85,6 +85,7 @@ def _build_trainer(
             compile=SimpleNamespace(
                 mode="aot_fx_trace",
                 enable_passes=enable_passes,
+                precompile_artifact_dir="",
             )
         )
         trainer._fwd_bwd_step_module = None
