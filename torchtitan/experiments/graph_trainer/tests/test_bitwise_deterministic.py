@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
+from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -38,6 +39,7 @@ from torchtitan.experiments.graph_trainer.llama3 import (
 )
 from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
@@ -107,8 +109,21 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_flavor: str
 
     def setUp(self):
-        if not hasattr(self, "model_registry"):
-            self.skipTest("Base class")
+        # Disable max_autotune for FlexAttention to ensure bitwise-identical
+        # results between eager (torch.compile) and traced (regional_inductor)
+        # paths. max_autotune causes kernel config divergence between the two.
+        self._orig_inductor_configs = FlexAttention.inductor_configs
+        self._orig_compiled_flex_attn = FlexAttention._compiled_flex_attn
+        FlexAttention.inductor_configs = {
+            **self._orig_inductor_configs,
+            "max_autotune": False,
+            "coordinate_descent_tuning": False,
+        }
+        FlexAttention._compiled_flex_attn = torch.compile(
+            flex_attention,
+            options=FlexAttention.inductor_configs,
+        )
+
         _set_deterministic()
         model_spec = self.model_registry(self.model_flavor)
         self.model_config = model_spec.model
@@ -124,7 +139,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.labels = torch.randint(0, vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
 
     def tearDown(self):
-        pass
+        FlexAttention.inductor_configs = self._orig_inductor_configs
+        FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
     def _run_steps(
         self, model: nn.Module, trainer_cls: type, *, enable_passes: bool = True
@@ -359,11 +375,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
-# TODO: max_autotune=True causes multiple issues for FlexAttn bitwise tests:
-# kernel config divergence between eager and traced paths, and triton shared
-# memory OOMs for large head dims (DSv3). Investigate after stabilizing
-# max_autotune with regional_inductor.
-@unittest.skip("max_autotune breaks FlexAttn bitwise tests")
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
@@ -403,7 +414,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
-@unittest.skip("max_autotune breaks FlexAttn bitwise tests")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
@@ -429,11 +439,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """09bb71bafdd888cf46c5f5c7ccddb5441266f843f9a2255d1569121613035be9""",
+            """2dcc779af7bc5aeae2d39eff3898180a8156549b2f1582d77e8db237689e0c67""",
         )
         assert_expected_inline(
             grad_hash,
-            """8bb6e647c3edaa229cc65872086ccc5c4e1b7f1647bb01da4506ab777a64a0db""",
+            """b3f5b911dea6c9d36f508b08300220d7f39f142a7c34a49b7ef2543abb2065dc""",
         )
 
     # TODO: OOMs during flex_attention compilation on A100 GPUs.
