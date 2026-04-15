@@ -23,7 +23,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
-    construct_load_graph_passes,
+    runtime_passes,
 )
 from torchtitan.trainer import Trainer
 
@@ -164,7 +164,7 @@ class GraphTrainer(Trainer):
                     # Precompiled artifact already has cleanup +
                     # regional_inductor baked in; only apply
                     # load-time passes (cudagraph).
-                    passes = construct_load_graph_passes(self._traced_step)
+                    passes = runtime_passes(self._traced_step)
                 else:
                     passes = construct_default_graph_passes(self._traced_step)
                 if passes:
