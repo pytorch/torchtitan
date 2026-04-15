@@ -132,6 +132,10 @@ class CUDAGraphWrapper:
         self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
+        # example_inputs is empty when loading a precompiled artifact:
+        # the artifact is deserialized before the first real forward
+        # call, so no example inputs are available yet. In that case
+        # we defer computation to the first __call__ (warmup phase).
         self._input_indices_to_copy: list[int] | None = (
             [
                 i
