@@ -341,15 +341,15 @@ def _precompile_aot_fx_trace(
     # cudagraph is excluded — it runs at load time on each rank.
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
-        construct_precompile_graph_passes,
+        compile_time_passes,
     )
 
-    precompile_passes = construct_precompile_graph_passes(traced_result)
+    passes = compile_time_passes(traced_result)
     traced_result.gm = apply_graph_passes(
-        traced_result.gm, traced_result.example_inputs, precompile_passes
+        traced_result.gm, traced_result.example_inputs, passes
     )
     logger.info(
-        f"Applied {len(precompile_passes)} precompile graph passes, "
+        f"Applied {len(passes)} precompile graph passes, "
         f"graph now has {len(list(traced_result.gm.graph.nodes))} nodes"
     )
 
