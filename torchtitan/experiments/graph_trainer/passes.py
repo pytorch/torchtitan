@@ -42,6 +42,7 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
+    remove_transpose_pairs_pass,
 )
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
@@ -71,6 +72,7 @@ def construct_default_graph_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        remove_transpose_pairs_pass,
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but

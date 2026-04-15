@@ -155,3 +155,79 @@ def remove_identity_slice_pass(
     gm.graph.lint()
     gm.recompile()
     return gm
+
+
+def remove_transpose_pairs_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove canceling transpose pairs from the graph.
+
+    Two patterns are handled:
+
+    1. ``aten.t.default(aten.t.default(x))`` -> ``x``
+       (2D matrix transpose applied twice is identity)
+
+    2. ``aten.transpose.int(aten.transpose.int(x, d0, d1), d0, d1)`` -> ``x``
+       (transposing the same pair of dimensions twice is identity)
+
+    Only pairs where the inner transpose has exactly one user (the outer
+    transpose) are removed, to avoid breaking other consumers.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with canceling transpose pairs removed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function":
+            continue
+
+        if node.target is torch.ops.aten.t.default:
+            inner = node.args[0]
+            if not isinstance(inner, torch.fx.Node):
+                continue
+            if inner.op != "call_function":
+                continue
+            if inner.target is not torch.ops.aten.t.default:
+                continue
+            if len(inner.users) != 1:
+                continue
+
+            original_input = inner.args[0]
+            node.replace_all_uses_with(original_input)
+            gm.graph.erase_node(node)
+            gm.graph.erase_node(inner)
+            count += 1
+
+        elif node.target is torch.ops.aten.transpose.int:
+            inner = node.args[0]
+            if not isinstance(inner, torch.fx.Node):
+                continue
+            if inner.op != "call_function":
+                continue
+            if inner.target is not torch.ops.aten.transpose.int:
+                continue
+            if len(inner.users) != 1:
+                continue
+
+            # Check that both transpositions use the same set of dimensions.
+            outer_dims = set(node.args[1:3])
+            inner_dims = set(inner.args[1:3])
+            if outer_dims != inner_dims:
+                continue
+
+            original_input = inner.args[0]
+            node.replace_all_uses_with(original_input)
+            gm.graph.erase_node(node)
+            gm.graph.erase_node(inner)
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} canceling transpose pair(s) from the graph")
+
+    return gm

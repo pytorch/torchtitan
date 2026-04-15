@@ -25,6 +25,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
+    remove_transpose_pairs_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.linear import Linear
@@ -894,6 +895,142 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 2)
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
+
+
+class TestRemoveTransposePairsPass(TestCase):
+    """Unit tests for the remove_transpose_pairs_pass graph pass."""
+
+    def _count_transpose_nodes(self, gm):
+        """Count aten.t and aten.transpose.int call_function nodes."""
+        targets = {torch.ops.aten.t.default, torch.ops.aten.transpose.int}
+        return sum(
+            1 for n in gm.graph.nodes if n.op == "call_function" and n.target in targets
+        )
+
+    def _count_call_function_nodes(self, gm):
+        """Count all call_function nodes."""
+        return sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+    def test_t_pair_removed(self):
+        """t(t(x)) pair is removed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        t2 = graph.call_function(torch.ops.aten.t.default, args=(t1,))
+        graph.output(t2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 2)
+
+        remove_transpose_pairs_pass(gm)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 0)
+
+    def test_transpose_int_pair_removed(self):
+        """transpose(transpose(x, d0, d1), d0, d1) pair is removed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.transpose.int, args=(x, 0, 1))
+        t2 = graph.call_function(torch.ops.aten.transpose.int, args=(t1, 0, 1))
+        graph.output(t2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 2)
+
+        remove_transpose_pairs_pass(gm)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 0)
+
+    def test_transpose_int_swapped_dims_removed(self):
+        """transpose(transpose(x, d0, d1), d1, d0) pair is removed (same set of dims)."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.transpose.int, args=(x, 0, 1))
+        t2 = graph.call_function(torch.ops.aten.transpose.int, args=(t1, 1, 0))
+        graph.output(t2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        remove_transpose_pairs_pass(gm)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 0)
+
+    def test_transpose_int_different_dims_preserved(self):
+        """transpose pairs with different dimensions are not removed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.transpose.int, args=(x, 0, 1))
+        t2 = graph.call_function(torch.ops.aten.transpose.int, args=(t1, 1, 2))
+        graph.output(t2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        remove_transpose_pairs_pass(gm)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 2)
+
+    def test_multi_use_inner_preserved(self):
+        """Inner transpose with multiple users is not removed."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        t2 = graph.call_function(torch.ops.aten.t.default, args=(t1,))
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(t1,))
+        graph.output((t2, relu))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        remove_transpose_pairs_pass(gm)
+
+        # Both t nodes should still be present since t1 has two users
+        self.assertEqual(self._count_transpose_nodes(gm), 2)
+
+    def test_standalone_transpose_preserved(self):
+        """A single transpose without a matching pair is preserved."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        graph.output(t1)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        remove_transpose_pairs_pass(gm)
+
+        self.assertEqual(self._count_transpose_nodes(gm), 1)
+
+    def test_numerics_preserved_t(self):
+        """Numerics are preserved after removing t(t(x)) pairs."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(relu,))
+        t2 = graph.call_function(torch.ops.aten.t.default, args=(t1,))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(t2,))
+        graph.output(neg)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        x_val = torch.randn(3, 4)
+        expected = gm(x_val)
+
+        remove_transpose_pairs_pass(gm)
+
+        actual = gm(x_val)
+        self.assertEqual(actual, expected)
+
+    def test_numerics_preserved_transpose_int(self):
+        """Numerics are preserved after removing transpose.int pairs."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        t1 = graph.call_function(torch.ops.aten.transpose.int, args=(relu, 0, 2))
+        t2 = graph.call_function(torch.ops.aten.transpose.int, args=(t1, 0, 2))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(t2,))
+        graph.output(neg)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        x_val = torch.randn(2, 3, 4)
+        expected = gm(x_val)
+
+        remove_transpose_pairs_pass(gm)
+
+        actual = gm(x_val)
+        self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":
