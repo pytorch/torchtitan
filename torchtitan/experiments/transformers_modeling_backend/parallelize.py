@@ -563,6 +563,31 @@ def apply_non_moe_tp(
                 sequence_dim=2, use_local_output=True
             )
 
+        # GLM-5 DSA (Dense Sparse Attention) indexer: its inputs arrive as
+        # plain tensors (from upstream NoParallel/to_local), but after FSDP
+        # unshard its weights become DTensors — causing mixed tensor errors.
+        # Shadow DTensor params with local copies via __dict__ on each
+        # sub-module, same pattern as experts_to_local hooks.
+        # The indexer is @torch.no_grad so no grad concerns.
+        if hasattr(transformer_block.self_attn, "indexer"):
+            indexer = transformer_block.self_attn.indexer
+
+            # The indexer's inputs (hidden_states, q_resid) are
+            # DTensor(Replicate) from PrepareModuleInput on self_attn,
+            # but its weights are plain Parameters (FSDP manages them at
+            # block level). Convert DTensor inputs to local so F.linear
+            # doesn't hit mixed DTensor/Tensor errors.
+            def _indexer_to_local_pre_hook(module, args):
+                def _to_local(x):
+                    if isinstance(x, DTensor):
+                        return x.to_local()
+                    if isinstance(x, tuple):
+                        return tuple(_to_local(v) for v in x)
+                    return x
+                return tuple(_to_local(a) for a in args)
+
+            indexer.register_forward_pre_hook(_indexer_to_local_pre_hook)
+
         if not transformer_block.moe_enabled:
             mlp_plan = {
                 "mlp": prepare_module_input(
