@@ -103,6 +103,7 @@ def _make_gptoss_experts_config(
     layer_id: int,
     top_k: int,
     score_before_experts: bool,
+    moe_comm_backend: str = "local",
 ) -> GptOssGroupedExperts.Config:
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
     std = depth_scaled_std(0.02, layer_id)
@@ -121,6 +122,7 @@ def _make_gptoss_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
@@ -134,6 +136,7 @@ def _build_gptoss_layers(
     top_k: int,
     score_before_experts: bool,
     load_balance_coeff: float,
+    moe_comm_backend: str = "local",
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -150,6 +153,7 @@ def _build_gptoss_layers(
             layer_id=layer_id,
             top_k=top_k,
             score_before_experts=score_before_experts,
+            moe_comm_backend=moe_comm_backend,
         )
         moe_cfg = GptOssMoE.Config(
             num_experts=num_experts,
@@ -179,7 +183,7 @@ def _build_gptoss_layers(
     return layers
 
 
-def _debugmodel() -> GptOssModel.Config:
+def _debugmodel(moe_comm_backend: str = "local", **kwargs) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
     n_layers = 4
@@ -203,6 +207,7 @@ def _debugmodel() -> GptOssModel.Config:
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -218,7 +223,7 @@ def _debugmodel() -> GptOssModel.Config:
     )
 
 
-def _20b() -> GptOssModel.Config:
+def _20b(moe_comm_backend: str = "local", **kwargs) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
     n_layers = 24
@@ -242,6 +247,7 @@ def _20b() -> GptOssModel.Config:
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -257,7 +263,7 @@ def _20b() -> GptOssModel.Config:
     )
 
 
-def _120b() -> GptOssModel.Config:
+def _120b(moe_comm_backend: str = "local", **kwargs) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
     n_layers = 36
@@ -281,6 +287,7 @@ def _120b() -> GptOssModel.Config:
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -306,9 +313,9 @@ gptoss_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    moe_comm_backend: str = "local",
 ) -> ModelSpec:
-    config = gptoss_configs[flavor]()
+    config = gptoss_configs[flavor](moe_comm_backend=moe_comm_backend)
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,
