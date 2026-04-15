@@ -354,7 +354,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
                     "implementation='fused_opt_states_bf16' is not supported with "
                     "OptimizersInBackwardContainer"
                 )
-            super().__post_init__()
+            OptimizersContainer.Config.__post_init__(self)
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         optimizer_cls = self._resolve_optimizer_cls(config.name)
