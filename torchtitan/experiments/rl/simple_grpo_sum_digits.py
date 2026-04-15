@@ -70,18 +70,22 @@ class GRPOLoss(Configurable):
         self,
         policy_logprobs: list[torch.Tensor],
         advantages: torch.Tensor,
-        ref_logprobs: list[torch.Tensor],
+        ref_logprobs: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         per_sample_mean_log_ratio = []
         per_sample_mean_kl = []
 
-        # Have to loop over samples because the logprobs are not batched
-        for policy_lps, ref_lps in zip(policy_logprobs, ref_logprobs):
-            token_log_ratio = policy_lps - ref_lps.detach()
-            per_sample_mean_log_ratio.append(token_log_ratio.mean())
+        if ref_logprobs is not None:
+            for policy_lps, ref_lps in zip(policy_logprobs, ref_logprobs):
+                token_log_ratio = policy_lps - ref_lps.detach()
+                per_sample_mean_log_ratio.append(token_log_ratio.mean())
 
-            token_kl = torch.exp(token_log_ratio) - 1 - token_log_ratio  # noqa: TOR107
-            per_sample_mean_kl.append(token_kl.mean())
+                token_ratio = torch.exp(token_log_ratio)
+                token_kl = token_ratio - 1 - token_log_ratio
+                per_sample_mean_kl.append(token_kl.mean())
+        else:
+            for policy_lps in policy_logprobs:
+                per_sample_mean_log_ratio.append(policy_lps.mean())
 
         mean_log_ratio = torch.stack(per_sample_mean_log_ratio)
         ratio = torch.exp(mean_log_ratio)
@@ -91,7 +95,9 @@ class GRPOLoss(Configurable):
         clipped_loss = clipped_ratio * advantages
         pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
 
-        kl_div = torch.stack(per_sample_mean_kl).mean()
+        kl_div = torch.tensor(0.0)
+        if per_sample_mean_kl:
+            kl_div = torch.stack(per_sample_mean_kl).mean()
 
         loss = pg_loss + self.kl_coef * kl_div
         metrics = {

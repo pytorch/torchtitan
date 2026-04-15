@@ -298,6 +298,15 @@ class PolicyTrainer(Actor, Configurable):
         response_lens = local_batch.response_lens
         advantages = local_batch.advantages.to(device)
 
+        max_seq_len = max(seq_lens)
+        rope_cache_len = self.model.freqs_cis.shape[0]
+        if max_seq_len > rope_cache_len:
+            raise ValueError(
+                f"Episode length {max_seq_len} exceeds rope cache size "
+                f"{rope_cache_len}. Increase model max_seq_len or reduce "
+                f"generation max_tokens."
+            )
+
         attention_masks = create_varlen_metadata(seq_lens, device)
         positions = create_positions_from_seq_lens(seq_lens, device)
 
@@ -309,6 +318,7 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
+        ref_logprobs = None
         if self.ref_model is not None:
             with torch.no_grad():
                 ref_logits = self.ref_model(
@@ -318,8 +328,6 @@ class PolicyTrainer(Actor, Configurable):
                 ref_logprobs = extract_response_logprobs(
                     all_ref_logprobs, seq_lens, prompt_lens, response_lens
                 )
-        else:
-            ref_logprobs = [torch.zeros_like(lp) for lp in policy_logprobs]
 
         loss, loss_metrics = self.loss_fn(
             policy_logprobs=policy_logprobs,
