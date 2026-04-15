@@ -246,6 +246,8 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
     SWEEP_SHARED_MODELS=(
         "Qwen/Qwen2-57B-A14B"                          # qwen2_moe
         "zai-org/GLM-4.7"                               # glm4_moe_lite (shared experts)
+        "deepseek-ai/DeepSeek-V3"                       # deepseek_v3 (MLA + shared experts)
+        # zai-org/GLM-5 — DSA indexer module needs TP plan (mixed DTensor error)
     )
     for hf_model in "${SWEEP_SHARED_MODELS[@]}"; do
         run_half "TP=2+EP=2 $hf_model" \
