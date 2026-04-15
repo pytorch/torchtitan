@@ -182,6 +182,10 @@ def remove_identity_slice_pass(
     return gm
 
 
+def _is_backward_node(node: torch.fx.Node) -> bool:
+    return node.meta.get("autograd_backward", False)
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
@@ -201,6 +205,7 @@ def construct_default_graph_passes(
 
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
+        apply_ac_on_fwd_bwd_graph,
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
@@ -542,6 +547,11 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
+        # Skip backward nodes — they must not carry recompute tags,
+        # otherwise the remat pass would try to duplicate backward ops.
+        if _is_backward_node(node):
+            continue
+
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -559,7 +569,6 @@ def apply_sac_pass(
                 node.meta["recompute"] = parent.meta["recompute"]
                 node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
-
         custom_meta = node.meta.get("custom", {})
         ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
         node.meta["ac_graph_id"] = ac_region_id
@@ -592,6 +601,27 @@ def apply_sac_pass(
             f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
         )
     return gm
+
+
+def apply_ac_on_fwd_bwd_graph(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """Apply graph-based SAC to a traced fwd+loss+bwd graph.
+
+    Tags forward nodes with recompute policy via apply_sac_pass (backward
+    nodes are skipped automatically via ``node.meta["autograd_backward"]``), then
+    applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
+    PREFER_RECOMPUTE forward ops before backward and DCE originals.
+
+    The model must have been annotated with annotate_ac_regions before
+    tracing so that nodes have custom["ac_region_id"] metadata.
+    """
+    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
+        remat_using_tags_for_fwd_loss_bwd_graph,
+    )
+
+    apply_sac_pass(gm)
+    return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
 # Apply activation checkpointing on joint graph before partitioner
@@ -694,7 +724,7 @@ def inductor_decomposition_pass(
             f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
         )
 
-    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders, strict=True):
         # Copy all metadata from original to decomposed
         for key, value in orig.meta.items():
             if key not in decomp.meta:

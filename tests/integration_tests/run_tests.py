@@ -91,9 +91,13 @@ def run_single_test(
             )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
+def run_tests(
+    args,
+    test_list: list[OverrideDefinitions],
+    module=None,
+    config=None,
+):
     """Run all integration tests to test the core features of TorchTitan"""
-
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
@@ -123,7 +127,12 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
             )
         else:
             try:
-                run_single_test(test_flavor, args.output_dir, module, config)
+                run_single_test(
+                    test_flavor,
+                    args.output_dir,
+                    module,
+                    config,
+                )
             except Exception as e:
                 logger.error(str(e))
                 failed_tests.append((test_flavor.test_name, str(e)))
