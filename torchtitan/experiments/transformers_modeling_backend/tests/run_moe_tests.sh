@@ -250,7 +250,7 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "zai-org/GLM-4.7"                               # glm4_moe_lite (shared experts)
         "deepseek-ai/DeepSeek-V3"                       # deepseek_v3 (MLA + shared experts)
         "zai-org/GLM-5"                                 # glm_moe_dsa (MLA + DSA + shared experts)
-        # microsoft/Phi-3.5-MoE-instruct — sparsemixer backward uses scatter_add_ incompatible with DTensor
+        "microsoft/Phi-3.5-MoE-instruct"                # phimoe (sparsemixer custom backward)
     )
     for hf_model in "${SWEEP_SHARED_MODELS[@]}"; do
         run_half "TP=2+EP=2 $hf_model" \

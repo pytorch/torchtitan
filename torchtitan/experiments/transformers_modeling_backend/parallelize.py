@@ -270,7 +270,11 @@ def _make_moe_to_local_pre_hook(grad_placements):
     def hook(module, args):
         hidden_states = args[0]
         if isinstance(hidden_states, DTensor):
-            return (hidden_states.to_local(grad_placements=grad_placements),)
+            # clone() is needed because to_local() returns a view from a
+            # custom autograd Function (_ToTorchTensorBackward). Some HF
+            # models (e.g. PhiMoE) apply in-place ops (input_jitter_noise
+            # *= ...) which autograd forbids on custom Function views.
+            return (hidden_states.to_local(grad_placements=grad_placements).clone(),)
         return None
 
     return hook
@@ -694,14 +698,44 @@ def apply_moe_ep_tp(
                     distribute_tensor(experts.down_proj, tp_mesh, [Shard(2)])
                 )
 
-            # Replicate gate params on TP mesh and handle DTensor
-            # input/output via NoParallel. Same as native titan's
-            # NoParallel on moe.router.gate.
-            parallelize_module(
-                gate,
-                tp_mesh,
-                NoParallel(local_output_grad_placements=(Partial(),)),
-            )
+            # Replicate gate params on TP mesh. Most routers (Mixtral,
+            # Qwen3, DeepSeek V3, etc.) use NoParallel which wraps
+            # inputs as DTensor for the gate's nn.Linear forward.
+            #
+            # PhiMoE's PhimoeTopKRouter overrides forward to call a
+            # custom autograd Function (sparsemixer) whose backward
+            # uses scatter_add_, incompatible with DTensor placement
+            # changes. For these routers, use distribute_module (bare)
+            # + __dict__ param shadowing so the entire forward operates
+            # on local tensors. Same pattern as _experts_to_local hooks.
+            if type(gate).forward is not nn.Linear.forward:
+                distribute_module(gate, tp_mesh)
+
+                def _router_params_to_local(gate_mod):
+                    # Use direct attribute access (not named_parameters)
+                    # to match the proven _experts_to_local pattern.
+                    # FSDP2 manages params at block level — after unshard,
+                    # module.weight works but named_parameters may not.
+                    def pre_hook(module, args):
+                        weight = gate_mod.weight
+                        if isinstance(weight, DTensor):
+                            gate_mod.__dict__["weight"] = weight.to_local()
+
+                    def post_hook(module, args, output):
+                        gate_mod.__dict__.pop("weight", None)
+                        return output
+
+                    return pre_hook, post_hook
+
+                pre_hook, post_hook = _router_params_to_local(gate)
+                gate.register_forward_pre_hook(pre_hook)
+                gate.register_forward_hook(post_hook)
+            else:
+                parallelize_module(
+                    gate,
+                    tp_mesh,
+                    NoParallel(local_output_grad_placements=(Partial(),)),
+                )
 
             # FSDP converts gate buffers (e.g. e_score_correction_bias in
             # DeepSeek V3/GLM-4.7 routers) to DTensors for mesh alignment.
