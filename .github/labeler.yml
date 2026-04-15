@@ -4,3 +4,8 @@
   - scripts/**
   - tests/**
   - torchtitan/**
+
+"ciflow/graph_trainer":
+  - torchtitan/experiments/graph_trainer/**
+  - .github/workflows/integration_test_8gpu_graph_trainer.yaml
+  - .github/workflows/integration_test_8gpu_graph_trainer_h100.yaml

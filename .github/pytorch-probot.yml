@@ -1,3 +1,4 @@
 ciflow_push_tags:
   - ciflow/8gpu
+  - ciflow/graph_trainer
 labeler_config: labeler.yml

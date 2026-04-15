@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     tags:
-      - ciflow/8gpu/*
+      - ciflow/graph_trainer/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
