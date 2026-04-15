@@ -132,11 +132,15 @@ class CUDAGraphWrapper:
         self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
-        self._input_indices_to_copy = [
-            i
-            for i, inp in enumerate(example_inputs)
-            if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
-        ]
+        self._input_indices_to_copy: list[int] | None = (
+            [
+                i
+                for i, inp in enumerate(example_inputs)
+                if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
+            ]
+            if example_inputs
+            else None
+        )
         self._cudagraph: torch.cuda.CUDAGraph | None = None
         self._has_warmup = False
 
@@ -157,22 +161,31 @@ class CUDAGraphWrapper:
         for i in self._input_indices_to_copy:
             self._args[i].copy_(args[i])
 
-    def _check_input_types(self, inputs) -> None:
+    def _validate_inputs(self, inputs) -> None:
+        """Validate that all inputs are of supported types.
+
+        Opaque inputs (e.g. DeviceMesh from SimpleFSDP/DTensor) are
+        inherently static and already excluded from copying (only
+        tensors appear in ``_input_indices_to_copy``), so no special
+        handling is needed beyond accepting them here.
+        """
         for i, inp in enumerate(inputs):
-            if not (
-                isinstance(inp, (torch.Tensor, int, float, torch._C.Generator))
-                or is_opaque_value(inp)
-            ):
-                raise ValueError(
-                    "args must be tensor, integer (for dynamic shapes), "
-                    "float (for scalar constants), "
-                    "Generator (for random number generator), "
-                    "or opaque object, "
-                    f"but found {type(inp)} with value {inp!r} at index {i}"
-                )
+            if isinstance(inp, (torch.Tensor, int, float, torch._C.Generator)):
+                continue
+            if is_opaque_value(inp):
+                continue
+            raise ValueError(
+                "args must be tensor, integer (for dynamic shapes), "
+                "float (for scalar constants), "
+                "Generator (for random number generator), "
+                "or opaque object, "
+                f"but found {type(inp)} with value {inp!r} at index {i}"
+            )
 
     def _check_static_inputs_address(self) -> None:
         for i in self._static_input_indices:
+            if not isinstance(self._args[i], torch.Tensor):
+                continue
             actual = self._args[i].data_ptr()
             expected = self._input_addresses[i]
             assert expected == actual, (
@@ -194,7 +207,14 @@ class CUDAGraphWrapper:
             return out
 
         if self._cudagraph is None:
-            self._check_input_types(args)
+            self._validate_inputs(args)
+            if self._input_indices_to_copy is None:
+                self._input_indices_to_copy = [
+                    i
+                    for i, inp in enumerate(args)
+                    if isinstance(inp, torch.Tensor)
+                    and i not in self._static_input_indices
+                ]
             self._args = args
             self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args

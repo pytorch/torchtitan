@@ -49,32 +49,24 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
-def construct_default_graph_passes(
+def construct_precompile_graph_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
-    """Build the default pass list for the aot_fx_trace compile path.
+    """Passes to apply at precompile time (before serialization).
 
-    Per-pass configuration (e.g. ``static_input_indices`` for cudagraph) is
-    bound here via ``functools.partial`` so that ``apply_graph_passes``
-    stays a generic pass runner with no pass-specific parameters.
+    Includes cleanup, FlexAttention annotation, and regional_inductor
+    compilation. The compiled Triton kernels (AOTCompiledArtifact nodes)
+    are serialized into the artifact by GraphPickler.
 
-    Args:
-        traced_result: The traced graph and metadata from ``trace_train_step``.
-
-    Returns:
-        An ordered list of graph passes ready to apply.
+    cudagraph is excluded — it needs real tensors and devices at runtime.
     """
     from torchtitan.models.common.attention import FlexAttention
 
-    passes: list[Callable] = [
+    return [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        # FlexAttention HOPs must be compiled (via regional_inductor) to
-        # produce bitwise identical results to the eager Trainer path.
-        # When left uncompiled, flex_attention still runs correctly but
-        # produces different numerical results.
         functools.partial(
             annotate_flex_attention_for_regional_inductor_pass,
             flex_compile_config=FlexAttention.inductor_configs,
@@ -82,9 +74,18 @@ def construct_default_graph_passes(
         regional_inductor_pass,
     ]
 
-    # cudagraph should be the last pass.
+
+def construct_load_graph_passes(
+    traced_result: "TracedResult",
+) -> list[Callable]:
+    """Passes to apply at load time (after deserialization).
+
+    Only includes cudagraph — regional_inductor and cleanup passes
+    were already applied at precompile time.
+    """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
+    passes: list[Callable] = []
     if is_cudagraph_compatible(traced_result.gm):
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
@@ -94,7 +95,19 @@ def construct_default_graph_passes(
                 static_input_indices=static_input_indices,
             )
         )
+    return passes
 
+
+def construct_default_graph_passes(
+    traced_result: "TracedResult",
+) -> list[Callable]:
+    """Build the full pass list for the non-precompile aot_fx_trace path.
+
+    Combines all precompile-time and load-time passes into a single list.
+    Used when tracing happens at runtime (no precompiled artifact).
+    """
+    passes = construct_precompile_graph_passes(traced_result)
+    passes.extend(construct_load_graph_passes(traced_result))
     return passes
 
 
@@ -285,6 +298,13 @@ def cudagraph_pass(
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
     """
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure cudagraph is not combined with passes that replace the "
+            f"GraphModule (e.g. full_inductor_compilation)."
+        )
+
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
     from torchtitan.experiments.graph_trainer.cudagraph import (
