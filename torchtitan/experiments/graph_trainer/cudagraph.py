@@ -124,30 +124,27 @@ class CUDAGraphWrapper:
         example_inputs: Sequence[Any],
         static_input_indices: tuple[int] | None = None,
         should_check_address: bool = False,
-        *,
-        boxed_call: bool | None = None,
     ):
         _cg_manager.maybe_initialize()
         _cg_manager.register_wrapper(self)
 
         self._runnable = runnable
-        # _boxed_call_inner controls how we *call* the inner runnable
-        # (single list arg vs *args). This is distinct from the outer
-        # _boxed_call attribute that the AOT runtime checks to decide
-        # how to call *us* (see cudagraph_pass in passes.py).
-        self._boxed_call_inner = (
-            boxed_call
-            if boxed_call is not None
-            else getattr(runnable, "_boxed_call", False)
-        )
         self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
-        self._input_indices_to_copy = [
-            i
-            for i, inp in enumerate(example_inputs)
-            if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
-        ]
+        # When example_inputs are not available at construction time (e.g.
+        # CooR precompile, where the wrapper is deserialized from a cache
+        # without inputs), we defer computing indices until the first call.
+        self._input_indices_to_copy: list[int] | None = (
+            [
+                i
+                for i, inp in enumerate(example_inputs)
+                if isinstance(inp, torch.Tensor)
+                and i not in self._static_input_indices
+            ]
+            if example_inputs
+            else None
+        )
         self._cudagraph: torch.cuda.CUDAGraph | None = None
         self._has_warmup = False
 
@@ -200,23 +197,7 @@ class CUDAGraphWrapper:
                 f"{expected} != {actual}"
             )
 
-    def _call_runnable(self, flat_args):
-        if self._boxed_call_inner:
-            return self._runnable(list(flat_args))
-        return self._runnable(*flat_args)
-
     def __call__(self, *args):
-        # Normalize boxed vs unboxed calling convention: internally we
-        # always work with a flat tuple of individual inputs.
-        if (
-            self._boxed_call_inner
-            and len(args) == 1
-            and isinstance(args[0], (list, tuple))
-        ):
-            flat_args = tuple(args[0])
-        else:
-            flat_args = args
-
         if not self._has_warmup:
             self._has_warmup = True
             device = torch.cuda.current_device()
@@ -226,14 +207,24 @@ class CUDAGraphWrapper:
             with _use_cuda_memory_pool_manager(
                 device, _cg_manager.graph_pool, _cg_manager.stream
             ):
-                out = self._call_runnable(flat_args)
+                out = self._runnable(*args)
             return out
 
         if self._cudagraph is None:
-            self._validate_inputs(flat_args)
-            self._args = flat_args
+            self._validate_inputs(args)
+            # _input_indices_to_copy is None when example_inputs were not
+            # available at construction time (e.g. CooR precompile). In that
+            # case we lazily compute the indices from the first real call.
+            if self._input_indices_to_copy is None:
+                self._input_indices_to_copy = [
+                    i
+                    for i, inp in enumerate(args)
+                    if isinstance(inp, torch.Tensor)
+                    and i not in self._static_input_indices
+                ]
+            self._args = args
             self._input_addresses = [
-                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in flat_args
+                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
             ]
 
             self._cudagraph = torch.cuda.CUDAGraph()
@@ -243,12 +234,13 @@ class CUDAGraphWrapper:
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
             ):
-                self._output = self._call_runnable(flat_args)
+                # `output` is managed by pytorch's cudagraph pool
+                self._output = self._runnable(*args)
 
         if self._should_check_address:
             self._check_static_inputs_address()
 
-        self._copy_non_static_inputs(*flat_args)
+        self._copy_non_static_inputs(*args)
         self._cudagraph.replay()
         return self._output
 

@@ -412,7 +412,20 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
         ctx = TracingContext(fake_mode)
         # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
-        with fake_mode, tracing(ctx), preserve_node_meta(), _skip_nested_compile():
+
+        # Disable autograd multithreading so that backward tracing
+        # runs on the calling thread.  Without this, the C++ autograd
+        # engine dispatches backward to a worker thread that has a
+        # fresh contextvars.Context, making the compile_on_one_rank
+        # ContextVar invisible and causing _sym_get_coordinate to
+        # bake rank 0's concrete coordinates into the backward graph.
+        with (
+            fake_mode,
+            tracing(ctx),
+            preserve_node_meta(),
+            _skip_nested_compile(),
+            torch.autograd.set_multithreading_enabled(False),
+        ):
             traced = make_fx(
                 fn_with_subclass_handling,
                 record_stack_traces=True,

@@ -86,7 +86,6 @@ def _make_precompile_callback(
     parallel_dims: ParallelDims,
     storage: StorageAdapter | None = None,
     config_fingerprint: ConfigFingerprint | None = None,
-    extra_metadata: dict | None = None,
 ):
     """Build the on_compile callback that saves the compiled artifact to disk."""
     from .precompile import compute_config_fingerprint, precompile_save
@@ -99,17 +98,14 @@ def _make_precompile_callback(
         )
 
     def on_compile(compiled_fn, out_spec):
-        metadata: dict = {
-            "world_size": torch.distributed.get_world_size(),
-        }
-        if extra_metadata:
-            metadata.update(extra_metadata)
         precompile_save(
             model,
             compiled_fn,
             storage,
             out_spec=out_spec,
-            metadata=metadata,
+            metadata={
+                "world_size": torch.distributed.get_world_size(),
+            },
             config_fingerprint=config_fingerprint,
         )
 
@@ -144,15 +140,8 @@ def _apply_aot_compile(
                 f"Run precompile_main first to generate the artifact."
             )
 
-        cudagraph_enabled = "cudagraph" in compile_config.passes
-        is_regional = "regional_inductor" in compile_config.passes
         return _apply_aot_compile_load(
-            model,
-            parallel_dims,
-            storage,
-            config_fingerprint,
-            cudagraph=cudagraph_enabled,
-            is_regional=is_regional,
+            model, parallel_dims, storage, config_fingerprint
         )
 
     # Get joint custom passes from config
@@ -194,8 +183,6 @@ def _apply_aot_compile_load(
     parallel_dims: ParallelDims,
     storage: StorageAdapter,
     config_fingerprint: ConfigFingerprint,
-    cudagraph: bool = False,
-    is_regional: bool = False,
 ) -> CompiledModule:
     """Load a precompiled artifact and wrap the model with it."""
     from .precompile import precompile_load
@@ -208,8 +195,6 @@ def _apply_aot_compile_load(
         model,
         storage,
         expected_fingerprint=config_fingerprint,
-        cudagraph=cudagraph,
-        is_regional=is_regional,
     )
 
     def _unused_graph_builder(*args, **kwargs):
@@ -261,15 +246,18 @@ def apply_compile(
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
     )
 
-    if compile_config.precompile_artifact_dir and mode != "aot":
+    if compile_config.precompile_artifact_dir and mode not in ("aot", "aot_fx_trace"):
         logger.warning(
             "--compile.precompile_artifact_dir is only supported with "
-            f"--compile.mode=aot, but mode is '{mode}'. Ignoring precompile."
+            f"--compile.mode=aot or aot_fx_trace, but mode is '{mode}'. "
+            "Ignoring precompile."
         )
         compile_config = dataclasses.replace(compile_config, precompile_artifact_dir="")
 
-    if compile_config.precompile_artifact_dir and not (
-        _SERIALIZABLE_PASSES & set(compile_config.passes)
+    if (
+        compile_config.precompile_artifact_dir
+        and mode == "aot"
+        and not (_SERIALIZABLE_PASSES & set(compile_config.passes))
     ):
         raise ValueError(
             "--compile.precompile_artifact_dir requires at least one pass that "
@@ -296,10 +284,18 @@ def apply_compile(
         )
     elif mode == "aot_fx_trace":
         # aot_fx_trace traces fwd+loss+bwd together inside forward_backward_step,
-        # so no model-level wrapping is needed here.
-        logger.info(
-            "aot_fx_trace compile mode: graph capture will happen at training time"
-        )
+        # so no model-level wrapping is needed here. If precompile_artifact_dir
+        # is set, the precompiled artifact will be loaded lazily in
+        # GraphTrainer._make_fx_forward_backward_step.
+        if compile_config.precompile_artifact_dir:
+            logger.info(
+                "aot_fx_trace compile mode: precompiled artifact will be loaded "
+                f"from {compile_config.precompile_artifact_dir}"
+            )
+        else:
+            logger.info(
+                "aot_fx_trace compile mode: graph capture will happen at training time"
+            )
         return model
     else:
         raise ValueError(

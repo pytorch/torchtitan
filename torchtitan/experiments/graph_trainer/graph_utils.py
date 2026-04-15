@@ -326,18 +326,9 @@ def compiler(
         # cudagraph pass is always the last pass if it is applied
         cg_pass = passes[-1]
 
-        # Pre-compute static input indices while gm is still a
-        # GraphModule. Prior passes (e.g. full_inductor_compilation)
-        # may replace gm with a non-GraphModule callable, making it
-        # impossible to inspect the graph later.
-        from torchtitan.experiments.graph_trainer.cudagraph import (
-            get_static_input_indices,
-        )
-
-        static_input_indices = get_static_input_indices(gm, is_forward)
-        _cg_pass = functools.partial(
-            cg_pass, is_forward=is_forward, static_input_indices=static_input_indices
-        )
+        # to identify static input indices, cudagraph passes behaves differently for
+        # forward and backward pass. so we explicitly pass the info.
+        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
 
         # keep the function name for debug log
         passes[-1] = functools.wraps(cg_pass)(_cg_pass)

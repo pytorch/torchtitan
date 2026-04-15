@@ -12,13 +12,24 @@ artifact from a single process, which can then be loaded by all ranks
 during torchrun training. This avoids the need to run torchrun with N
 GPUs just for precompilation.
 
-Usage:
+Supports two compile modes:
+- aot: AOT joint graph export + Inductor compilation
+- aot_fx_trace: make_fx tracing of fwd+loss+bwd + Inductor compilation
+
+Usage (aot mode):
     python -m torchtitan.experiments.graph_trainer.precompile_main \
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_debugmodel \
         --compile.passes full_inductor_compilation \
         --compile.joint_passes inductor_decomposition \
         --compile.precompile_artifact_dir /tmp/precompile_artifacts
+
+Usage (aot_fx_trace mode):
+    python -m torchtitan.experiments.graph_trainer.precompile_main \
+        --module graph_trainer.llama3 \
+        --config graph_trainer_llama3_debugmodel \
+        --compile.mode aot_fx_trace \
+        --compile.precompile_artifact_dir /tmp/fx_trace_artifacts
 """
 
 import contextlib
@@ -46,30 +57,23 @@ from torchtitan.experiments.graph_trainer.graph_utils import (
     joint_graph_builder,
     make_compiler_with_passes,
 )
-from torchtitan.experiments.graph_trainer.precompile import _ARTIFACT_KEY
+from torchtitan.experiments.graph_trainer.precompile import (
+    _ARTIFACT_KEY,
+    _FX_TRACE_ARTIFACT_KEY,
+)
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
 
-def main():
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
 
+def _common_setup(config):
+    """Common setup for all precompile modes: fake PG, CooR, model build."""
     compile_config = config.compile
 
     if not compile_config.precompile_artifact_dir:
         raise ValueError(
             "precompile_main requires --compile.precompile_artifact_dir to be set."
-        )
-    # Only one pass in the pipeline needs to produce serializable OutputCode.
-    # Earlier graph passes like bucketing can still run as long as the final
-    # lowering pass is one of the serializable passes below.
-    if not (_SERIALIZABLE_PASSES & set(compile_config.passes)):
-        raise ValueError(
-            "precompile_main requires at least one pass that produces "
-            "serializable output "
-            f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
 
     parallelism = config.parallelism
@@ -174,7 +178,22 @@ def main():
         dist_config.compile_on_one_rank = True
     model.train()
 
-    logger.info("Model parallelized and materialized, starting AOT compile")
+    logger.info("Model parallelized and materialized")
+
+    return model, model_config, model_spec, compile_config, parallel_dims, device
+
+
+def _precompile_aot(
+    config, model, model_config, model_spec, compile_config, parallel_dims, device
+):
+    """AOT mode precompilation: joint graph export + Inductor."""
+    # Only one pass in the pipeline needs to produce serializable OutputCode.
+    if not (_SERIALIZABLE_PASSES & set(compile_config.passes)):
+        raise ValueError(
+            "precompile_main requires at least one pass that produces "
+            "serializable output "
+            f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
+        )
 
     # Augment compile_config with AC joint passes to match the training
     # path, which calls apply_graph_ac during parallelization. Without
@@ -187,7 +206,7 @@ def main():
     from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
+        config.parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
     )
 
     from .precompile import compute_config_fingerprint
@@ -196,26 +215,6 @@ def main():
     config_fingerprint = compute_config_fingerprint(
         model, compile_config, parallel_dims
     )
-
-    # The custom cudagraph pass (CUDAGraphWrapper) wraps at compile time and
-    # can't be serialized. For precompile, we use Inductor's built-in cudagraph
-    # mechanism instead: setting triton.cudagraphs=True populates
-    # CudagraphCachedInfo in the artifact, and post_compile() applies the
-    # wrapping at load time on each rank.
-    #
-    # This must happen after fingerprint computation (which uses the
-    # original passes list) but before get_compiler_passes_from_config
-    # (which should not include the non-serializable cudagraph pass).
-    use_inductor_cudagraphs = "cudagraph" in compile_config.passes
-    if use_inductor_cudagraphs:
-        compile_config = dataclasses.replace(
-            compile_config,
-            passes=[p for p in compile_config.passes if p != "cudagraph"],
-        )
-        logger.info(
-            "Cudagraph pass replaced with Inductor built-in cudagraphs for "
-            "precompile (CudagraphCachedInfo will be serialized in the artifact)"
-        )
 
     joint_custom_passes = get_joint_custom_passes_from_config(
         parallel_dims, compile_config, fsdp_reshard_after_forward
@@ -227,41 +226,12 @@ def main():
         compiler_passes, dump_folder=config.dump_folder
     )
 
-    # Capture static input indices for the regional cudagraph path.
-    # For full_inductor, Inductor's post_compile already gets static
-    # indices from the serialized CompiledFxGraph (fx_kwargs), but
-    # for regional compilation wrap_output wraps the entire
-    # RegionalOutputCode from the outside and needs these indices
-    # explicitly. We capture them here while the GraphModule is still
-    # inspectable (before Inductor replaces it with OutputCode).
-    extra_metadata: dict = {}
-    if use_inductor_cudagraphs:
-        from torchtitan.experiments.graph_trainer.cudagraph import (
-            get_static_input_indices,
-        )
-
-        _orig_fw_compiler = fw_compiler
-        _orig_bw_compiler = bw_compiler
-
-        def fw_compiler(gm, example_inputs):
-            extra_metadata["fw_static_input_indices"] = get_static_input_indices(
-                gm, is_forward=True
-            )
-            return _orig_fw_compiler(gm, example_inputs)
-
-        def bw_compiler(gm, example_inputs):
-            extra_metadata["bw_static_input_indices"] = get_static_input_indices(
-                gm, is_forward=False
-            )
-            return _orig_bw_compiler(gm, example_inputs)
-
     on_compile = _make_precompile_callback(
         model,
         compile_config,
         parallel_dims,
         storage=storage,
         config_fingerprint=config_fingerprint,
-        extra_metadata=extra_metadata,
     )
 
     model_joint_graph_builder = functools.partial(
@@ -289,23 +259,143 @@ def main():
     dummy_input = torch.randint(
         0, vocab_size, (local_batch_size, seq_len), device=device
     )
-
-    # triton.cudagraphs only needs to be active during compilation
-    # (compile_fx_inner), where it causes Inductor to populate
-    # CudagraphCachedInfo in the serialized artifact. Scope it
-    # tightly to avoid affecting unrelated config readers.
-    cudagraph_ctx: contextlib.AbstractContextManager = contextlib.nullcontext()
-    if use_inductor_cudagraphs:
-        cudagraph_ctx = torch._inductor.config.patch({"triton.cudagraphs": True})
-
     logger.info("Running forward pass to trigger AOT compilation...")
-    with cudagraph_ctx:
-        compiled_model(dummy_input)
+    compiled_model(dummy_input)
 
     logger.info(
         f"Precompile complete. Artifact saved to "
         f"{compile_config.precompile_artifact_dir}/{_ARTIFACT_KEY}.bin"
     )
+
+
+def _precompile_aot_fx_trace(
+    config, model, model_config, model_spec, compile_config, parallel_dims, device
+):
+    """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
+    from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
+    from torchtitan.experiments.graph_trainer.precompile import (
+        compute_config_fingerprint,
+        precompile_fx_trace_save,
+    )
+    from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
+
+    loss_fn = model_spec.build_loss_fn(compile_config, parallel_dims=parallel_dims)
+
+    fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+
+    seq_len = config.training.seq_len
+    local_batch_size = config.training.local_batch_size
+    vocab_size = model_config.vocab_size
+
+    dummy_inputs = torch.randint(
+        0, vocab_size, (local_batch_size, seq_len), device=device
+    )
+    dummy_labels = torch.randint(
+        0, vocab_size, (local_batch_size, seq_len), device=device
+    )
+    # The trainer computes global_valid_tokens via dist_sum (an
+    # all-reduce + .item()), which returns a Python float. Use the
+    # same type here so make_fx bakes it as a graph constant — not a
+    # graph input — identical to the non-precompile runtime trace.
+    global_batch_size = local_batch_size * parallel_dims.dp_shard * parallel_dims.dp_replicate * parallel_dims.cp
+    dummy_global_valid_tokens = float(global_batch_size * seq_len)
+    extra_inputs: dict[str, torch.Tensor] = {}
+    extra_kwargs: dict[str, torch.Tensor] = {}
+
+    # Enable loss_parallel when TP is active and loss_parallel is not
+    # disabled. This matches the training path which wraps tracing +
+    # execution inside train_context() → loss_parallel(). Without it,
+    # cross_entropy fails with "mixed torch.Tensor and DTensor" because
+    # the TP-parallelized model outputs Shard'd DTensors but labels
+    # remain plain tensors.
+    loss_parallel_enabled = (
+        parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
+    )
+    loss_parallel_ctx = (
+        torch.distributed.tensor.parallel.loss_parallel()
+        if loss_parallel_enabled
+        else contextlib.nullcontext()
+    )
+
+    logger.info("Tracing fwd+loss+bwd via make_fx...")
+    with loss_parallel_ctx:
+        traced_result = trace_train_step(fwd_bwd_fn)(
+            model,
+            dummy_inputs,
+            dummy_labels,
+            dummy_global_valid_tokens,
+            extra_inputs,
+            extra_kwargs,
+        )
+    logger.info(
+        f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
+        f"{len(traced_result.state_fqns)} state entries"
+    )
+
+
+    # Augment compile_config with AC joint passes to match the training
+    # path, which calls apply_graph_ac during parallelization. Without
+    # this the config fingerprint will differ from training.
+    if config.activation_checkpoint.mode != "none":
+        apply_graph_ac(compile_config, config.activation_checkpoint)
+
+    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+    config_fingerprint = compute_config_fingerprint(
+        model, compile_config, parallel_dims
+    )
+
+    precompile_fx_trace_save(
+        traced_result,
+        storage,
+        config_fingerprint=config_fingerprint,
+    )
+
+    logger.info(
+        f"Precompile complete. Artifact saved to "
+        f"{compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}.bin"
+    )
+
+
+def main():
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
+
+    mode = config.compile.mode
+    if mode not in ("aot", "aot_fx_trace"):
+        raise ValueError(
+            f"precompile_main only supports --compile.mode aot or aot_fx_trace, "
+            f"got '{mode}'."
+        )
+
+    (
+        model,
+        model_config,
+        model_spec,
+        compile_config,
+        parallel_dims,
+        device,
+    ) = _common_setup(config)
+
+    if mode == "aot":
+        _precompile_aot(
+            config,
+            model,
+            model_config,
+            model_spec,
+            compile_config,
+            parallel_dims,
+            device,
+        )
+    elif mode == "aot_fx_trace":
+        _precompile_aot_fx_trace(
+            config,
+            model,
+            model_config,
+            model_spec,
+            compile_config,
+            parallel_dims,
+            device,
+        )
 
     dist.destroy_process_group()
 

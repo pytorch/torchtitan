@@ -21,8 +21,11 @@ if TYPE_CHECKING:
 import torch
 import torch.utils._pytree as pytree
 from torch._dynamo.aot_compile_types import BundledAOTAutogradSerializableCallable
-from torch._inductor.cudagraph_utils import CUDAGraphPolicy
 
+from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    SubclassLayout,
+    TracedResult,
+)
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
@@ -82,6 +85,48 @@ def compute_config_fingerprint(
         h.update(f"cuda_capability:{capability}\n".encode())
 
     return ConfigFingerprint(h.hexdigest()[:16])
+
+
+def _validate_config_fingerprint(
+    artifact_fingerprint: ConfigFingerprint,
+    expected_fingerprint: ConfigFingerprint,
+) -> None:
+    """Validate that artifact and current config fingerprints match.
+
+    Raises ValueError on mismatch unless TORCHTITAN_SKIP_FINGERPRINT_CHECK=1
+    is set in the environment, in which case a warning is emitted instead.
+    No-ops when either fingerprint is empty (legacy artifact / missing config).
+    """
+    if not expected_fingerprint or not artifact_fingerprint:
+        if expected_fingerprint and not artifact_fingerprint:
+            logger.warning(
+                "Precompiled artifact has no config fingerprint (legacy artifact). "
+                "Skipping fingerprint validation. Re-save the artifact to enable "
+                "fingerprint checks."
+            )
+        return
+
+    if artifact_fingerprint == expected_fingerprint:
+        return
+
+    if os.environ.get("TORCHTITAN_SKIP_FINGERPRINT_CHECK", "") == "1":
+        logger.warning(
+            "Config fingerprint mismatch IGNORED due to "
+            "TORCHTITAN_SKIP_FINGERPRINT_CHECK=1. "
+            f"Artifact: {artifact_fingerprint}, "
+            f"current: {expected_fingerprint}."
+        )
+        return
+
+    raise ValueError(
+        f"Config fingerprint mismatch: the precompiled artifact was "
+        f"saved with a different configuration. "
+        f"Artifact fingerprint: {artifact_fingerprint}, "
+        f"current fingerprint: {expected_fingerprint}. "
+        f"Delete the stale artifact and re-run precompile to "
+        f"generate a fresh one. Set TORCHTITAN_SKIP_FINGERPRINT_CHECK=1 "
+        f"to bypass this check."
+    )
 
 
 def _unwrap_serializable(
@@ -149,171 +194,10 @@ def precompile_save(
     return path
 
 
-class _PrecompileCUDAGraphPolicy(CUDAGraphPolicy):
-    """CUDAGraphPolicy that swaps in torchtitan's CUDAGraphWrapper.
-
-    Deserialization (``deserialize_compile_artifacts``) runs Inductor's
-    ``wrap_post_compile`` internally, which compiles the FX graph into an
-    ``OutputCode`` — generated wrapper code + compiled Triton/C++ kernels.
-    The FX graph is gone after this step.  Cudagraph wrapping happens
-    *inside* ``post_compile``, per-``CompiledFxGraph`` (fwd, bwd), using
-    the static input indices already serialized in the artifact
-    (``fx_kwargs["static_input_idxs"]``).  This policy hooks into that
-    process to use ``CUDAGraphWrapper`` (which supports explicit teardown
-    for NCCL cleanup) instead of Inductor's built-in ``cudagraph_trees``.
-
-    For regional compilation (``is_regional=True``), per-``CompiledFxGraph``
-    wrapping is skipped (``should_wrap`` returns ``False``) and
-    ``wrap_output`` wraps the entire ``RegionalOutputCode`` at the outer
-    level.  Unlike the full-inductor path, the regional path needs
-    externally-provided static input indices (``fw_static_input_indices``,
-    ``bw_static_input_indices``) since there is no per-graph
-    ``CudagraphCachedInfo`` at the outer level.
-    """
-
-    def __init__(
-        self,
-        is_regional: bool = False,
-        fw_static_input_indices: list[int] | None = None,
-        bw_static_input_indices: list[int] | None = None,
-    ) -> None:
-        self._is_regional = is_regional
-        self._fw_static_input_indices = fw_static_input_indices
-        self._bw_static_input_indices = bw_static_input_indices
-        self._wrap_output_call_count = 0
-
-    def cudagraphify(
-        self,
-        model: Callable,
-        inputs: Any,
-        static_input_idxs: Any,
-        **_kwargs: Any,
-    ) -> Callable:
-        from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
-
-        cg: list[CUDAGraphWrapper | None] = [None]
-
-        def run(new_inputs: list) -> Any:
-            if cg[0] is None:
-                cg[0] = CUDAGraphWrapper(
-                    model, new_inputs, tuple(static_input_idxs), boxed_call=True
-                )
-            return cg[0](new_inputs)
-
-        run._boxed_call = True  # type: ignore[attr-defined]
-        return run
-
-    def should_wrap(self, compiled_graph: Any) -> bool:
-        return not self._is_regional
-
-    def wrap_output(self, output_code: Any) -> Any:
-        from torch._inductor.output_code import RegionalOutputCode
-
-        if not isinstance(output_code, RegionalOutputCode):
-            return output_code
-
-        from torchtitan.experiments.graph_trainer.cudagraph import CUDAGraphWrapper
-
-        original = output_code
-
-        # wrap_post_compile calls wrap_output for fwd first, bwd second.
-        # Use the call counter to select the right static indices.
-        call_idx = self._wrap_output_call_count
-        self._wrap_output_call_count += 1
-        static_input_indices = (
-            self._fw_static_input_indices
-            if call_idx == 0
-            else self._bw_static_input_indices
-        )
-        if static_input_indices is None:
-            static_input_indices = ()
-
-        cg: list[CUDAGraphWrapper | None] = [None]
-
-        def wrapped(inputs: list) -> Any:
-            if cg[0] is None:
-                cg[0] = CUDAGraphWrapper(
-                    original, inputs, tuple(static_input_indices), boxed_call=True
-                )
-            return cg[0](inputs)
-
-        wrapped._boxed_call = True  # type: ignore[attr-defined]
-        logger.info(
-            f"Wrapped RegionalOutputCode with CUDAGraphWrapper "
-            f"(static_input_indices={len(static_input_indices)} entries)"
-        )
-        return wrapped
-
-    def teardown(self) -> None:
-        from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
-
-        cudagraph_teardown()
-
-
-def _deserialize_with_cudagraph(
-    serialized_fn_bytes: bytes,
-    cudagraph: bool,
-    is_regional: bool = False,
-    fw_static_input_indices: list[int] | None = None,
-    bw_static_input_indices: list[int] | None = None,
-) -> Callable:
-    """Deserialize a compiled artifact, optionally applying CUDAGraphWrapper.
-
-    Cudagraph wrapping is bundled with deserialization because
-    deserialization runs Inductor's ``post_compile`` internally (via
-    ``wrap_post_compile``), and ``post_compile`` is where per-
-    ``CompiledFxGraph`` cudagraph wrapping happens.  The result is an
-    ``OutputCode`` (generated wrapper code + compiled kernels), not an
-    FX GraphModule — so wrapping can't be applied as a separate step
-    afterwards at the same granularity.
-
-    When ``cudagraph=True``, installs a ``_PrecompileCUDAGraphPolicy``
-    so that ``post_compile`` uses torchtitan's ``CUDAGraphWrapper``
-    (which supports explicit teardown for NCCL cleanup) instead of
-    Inductor's built-in ``cudagraph_trees``.
-
-    For regional compilation (``is_regional=True``), per-
-    ``CompiledFxGraph`` wrapping is skipped and the entire
-    ``RegionalOutputCode`` is wrapped at the outer level.  The
-    ``fw/bw_static_input_indices`` are only needed for this regional
-    path; the full-inductor path gets static indices from the
-    serialized ``CompiledFxGraph`` itself.
-    """
-    if not cudagraph:
-        return BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
-            serialized_fn_bytes
-        )
-
-    import torch._inductor.config as _inductor_config
-
-    policy = _PrecompileCUDAGraphPolicy(
-        is_regional=is_regional,
-        fw_static_input_indices=fw_static_input_indices,
-        bw_static_input_indices=bw_static_input_indices,
-    )
-
-    with _inductor_config.patch(
-        {
-            "cudagraph_policy": policy,
-            "triton.cudagraphs": True,
-        }
-    ):
-        compiled_fn = (
-            BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
-                serialized_fn_bytes
-            )
-        )
-
-    logger.info("Deserialized with CUDAGraphWrapper wrapping for fwd/bwd")
-    return compiled_fn
-
-
 def precompile_load(
     model: torch.nn.Module,
     storage: StorageAdapter,
     expected_fingerprint: ConfigFingerprint,
-    cudagraph: bool = False,
-    is_regional: bool = False,
 ) -> Callable:
     """
     Load a precompiled artifact and return a wrapper function that
@@ -339,32 +223,7 @@ def precompile_load(
             f"Saved: {artifact.buffers_spec}, Current: {current_buffers}"
         )
 
-    skip_fp_check = os.environ.get("TORCHTITAN_SKIP_FINGERPRINT_CHECK", "") == "1"
-    if expected_fingerprint and artifact.config_fingerprint:
-        if artifact.config_fingerprint != expected_fingerprint:
-            if skip_fp_check:
-                logger.warning(
-                    "Config fingerprint mismatch IGNORED due to "
-                    "TORCHTITAN_SKIP_FINGERPRINT_CHECK=1. "
-                    f"Artifact: {artifact.config_fingerprint}, "
-                    f"current: {expected_fingerprint}."
-                )
-            else:
-                raise ValueError(
-                    f"Config fingerprint mismatch: the precompiled artifact was "
-                    f"saved with a different model/parallelism/compile configuration. "
-                    f"Artifact fingerprint: {artifact.config_fingerprint}, "
-                    f"current fingerprint: {expected_fingerprint}. "
-                    f"Delete the stale artifact and re-run with precompile to "
-                    f"generate a fresh one. Set TORCHTITAN_SKIP_FINGERPRINT_CHECK=1 "
-                    f"to bypass this check."
-                )
-    elif expected_fingerprint and not artifact.config_fingerprint:
-        logger.warning(
-            "Precompiled artifact has no config fingerprint (legacy artifact). "
-            "Skipping fingerprint validation. Re-save the artifact to enable "
-            "fingerprint checks."
-        )
+    _validate_config_fingerprint(artifact.config_fingerprint, expected_fingerprint)
 
     logger.info(
         f"Precompile artifact loaded: "
@@ -376,8 +235,6 @@ def precompile_load(
 
     out_spec = artifact.out_spec
     serialized_fn_bytes = artifact.serialized_fn
-    fw_static_input_indices = artifact.metadata.get("fw_static_input_indices")
-    bw_static_input_indices = artifact.metadata.get("bw_static_input_indices")
     compiled_fn: Callable | None = None
 
     def wrapper_fn(args, kwargs):
@@ -408,12 +265,10 @@ def precompile_load(
                     "skipping CooR custom op pre-import"
                 )
 
-            compiled_fn = _deserialize_with_cudagraph(
-                serialized_fn_bytes,
-                cudagraph,
-                is_regional=is_regional,
-                fw_static_input_indices=fw_static_input_indices,
-                bw_static_input_indices=bw_static_input_indices,
+            compiled_fn = (
+                BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
+                    serialized_fn_bytes
+                )
             )
 
         # Build the flat input tuple: params + buffers + user args.
@@ -435,3 +290,149 @@ def precompile_load(
         return flat_outputs
 
     return wrapper_fn
+
+
+_FX_TRACE_ARTIFACT_KEY = "fx_trace_default"
+
+
+@dataclass
+class PrecompiledFxTraceArtifact:
+    """Artifact for aot_fx_trace precompilation.
+
+    Stores the traced FX graph (as a pickled GraphModule) alongside the
+    TracedResult metadata needed to unwrap DTensor inputs and rewrap
+    outputs at runtime. Inductor compilation happens at load time on
+    each rank.
+    """
+
+    serialized_gm: bytes
+    state_fqns: list[str]
+    num_flat_inputs: int
+    input_subclass_layouts: dict[int, SubclassLayout]
+    num_flat_outputs: int
+    output_subclass_layouts: dict[int, SubclassLayout]
+    output_spec: pytree.TreeSpec
+    config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
+
+
+def precompile_fx_trace_save(
+    traced_result: TracedResult,
+    storage: StorageAdapter,
+    config_fingerprint: ConfigFingerprint | None = None,
+) -> str:
+    """Serialize a make_fx traced FX graph artifact and save it.
+
+    The traced GraphModule is pickled along with TracedResult metadata
+    needed for DTensor unwrapping/rewrapping at runtime. Inductor
+    compilation is deferred to load time so we avoid serializing
+    compiled Triton kernels (which are architecture-specific and
+    difficult to serialize across CooR ops).
+
+    Uses GraphPickler (not plain pickle) to preserve SymInt expressions
+    in the graph. Plain pickle evaluates SymInts to their concrete
+    trace-time values, which bakes in rank-specific constants (e.g.
+    the embedding vocabulary offset from _runtime_compute_coordinate_on_dim).
+    GraphPickler serializes the symbolic expression so the graph
+    remains rank-agnostic after deserialization.
+    """
+    from torch.fx._graph_pickler import GraphPickler, Options
+
+    from torchtitan.experiments.graph_trainer.passes import (
+        _node_metadata_key_filter_distributed,
+    )
+
+    # ops_filter=None allows all ops including CooR custom ops
+    # (device_mesh._runtime_compute_coordinate_on_dim, _dtensor, _c10d_functional).
+    # node_metadata_key_filter strips "val" and "eager_input_vals" which
+    # contain unpicklable ProcessGroup/DeviceMesh objects from CooR ops.
+    serialized_gm = GraphPickler.dumps(
+        traced_result.gm,
+        Options(
+            ops_filter=None,
+            node_metadata_key_filter=_node_metadata_key_filter_distributed,
+        ),
+    )
+
+    artifact = PrecompiledFxTraceArtifact(
+        serialized_gm=serialized_gm,
+        state_fqns=traced_result.state_fqns,
+        num_flat_inputs=traced_result.num_flat_inputs,
+        input_subclass_layouts=traced_result.input_subclass_layouts,
+        num_flat_outputs=traced_result.num_flat_outputs,
+        output_subclass_layouts=traced_result.output_subclass_layouts,
+        output_spec=traced_result.output_spec,
+        config_fingerprint=config_fingerprint or ConfigFingerprint(""),
+    )
+
+    data = pickle.dumps(artifact)
+    path = storage.save(_FX_TRACE_ARTIFACT_KEY, data)
+    logger.info(
+        f"FxTrace precompile artifact saved: "
+        f"state_fqns={len(artifact.state_fqns)}, "
+        f"num_flat_inputs={artifact.num_flat_inputs}, "
+        f"size={len(data)} bytes, fingerprint={config_fingerprint}, "
+        f"path={path}"
+    )
+    return path
+
+
+def precompile_fx_trace_load(
+    storage: StorageAdapter,
+    expected_fingerprint: ConfigFingerprint,
+) -> TracedResult:
+    """Load a precompiled aot_fx_trace artifact.
+
+    Returns a TracedResult with the deserialized GraphModule and
+    metadata. The caller uses this with run_traced_train_step to
+    execute the graph (same path as non-precompiled aot_fx_trace).
+
+    DeviceMesh objects are graph inputs (placeholders), not baked-in
+    constants, so ProcessGroup names are resolved at runtime from
+    the caller-provided DeviceMesh — no post-deserialization PG
+    remapping is needed.
+    """
+    data = storage.load(_FX_TRACE_ARTIFACT_KEY)
+    artifact: PrecompiledFxTraceArtifact = pickle.loads(data)
+
+    _validate_config_fingerprint(artifact.config_fingerprint, expected_fingerprint)
+
+    logger.info(
+        f"FxTrace precompile artifact loaded: "
+        f"state_fqns={len(artifact.state_fqns)}, "
+        f"num_flat_inputs={artifact.num_flat_inputs}, "
+        f"fingerprint={artifact.config_fingerprint}"
+    )
+
+    # CooR-compiled artifacts reference custom ops (e.g.
+    # device_mesh._get_submesh, device_mesh._runtime_compute_coordinate_on_dim)
+    # that are lazily registered. The ops module uses @torch.library.custom_op
+    # with DeviceMesh, which requires DeviceMesh to be registered as an opaque
+    # type first. Ensure registration before importing the ops.
+    from torch.distributed.device_mesh import _register_distributed_opaque_types
+
+    _register_distributed_opaque_types()
+    from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
+
+    from torch._subclasses import FakeTensorMode
+    from torch.fx._graph_pickler import GraphPickler
+
+    # GraphPickler.loads requires a FakeTensorMode to reconstruct
+    # FakeTensors and SymInts in the graph. The mode is only used
+    # during deserialization — the graph executes with real tensors.
+    fake_mode = FakeTensorMode(
+        allow_non_fake_inputs=True,
+        shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+    )
+    gm = GraphPickler.loads(artifact.serialized_gm, fake_mode)
+    gm.recompile()
+
+    return TracedResult(
+        gm=gm,
+        example_inputs=(),
+        state_fqns=artifact.state_fqns,
+        num_flat_inputs=artifact.num_flat_inputs,
+        input_subclass_layouts=artifact.input_subclass_layouts,
+        num_flat_outputs=artifact.num_flat_outputs,
+        output_subclass_layouts=artifact.output_subclass_layouts,
+        output_spec=artifact.output_spec,
+    )
