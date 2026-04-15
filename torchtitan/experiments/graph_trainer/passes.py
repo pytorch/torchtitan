@@ -75,7 +75,7 @@ def construct_default_graph_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        selective_remat_on_fwd_bwd_graph_pass,
+        selective_activation_remat_pass,
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
@@ -470,7 +470,7 @@ def apply_sac_pass(
     return gm
 
 
-def selective_remat_on_fwd_bwd_graph_pass(
+def selective_activation_remat_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
