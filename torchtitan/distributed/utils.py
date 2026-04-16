@@ -245,15 +245,31 @@ def set_batch_invariance(enable: bool) -> None:
     # Must be set BEFORE dist.init_process_group.
     # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/batch_invariant.py
     os.environ["NCCL_LAUNCH_MODE"] = "GROUP"  # Fixed kernel launch ordering
-    os.environ["NCCL_COLLNET_ENABLE"] = "0"  # Disable SHARP (non-deterministic IB HW reduce)
-    os.environ["NCCL_NVLS_ENABLE"] = "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
-    os.environ["NCCL_P2P_NET_DISABLE"] = "1"  # Disable P2P to avoid transport-dependent accumulation order
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"  # Single channel to prevent split-interleave reordering
-    os.environ["NCCL_MAX_NCHANNELS"] = "1"  # Single channel to prevent split-interleave reordering
+    os.environ[
+        "NCCL_COLLNET_ENABLE"
+    ] = "0"  # Disable SHARP (non-deterministic IB HW reduce)
+    os.environ[
+        "NCCL_NVLS_ENABLE"
+    ] = "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
+    os.environ[
+        "NCCL_P2P_NET_DISABLE"
+    ] = "1"  # Disable P2P to avoid transport-dependent accumulation order
+    os.environ[
+        "NCCL_MIN_NCHANNELS"
+    ] = "1"  # Single channel to prevent split-interleave reordering
+    os.environ[
+        "NCCL_MAX_NCHANNELS"
+    ] = "1"  # Single channel to prevent split-interleave reordering
     os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 protocols may reorder reductions
-    os.environ["NCCL_ALGO"] = "allreduce:tree"  # Deterministic reduction order across ranks
-    os.environ["NCCL_NTHREADS"] = "1"  # Single thread to eliminate scheduling non-determinism
-    os.environ["NCCL_SOCKET_NTHREADS"] = "1"  # Single socket thread to eliminate scheduling non-determinism
+    os.environ[
+        "NCCL_ALGO"
+    ] = "allreduce:tree"  # Deterministic reduction order across ranks
+    os.environ[
+        "NCCL_NTHREADS"
+    ] = "1"  # Single thread to eliminate scheduling non-determinism
+    os.environ[
+        "NCCL_SOCKET_NTHREADS"
+    ] = "1"  # Single socket thread to eliminate scheduling non-determinism
 
     # Disable reduced-precision reductions: these allow cuBLAS to use
     # lower-precision accumulation that can round differently depending
