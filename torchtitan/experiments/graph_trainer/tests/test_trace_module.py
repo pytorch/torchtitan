@@ -7,6 +7,7 @@
 import unittest
 from collections import Counter
 
+import pytest
 import torch
 import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
@@ -26,6 +27,8 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
+
+from torchtitan.tools.utils import has_cuda_capability
 
 
 def get_loss(logits, labels):
@@ -647,6 +650,8 @@ class TestTraceModels(unittest.TestCase):
         config = qwen3_configs["debugmodel"]()
         self._run_model_test(Qwen3Model, config)
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_qwen3_moe(self):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
@@ -654,6 +659,8 @@ class TestTraceModels(unittest.TestCase):
         config = qwen3_configs["debugmodel_moe"]()
         self._run_model_test(Qwen3Model, config)
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_deepseek_v3(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
@@ -661,6 +668,8 @@ class TestTraceModels(unittest.TestCase):
         config = deepseekv3_configs["debugmodel"]()
         self._run_model_test(DeepSeekV3Model, config)
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_llama4(self):
         from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
@@ -673,6 +682,8 @@ class TestTraceModels(unittest.TestCase):
             use_regional_inductor=True,
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_gpt_oss(self):
         from torch.nn.attention.flex_attention import and_masks
 
@@ -911,6 +922,8 @@ class TestTraceFSDP(FSDPTest):
         config = qwen3_configs["debugmodel"]()
         self._run_fsdp_model_test(Qwen3Model, config)
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_deepseek_v3_fsdp(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model

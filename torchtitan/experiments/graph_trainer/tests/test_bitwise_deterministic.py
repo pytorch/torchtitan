@@ -18,6 +18,7 @@ import unittest
 from collections.abc import Callable
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
@@ -176,6 +177,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_llama)
 
+    @pytest.mark.sm90_only
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -205,6 +207,8 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
+@pytest.mark.sm90_only
+@unittest.skipUnless(has_cuda_capability(9, 0), "Requires sm_90+ GPU")
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
@@ -245,6 +249,8 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 # kernel config divergence between eager and traced paths, and triton shared
 # memory OOMs for large head dims (DSv3). Investigate after stabilizing
 # max_autotune with regional_inductor.
+@pytest.mark.sm90_only
+@unittest.skipUnless(has_cuda_capability(9, 0), "Requires sm_90+ GPU")
 @unittest.skip("max_autotune breaks FlexAttn bitwise tests")
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
@@ -285,6 +291,8 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
+@pytest.mark.sm90_only
+@unittest.skipUnless(has_cuda_capability(9, 0), "Requires sm_90+ GPU")
 @unittest.skip("max_autotune breaks FlexAttn bitwise tests")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).

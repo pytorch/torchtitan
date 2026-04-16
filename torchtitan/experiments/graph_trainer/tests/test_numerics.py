@@ -9,6 +9,7 @@ import subprocess
 import sys
 import unittest
 
+import pytest
 import torch
 from torch.distributed._composable.fsdp import fully_shard
 from torch.testing._internal.common_fsdp import FSDPTest
@@ -16,6 +17,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.tools.utils import has_cuda_capability
 
 
 STEPS = 20
@@ -181,11 +183,15 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_moe_dsv3_aot_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode aot"),
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_moe_dsv3_manual_bucketing_aot_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -217,12 +223,16 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_moe_dsv3_jit_vs_eager(self):
         """Test graph_trainer.deepseek_v3 matches deepseek_v3 (JIT)."""
         self.assertTrue(
             _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode jit"),
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_moe_dsv3_manual_bucketing_jit_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -230,6 +240,8 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_moe_dsv3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -242,6 +254,8 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
 
+    @pytest.mark.sm90_only
+    @unittest.skipUnless(has_cuda_capability(9, 0), "MoE tests require H100 (sm_90+)")
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_moe_loss_compare(
