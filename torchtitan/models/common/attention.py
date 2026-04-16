@@ -188,7 +188,7 @@ class FlexAttention(Module):
         # and accepting changes that improve runtime by >0.1%. This can also
         # run without max_autotune but starts from a weaker baseline config.
         # See torch/_inductor/runtime/coordinate_descent_tuner.py.
-        "coordinate_descent_tuning": False,
+        "coordinate_descent_tuning": True,
         "triton.cudagraphs": False,
     }
 

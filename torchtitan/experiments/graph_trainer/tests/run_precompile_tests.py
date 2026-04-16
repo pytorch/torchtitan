@@ -10,7 +10,7 @@ Separate test runner for CooR precompile integration tests.
 Each test has two steps:
 1. Run precompile_main.py on a single process to generate a rank-agnostic
    compiled artifact.
-2. Run training via graph_trainer/run_train.sh (which passes
+2. Run training via graph_trainer/run_train_precompile.sh (which passes
    --virtual-local-rank to torchrun) to load and train with the artifact.
 
 Usage:
@@ -99,7 +99,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     ]
 
 
-RUN_TRAIN_SCRIPT = "torchtitan/experiments/graph_trainer/run_train.sh"
+RUN_TRAIN_SCRIPT = "torchtitan/experiments/graph_trainer/run_train_precompile.sh"
 
 
 def run_precompile_tests(args):
