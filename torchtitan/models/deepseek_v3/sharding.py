@@ -14,7 +14,7 @@ from torchtitan.distributed.sharding import (
     sequence_parallel_spec,
     set_decoder_sharding_spec,
 )
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
@@ -25,6 +25,7 @@ def set_deepseekv3_sharding_spec(
     *,
     loss_parallel: bool,
     enable_sp: bool,
+    full_dtensor: bool = False,
 ) -> None:
     """Fill ``sharding_spec`` on all DeepSeek V3 sub-configs.
 
@@ -60,16 +61,37 @@ def _set_deepseekv3_layer_sharding(layer_cfg, *, enable_sp: bool) -> None:
             "freqs_cis": {TP: Replicate()},
         },
     )
-    # wkv_a, kv_norm: no spec (low-rank, stays replicated)
+    # Low-rank projections and norms keep Replicate weights on TP. We still
+    # distribute them (Replicate DTensor) so DTensor activations flow through
+    # without mixing plain Tensor + DTensor in the matmul.
+    replicate_weight = ShardingSpec(
+        state_shardings={"weight": {TP: Replicate()}},
+    )
+    layer_cfg.attention.wkv_a.sharding_spec = replicate_weight
+    layer_cfg.attention.kv_norm.sharding_spec = replicate_weight
+
     # wkv_b: ColwiseParallel (expands to full heads)
     layer_cfg.attention.wkv_b.sharding_spec = colwise_spec()
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
+
+    # Inner attention: local_map to convert TP DTensors to local tensors.
+    # MLA: q/k/v are (bs, seq, heads, head_dim) — no transpose, heads at dim 2.
+    qkv_placements = (Shard(2),)
+    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
+        local_map=LocalMapSpec(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,),
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
 
     # Query projection: depends on q_lora_rank
     if layer_cfg.attention.q_lora_rank == 0:
         layer_cfg.attention.wq.sharding_spec = colwise_spec()
     else:
-        # Low-rank: wq_a/q_norm stay replicated, wq_b is colwise
+        # Low-rank: wq_a + q_norm stay Replicate DTensors; wq_b is Colwise.
+        layer_cfg.attention.wq_a.sharding_spec = replicate_weight
+        layer_cfg.attention.q_norm.sharding_spec = replicate_weight
         layer_cfg.attention.wq_b.sharding_spec = colwise_spec()
 
     # Dense FFN (non-MoE layers only)
