@@ -59,7 +59,8 @@ def compile_time_passes(
     that compiled Triton kernels are baked into the artifact. Otherwise
     they run at trace time via ``construct_default_graph_passes``.
 
-    cudagraph is excluded — it needs real tensors and devices at runtime.
+    cudagraph is excluded because it needs to re-capture the graph into
+    an in-memory CUDA graph at runtime
     """
     from torchtitan.models.common.attention import FlexAttention
 
