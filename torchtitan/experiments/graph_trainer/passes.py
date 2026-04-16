@@ -37,6 +37,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
@@ -49,24 +50,21 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
-def construct_default_graph_passes(
+def compile_time_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
-    """Build the default pass list for the aot_fx_trace compile path.
+    """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
-    Per-pass configuration (e.g. ``static_input_indices`` for cudagraph) is
-    bound here via ``functools.partial`` so that ``apply_graph_passes``
-    stays a generic pass runner with no pass-specific parameters.
+    If precompile is enabled, these are applied before serialization so
+    that compiled Triton kernels are baked into the artifact. Otherwise
+    they run at trace time via ``construct_default_graph_passes``.
 
-    Args:
-        traced_result: The traced graph and metadata from ``trace_train_step``.
-
-    Returns:
-        An ordered list of graph passes ready to apply.
+    cudagraph is excluded because it needs to re-capture the graph into
+    an in-memory CUDA graph at runtime
     """
     from torchtitan.models.common.attention import FlexAttention
 
-    passes: list[Callable] = [
+    return [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
@@ -80,11 +78,39 @@ def construct_default_graph_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
+        custom_codegen_pass,
     ]
 
-    # cudagraph should be the last pass.
+
+def construct_default_graph_passes(
+    traced_result: "TracedResult",
+    *,
+    precompiled: bool = False,
+) -> list[Callable]:
+    """Build the pass list for the aot_fx_trace path.
+
+    When ``precompiled=False`` (default), returns the full list: cleanup,
+    FlexAttention annotation, regional_inductor, and cudagraph.
+
+    When ``precompiled=True``, the artifact already has cleanup and
+    regional_inductor baked in, so only cudagraph is returned.
+    """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
+    passes: list[Callable] = []
+    if not precompiled:
+        passes.extend(compile_time_passes(traced_result))
+
+    # cudagraph should be the last pass.
     if is_cudagraph_compatible(traced_result.gm):
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
@@ -92,9 +118,9 @@ def construct_default_graph_passes(
                 cudagraph_pass,
                 is_forward=True,
                 static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
-
     return passes
 
 
@@ -266,6 +292,7 @@ def cudagraph_pass(
     *,
     is_forward: bool,
     static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -284,7 +311,18 @@ def cudagraph_pass(
             when ``static_input_indices`` is not provided.
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors (as
+            opposed to opaque values like DeviceMesh). Used to compute which
+            inputs need copying for cudagraph replay. When not provided, this
+            is inferred from ``example_inputs``.
     """
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure cudagraph is not combined with passes that replace the "
+            f"GraphModule (e.g. full_inductor_compilation)."
+        )
+
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
     from torchtitan.experiments.graph_trainer.cudagraph import (
@@ -294,7 +332,12 @@ def cudagraph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    gm.forward = CUDAGraphWrapper(
+        gm.forward,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
+    )
     return gm
 
 
@@ -680,6 +723,7 @@ AVAILABLE_COMPILER_PASSES = {
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "custom_codegen": custom_codegen_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
