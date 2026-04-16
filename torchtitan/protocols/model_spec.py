@@ -41,12 +41,12 @@ class ModelSpec:
     # signatures elsewhere in the codebase.
     build_loss_fn: Callable
     parallelize_fn: Callable
+    set_sharding_spec_fn: Callable | None
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None
     state_dict_adapter: type[BaseStateDictAdapter] | None
-    set_sharding_spec_fn: Callable | None = None
 
 
 @dataclass
 class FaultTolerantModelSpec(ModelSpec):
-    fragment_fn: Callable | None = None
+    fragment_fn: Callable | None

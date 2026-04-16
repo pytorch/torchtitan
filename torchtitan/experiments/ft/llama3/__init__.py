@@ -12,6 +12,7 @@ from torchtitan.models.llama3 import (
     Llama3StateDictAdapter,
     parallelize_llama,
 )
+from torchtitan.models.llama3.sharding import set_llama3_sharding_spec
 from torchtitan.protocols.model_spec import FaultTolerantModelSpec
 
 
@@ -22,6 +23,7 @@ def model_registry(flavor: str) -> FaultTolerantModelSpec:
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_llama,
+        set_sharding_spec_fn=set_llama3_sharding_spec,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
