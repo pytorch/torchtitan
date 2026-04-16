@@ -198,7 +198,7 @@ hash from `torch/version.py`:
 
 ```bash
 pip download torch==<version> \
-    --index-url https://download.pytorch.org/whl/nightly/cu128 \
+    --index-url https://download.pytorch.org/whl/nightly/cu130 \
     --no-deps -d /tmp/torch_wheel --python-version 3.12 --only-binary :all:
 
 unzip -p /tmp/torch_wheel/torch-<version>-cp312-cp312-manylinux_2_28_x86_64.whl \
