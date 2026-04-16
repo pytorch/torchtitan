@@ -171,7 +171,10 @@ def maybe_enable_memory_snapshot(
         class MemoryProfiler:
             def __init__(self, step_num: int, freq: int):
                 device_module.memory._record_memory_history(
-                    max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES
+                    max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES,
+                    # Use stacks="all" if you need C++ stacks, but you might
+                    # run into unwind problems (RuntimeError: stoi).
+                    stacks="python",
                 )
                 # when resume training, we start from the last step
                 self.step_num = step_num
