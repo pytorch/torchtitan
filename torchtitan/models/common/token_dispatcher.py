@@ -381,18 +381,18 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         shared_experts overlaps with the async all-to-all combine — it runs
         while the a2a is in flight on the NCCL stream. scatter_add forces sync.
 
-        When sp_size > 1 (sequence parallel), x is the global input and is
-        split to the local shard before scatter_add and shared_experts.
+        When sp_size > 1 (sequence parallel), dispatch uses local token
+        indices. Combine offsets them to global positions so scatter_add
+        into full x is correct.
 
         Args:
             routed_output: (R, dim) expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
-            x: (num_tokens, dim) original input tokens (global if sp_size > 1)
+            x: (num_tokens, dim) original input tokens
             shared_experts: optional shared expert module to overlap
 
         Returns:
             (num_tokens, dim) combined output with shared_experts added.
-            When sp_size > 1, num_tokens is the local shard size.
         """
         # Reverse expert-major reordering
         routed_output = self._unpermute(
@@ -408,14 +408,33 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             self.ep_group,
         )
 
-        # When sequence_parallel is active, x is the global input — split it
-        # to the local shard so scatter_add and shared_experts use local tokens.
-        if self.sp_size > 1:
-            (x,) = self._split_along_sp(x)
-
         # shared_experts overlaps with the async a2a (NCCL stream).
         # Score application + scatter_add forces the a2a to sync.
-        return super().combine(routed_output, metadata, x, shared_experts)
+        out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
+
+        if not self.score_before_experts:
+            routed_output = (
+                routed_output.to(torch.float32)
+                * metadata.top_scores_experts_sorted.reshape(-1, 1)
+            ).to(routed_output.dtype)
+
+        # When sequence_parallel is active, dispatch splits tokens to a local
+        # shard, so token_indices_experts_sorted are 0-based local indices.
+        # Offset them to global positions so scatter_add into full x is correct.
+        if self.sp_size > 1:
+            local_num_tokens = x.shape[0] // self.sp_size
+            token_indices_experts_sorted = (
+                metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
+            )
+        else:
+            token_indices_experts_sorted = metadata.token_indices_experts_sorted
+
+        out = deterministic_scatter_add(
+            out,
+            token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
+            routed_output,
+        )
+        return out
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
