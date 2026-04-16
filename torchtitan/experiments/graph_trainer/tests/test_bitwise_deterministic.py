@@ -169,7 +169,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
             compile_time_passes,
-            runtime_passes,
+            construct_default_graph_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             precompile_fx_trace_load,
@@ -213,19 +213,16 @@ class BitwiseDeterministicBase(unittest.TestCase):
             storage = DiskStorageAdapter(tmpdir)
             precompile_fx_trace_save(traced_result, storage)
 
-            loaded_result = precompile_fx_trace_load(
-                storage, expected_fingerprint=""
-            )
+            loaded_result = precompile_fx_trace_load(storage, expected_fingerprint="")
 
-        # Step 4: Apply runtime passes only (cudagraph)
+        # Step 4: Apply load-time passes (cudagraph)
         if enable_passes:
-            passes = runtime_passes(loaded_result)
-            if passes:
-                loaded_result.gm = apply_graph_passes(
-                    loaded_result.gm,
-                    loaded_result.example_inputs,
-                    passes,
-                )
+            passes = construct_default_graph_passes(loaded_result, precompiled=True)
+            loaded_result.gm = apply_graph_passes(
+                loaded_result.gm,
+                loaded_result.example_inputs,
+                passes,
+            )
 
         # Step 4: Run training steps using the loaded artifact
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -314,9 +311,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         _set_deterministic()
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
-        self._assert_runs_match(
-            run_traced, run_precompile, "trace vs precompile: "
-        )
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
@@ -361,9 +356,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         _set_deterministic()
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
-        self._assert_runs_match(
-            run_traced, run_precompile, "trace vs precompile: "
-        )
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
 # TODO: max_autotune=True causes multiple issues for FlexAttn bitwise tests:

@@ -47,6 +47,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
+
 from torchtitan.experiments.graph_trainer.compile import (
     _make_precompile_callback,
     _SERIALIZABLE_PASSES,
@@ -163,14 +164,27 @@ def _common_setup(config):
 
     model.verify_module_protocol()
 
-    no_compile_config = dataclasses.replace(compile_config, enable=False)
+    # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
+    # (returns model unchanged), so we pass the real compile_config.
+    # This lets side effects from parallelize_fn (e.g. apply_graph_ac
+    # adding "apply_sac" to joint_passes) be visible to
+    # compute_config_fingerprint later without needing a manual hack.
+    # For aot, apply_compile would try to load a non-existent artifact,
+    # so we suppress it with a copy that has enable=False. This
+    # complexity goes away once we complete the migration to
+    # aot_fx_trace and remove the aot code path.
+    if compile_config.mode == "aot":
+        parallelize_compile_config = dataclasses.replace(compile_config, enable=False)
+    else:
+        parallelize_compile_config = compile_config
+
     model = model_spec.parallelize_fn(
         model,
         parallel_dims=parallel_dims,
         training=config.training,
         model_converters=config.model_converters,
         parallelism=parallelism,
-        compile_config=no_compile_config,
+        compile_config=parallelize_compile_config,
         ac_config=config.activation_checkpoint,
         dump_folder=config.dump_folder,
     )
@@ -370,12 +384,6 @@ def _precompile_aot_fx_trace(
         f"Applied {len(passes)} precompile graph passes, "
         f"graph now has {len(list(traced_result.gm.graph.nodes))} nodes"
     )
-
-    # Augment compile_config with AC joint passes to match the training
-    # path, which calls apply_graph_ac during parallelization. Without
-    # this the config fingerprint will differ from training.
-    if config.activation_checkpoint.mode != "none":
-        apply_graph_ac(compile_config, config.activation_checkpoint)
 
     storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
     config_fingerprint = compute_config_fingerprint(

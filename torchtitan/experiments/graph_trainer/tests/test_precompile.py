@@ -481,6 +481,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
             num_flat_outputs=2,
             output_subclass_layouts={0: SubclassLayout(1, None)},
             output_spec=spec,
+            tensor_input_indices=[0, 1, 2, 3],
             config_fingerprint="test_fp_123",
         )
 
@@ -510,6 +511,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
             num_flat_outputs=1,
             output_subclass_layouts={},
             output_spec=spec,
+            tensor_input_indices=[0, 1],
             config_fingerprint="old_fp",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
