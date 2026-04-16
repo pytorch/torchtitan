@@ -158,15 +158,21 @@ def pipeline_llm(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    # Register SPMD mesh with PP stages for DTensor reconstruction
-    # after P2P recv in full DTensor mode.
+    # Config-based TP keeps DTensors on the PP boundary. The PipelineStage
+    # strips DTensors to local tensors for P2P send and reconstructs them on
+    # recv by looking up the mesh in its ``_mesh_cache``. Register the mesh
+    # that carries those DTensors so the reconstruction can find it.
+    pp_dtensor_mesh: DeviceMesh | None = None
     if training.full_dtensor:
         from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
 
-        spmd_mesh = get_dense_spmd_mesh(parallel_dims)
+        pp_dtensor_mesh = get_dense_spmd_mesh(parallel_dims)
+    elif parallel_dims.tp_enabled:
+        pp_dtensor_mesh = parallel_dims.get_mesh("tp")
+    if pp_dtensor_mesh is not None:
         for stage in stages:
             stage._mesh_cache._get_mesh_cb = (
-                lambda names, layout: spmd_mesh  # pyrefly: ignore[bad-assignment]
+                lambda names, layout: pp_dtensor_mesh  # pyrefly: ignore[bad-assignment]
             )
 
     pp_schedule = build_pipeline_schedule(
