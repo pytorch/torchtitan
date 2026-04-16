@@ -217,10 +217,9 @@ class RLTrainer(Configurable):
                     )
                 if self.trainer.parallelism.enable_sequence_parallel:
                     raise ValueError(
-                        "batch_invariant requires SP disabled "
-                        "(--trainer.parallelism.no-enable-sequence-parallel). "
+                        "batch_invariant mode doesn't support SP now. "
                         "SP uses reduce-scatter which only supports Ring in NCCL "
-                        "and has not been validated for cross-node determinism."
+                        "and has not been validated for determinism."
                     )
 
     def __init__(self, config: Config):
