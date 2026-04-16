@@ -657,9 +657,9 @@ def model_registry(flavor: str) -> ModelSpec:
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3,
+        set_sharding_spec_fn=set_qwen3_sharding_spec,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
-        set_sharding_spec_fn=set_qwen3_sharding_spec,
     )

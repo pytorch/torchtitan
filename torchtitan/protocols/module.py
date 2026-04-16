@@ -128,13 +128,12 @@ class Module(nn.Module, Configurable):
         """
         pass
 
-    @property
-    def _pos_arg_names(self) -> list[str]:
-        """Positional arg names of ``forward`` (excluding ``self``).
+    def _cache_pos_arg_names(self) -> list[str]:
+        """Return positional arg names of ``forward`` (excluding ``self``), cached.
 
-        Computed once from the class-level ``forward`` signature and cached.
-        Must be accessed **before** ``forward`` is wrapped (i.e., in
-        ``parallelize``), so the introspection sees the original signature.
+        Must be called once **before** ``forward`` is wrapped in ``parallelize``
+        so ``inspect.signature`` sees the unwrapped signature. Subsequent
+        calls return the cached list.
         """
         if self._pos_arg_list is not None:
             return self._pos_arg_list
@@ -160,12 +159,16 @@ class Module(nn.Module, Configurable):
 
         For each module with a ``sharding_spec``:
 
-        1. ``distribute_tensor`` on params/buffers per ``state_shardings``.
+        1. ``distribute_tensor`` on params and buffers per ``state_shardings``.
         2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
 
-        The wrapping order is: ``shard_inputs → [local_map →] fn → shard_outputs``.
-        CP (applied before ``parallelize``) is captured inside ``local_map``.
-        FSDP hooks on ``__call__`` fire around the wrapped ``forward``.
+        The wrapping order is:
+            ``shard_inputs -> [optional local_map] fn -> shard_outputs``.
+
+        fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
+
+        Legacy parallelism support:
+            CP (applied before ``parallelize``) is captured inside ``local_map``.
 
         Idempotent: a second call (e.g. after ``init_weights`` overwrites
         buffers) only re-distributes plain tensors without double-wrapping
@@ -178,7 +181,7 @@ class Module(nn.Module, Configurable):
             if isinstance(child, Module):
                 child.parallelize(mesh)
             else:
-                # Look through non-Module wrappers (CheckpointWrapper, compile)
+                # Look through non-Module wrappers, e.g., CheckpointWrapper
                 queue.extend(child.children())
 
         spec = self._sharding_spec
@@ -223,7 +226,9 @@ class Module(nn.Module, Configurable):
         # Wrap forward with redistribution (+ local_map if needed).
         # Skip if already wrapped (idempotent for post-init_weights calls).
         if not self._forward_wrapped:
-            _ = self._pos_arg_names  # noqa: F841
+            # Cache positional arg names of the original forward so _shard_inputs
+            # can read them from the cache instead of calling inspect every forward.
+            self._cache_pos_arg_names()
 
             fn = self.forward
             if spec.local_map is not None:
@@ -256,7 +261,7 @@ class Module(nn.Module, Configurable):
         1. If plain tensor, wrap as DTensor using ``input_layouts`` (annotation).
         2. If DTensor placements != ``in_shardings``, redistribute.
 
-        Step 1 is required because we have not in the regime of full dtensor yet.
+        Step 1 is required because we are not yet in the full-DTensor regime.
         """
         spec = self._sharding_spec
         assert spec is not None
@@ -266,7 +271,9 @@ class Module(nn.Module, Configurable):
 
         # Use pre-cached positional arg names (populated in parallelize()) to
         # merge positional args into a unified kwargs dict.
-        pos_arg_names = [name for name in self._pos_arg_names if name not in kwargs]
+        pos_arg_names = [
+            name for name in self._cache_pos_arg_names() if name not in kwargs
+        ]
         new_kwargs = dict(zip(pos_arg_names, args))
         new_kwargs.update(kwargs)
 

@@ -266,6 +266,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model_config,
                 parallel_dims,
                 loss_parallel=loss_parallel,
+                enable_sp=config.parallelism.enable_sequence_parallel,
                 full_dtensor=config.training.full_dtensor,
             )
 
