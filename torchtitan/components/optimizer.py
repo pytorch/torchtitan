@@ -108,12 +108,19 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         weight_decay: float = 0.1
         """Weight decay to use"""
 
-        implementation: Literal["for-loop", "foreach", "fused"] = "fused"
+        implementation: Literal[
+            "for-loop", "foreach", "fused", "fused_opt_states_bf16"
+        ] = "fused"
         """
         Specify which optimizer implementation to use:
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
         - 'for-loop': Use the default implementation for the optimizer (slowest).
+        - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
+          momentum and variance in bfloat16 via a step pre-hook so the fused
+          CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
+          Only supported for Adam/AdamW with OptimizersContainer (not
+          OptimizersInBackwardContainer). See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
@@ -122,6 +129,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         pattern matching parameter FQNs and multipliers for lr and weight_decay.
         Parameters not matching any pattern use the global defaults.
         Patterns are checked in order; first match wins."""
+
+        def __post_init__(self):
+            if self.implementation == "fused_opt_states_bf16":
+                if self.name not in ("Adam", "AdamW"):
+                    raise ValueError(
+                        "implementation='fused_opt_states_bf16' is only supported "
+                        f"for Adam/AdamW, got optimizer '{self.name}'"
+                    )
 
     optimizers: list[T]
     model_parts: list[nn.Module]
@@ -135,13 +150,19 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     @staticmethod
     def _build_optimizer_kwargs(config: Config) -> dict[str, Any]:
-        assert config.implementation in ["fused", "foreach", "for-loop"]
+        assert config.implementation in [
+            "fused",
+            "foreach",
+            "for-loop",
+            "fused_opt_states_bf16",
+        ]
+        fused = config.implementation in ("fused", "fused_opt_states_bf16")
         return {
             "lr": config.lr,
             "betas": (config.beta1, config.beta2),
             "eps": config.eps,
             "weight_decay": config.weight_decay,
-            "fused": config.implementation == "fused",
+            "fused": fused,
             "foreach": config.implementation == "foreach",
         }
 
@@ -219,6 +240,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             self.optimizers.append(optimizer_cls(param_groups))
             for group in param_groups:
                 all_params.extend(group["params"])
+        if config.implementation == "fused_opt_states_bf16":
+            self._register_bf16_optimizer_state_hook()
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
@@ -269,6 +292,46 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         # functionality such as hooks.
         Optimizer.__init__(self, all_params, optimizer_kwargs)
 
+    def _register_bf16_optimizer_state_hook(self) -> None:
+        """Register a step pre-hook to create Adam optimizer states in bfloat16.
+
+        The hook pre-populates optimizer state before Adam's lazy initialization
+        runs, so that ``_init_group`` finds non-empty state and skips its own
+        fp32 allocation. The fused CUDA kernel then sees the dtype mismatch
+        between fp32 params and bf16 states, dispatching to the mixed-precision
+        kernel (``FusedAdamMathFunctorMP``).
+        """
+
+        def _bf16_state_init_hook(
+            optimizer: Optimizer, args: tuple, kwargs: dict
+        ) -> None:
+            for group in optimizer.param_groups:
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+                    state = optimizer.state[p]
+                    if len(state) == 0:
+                        state["step"] = (
+                            torch.zeros((), dtype=torch.float32, device=p.device)
+                            if group.get("capturable") or group.get("fused")
+                            else torch.tensor(0.0, dtype=torch.float32)
+                        )
+                        state["exp_avg"] = torch.zeros_like(
+                            p, dtype=torch.bfloat16, memory_format=torch.preserve_format
+                        )
+                        state["exp_avg_sq"] = torch.zeros_like(
+                            p, dtype=torch.bfloat16, memory_format=torch.preserve_format
+                        )
+                        if group.get("amsgrad"):
+                            state["max_exp_avg_sq"] = torch.zeros_like(
+                                p,
+                                dtype=torch.bfloat16,
+                                memory_format=torch.preserve_format,
+                            )
+
+        for optim in self.optimizers:
+            optim.register_step_pre_hook(_bf16_state_init_hook)
+
     def init_cache_state_dict(self) -> None:
         """Initialize cached state dict for TorchFT. No-op for base class."""
         pass
@@ -285,7 +348,13 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     @dataclass(kw_only=True, slots=True)
     class Config(OptimizersContainer.Config):
-        pass
+        def __post_init__(self) -> None:
+            if self.implementation == "fused_opt_states_bf16":
+                raise ValueError(
+                    "implementation='fused_opt_states_bf16' is not supported with "
+                    "OptimizersInBackwardContainer"
+                )
+            OptimizersContainer.Config.__post_init__(self)
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         optimizer_cls = self._resolve_optimizer_cls(config.name)

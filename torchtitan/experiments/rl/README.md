@@ -30,7 +30,7 @@ source titan-rl/bin/activate
 
 1. Install Monarch and TorchStore from main:
 ```bash
-uv pip install torchmonarch==0.5.0.dev20260403
+uv pip install torchmonarch==0.4.1
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 uv pip install pygtrie portpicker
 ```
@@ -38,7 +38,7 @@ uv pip install pygtrie portpicker
 2. Install Flash Attention 3 kernels:
 ```bash
 # Flash Attention v3 (recommended for H100/H200 and newer GPUs)
-uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu128
+uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
 ```
 
 **NOTE:** FA2 is bundled with PyTorch and will be used automatically on older GPUs (e.g. A100) that don't support FA3.
@@ -48,15 +48,15 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
+4. Install PyTorch nightly, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
 ```bash
 # Install vllm with nightly torch
-uv pip install torch vllm xformers  --pre \
---extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+uv pip install torch vllm torchcomms  --pre \
+--extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
 --index-strategy unsafe-best-match
 ```
 
-**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
+**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.0, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu130, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
 5. Install TorchTitan in editable mode:
@@ -73,7 +73,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torch
 
 7. Run inference with torchtitan model definition:
 ```bash
-torchrun --nproc_per_node=2 torchtitan/experiments/rl/inference_example.py
+torchrun --nproc_per_node=4 torchtitan/experiments/rl/inference_example.py
 ```
 
 **NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.

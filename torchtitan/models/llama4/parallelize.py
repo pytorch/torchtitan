@@ -30,7 +30,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import (
     DeepEPExpertParallel,
@@ -40,13 +40,16 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
     TorchAOExpertParallel,
 )
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
     NoParallel,
 )
-from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
+
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -133,6 +136,7 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
             hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
+            enable_sp=True,
             pad_multiple=pad_multiple,
         )
 
@@ -156,7 +160,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -182,7 +186,6 @@ def parallelize_llama(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
-        gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -307,7 +310,6 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
-    gradient_divide_factor: int | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -515,9 +517,12 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
     hybridep_non_blocking_expert_capacity_factor: float | None = None,
+    enable_sp: bool = True,
     pad_multiple: int | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
+
+    sp_layout = Shard(1) if enable_sp else Replicate()
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
@@ -527,15 +532,16 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
-                # input / output sharding on the seqlen dim
-                # all-gather for input, reduce-scatter for output
+                # With SP: all-gather (Shard→Replicate) for input,
+                # reduce-scatter (Partial→Shard) for output.
+                # Without SP: input is already Replicate,
+                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
-                    input_layouts=(Shard(1),),
+                    input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
-                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
                     use_local_input=False,
                     output_layouts=(Partial(),),
-                    desired_output_layouts=(Shard(1),),
+                    desired_output_layouts=(sp_layout,),
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(
