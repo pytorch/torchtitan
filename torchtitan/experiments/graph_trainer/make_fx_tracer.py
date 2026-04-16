@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -198,27 +199,51 @@ def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
 
 
 def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
-    """Copy forward node metadata (custom) to later nodes sharing the same seq_nr.
+    """Copy forward metadata to backward nodes across all nested FX subgraphs.
 
-    Walks the graph in a single pass. The first node seen for each seq_nr is
-    treated as the forward node.
-    Subsequent nodes with the same seq_nr (typically backward nodes) receive
-    the forward node's custom metadata.
+    Uses a two-pass approach over all submodule graphs (including HOP subgraphs
+    like score_mod/mask_mod). Pass 1 collects forward nodes by seq_nr; pass 2
+    copies custom/nn_module_stack/stack_trace from the matching forward node to
+    each backward node. Backward nodes are identified by the autograd engine's
+    ``autograd_backward`` tag on ``node.meta``.
     """
+
+    def _is_backward(node: torch.fx.Node) -> bool:
+        return node.meta.get("autograd_backward", False)
+
     seq_nr_to_fwd_node: dict[int, torch.fx.Node] = {}
 
-    for node in fx_g.graph.nodes:
-        if node.op not in ("call_function", "get_attr") or "seq_nr" not in node.meta:
+    for submod in fx_g.modules():
+        if not isinstance(submod, torch.fx.GraphModule):
             continue
-        seq_nr = node.meta["seq_nr"]
-        if seq_nr not in seq_nr_to_fwd_node:
-            seq_nr_to_fwd_node[seq_nr] = node
-        else:
-            fwd_node = seq_nr_to_fwd_node[seq_nr]
+        for node in submod.graph.nodes:
+            if (
+                node.op not in ("call_function", "get_attr")
+                or "seq_nr" not in node.meta
+                or _is_backward(node)
+            ):
+                continue
+            seq_nr = node.meta["seq_nr"]
+            if seq_nr not in seq_nr_to_fwd_node:
+                seq_nr_to_fwd_node[seq_nr] = node
+
+    for submod in fx_g.modules():
+        if not isinstance(submod, torch.fx.GraphModule):
+            continue
+        for node in submod.graph.nodes:
+            if (
+                node.op not in ("call_function", "get_attr")
+                or "seq_nr" not in node.meta
+                or not _is_backward(node)
+            ):
+                continue
+            fwd_node = seq_nr_to_fwd_node.get(node.meta["seq_nr"])
+            if fwd_node is None or fwd_node is node:
+                continue
 
             custom = fwd_node.meta.get("custom")
             if custom:
-                node.meta.setdefault("custom", {}).update(custom)
+                node.meta.setdefault("custom", {}).update(copy.deepcopy(custom))
             nn_module_stack = fwd_node.meta.get("nn_module_stack")
             if nn_module_stack is not None:
                 node.meta["nn_module_stack"] = nn_module_stack.copy()
