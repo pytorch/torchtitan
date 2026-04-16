@@ -215,6 +215,13 @@ class RLTrainer(Configurable):
                         f"batch_invariant requires bfloat16 generator dtype, "
                         f"got {self.generator.model_dtype!r}"
                     )
+                if self.trainer.parallelism.enable_sequence_parallel:
+                    raise ValueError(
+                        "batch_invariant requires SP disabled "
+                        "(--trainer.parallelism.no-enable-sequence-parallel). "
+                        "SP uses reduce-scatter which only supports Ring in NCCL "
+                        "and has not been validated for cross-node determinism."
+                    )
 
     def __init__(self, config: Config):
         self.config = config
