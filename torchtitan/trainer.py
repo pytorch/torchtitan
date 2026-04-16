@@ -540,9 +540,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             ntokens_batch = labels.numel()
-            # Divide by cp_degree, because CP ranks process the same tokens
-            self.ntokens_seen += ntokens_batch // self.parallel_dims.cp
-
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -645,6 +642,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
             )
+
+        # Accumulate after CP sharding so labels.numel() reflects the actual
+        # unique tokens this rank processes (not the full pre-split sequence).
+        self.ntokens_seen += labels.numel()
 
         return inputs, labels, extra_inputs, extra_kwargs
 
