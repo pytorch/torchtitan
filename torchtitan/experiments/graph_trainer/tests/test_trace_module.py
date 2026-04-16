@@ -16,7 +16,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
-    _patch_engine_run_backward,
     extract_module_state,
     minimal_fx_tracer,
     run_traced,
@@ -391,7 +390,7 @@ class TestTraceDTensor(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMetadataPropagation(unittest.TestCase):
-    """Tests for _patch_engine_run_backward and _copy_fwd_metadata_to_bw_nodes."""
+    """Tests for _copy_fwd_metadata_to_bw_nodes."""
 
     DEVICE = "cuda"
     DTYPE = torch.float32
@@ -400,7 +399,7 @@ class TestMetadataPropagation(unittest.TestCase):
         torch.manual_seed(42)
 
     def test_backward_nodes_have_seq_nr(self):
-        """Verify that backward FX nodes get seq_nr metadata via the patched engine."""
+        """Verify that backward FX nodes get seq_nr metadata via patched autograd.grad."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
@@ -498,22 +497,6 @@ class TestMetadataPropagation(unittest.TestCase):
             [],
             f"Backward nodes missing stack_trace: {bwd_nodes_missing_stack_trace}",
         )
-
-    def test_patch_engine_restores_original(self):
-        """Verify that _patch_engine_run_backward restores the original function."""
-        import torch.autograd
-        import torch.autograd.graph
-
-        orig_fn = torch.autograd.graph._engine_run_backward
-
-        with _patch_engine_run_backward():
-            # Inside the context, it should be patched
-            self.assertIsNot(torch.autograd.graph._engine_run_backward, orig_fn)
-            self.assertIsNot(torch.autograd._engine_run_backward, orig_fn)
-
-        # After the context, it should be restored
-        self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
-        self.assertIs(torch.autograd._engine_run_backward, orig_fn)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
