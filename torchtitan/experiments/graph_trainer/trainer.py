@@ -104,6 +104,34 @@ class GraphTrainer(Trainer):
             extra_kwargs,
         )
 
+    def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
+        """Load a precompiled aot_fx_trace artifact from disk."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _FX_TRACE_ARTIFACT_KEY,
+            compute_config_fingerprint,
+            precompile_fx_trace_load,
+        )
+        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+
+        compile_config = self.config.compile
+        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+
+        if not storage.exists(_FX_TRACE_ARTIFACT_KEY):
+            raise ValueError(
+                f"Precompiled fx_trace artifact not found at "
+                f"'{compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}'. "
+                f"Run precompile_main with --compile.mode aot_fx_trace first."
+            )
+
+        config_fingerprint = compute_config_fingerprint(
+            model, compile_config, self.parallel_dims
+        )
+
+        self._traced_step = precompile_fx_trace_load(
+            storage,
+            expected_fingerprint=config_fingerprint,
+        )
+
     def _make_fx_forward_backward_step(
         self,
         model: nn.Module,
@@ -115,20 +143,26 @@ class GraphTrainer(Trainer):
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         if self._traced_step is None:
-            fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-            maybe_register_blockmask_pytree_node()
-            with self.train_context():
-                self._traced_step = trace_train_step(fwd_bwd_fn)(
-                    model,
-                    inputs,
-                    labels,
-                    global_valid_tokens,
-                    extra_inputs,
-                    extra_kwargs,
-                )
+            if self.config.compile.precompile_artifact_dir:
+                self._load_precompiled_fx_trace(model)
+            else:
+                fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
+                maybe_register_blockmask_pytree_node()
+                with self.train_context():
+                    self._traced_step = trace_train_step(fwd_bwd_fn)(
+                        model,
+                        inputs,
+                        labels,
+                        global_valid_tokens,
+                        extra_inputs,
+                        extra_kwargs,
+                    )
 
             if self.config.compile.enable_passes:
-                passes = construct_default_graph_passes(self._traced_step)
+                passes = construct_default_graph_passes(
+                    self._traced_step,
+                    precompiled=bool(self.config.compile.precompile_artifact_dir),
+                )
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,

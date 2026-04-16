@@ -6,7 +6,7 @@
 
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -258,6 +258,7 @@ class TracedResult:
     num_flat_outputs: int
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
+    tensor_input_indices: list[int] = field(default_factory=list)
 
     @property
     def num_static_inputs(self) -> int:
@@ -361,6 +362,15 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
         ctx = TracingContext(fake_mode)
         # preserve_node_meta propagates fx.traceback.annotate metadata to traced nodes
+        # Disable autograd multithreading so that backward tracing
+        # runs on the calling thread. Without this, the C++ autograd
+        # engine dispatches backward to a worker thread that has a
+        # fresh contextvars.Context, making the compile_on_one_rank
+        # ContextVar invisible and causing _sym_get_coordinate to
+        # bake rank 0's concrete coordinates into the backward graph.
+        # TODO: Move set_multithreading_enabled(False) to global init.
+        # Forcing backward onto the main CPU thread is a good default
+        # for both tracing and runtime, not just the tracing path.
         # _skip_nested_compile lets the current make_fx trace inline through
         # torch.compile'd FlexAttention kernels instead of erroring.
         # _non_strict_tracing_context is required by _patch_autograd_grad() and
@@ -371,6 +381,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             tracing(ctx),
             preserve_node_meta(),
             _skip_nested_compile(),
+            torch.autograd.set_multithreading_enabled(False),
             torch.compiler._non_strict_tracing_context(),
         ):
             traced = make_fx(
@@ -395,6 +406,9 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             num_flat_outputs=num_flat_outputs,
             output_subclass_layouts=output_layouts,
             output_spec=output_spec,
+            tensor_input_indices=[
+                i for i, x in enumerate(fake_args) if isinstance(x, torch.Tensor)
+            ],
         )
 
     return _trace_with_args
