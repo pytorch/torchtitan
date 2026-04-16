@@ -55,7 +55,7 @@ from torchtitan.experiments.rl.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
+from torchtitan.experiments.rl.simple_grpo_sum_digits import GRPOLoss, RLTrainer
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.tools import utils
 
@@ -273,6 +273,7 @@ def _test_config() -> RLTrainer.Config:
                 data_parallel_replicate_degree=1,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",

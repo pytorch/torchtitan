@@ -6,6 +6,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 
 @dataclass
 class Episode:
@@ -43,3 +45,15 @@ class Episode:
     reward: float = 0.0
     group_id: str = ""
     advantage: float = 0.0
+
+
+@dataclass
+class TrainBatch:
+    token_ids: torch.Tensor  # [1, total_tokens]
+    prompt_lens: list[int]  # [num_episodes]
+    response_lens: list[int]  # [num_episodes]
+    seq_lens: list[int]  # [num_episodes] (prompt_lens + response_lens)
+    advantages: torch.Tensor  # [num_episodes]
+    token_logprobs: list[
+        list[float]
+    ]  # [num_episodes][response_len_i] per-token logprobs from rollout
