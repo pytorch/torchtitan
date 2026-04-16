@@ -52,11 +52,11 @@ from torchtitan.tools.logging import logger
 def compile_time_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
-    """Passes to apply at precompile time (before serialization).
+    """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
-    Includes cleanup, FlexAttention annotation, and regional_inductor
-    compilation. The compiled Triton kernels (AOTCompiledArtifact nodes)
-    are serialized into the artifact by GraphPickler.
+    If precompile is enabled, these are applied before serialization so
+    that compiled Triton kernels are baked into the artifact. Otherwise
+    they run at trace time via ``construct_default_graph_passes``.
 
     cudagraph is excluded — it needs real tensors and devices at runtime.
     """
@@ -79,18 +79,26 @@ def compile_time_passes(
     ]
 
 
-def runtime_passes(
+def construct_default_graph_passes(
     traced_result: "TracedResult",
+    *,
+    precompiled: bool = False,
 ) -> list[Callable]:
-    """Passes to apply at load time (after deserialization).
+    """Build the pass list for the aot_fx_trace path.
 
-    Only includes cudagraph — regional_inductor and cleanup passes
-    were already applied at precompile time.
+    When ``precompiled=False`` (default), returns the full list: cleanup,
+    FlexAttention annotation, regional_inductor, and cudagraph.
+
+    When ``precompiled=True``, the artifact already has cleanup and
+    regional_inductor baked in, so only cudagraph is returned.
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    # cudagraph should be the last pass.
     passes: list[Callable] = []
+    if not precompiled:
+        passes.extend(compile_time_passes(traced_result))
+
+    # cudagraph should be the last pass.
     if is_cudagraph_compatible(traced_result.gm):
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
@@ -100,19 +108,6 @@ def runtime_passes(
                 static_input_indices=static_input_indices,
             )
         )
-    return passes
-
-
-def construct_default_graph_passes(
-    traced_result: "TracedResult",
-) -> list[Callable]:
-    """Build the full pass list for the non-precompile aot_fx_trace path.
-
-    Combines all precompile-time and load-time passes into a single list.
-    Used when tracing happens at runtime (no precompiled artifact).
-    """
-    passes = compile_time_passes(traced_result)
-    passes.extend(runtime_passes(traced_result))
     return passes
 
 

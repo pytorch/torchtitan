@@ -134,8 +134,10 @@ class CUDAGraphWrapper:
         )
         # example_inputs is empty when loading a precompiled artifact:
         # the artifact is deserialized before the first real forward
-        # call, so no example inputs are available yet. In that case
-        # we defer computation to the first __call__ (warmup phase).
+        # call, so no example inputs are available yet. We defer
+        # _input_indices_to_copy to the first __call__ because we
+        # need actual inputs to distinguish tensors from opaque
+        # values (e.g. DeviceMesh from CooR/DTensor unwrapping).
         self._input_indices_to_copy: list[int] | None = (
             [
                 i
@@ -223,8 +225,7 @@ class CUDAGraphWrapper:
                         self._input_addresses.append(None)
             else:
                 self._input_addresses = [
-                    x.data_ptr() if isinstance(x, torch.Tensor) else None
-                    for x in args
+                    x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
                 ]
 
             self._cudagraph = torch.cuda.CUDAGraph()

@@ -419,6 +419,9 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
         # fresh contextvars.Context, making the compile_on_one_rank
         # ContextVar invisible and causing _sym_get_coordinate to
         # bake rank 0's concrete coordinates into the backward graph.
+        # TODO: Move set_multithreading_enabled(False) to global init.
+        # Forcing backward onto the main CPU thread is a good default
+        # for both tracing and runtime, not just the tracing path.
         with (
             fake_mode,
             tracing(ctx),
