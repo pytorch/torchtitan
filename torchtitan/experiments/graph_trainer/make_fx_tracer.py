@@ -6,7 +6,7 @@
 
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -307,6 +307,7 @@ class TracedResult:
     num_flat_outputs: int
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
+    tensor_input_indices: list[int] = field(default_factory=list)
 
     @property
     def num_static_inputs(self) -> int:
@@ -419,6 +420,9 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
         # fresh contextvars.Context, making the compile_on_one_rank
         # ContextVar invisible and causing _sym_get_coordinate to
         # bake rank 0's concrete coordinates into the backward graph.
+        # TODO: Move set_multithreading_enabled(False) to global init.
+        # Forcing backward onto the main CPU thread is a good default
+        # for both tracing and runtime, not just the tracing path.
         with (
             fake_mode,
             tracing(ctx),
@@ -448,6 +452,9 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             num_flat_outputs=num_flat_outputs,
             output_subclass_layouts=output_layouts,
             output_spec=output_spec,
+            tensor_input_indices=[
+                i for i, x in enumerate(fake_args) if isinstance(x, torch.Tensor)
+            ],
         )
 
     return _trace_with_args

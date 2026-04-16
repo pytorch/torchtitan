@@ -298,12 +298,14 @@ _FX_TRACE_ARTIFACT_KEY = "fx_trace_default"
 
 @dataclass
 class PrecompiledFxTraceArtifact:
-    """Artifact for aot_fx_trace precompilation.
+    """Serialized form of a TracedResult for aot_fx_trace precompilation.
 
-    Stores the traced FX graph (as a pickled GraphModule) alongside the
-    TracedResult metadata needed to unwrap DTensor inputs and rewrap
-    outputs at runtime. Inductor compilation happens at load time on
-    each rank.
+    Stores the traced FX graph (as a GraphPickler-serialized
+    GraphModule) alongside the TracedResult metadata needed to unwrap
+    DTensor inputs and rewrap outputs at runtime. Compiled Triton
+    kernels (AOTCompiledArtifact nodes from regional_inductor) are
+    baked into the serialized graph at precompile time — no Inductor
+    recompilation is needed at load time.
     """
 
     serialized_gm: bytes
@@ -313,7 +315,80 @@ class PrecompiledFxTraceArtifact:
     num_flat_outputs: int
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
+    tensor_input_indices: list[int]
     config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
+
+    @classmethod
+    def from_traced_result(
+        cls,
+        traced_result: TracedResult,
+        config_fingerprint: ConfigFingerprint | None = None,
+    ) -> "PrecompiledFxTraceArtifact":
+        """Create an artifact from a TracedResult by serializing its GraphModule.
+
+        Uses GraphPickler (not plain pickle) to preserve SymInt
+        expressions in the graph. Plain pickle evaluates SymInts to
+        concrete trace-time values, baking in rank-specific constants
+        (e.g. the embedding vocab offset from
+        _runtime_compute_coordinate_on_dim).
+        """
+        from torch.fx._graph_pickler import GraphPickler, Options
+
+        from torchtitan.experiments.graph_trainer.passes import (
+            _node_metadata_key_filter_distributed,
+        )
+
+        serialized_gm = GraphPickler.dumps(
+            traced_result.gm,
+            Options(
+                ops_filter=None,
+                node_metadata_key_filter=_node_metadata_key_filter_distributed,
+            ),
+        )
+
+        return cls(
+            serialized_gm=serialized_gm,
+            state_fqns=traced_result.state_fqns,
+            num_flat_inputs=traced_result.num_flat_inputs,
+            input_subclass_layouts=traced_result.input_subclass_layouts,
+            num_flat_outputs=traced_result.num_flat_outputs,
+            output_subclass_layouts=traced_result.output_subclass_layouts,
+            output_spec=traced_result.output_spec,
+            tensor_input_indices=traced_result.tensor_input_indices,
+            config_fingerprint=config_fingerprint or ConfigFingerprint(""),
+        )
+
+    def to_traced_result(self) -> TracedResult:
+        """Deserialize back into a TracedResult.
+
+        Registers CooR custom ops, then deserializes the GraphModule
+        via GraphPickler under a FakeTensorMode (needed so that
+        placeholder metadata contains FakeTensors for downstream
+        passes like regional_inductor).
+        """
+        _register_coor_ops()
+
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler
+
+        fake_mode = FakeTensorMode(
+            allow_non_fake_inputs=True,
+            shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+        )
+        gm = GraphPickler.loads(self.serialized_gm, fake_mode)
+        gm.recompile()
+
+        return TracedResult(
+            gm=gm,
+            example_inputs=(),
+            state_fqns=self.state_fqns,
+            num_flat_inputs=self.num_flat_inputs,
+            input_subclass_layouts=self.input_subclass_layouts,
+            num_flat_outputs=self.num_flat_outputs,
+            output_subclass_layouts=self.output_subclass_layouts,
+            output_spec=self.output_spec,
+            tensor_input_indices=self.tensor_input_indices,
+        )
 
 
 def precompile_fx_trace_save(
@@ -325,39 +400,10 @@ def precompile_fx_trace_save(
 
     The GraphModule should have graph passes (cleanup, annotation,
     regional_inductor) already applied so compiled Triton kernels are
-    baked into the artifact as AOTCompiledArtifact nodes. GraphPickler
-    handles serialization of these compiled artifacts natively.
-
-    Uses GraphPickler (not plain pickle) to preserve SymInt expressions
-    in the graph. Plain pickle evaluates SymInts to their concrete
-    trace-time values, which bakes in rank-specific constants (e.g.
-    the embedding vocabulary offset from _runtime_compute_coordinate_on_dim).
-    GraphPickler serializes the symbolic expression so the graph
-    remains rank-agnostic after deserialization.
+    baked into the artifact as AOTCompiledArtifact nodes.
     """
-    from torch.fx._graph_pickler import GraphPickler, Options
-
-    from torchtitan.experiments.graph_trainer.passes import (
-        _node_metadata_key_filter_distributed,
-    )
-
-    serialized_gm = GraphPickler.dumps(
-        traced_result.gm,
-        Options(
-            ops_filter=None,
-            node_metadata_key_filter=_node_metadata_key_filter_distributed,
-        ),
-    )
-
-    artifact = PrecompiledFxTraceArtifact(
-        serialized_gm=serialized_gm,
-        state_fqns=traced_result.state_fqns,
-        num_flat_inputs=traced_result.num_flat_inputs,
-        input_subclass_layouts=traced_result.input_subclass_layouts,
-        num_flat_outputs=traced_result.num_flat_outputs,
-        output_subclass_layouts=traced_result.output_subclass_layouts,
-        output_spec=traced_result.output_spec,
-        config_fingerprint=config_fingerprint or ConfigFingerprint(""),
+    artifact = PrecompiledFxTraceArtifact.from_traced_result(
+        traced_result, config_fingerprint
     )
 
     data = pickle.dumps(artifact)
@@ -388,10 +434,6 @@ def precompile_fx_trace_load(
     remapping is needed.
     """
     data = storage.load(_FX_TRACE_ARTIFACT_KEY)
-    # Plain pickle is correct here: it unpacks the PrecompiledFxTraceArtifact
-    # dataclass whose fields are plain Python types. The GraphModule (with
-    # compiled Triton kernels) lives inside artifact.serialized_gm as an
-    # opaque bytes blob and is deserialized below via GraphPickler.loads.
     artifact: PrecompiledFxTraceArtifact = pickle.loads(data)
 
     _validate_config_fingerprint(artifact.config_fingerprint, expected_fingerprint)
@@ -403,25 +445,4 @@ def precompile_fx_trace_load(
         f"fingerprint={artifact.config_fingerprint}"
     )
 
-    _register_coor_ops()
-
-    from torch._subclasses import FakeTensorMode
-    from torch.fx._graph_pickler import GraphPickler
-
-    fake_mode = FakeTensorMode(
-        allow_non_fake_inputs=True,
-        shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
-    )
-    gm = GraphPickler.loads(artifact.serialized_gm, fake_mode)
-    gm.recompile()
-
-    return TracedResult(
-        gm=gm,
-        example_inputs=(),
-        state_fqns=artifact.state_fqns,
-        num_flat_inputs=artifact.num_flat_inputs,
-        input_subclass_layouts=artifact.input_subclass_layouts,
-        num_flat_outputs=artifact.num_flat_outputs,
-        output_subclass_layouts=artifact.output_subclass_layouts,
-        output_spec=artifact.output_spec,
-    )
+    return artifact.to_traced_result()

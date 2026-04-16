@@ -124,6 +124,7 @@ class CUDAGraphWrapper:
         example_inputs: Sequence[Any],
         static_input_indices: tuple[int] | None = None,
         should_check_address: bool = False,
+        tensor_input_indices: list[int] | None = None,
     ):
         _cg_manager.maybe_initialize()
         _cg_manager.register_wrapper(self)
@@ -132,19 +133,16 @@ class CUDAGraphWrapper:
         self._static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
-        # example_inputs is empty when loading a precompiled artifact:
-        # the artifact is deserialized before the first real forward
-        # call, so no example inputs are available yet. In that case
-        # we defer computation to the first __call__ (warmup phase).
-        self._input_indices_to_copy: list[int] | None = (
-            [
+        if tensor_input_indices is not None:
+            self._input_indices_to_copy = [
+                i for i in tensor_input_indices if i not in self._static_input_indices
+            ]
+        else:
+            self._input_indices_to_copy = [
                 i
                 for i, inp in enumerate(example_inputs)
                 if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
             ]
-            if example_inputs
-            else None
-        )
         self._cudagraph: torch.cuda.CUDAGraph | None = None
         self._has_warmup = False
 
@@ -188,8 +186,6 @@ class CUDAGraphWrapper:
 
     def _check_static_inputs_address(self) -> None:
         for i in self._static_input_indices:
-            if not isinstance(self._args[i], torch.Tensor):
-                continue
             actual = self._args[i].data_ptr()
             expected = self._input_addresses[i]
             assert expected == actual, (
@@ -212,13 +208,6 @@ class CUDAGraphWrapper:
 
         if self._cudagraph is None:
             self._validate_inputs(args)
-            if self._input_indices_to_copy is None:
-                self._input_indices_to_copy = [
-                    i
-                    for i, inp in enumerate(args)
-                    if isinstance(inp, torch.Tensor)
-                    and i not in self._static_input_indices
-                ]
             self._args = args
             self._input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args

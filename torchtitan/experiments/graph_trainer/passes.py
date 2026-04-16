@@ -52,13 +52,13 @@ from torchtitan.tools.logging import logger
 def compile_time_passes(
     traced_result: "TracedResult",
 ) -> list[Callable]:
-    """Passes to apply at precompile time (before serialization).
+    """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
-    Includes cleanup, FlexAttention annotation, and regional_inductor
-    compilation. The compiled Triton kernels (AOTCompiledArtifact nodes)
-    are serialized into the artifact by GraphPickler.
+    If precompile is enabled, these are applied before serialization so
+    that compiled Triton kernels are baked into the artifact. Otherwise
+    they run at trace time via ``construct_default_graph_passes``.
 
-    cudagraph is excluded — it needs real tensors and devices at runtime.
+    cudagraph is excluded because we need to recapture the graph at runtime.
     """
     from torchtitan.models.common.attention import FlexAttention
 
@@ -79,17 +79,26 @@ def compile_time_passes(
     ]
 
 
-def runtime_passes(
+def construct_default_graph_passes(
     traced_result: "TracedResult",
+    *,
+    precompiled: bool = False,
 ) -> list[Callable]:
-    """Passes to apply at load time (after deserialization).
+    """Build the pass list for the aot_fx_trace path.
 
-    Only includes cudagraph — regional_inductor and cleanup passes
-    were already applied at precompile time.
+    When ``precompiled=False`` (default), returns the full list: cleanup,
+    FlexAttention annotation, regional_inductor, and cudagraph.
+
+    When ``precompiled=True``, the artifact already has cleanup and
+    regional_inductor baked in, so only cudagraph is returned.
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
     passes: list[Callable] = []
+    if not precompiled:
+        passes.extend(compile_time_passes(traced_result))
+
+    # cudagraph should be the last pass.
     if is_cudagraph_compatible(traced_result.gm):
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
@@ -97,21 +106,9 @@ def runtime_passes(
                 cudagraph_pass,
                 is_forward=True,
                 static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
-    return passes
-
-
-def construct_default_graph_passes(
-    traced_result: "TracedResult",
-) -> list[Callable]:
-    """Build the full pass list for the non-precompile aot_fx_trace path.
-
-    Combines all precompile-time and load-time passes into a single list.
-    Used when tracing happens at runtime (no precompiled artifact).
-    """
-    passes = compile_time_passes(traced_result)
-    passes.extend(runtime_passes(traced_result))
     return passes
 
 
@@ -283,6 +280,7 @@ def cudagraph_pass(
     *,
     is_forward: bool,
     static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -301,6 +299,10 @@ def cudagraph_pass(
             when ``static_input_indices`` is not provided.
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors (as
+            opposed to opaque values like DeviceMesh). Used to compute which
+            inputs need copying for cudagraph replay. When not provided, this
+            is inferred from ``example_inputs``.
     """
     if not isinstance(gm, torch.fx.GraphModule):
         raise TypeError(
@@ -318,7 +320,12 @@ def cudagraph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    gm.forward = CUDAGraphWrapper(
+        gm.forward,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
+    )
     return gm
 
 
