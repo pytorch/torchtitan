@@ -28,6 +28,7 @@ from torch._library.opaque_object import (
     register_opaque_type,
 )
 from torch.distributed import ProcessGroup
+from torch.utils._python_dispatch import _disable_current_modes
 
 _buffer: Any = None  # Global buffer instance
 
@@ -365,7 +366,8 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     try:
-        from deep_ep import HybridEPBuffer  # pyrefly: ignore [missing-import]
+        # pyrefly: ignore [missing-import, missing-module-attribute]
+        from deep_ep import HybridEPBuffer
     except ImportError as e:
         raise ImportError(
             "HybridEP requires deep_ep library. "
@@ -433,12 +435,17 @@ def dispatch_tokens(
     selected_experts_indices = selected_experts_indices.contiguous()
     top_scores = top_scores.contiguous()
 
-    get_buffer(
-        group=group,
-        hidden_dim=hidden_states.shape[1],
-        num_tokens=hidden_states.shape[0],
-        num_local_experts=num_local_experts,
-    )
+    # Hide buffer setup from SAC's __torch_dispatch__ via _disable_current_modes().
+    # Buffer.__init__ calls all_gather_object() which triggers aten._to_copy
+    # (CUDA→CPU), a MUST_SAVE op in our SAC policy. These are infrastructure
+    # ops, not model compute, and must not enter SAC's FIFO cache.
+    with _disable_current_modes():
+        get_buffer(
+            group=group,
+            hidden_dim=hidden_states.shape[1],
+            num_tokens=hidden_states.shape[0],
+            num_local_experts=num_local_experts,
+        )
 
     (
         hidden,

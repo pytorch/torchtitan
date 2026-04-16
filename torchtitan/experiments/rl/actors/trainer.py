@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torchstore as ts
 from monarch.actor import Actor, endpoint
@@ -30,11 +29,13 @@ from torchtitan.config.configs import (
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
-    compute_policy_gradient_loss,
-    compute_token_log_probs,
+    compute_logprobs,
+    create_positions_from_seq_lens,
+    create_varlen_metadata,
+    extract_response_logprobs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -51,6 +52,7 @@ class PolicyTrainer(Actor, Configurable):
         config: PolicyTrainer.Config for model/optimizer/parallelism settings.
         model_spec: Model specification (model config, parallelize_fn, state_dict_adapter).
         hf_assets_path: Path to HF assets folder for checkpoint loading.
+        transfer_dtype: DType to cast weights to before transfer. If None, no cast is performed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -66,9 +68,9 @@ class PolicyTrainer(Actor, Configurable):
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
-        """Communication configuration for distributed initialization."""
         compile: CompileConfig = field(default_factory=CompileConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        loss: Configurable.Config = field(default_factory=Configurable.Config)
 
     def __init__(
         self,
@@ -79,6 +81,7 @@ class PolicyTrainer(Actor, Configurable):
         transfer_dtype: str = "",
     ):
         self.config = config
+        self.loss_fn = config.loss.build()
         self.model_spec = model_spec
         # Only cast if transfer dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -127,13 +130,18 @@ class PolicyTrainer(Actor, Configurable):
         self.model = model
         self.model_parts = [model]
 
-        # Create reference model for KL divergence (frozen copy of initial policy)
-        # TODO: Move ref_model to a separate actor so it can live on different GPUs
-        ref_model = self._build_model(model_spec, config, device_type, hf_assets_path)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        self.ref_model = ref_model
+        # Conditionally build frozen reference model for KL penalty
+        # TODO: @joecummings remove ref entirely, this is hacky and we don't need it
+        if getattr(config.loss, "kl_coef", 0) > 0:
+            ref_model = self._build_model(
+                model_spec, config, device_type, hf_assets_path
+            )
+            ref_model.eval()
+            ref_model.requires_grad_(False)
+            self.ref_model = ref_model
+            logger.info("Built frozen reference model for KL penalty")
+        else:
+            self.ref_model = None
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -145,10 +153,15 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Any | None = None
 
-        # Data parallelism: determine this rank's shard of the batch.
-        self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
-        self.dp_rank = dist.get_rank() // self.parallel_dims.non_data_parallel_size
+        # Data parallelism: mesh is available after _build_model triggers build_mesh
         self.dp_enabled = self.parallel_dims.dp_enabled
+        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
+        if batch_mesh is not None:
+            self.dp_size = batch_mesh.size()
+            self.dp_rank = batch_mesh.get_local_rank()
+        else:
+            self.dp_size = 1
+            self.dp_rank = 0
 
         logger.debug(
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
@@ -260,18 +273,14 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     @endpoint
-    async def step(self, episodes: list[Episode]) -> dict:
+    async def step(self, train_data: list[TrainBatch]) -> dict:
         """Perform one training step.
 
-        Expects a flat list of Episodes with ``advantage`` already computed
-        by the controller. Shards episodes across DP ranks so each rank
-        processes a unique slice of the data.
-
         Args:
-            episodes: Flat list of Episodes with advantages set.
+            train_data (list[TrainBatch]): List of batches, one per DP rank.
 
         Returns:
-            Training metrics
+            dict: Training metrics (loss, policy version, etc.).
         """
         # The policy and ref models share code objects, so dynamo's
         # per-code-object cache must hold entries for both grad modes
@@ -284,50 +293,55 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        advantages = torch.tensor([ep.advantage for ep in episodes])
+        local_batch = train_data[self.dp_rank]
+        device = self.device
 
-        all_token_ids: list[list[int]] = [ep.token_ids for ep in episodes]
-        all_prompt_token_ids: list[list[int]] = [ep.prompt_token_ids for ep in episodes]
-        all_token_log_probs: list[list[float]] = [ep.token_log_probs for ep in episodes]
+        token_ids = local_batch.token_ids.to(device)
+        seq_lens = local_batch.seq_lens
+        prompt_lens = local_batch.prompt_lens
+        response_lens = local_batch.response_lens
+        advantages = local_batch.advantages.to(device)
 
-        all_rewards_tensor = torch.tensor([ep.reward for ep in episodes])
+        max_seq_len = max(seq_lens)
+        rope_cache_len = self.model.freqs_cis.shape[0]
+        if max_seq_len > rope_cache_len:
+            raise ValueError(
+                f"Episode length {max_seq_len} exceeds rope cache size "
+                f"{rope_cache_len}. Increase model max_seq_len or reduce "
+                f"generation max_tokens."
+            )
 
-        # Shard flattened completions across DP ranks so each rank processes
-        # a unique subset of the data.
-        total_samples = len(all_token_ids)
-        my_indices = list(range(self.dp_rank, total_samples, self.dp_size))
-        my_token_ids = [all_token_ids[i] for i in my_indices]
-        my_prompt_token_ids = [all_prompt_token_ids[i] for i in my_indices]
-        my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
-        my_advantages = advantages[my_indices]
+        attention_masks = create_varlen_metadata(seq_lens, device)
+        positions = create_positions_from_seq_lens(seq_lens, device)
 
-        # Compute reference log probs using frozen ref_model (local shard only)
-        ref_token_log_probs = []
-        device = next(self.model.parameters()).device
-        with torch.no_grad():
-            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
-                token_lps = compute_token_log_probs(
-                    self.ref_model,
-                    prompt_toks,
-                    gen_toks,
-                    device,
-                )
-                ref_token_log_probs.append(token_lps)
-
-        # Compute loss on this rank's shard
-        loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
-            self.model,
-            my_token_ids,
-            my_prompt_token_ids,
-            my_advantages,
-            ref_token_log_probs,
-            kl_coef=0.1,
+        logits = self.model(
+            token_ids, attention_masks=attention_masks, positions=positions
+        )
+        all_policy_logprobs = compute_logprobs(logits, token_ids)
+        policy_logprobs = extract_response_logprobs(
+            all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        # Verify logprob identity (local shard)
+        ref_logprobs = None
+        if self.ref_model is not None:
+            with torch.no_grad():
+                ref_logits = self.ref_model(
+                    token_ids, attention_masks=attention_masks, positions=positions
+                )
+                all_ref_logprobs = compute_logprobs(ref_logits, token_ids)
+                ref_logprobs = extract_response_logprobs(
+                    all_ref_logprobs, seq_lens, prompt_lens, response_lens
+                )
+
+        loss, loss_metrics = self.loss_fn(
+            policy_logprobs=policy_logprobs,
+            advantages=advantages,
+            ref_logprobs=ref_logprobs,
+        )
+
         verification_result = verify_logprob_identity(
-            my_token_log_probs,
-            batch_token_log_probs,
+            local_batch.token_logprobs,
+            policy_logprobs,
         )
 
         logger.debug(
@@ -358,11 +372,8 @@ class PolicyTrainer(Actor, Configurable):
         # Return metrics
         metrics = {
             "loss": loss.item(),
-            "reward_mean": all_rewards_tensor.mean().item(),
-            "reward_std": all_rewards_tensor.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": episodes[0].text[:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             # Trainer vs generator log prob divergence

@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -156,48 +155,20 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-@contextmanager
-def annotate_flex_attention_for_regional_inductor() -> Generator[None, None, None]:
-    """Annotate FlexAttention.forward so regional_inductor compiles flex attention HOPs.
-
-    Uses the same inductor configs as FlexAttention._compiled_flex_attn
-    to ensure bitwise-identical kernels between eager and regional_inductor paths.
-    """
-    from torchtitan.models.common.attention import FlexAttention
-
-    orig = FlexAttention.forward
-    FlexAttention.forward = annotate_fn(
-        {"compile_with_inductor": {"inductor_configs": FlexAttention.inductor_configs}}
-    )(orig)
-    try:
-        yield
-    finally:
-        FlexAttention.forward = orig
-
-
-def enable_graph_ac_for_mode(ac_mode: str) -> bool:
-    if ac_mode == "none":
-        return False
-    if ac_mode == "selective":
-        return True
-    raise ValueError(
-        "graph_trainer only supports activation_checkpoint.mode "
-        f"'selective' or 'none', got {ac_mode!r}. Use 'selective' for "
-        "graph-based SAC."
-    )
-
-
 def apply_graph_ac(
     compile_config: CompileConfig,
     ac_config: "ActivationCheckpointConfig",
 ) -> None:
     """Add apply_sac to compile joint passes for graph-based selective AC.
 
-    ``selective`` enables graph SAC, ``none`` is a no-op, and other modes
-    raise ValueError.
+    Must be called only when ac_config.mode != "none". Only "selective" mode
+    is supported; other modes raise ValueError.
     """
-    if not enable_graph_ac_for_mode(ac_config.mode):
-        return
+    if ac_config.mode != "selective":
+        raise ValueError(
+            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
+            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
+        )
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])
     if "apply_sac" not in joint_pass_names:

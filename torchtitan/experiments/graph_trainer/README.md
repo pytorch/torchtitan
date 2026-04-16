@@ -16,11 +16,11 @@ The goal is to give users more explicit control over the compiler stack in terms
 
 ### Prerequisites
 
-GraphTrainer requires the latest PyTorch nightly, which can be installed (e.g., for CUDA 12.8) via:
+GraphTrainer requires the latest PyTorch nightly, which can be installed (e.g., for CUDA 13.0) via:
 ```bash
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu130 --force-reinstall
 ```
-You can replace `cu128` with another version of CUDA or an AMD GPU (e.g. `rocm6.3`).
+You can replace `cu130` with another version of CUDA or an AMD GPU (e.g. `rocm6.3`).
 
 ### Quick Start
 
@@ -96,10 +96,9 @@ python -m torchtitan.experiments.graph_trainer.precompile_main \
     --parallelism.tensor_parallel_degree 2
 
 # Step 2: load and train with torchrun (uses all GPUs)
-# Uses the dedicated graph_trainer run_train.sh which passes
-# --virtual-local-rank to torchrun.
+# Uses run_train_precompile.sh which passes --virtual-local-rank to torchrun.
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
-    ./torchtitan/experiments/graph_trainer/run_train.sh \
+    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \

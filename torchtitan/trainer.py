@@ -392,17 +392,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 color=color,
             )
         else:
-            # apply Tensor/Context/Expert Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = model_spec.parallelize_fn(
-                model,
-                parallel_dims=parallel_dims,
-                training=config.training,
-                model_converters=config.model_converters,
-                parallelism=config.parallelism,
-                compile_config=config.compile,
-                ac_config=config.activation_checkpoint,
-                dump_folder=config.dump_folder,
-            )
+            if not config.checkpoint.create_seed_checkpoint:
+                # Skip parallelize_fn for seed checkpoints — nothing from
+                # it is needed (AC, compile, nD parallelism, mixed precision, etc.).
+                model = model_spec.parallelize_fn(
+                    model,
+                    parallel_dims=parallel_dims,
+                    training=config.training,
+                    model_converters=config.model_converters,
+                    parallelism=config.parallelism,
+                    compile_config=config.compile,
+                    ac_config=config.activation_checkpoint,
+                    dump_folder=config.dump_folder,
+                )
 
             model.to_empty(device=init_device)
             with torch.no_grad():

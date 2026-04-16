@@ -37,19 +37,21 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    remove_detach_pass,
+    remove_identity_slice_pass,
+    remove_identity_view_pass,
+)
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
 
 
-def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("custom", {}).get("autograd_backward", False)
-
-
 def construct_default_graph_passes(
-    traced_result: TracedResult,
+    traced_result: "TracedResult",
 ) -> list[Callable]:
     """Build the default pass list for the aot_fx_trace compile path.
 
@@ -63,8 +65,33 @@ def construct_default_graph_passes(
     Returns:
         An ordered list of graph passes ready to apply.
     """
+    from torchtitan.models.common.attention import FlexAttention
+
     passes: list[Callable] = [
         functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
+        remove_detach_pass,
+        remove_identity_view_pass,
+        remove_identity_slice_pass,
+        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # produce bitwise identical results to the eager Trainer path.
+        # When left uncompiled, flex_attention still runs correctly but
+        # produces different numerical results.
+        functools.partial(
+            annotate_flex_attention_for_regional_inductor_pass,
+            flex_compile_config=FlexAttention.inductor_configs,
+        ),
+        regional_inductor_pass,
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
+        # TODO: Investigate why custom_codegen_pass hangs when dumping codegen file
+        # custom_codegen_pass,
     ]
 
     # cudagraph should be the last pass.
@@ -99,13 +126,6 @@ def apply_graph_passes(
     for pass_fn in passes:
         gm = pass_fn(gm, example_inputs)
     return gm
-
-
-def graph_ac_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
-) -> torch.fx.GraphModule:
-    """Apply graph-based SAC to a traced fwd+loss+bwd graph."""
-    return apply_ac_on_fwd_bwd_graph(gm)
 
 
 def autobucketing_reordering_pass(
@@ -174,34 +194,82 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
 def regional_inductor_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
 ) -> torch.fx.GraphModule:
-    """
-    Apply regional inductor compilation based on user annotation.
+    """Compile tagged graph regions with ``regional_inductor``.
 
-    When serializable=True (precompile mode), sets force_autograd_cache
-    so that regional_inductor wraps its output in RegionalOutputCode,
-    and overrides the ops filter to allow distributed collective ops.
-    """
-    with torch._functorch.config.patch(
-        "remat_using_tags_for_fwd_loss_bwd_graph", False
-    ):
-        if serializable:
-            with torch._functorch.config.patch("force_autograd_cache", True):
-                result = regional_inductor(gm, example_inputs)
-            from torch._inductor.output_code import RegionalOutputCode
+    Scans the graph for nodes whose ``node.meta["custom"]`` contains a
+    ``compile_with_inductor`` key and compiles those regions with
+    TorchInductor.  Nodes without this tag are left unchanged.  If no
+    nodes are tagged the pass is a no-op.
 
-            # Override the ops filter after compilation so that
-            # serialization (which happens later) allows distributed
-            # collective ops like _c10d_functional through GraphPickler.
-            if isinstance(result, RegionalOutputCode):
-                result._ops_filter = _ops_filter_with_distributed
-                result._node_metadata_key_filter = _node_metadata_key_filter_distributed
-            else:
-                logger.warning(
-                    "regional_inductor with serializable=True did not produce "
-                    "RegionalOutputCode; distributed ops may not serialize correctly."
-                )
-            return result
-        return regional_inductor(gm, example_inputs)
+    Inductor is configured for bitwise-equal numerics so that the
+    compiled regions match eager execution exactly.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs for shape propagation.
+        serializable: When True (precompile mode), sets
+            ``force_autograd_cache`` so that ``regional_inductor`` wraps
+            its output in ``RegionalOutputCode``, and overrides the ops
+            filter to allow distributed collective ops.
+    """
+    import torch._inductor.config as ic
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
+        """Extract the FakeTensorMode from a graph module's placeholder metadata."""
+        for node in gm.graph.nodes:
+            if node.op == "placeholder" and "val" in node.meta:
+                val = node.meta["val"]
+                if isinstance(val, FakeTensor):
+                    return val.fake_mode
+        return None
+
+    # Ensure inductor produces bitwise-equal numerics vs eager.
+    ic.eager_numerics.division_rounding = True
+    # Recommended by inductor team — uncomment as needed:
+    # ic.emulate_precision_casts = True
+    # ic.eager_numerics.disable_ftz = True
+    # ic.eager_numerics.use_pytorch_libdevice = True
+    # ic.fallback_random = True
+
+    # regional_inductor calls standalone_compile with
+    # dynamic_shapes="from_tracing_context", which requires an active
+    # TracingContext with a FakeTensorMode.  When this pass is called
+    # outside torch.compile (e.g. after make_fx tracing in graph_trainer),
+    # no TracingContext exists, so we create one from the graph's fake
+    # tensor metadata.
+    fake_mode = _get_fake_mode_from_gm(gm)
+    tracing_ctx = torch._guards.TracingContext(fake_mode)
+
+    if serializable:
+        with (
+            torch._guards.tracing(tracing_ctx),
+            torch._functorch.config.patch("force_autograd_cache", True),
+        ):
+            result = regional_inductor(gm, example_inputs)
+        from torch._inductor.output_code import RegionalOutputCode
+
+        # Override the ops filter after compilation so that
+        # serialization (which happens later) allows distributed
+        # collective ops like _c10d_functional through GraphPickler.
+        if isinstance(result, RegionalOutputCode):
+            result._ops_filter = _ops_filter_with_distributed
+            result._node_metadata_key_filter = _node_metadata_key_filter_distributed
+        else:
+            logger.warning(
+                "regional_inductor with serializable=True did not produce "
+                "RegionalOutputCode; distributed ops may not serialize correctly."
+            )
+        return result
+
+    with torch._guards.tracing(tracing_ctx):
+        gm = regional_inductor(gm, example_inputs)
+
+    # regional_inductor may switch to boxed calling convention; reset to
+    # default so the graph can be called with positional args as usual.
+    gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    gm.recompile()
+    return gm
 
 
 def cudagraph_pass(
@@ -242,16 +310,68 @@ def cudagraph_pass(
     return gm
 
 
-def validate_flex_attn_annotation_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+def annotate_flex_attention_for_regional_inductor_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    flex_compile_config: dict | None,
+    mask_compile_config: dict | None = None,
 ) -> torch.fx.GraphModule:
-    """Verify user annotations show up in the graph."""
+    """Tag flex attention HOPs with compile_with_inductor for regional_inductor.
+
+    Annotates three sets of nodes so that regional_inductor correctly
+    scoops and compiles flex attention regions:
+    1. The HOP node itself (flex_attention / flex_attention_backward)
+    2. The get_attr nodes referencing score_mod / mask_mod submodules.
+    3. All nodes inside those submodule graphs.
+
+    Args:
+        gm: The graph module to annotate.
+        example_inputs: Example inputs (unused, required by pass interface).
+        flex_compile_config: Inductor config dict for flex attention HOP
+            nodes and their get_attr submodule references. When provided,
+            wrapped as ``{"inductor_configs": flex_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+        mask_compile_config: Inductor config dict for nodes inside mask_mod
+            subgraphs. When provided, wrapped as
+            ``{"inductor_configs": mask_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+    """
+    flex_compile_annotation: dict = (
+        {"inductor_configs": flex_compile_config}
+        if flex_compile_config is not None
+        else {}
+    )
+    mask_compile_annotation: dict = (
+        {"inductor_configs": mask_compile_config}
+        if mask_compile_config is not None
+        else {}
+    )
+
     for node in gm.graph.nodes:
-        if node.target in {
+        if node.target not in {
             torch.ops.higher_order.flex_attention,
             torch.ops.higher_order.flex_attention_backward,
         }:
-            assert "compile_with_inductor" in node.meta.get("custom", {})
+            continue
+        node.meta.setdefault("custom", {})[
+            "compile_with_inductor"
+        ] = flex_compile_annotation
+        for inp in node.all_input_nodes:
+            if inp.op != "get_attr":
+                continue
+            submod = getattr(gm, inp.target, None)
+            if not isinstance(submod, torch.fx.GraphModule):
+                continue
+            inp.meta.setdefault("custom", {})[
+                "compile_with_inductor"
+            ] = flex_compile_annotation
+
+            # Following are the nodes in mask_mod subgraph
+            for sub_node in submod.graph.nodes:
+                sub_node.meta.setdefault("custom", {})[
+                    "compile_with_inductor"
+                ] = mask_compile_annotation
     return gm
 
 
@@ -301,13 +421,6 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
-        custom_meta = node.meta.get("custom", {})
-
-        # Skip backward nodes — they must not carry recompute tags,
-        # otherwise the remat pass would try to duplicate backward ops.
-        if _is_backward_node(node):
-            continue
-
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -325,6 +438,8 @@ def apply_sac_pass(
                 node.meta["recompute"] = parent.meta["recompute"]
                 node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
+
+        custom_meta = node.meta.get("custom", {})
         ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
         node.meta["ac_graph_id"] = ac_region_id
 
@@ -356,27 +471,6 @@ def apply_sac_pass(
             f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
         )
     return gm
-
-
-def apply_ac_on_fwd_bwd_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
-    """Apply graph-based SAC to a traced fwd+loss+bwd graph.
-
-    Tags forward nodes with recompute policy via apply_sac_pass (backward
-    nodes are skipped automatically via the autograd_backward annotation), then
-    applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
-    PREFER_RECOMPUTE forward ops before backward and DCE originals.
-
-    The model must have been annotated with annotate_ac_regions before
-    tracing so that nodes have custom["ac_region_id"] metadata.
-    Backward nodes must be tagged with custom["autograd_backward"] (done by
-    ``torch.compiler._patch_autograd_grad()`` during tracing).
-    """
-    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
-        remat_using_tags_for_fwd_loss_bwd_graph,
-    )
-
-    apply_sac_pass(gm)
-    return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
 # Apply activation checkpointing on joint graph before partitioner
@@ -479,7 +573,7 @@ def inductor_decomposition_pass(
             f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
         )
 
-    for orig, decomp in zip(orig_placeholders, decomp_placeholders, strict=True):
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
         # Copy all metadata from original to decomposed
         for key, value in orig.meta.items():
             if key not in decomp.meta:
@@ -598,6 +692,7 @@ AVAILABLE_COMPILER_PASSES = {
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "custom_codegen": custom_codegen_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
@@ -606,6 +701,5 @@ AVAILABLE_COMPILER_PASSES = {
 AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
     "apply_sac": apply_sac_pass,
 }

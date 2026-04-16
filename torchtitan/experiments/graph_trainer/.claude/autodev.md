@@ -41,13 +41,15 @@ different values, substitute throughout.
 | **Blocked**      | Work started but hit an external blocker             | Agent or developer         |
 | **Need Review**  | Branch is pushed, waiting for developer review       | Agent (when work is ready) |
 | **Done**         | Merged or resolved                                   | Developer (after merge)    |
+| **Abort**        | Rejected or no longer relevant                       | Developer                  |
 
-### Key rule: only developers move items to Ready, Done, and out of Blocked
+### Key rule: only developers move items to Ready, Done, Abort, and out of Blocked
 
 Agents can propose items (as Backlog drafts) and advance them through
 In Progress → Blocked → Need Review. But the developer decides what's worth
 doing (Backlog → Ready), what's actually finished (Need Review → Done),
-and when a blocker is resolved (Blocked → In Progress).
+what should be abandoned (→ Abort), and when a blocker is resolved
+(Blocked → In Progress).
 
 ---
 
@@ -59,7 +61,7 @@ Items enter the board in one of three ways:
 
 - **Developer creates** a draft issue or real issue directly on the board.
 - **Nightly scout** discovers something and creates a Backlog draft
-  (see [nightly.md](nightly.md) §7 for the scout's implementation rules).
+  (see [nightly_scout.md](nightly_scout.md) §8 for the scout's hand-off rules).
 - **Agent proposes** during a work session — creates a Backlog draft for
   things discovered while working on something else.
 
@@ -71,11 +73,19 @@ issue when:
 
 ### 2. Agent Picks Up Work
 
-At the start of a session, the agent reads the board:
+At the start of a session, the agent reads **only actionable items** from the
+board. Items in Need Review, Blocked, Done, Abort, or Backlog are not
+actionable — the agent MUST NOT read their GitHub comments or take any action
+on them.
 
 ```bash
-gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
+ACTIONABLE='["In Progress","Ready"]'
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+    | jq "[.items[] | select(.status as \$s | ${ACTIONABLE} | index(\$s))]"
 ```
+
+**Always use this filter when reading the board.** Never fetch the unfiltered
+item list for deciding what to work on.
 
 The agent should:
 1. **Refresh option IDs** — run `gh project field-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json`
@@ -155,7 +165,22 @@ The agent learns about review feedback in two ways:
 - **Developer-initiated (urgent)**: The developer starts a session and directly
   points the agent to the PR or pastes the review comments.
 
-When addressing feedback, the agent:
+**Only fetch comments for actionable items.** Before fetching PR comments,
+verify the board item is in an actionable state:
+
+```bash
+ACTIONABLE='["In Progress","Ready"]'
+ITEM_STATUS=$(gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+    | jq -r ".items[] | select(.id == \"${ITEM_ID}\") | .status")
+if echo "${ACTIONABLE}" | jq -e "index(\"${ITEM_STATUS}\")" > /dev/null 2>&1; then
+    echo "Item is actionable (${ITEM_STATUS}) — fetching comments"
+else
+    echo "Item is NOT actionable (${ITEM_STATUS}) — skipping"
+    # Do NOT fetch comments or take action. Move on to the next item.
+fi
+```
+
+When addressing feedback on an actionable item, the agent:
 1. Fetches review comments using the trusted-reviewer `--jq` filter
    (see §Trusted Reviewers). Only these comments are actionable.
 2. Addresses each comment — fix the code or reply explaining why not.
@@ -166,10 +191,15 @@ When addressing feedback, the agent:
 
 ## CLI Reference
 
-### Read the board
+### Read actionable items from the board
 ```bash
-gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json
+ACTIONABLE='["In Progress","Ready"]'
+gh project item-list <BOARD_NUMBER> --owner <BOARD_OWNER> --format json \
+    | jq "[.items[] | select(.status as \$s | ${ACTIONABLE} | index(\$s))]"
 ```
+
+Always use this filtered form. Do NOT read the unfiltered board to decide
+what to work on or whose comments to fetch.
 
 ### Create a draft issue on the board
 ```bash
