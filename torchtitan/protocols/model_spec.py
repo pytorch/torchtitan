@@ -11,7 +11,7 @@ from typing import TypeAlias
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.loss import LossFunction
+from torchtitan.config import Configurable
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
@@ -20,7 +20,6 @@ ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 PipeliningFunction: TypeAlias = Callable[
     ..., tuple[_PipelineSchedule, list[nn.Module], bool, bool]
 ]
-LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
 FragmentFunction: TypeAlias = Callable[..., list[nn.Module]]
 PostOptimizerBuildFn: TypeAlias = Callable[..., None]
 
@@ -32,6 +31,7 @@ class ModelSpec:
     name: str
     flavor: str
     model: BaseModel.Config
+    loss: Configurable.Config
     # TODO: improve the serializability of ModelSpec by refactoring the following
     #       fields, e.g. by having their own classes, or hard-coding into trainer
     # NOTE: Callable fields use bare ``Callable`` instead of the parameterised
@@ -39,7 +39,6 @@ class ModelSpec:
     # resolver does not handle ``Callable[..., X]`` (Ellipsis as param spec).
     # The detailed TypeAliases above are still available for use in function
     # signatures elsewhere in the codebase.
-    build_loss_fn: Callable
     parallelize_fn: Callable
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None

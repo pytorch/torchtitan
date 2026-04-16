@@ -71,15 +71,6 @@ class TrainingConfig:
     gc_freq: int = 50
     """Python garbage control scheduling interval, in steps"""
 
-    loss_num_chunks: int = 1
-    """
-    Number of chunks to split the sequence dimension for cross-entropy loss
-    computation. When > 1, enables chunked CE loss which reduces peak memory
-    by avoiding materializing the full [B, L, V] logits tensor at once.
-    The sequence is split into this many chunks and lm_head + CE loss is
-    computed per-chunk with manual gradient assembly.
-    """
-
     gc_debug: bool = False
     """
     Enable GC debugging mode. This will perform gc.collect() at every step to

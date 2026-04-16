@@ -209,35 +209,11 @@ def apply_fsdp(
         reshard_after_forward_policy, pp_enabled
     )
 
-    if chunked_loss:
-        # ChunkedCELoss needs to independently manage the output (lm_head)
-        # reshard settings during the chunk loop. All three modules
-        # (tok_embeddings, norm, output) must be separate FSDP units.
-        # With weight tying this causes a duplicate all-gather of the shared
-        # weight, but the cost is small relative to the memory savings.
-        if model.tok_embeddings is not None:
-            # pyrefly: ignore [no-matching-overload]
-            fully_shard(
-                model.tok_embeddings,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
-        if model.norm is not None:
-            fully_shard(
-                model.norm,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
-        if model.output is not None:
-            # pyrefly: ignore [no-matching-overload]
-            fully_shard(
-                model.output,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
-    elif getattr(model, "enable_weight_tying", False):
+    if getattr(model, "enable_weight_tying", False):
         modules = [
-            m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
+            m
+            for m in (model.tok_embeddings, model.norm, model.lm_head)
+            if m is not None
         ]
         # pyrefly: ignore [no-matching-overload]
         fully_shard(
@@ -255,17 +231,17 @@ def apply_fsdp(
             )
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
-        if model.norm is not None and model.output is not None:
+        if model.norm is not None and model.lm_head is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                [model.norm, model.output],
+                [model.norm, model.lm_head],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
-        if model.output is not None:
+        if model.lm_head is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                model.output,
+                model.lm_head,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
@@ -383,10 +359,10 @@ def apply_fsdp(
         if next_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
-        elif model.norm is not None and model.output is not None:
+        elif model.norm is not None and model.lm_head is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_forward_prefetch(
-                [model.norm, model.output]
+                [model.norm, model.lm_head]
             )
 
     # backward
@@ -395,9 +371,9 @@ def apply_fsdp(
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
     # pyrefly: ignore [bad-argument-type]
-    if model.norm is not None and model.output is not None and len(model.layers) > 0:
+    if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
         # pyrefly: ignore [missing-attribute]
-        model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
         reversed_transformer_blocks, prev_transformer_blocks

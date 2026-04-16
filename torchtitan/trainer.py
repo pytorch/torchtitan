@@ -314,20 +314,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        loss_num_chunks = config.training.loss_num_chunks
-        if loss_num_chunks > 1:
-            self.loss_fn = ChunkedCELoss(
-                num_chunks=loss_num_chunks,
-                compile_config=config.compile,
-                pp_enabled=parallel_dims.pp_enabled,
-            )
-            # Grab lm_head reference before PP strips it from non-last stages.
-            self.loss_fn.init_lm_head(model)
-            logger.info(f"Initialized ChunkedCELoss with {loss_num_chunks} chunks")
-        else:
-            self.loss_fn = model_spec.build_loss_fn(
-                config.compile, parallel_dims=parallel_dims
-            )
+        self.loss_fn = model_spec.loss.build(
+            compile_config=config.compile,
+        )
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -419,6 +408,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model.train()
 
             self.model_parts = [model]
+
+        # Set lm_head reference for ChunkedCELoss after model construction
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            self.loss_fn.lm_head = self.model_parts[-1].lm_head
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -668,36 +661,31 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels
         )
 
-        # Set loss scale so gradients are properly normalized.
-        # This applies to both PP and non-PP paths uniformly.
-        self.loss_fn.set_scale(1.0 / global_valid_tokens)
-
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             is_chunked = isinstance(self.loss_fn, ChunkedCELoss)
+            if is_chunked:
+                self.loss_fn._global_valid_tokens = global_valid_tokens
 
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
-                # When chunked loss is enabled, the last stage should skip
-                # lm_head so ChunkedCELoss can handle it per-chunk.
-                extra_kwargs_pp = dict(extra_kwargs)
                 if is_chunked:
-                    extra_kwargs_pp["skip_lm_head"] = True
+                    extra_kwargs["skip_lm_head"] = True
 
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
                         **extra_inputs,
-                        **extra_kwargs_pp,
+                        **extra_kwargs,
                         target=targets,
                         losses=losses,
                         return_outputs=False,
                     )
                 else:
                     self.pp_schedule.step(
-                        **extra_kwargs_pp,
+                        **extra_kwargs,
                         target=targets,
                         losses=losses,
                         return_outputs=False,
@@ -707,7 +695,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             if self.pp_has_last_stage:
                 assert losses is not None
-                loss = torch.sum(torch.stack(losses)).to(self.device)
+                if is_chunked:
+                    # ChunkedCELoss already returns scaled loss per microbatch
+                    loss = torch.sum(torch.stack(losses)).to(self.device)
+                else:
+                    loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
+                        self.device
+                    )
             else:
                 loss = torch.tensor([-1.0], device=self.device)
         else:
@@ -723,13 +717,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
                 if is_chunked:
-                    # ChunkedCELoss handles lm_head, ce_loss, and backward
-                    # internally. Returns a detached loss for logging.
-                    loss = self.loss_fn(pred, labels)
+                    loss = self.loss_fn(pred, labels, global_valid_tokens)
                 else:
-                    loss = self.loss_fn(pred, labels)
-                    del pred
-                    loss.backward()
+                    loss = self.loss_fn(pred, labels) / global_valid_tokens
+
+                del pred
+                loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss

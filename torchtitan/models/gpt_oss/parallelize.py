@@ -120,7 +120,6 @@ def parallelize_gptoss(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
-        chunked_loss=training.loss_num_chunks > 1,
     )
 
     logger.info("Applied fully_shard to the model")

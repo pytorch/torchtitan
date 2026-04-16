@@ -161,8 +161,8 @@ class FaultTolerantTrainer(Trainer):
             init_device = device_type
             buffer_device = None
 
-        # FT addition: pass ft_manager to build_loss_fn
-        self.loss_fn = model_spec.build_loss_fn(
+        # FT addition: pass ft_manager to loss.build()
+        self.loss_fn = model_spec.loss.build(
             config.compile, parallel_dims=parallel_dims, ft_manager=self.ft_manager
         )
 

@@ -9,7 +9,7 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import build_mse_loss
+from torchtitan.components.loss import MSELoss
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -551,7 +551,7 @@ def model_registry(flavor: str) -> ModelSpec:
         model=config,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
-        build_loss_fn=build_mse_loss,
+        loss=MSELoss.Config(),
         post_optimizer_build_fn=None,
         state_dict_adapter=FluxStateDictAdapter,
     )

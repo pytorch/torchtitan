@@ -693,7 +693,7 @@ class HFTransformerModel(BaseModel):
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?
         if not isinstance(self.tok_embeddings, nn.Identity) and not isinstance(
-            self.output, nn.Identity
+            self.lm_head, nn.Identity
         ):
             self.model.tie_weights()
 
@@ -705,7 +705,7 @@ class HFTransformerModel(BaseModel):
         yield "tok_embeddings", self.tok_embeddings
         yield "layers", self.layers
         yield "norm", self.norm
-        yield "output", self.output
+        yield "output", self.lm_head
         yield "rotary_emb", self.rotary_emb
 
     def __setattr__(self, name, value):

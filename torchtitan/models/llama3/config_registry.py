@@ -102,6 +102,14 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_chunked_loss() -> Trainer.Config:
+    from torchtitan.components.loss import ChunkedCELoss
+
+    config = llama3_debugmodel()
+    config.model_spec.loss = ChunkedCELoss.Config(num_chunks=4)
+    return config
+
+
 def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(

@@ -64,7 +64,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
+            "lm_head.weight": "lm_head.weight",
         }
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
@@ -167,7 +167,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 if key not in to_hf_map:
                     continue
                 # pyrefly: ignore [missing-attribute]
-                if self.model_config.enable_weight_tying and key == "output.weight":
+                if self.model_config.enable_weight_tying and key == "lm_head.weight":
                     continue
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value

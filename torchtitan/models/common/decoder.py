@@ -67,7 +67,7 @@ class Decoder(BaseModel):
     class Config(BaseModel.Config):
         dim: int
         vocab_size: int
-        output: Linear.Config
+        lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
@@ -94,7 +94,7 @@ class Decoder(BaseModel):
             self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()
-        self.output = config.output.build()
+        self.lm_head = config.lm_head.build()
 
     def init_states(
         self,
@@ -137,7 +137,7 @@ class Decoder(BaseModel):
         h = self.norm(h) if self.norm is not None else h
         if skip_lm_head:
             return h
-        output = self.output(h) if self.output is not None else h
+        output = self.lm_head(h) if self.lm_head is not None else h
         return output
 
     def _get_flex_attention_masks(

@@ -10,7 +10,7 @@ from typing import Literal
 
 import torch.nn as nn
 
-from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
@@ -295,7 +295,7 @@ def _debugmodel(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -319,15 +319,16 @@ def _16b(
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
 ) -> DeepSeekV3Model.Config:
-    dim = 2048
-    n_layers = 27
-    vocab_size = 102400
+def _debugmodel_flex_attn() -> DeepSeekV3Model.Config:
+    dim = 256
+    n_layers = 6
+    vocab_size = 2048
     n_heads = 16
-    moe_hidden_dim = 1408
+    moe_hidden_dim = 256
     num_shared_experts = 2
-    dense_hidden_dim = 10944
+    dense_hidden_dim = 1024
     rope_dim = 64
-    num_experts = 64
+    num_experts = 8
     n_dense_layers = 1
 
     layers = _build_dsv3_layers(
@@ -345,11 +346,11 @@ def _16b(
         moe_hidden_dim=moe_hidden_dim,
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
-        router_top_k=6,
+        router_top_k=3,
         router_score_func="softmax",
         score_before_experts=False,
-        attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        inner_attention=FlexAttention.Config(),
+        mask_type="block_causal",
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -358,7 +359,7 @@ def _16b(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -376,8 +377,6 @@ def _16b(
         ),
         layers=layers,
     )
-
-
 def _236b(
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
@@ -425,7 +424,7 @@ def _236b(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -493,7 +492,7 @@ def _671b(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -536,7 +535,7 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        build_loss_fn=build_cross_entropy_loss,
+        loss=CrossEntropyLoss.Config(),
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
