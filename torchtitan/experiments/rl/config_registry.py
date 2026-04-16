@@ -59,8 +59,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -99,8 +99,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -177,8 +177,8 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=4,
             sampling=SamplingConfig(
+                n=4,
                 temperature=1.0,
                 top_p=0.95,
                 max_tokens=50,
@@ -225,8 +225,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
