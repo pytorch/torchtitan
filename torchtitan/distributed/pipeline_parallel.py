@@ -158,6 +158,17 @@ def pipeline_llm(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
+    # Config-based TP keeps DTensors on the PP boundary. The PipelineStage
+    # strips DTensors to local tensors for P2P send and reconstructs them on
+    # recv by looking up the mesh in its ``_mesh_cache``. Register the TP
+    # mesh so the reconstruction can find it.
+    if parallel_dims.tp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        for stage in stages:
+            stage._mesh_cache._get_mesh_cb = (
+                lambda names, layout: tp_mesh  # pyrefly: ignore[bad-assignment]
+            )
+
     pp_schedule = build_pipeline_schedule(
         parallelism=parallelism,
         local_batch_size=training.local_batch_size,
