@@ -259,6 +259,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model_config,
                 parallel_dims,
                 loss_parallel=not config.parallelism.disable_loss_parallel,
+                enable_sp=config.parallelism.enable_sequence_parallel,
             )
 
         logger.info(
