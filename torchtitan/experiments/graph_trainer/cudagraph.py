@@ -188,8 +188,6 @@ class CUDAGraphWrapper:
 
     def _check_static_inputs_address(self) -> None:
         for i in self._static_input_indices:
-            if not isinstance(self._args[i], torch.Tensor):
-                continue
             actual = self._args[i].data_ptr()
             expected = self._input_addresses[i]
             assert expected == actual, (
@@ -212,17 +210,22 @@ class CUDAGraphWrapper:
 
         if self._cudagraph is None:
             self._validate_inputs(args)
-            if self._input_indices_to_copy is None:
-                self._input_indices_to_copy = [
-                    i
-                    for i, inp in enumerate(args)
-                    if isinstance(inp, torch.Tensor)
-                    and i not in self._static_input_indices
-                ]
             self._args = args
-            self._input_addresses = [
-                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
-            ]
+            if self._input_indices_to_copy is None:
+                self._input_indices_to_copy = []
+                self._input_addresses = []
+                for i, x in enumerate(args):
+                    if isinstance(x, torch.Tensor):
+                        self._input_addresses.append(x.data_ptr())
+                        if i not in self._static_input_indices:
+                            self._input_indices_to_copy.append(i)
+                    else:
+                        self._input_addresses.append(None)
+            else:
+                self._input_addresses = [
+                    x.data_ptr() if isinstance(x, torch.Tensor) else None
+                    for x in args
+                ]
 
             self._cudagraph = torch.cuda.CUDAGraph()
 

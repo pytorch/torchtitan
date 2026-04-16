@@ -161,6 +161,9 @@ class GraphTrainer(Trainer):
 
             if self.config.compile.enable_passes:
                 if self.config.compile.precompile_artifact_dir:
+                    # Precompiled artifact already has cleanup +
+                    # regional_inductor baked in; only apply
+                    # load-time passes (cudagraph).
                     passes = runtime_passes(self._traced_step)
                 else:
                     passes = construct_default_graph_passes(self._traced_step)

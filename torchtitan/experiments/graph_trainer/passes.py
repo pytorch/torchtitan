@@ -89,6 +89,7 @@ def runtime_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
+    # cudagraph should be the last pass.
     passes: list[Callable] = []
     if is_cudagraph_compatible(traced_result.gm):
         static_input_indices = list(range(traced_result.num_static_inputs))
