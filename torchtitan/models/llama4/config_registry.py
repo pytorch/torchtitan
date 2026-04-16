@@ -26,7 +26,7 @@ def llama4_debugmodel() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", comm_backend="standard"),
+        model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
