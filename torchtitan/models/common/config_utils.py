@@ -33,14 +33,14 @@ from torchtitan.models.common.token_dispatcher import (
 
 
 def get_attention_config(
-    attn_backend: str,
+    backend: str,
 ) -> tuple[LocalMapInnerAttention.Config, str]:
-    """Map attn_backend string to (inner_attention config, mask_type)."""
-    if attn_backend == "sdpa":
+    """Map backend string to (inner_attention config, mask_type)."""
+    if backend == "sdpa":
         return ScaledDotProductAttention.Config(), "causal"
-    elif attn_backend == "flex":
+    elif backend == "flex":
         return FlexAttention.Config(), "block_causal"
-    elif attn_backend == "flex_flash":
+    elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
         if has_cuda_capability(10, 0):
@@ -57,10 +57,10 @@ def get_attention_config(
             ),
             "block_causal",
         )
-    elif attn_backend == "varlen":
+    elif backend == "varlen":
         return VarlenAttention.Config(), "block_causal"
     else:
-        raise ValueError(f"Unknown attn_backend: {attn_backend}")
+        raise ValueError(f"Unknown backend: {backend}")
 
 
 def make_gqa_config(
@@ -177,7 +177,8 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    moe_comm_backend: str = "local",
+    comm_backend: str | None = None,
+    capacity_factor: float | None = None,
 ) -> (
     LocalTokenDispatcher.Config
     | AllToAllTokenDispatcher.Config
@@ -186,32 +187,33 @@ def make_token_dispatcher_config(
 ):
     """Build the appropriate token dispatcher config.
 
-    Returns the right Config subclass based on moe_comm_backend:
-    - "local": LocalTokenDispatcher.Config (no EP communication)
+    Returns the right Config subclass based on comm_backend:
+    - None: LocalTokenDispatcher.Config (no EP communication)
     - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
     - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
     - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
-    if moe_comm_backend == "local":
+    if comm_backend is None:
         return LocalTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
         )
-    elif moe_comm_backend in ("deepep", "hybridep"):
+    elif comm_backend in ("deepep", "hybridep"):
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            comm_backend=moe_comm_backend,
+            comm_backend=comm_backend,
+            capacity_factor=capacity_factor,
         )
-    elif moe_comm_backend == "torchao":
+    elif comm_backend == "torchao":
         return TorchAOTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
         )
-    elif moe_comm_backend == "standard":
+    elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
@@ -219,8 +221,8 @@ def make_token_dispatcher_config(
         )
     else:
         raise ValueError(
-            f"Unknown moe_comm_backend: '{moe_comm_backend}'. "
-            "Must be one of 'local', 'standard', 'torchao', 'deepep', 'hybridep'."
+            f"Unknown comm_backend: '{comm_backend}'. "
+            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
         )
 
 
@@ -233,7 +235,8 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    moe_comm_backend: str = "local",
+    comm_backend: str | None = None,
+    capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -246,6 +249,7 @@ def make_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            moe_comm_backend=moe_comm_backend,
+            comm_backend=comm_backend,
+            capacity_factor=capacity_factor,
         ),
     )

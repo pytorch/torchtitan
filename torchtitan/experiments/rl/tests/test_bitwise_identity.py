@@ -260,9 +260,8 @@ def build_trainer_model(config):
 
 def _test_config() -> RLTrainer.Config:
     """Test-specific config: greedy sampling, fewer tokens, single sample."""
-    model_spec = model_registry("0.6B", attn_backend="varlen")
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(

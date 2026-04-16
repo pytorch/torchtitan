@@ -113,16 +113,16 @@ def parallelize_llama(
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     # Check if using DeepEP/HybridEP for MoE communication
-    moe_comm_backend = parallelism.expert_parallel_comm_backend
-    if moe_comm_backend in ("deepep", "hybridep"):
+    comm_backend = parallelism.expert_parallel_comm_backend
+    if comm_backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
             raise ValueError(
-                f"{moe_comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
+                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
                 "Please set expert_parallel_degree > 1 or use standard communication backend."
             )
         if parallel_dims.etp_enabled:
             raise NotImplementedError(
-                f"{moe_comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
+                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
@@ -133,9 +133,8 @@ def parallelize_llama(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            moe_comm_backend=moe_comm_backend,
+            comm_backend=comm_backend,
             enable_sp=True,
-            hybridep_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
             pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
@@ -514,9 +513,8 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
-    moe_comm_backend: str = "standard",
+    comm_backend: str = "standard",
     enable_sp: bool = True,
-    hybridep_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -586,18 +584,17 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            if moe_comm_backend in ("deepep", "hybridep"):
+            if comm_backend in ("deepep", "hybridep"):
                 # pyrefly: ignore [missing-attribute]
                 dispatcher = transformer_block.moe.experts.token_dispatcher
                 assert isinstance(dispatcher, DeepEPTokenDispatcher)
-                if moe_comm_backend == "deepep" and pad_multiple is not None:
+                if comm_backend == "deepep" and pad_multiple is not None:
                     raise ValueError(
                         "DeepEP does not support pad_multiple. "
                         "Use hybridep or standard comm backend instead."
                     )
                 dispatcher.pad_multiple = pad_multiple
-                dispatcher.hybridep_capacity_factor = hybridep_capacity_factor
-                logger.info(f"Applying {moe_comm_backend.upper()} to MoE layer")
+                logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             # sp_size and sp_rank are set for sequence-parallel token splitting
             # when EP borrows from TP (ETP=1).
             experts_plan = ExpertParallel()

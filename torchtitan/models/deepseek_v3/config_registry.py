@@ -66,7 +66,7 @@ def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry("16B", attn_backend="flex", moe_comm_backend="standard"),
+        model_spec=model_registry("16B", attn_backend="flex", comm_backend="standard"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -97,7 +97,7 @@ def deepseek_v3_16b() -> Trainer.Config:
 def deepseek_v3_671b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_registry("671B", attn_backend="flex", moe_comm_backend="torchao"),
+        model_spec=model_registry("671B", attn_backend="flex", comm_backend="torchao"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -123,8 +123,10 @@ def deepseek_v3_671b() -> Trainer.Config:
             mode="selective",
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
-        model_converters=ModelConvertersContainer.Config(converters=[
-            Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
-            Float8GroupedMMConverter.Config(fqns=["experts"]),
-        ]),
+        model_converters=ModelConvertersContainer.Config(
+            converters=[
+                Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
+                Float8GroupedMMConverter.Config(fqns=["experts"]),
+            ]
+        ),
     )

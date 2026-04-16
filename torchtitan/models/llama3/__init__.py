@@ -102,7 +102,7 @@ def _build_llama3_layers(
     return layers
 
 
-def _debugmodel(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
+def _debugmodel(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 6
@@ -133,7 +133,7 @@ def _debugmodel(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
     )
 
 
-def _1b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
+def _1b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
     n_kv_heads = 8
@@ -174,7 +174,7 @@ def _1b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
     )
 
 
-def _3b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
+def _3b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
     n_kv_heads = 8
@@ -215,7 +215,7 @@ def _3b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
     )
 
 
-def _8b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
+def _8b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
@@ -253,7 +253,7 @@ def _8b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
     )
 
 
-def _70b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
+def _70b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
     n_kv_heads = 8
@@ -291,7 +291,7 @@ def _70b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
     )
 
 
-def _405b(attn_backend: str = "sdpa", **kwargs) -> Llama3Model.Config:
+def _405b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
     n_kv_heads = 8

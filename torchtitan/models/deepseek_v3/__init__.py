@@ -171,7 +171,8 @@ def _build_dsv3_layers(
     router_route_norm: bool = False,
     score_before_experts: bool = False,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "local",
+    comm_backend: str | None = None,
+    capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -226,7 +227,8 @@ def _build_dsv3_layers(
                     top_k=router_top_k,
                     param_init=_depth_experts_init(layer_id),
                     score_before_experts=score_before_experts,
-                    moe_comm_backend=moe_comm_backend,
+                    comm_backend=comm_backend,
+                    capacity_factor=capacity_factor,
                 ),
                 shared_experts=make_ffn_config(
                     dim=dim,
@@ -252,8 +254,7 @@ def _build_dsv3_layers(
 
 def _debugmodel(
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "local",
-    **kwargs,
+    comm_backend: str | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -285,7 +286,7 @@ def _debugmodel(
         router_score_func="softmax",
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        comm_backend=comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -316,8 +317,7 @@ def _debugmodel(
 
 def _16b(
     attn_backend: str = "flex",
-    moe_comm_backend: str = "local",
-    **kwargs,
+    comm_backend: str | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -349,7 +349,7 @@ def _16b(
         router_score_func="softmax",
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        comm_backend=comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -380,8 +380,7 @@ def _16b(
 
 def _236b(
     attn_backend: str = "flex",
-    moe_comm_backend: str = "local",
-    **kwargs,
+    comm_backend: str | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -417,7 +416,7 @@ def _236b(
         router_route_scale=16.0,
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        comm_backend=comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -448,8 +447,7 @@ def _236b(
 
 def _671b(
     attn_backend: str = "flex",
-    moe_comm_backend: str = "local",
-    **kwargs,
+    comm_backend: str | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -486,7 +484,7 @@ def _671b(
         router_route_norm=True,
         score_before_experts=False,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        comm_backend=comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -526,11 +524,11 @@ deepseekv3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "local",
+    comm_backend: str | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
+        comm_backend=comm_backend,
     )
     return ModelSpec(
         name="deepseek_v3",

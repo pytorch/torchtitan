@@ -167,7 +167,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup
-        # Set at runtime by apply_moe_ep_tp from tp_mesh
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
         self.sp_size: int = 1
         self.sp_rank: int = 0
 
@@ -435,7 +435,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # Set at runtime by apply_moe_ep_tp
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
         self.pad_multiple: int
 
     def _permute(
@@ -499,19 +499,47 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         Args:
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
+            capacity_factor: Enable non-blocking HybridEP dispatch with a
+                given capacity factor.
+
+                Setting this to a float in (0, 1] enables CPU-free non-blocking
+                dispatch and controls num_permuted_tokens — the fused-permute
+                output capacity, estimated as:
+                num_tokens × ep_size × min(num_local_experts, top_k) × cf,
+                aligned for MXFP8.  Tokens whose permuted offset exceeds this
+                limit are silently dropped (overflow_flag is set on GPU).
+
+                - None = blocking mode (default).  HybridEP calls
+                  cudaStreamSynchronize after dispatch, copies
+                  tokens_per_expert to pinned CPU memory, and computes the
+                  exact num_permuted_tokens on the host.  No token dropping.
+                - 1.0 = non-blocking, worst-case sizing: every token can reach
+                  every local expert, no drops, highest memory.
+                - < 1.0 = non-blocking, reduced memory; controls the
+                  fused-permute output tensor size (num_permuted_tokens).
+                  Safe in practice when forced load balancing (e.g. aux-loss /
+                  round-robin) keeps distribution roughly uniform.
+
+                Note: this factor has no lasting effect on the all-to-all
+                communication buffer.  HybridEP's dispatch_with_permute
+                internally passes the actual num_tokens to
+                update_template_config, which auto-grows the buffer to the
+                full token count on the first dispatch regardless of this
+                setting.
         """
 
         comm_backend: str
+        capacity_factor: float | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.comm_backend = config.comm_backend
-        # Set at runtime by apply_moe_ep_tp
+        self.capacity_factor = config.capacity_factor
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
         # pad_multiple: Alignment size for token groups needed by quantized
         # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
         # with hybridep. None means no padding.
         self.pad_multiple: int | None = None
-        self.hybridep_capacity_factor: float | None = None
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup
 
@@ -542,7 +570,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 self.num_experts,
                 self.ep_group,
                 score_before_experts=self.score_before_experts,
-                non_blocking_expert_capacity_factor=self.hybridep_capacity_factor,
+                non_blocking_expert_capacity_factor=self.capacity_factor,
                 pad_multiple=self.pad_multiple,
             )
         else:
