@@ -86,7 +86,7 @@ def _build_llama4_layers(
     fixed_attn_block_size: int = 8192,
     attn_backend: str = "flex",
     shared_experts_hidden_dim: int | None = None,
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
     capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for a Llama4 model.
@@ -133,7 +133,7 @@ def _build_llama4_layers(
                 num_experts=num_experts,
                 top_k=router.top_k,
                 param_init=_depth_experts_init(layer_id),
-                comm_backend=comm_backend,
+                comm_backend=moe_comm_backend,
                 capacity_factor=capacity_factor,
             )
             shared_experts = make_ffn_config(
@@ -179,7 +179,7 @@ def _build_llama4_layers(
 
 def _debugmodel(
     attn_backend: str = "flex",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> Llama4Model.Config:
     dim = 256
     n_heads = 16
@@ -209,7 +209,7 @@ def _debugmodel(
             interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -225,7 +225,7 @@ def _debugmodel(
 
 def _17bx16e(
     attn_backend: str = "flex",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
@@ -266,7 +266,7 @@ def _17bx16e(
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
             attn_backend=attn_backend,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -282,7 +282,7 @@ def _17bx16e(
 
 def _17bx128e(
     attn_backend: str = "flex",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
@@ -323,7 +323,7 @@ def _17bx128e(
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
             attn_backend=attn_backend,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -345,11 +345,11 @@ llama4_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "flex",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> ModelSpec:
     config = llama4_configs[flavor](
         attn_backend=attn_backend,
-        comm_backend=comm_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return ModelSpec(
         name="llama4",

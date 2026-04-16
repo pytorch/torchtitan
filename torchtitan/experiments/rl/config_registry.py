@@ -25,7 +25,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
+from torchtitan.experiments.rl.simple_grpo_sum_digits import GRPOLoss, RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -46,6 +46,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -84,6 +85,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -122,6 +124,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 data_parallel_replicate_degree=1,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             compile=GeneratorCompileConfig(
@@ -166,6 +169,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             debug=batch_invariant_config,
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",

@@ -103,7 +103,7 @@ def _make_gptoss_experts_config(
     layer_id: int,
     top_k: int,
     score_before_experts: bool,
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
     capacity_factor: float | None = None,
 ) -> GptOssGroupedExperts.Config:
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
@@ -123,7 +123,7 @@ def _make_gptoss_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            comm_backend=comm_backend,
+            comm_backend=moe_comm_backend,
             capacity_factor=capacity_factor,
         ),
     )
@@ -138,7 +138,7 @@ def _build_gptoss_layers(
     top_k: int,
     score_before_experts: bool,
     load_balance_coeff: float,
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
     capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
@@ -156,7 +156,7 @@ def _build_gptoss_layers(
             layer_id=layer_id,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
             capacity_factor=capacity_factor,
         )
         moe_cfg = GptOssMoE.Config(
@@ -188,7 +188,7 @@ def _build_gptoss_layers(
 
 
 def _debugmodel(
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
@@ -213,7 +213,7 @@ def _debugmodel(
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -230,7 +230,7 @@ def _debugmodel(
 
 
 def _20b(
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -255,7 +255,7 @@ def _20b(
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -272,7 +272,7 @@ def _20b(
 
 
 def _120b(
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -297,7 +297,7 @@ def _120b(
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -323,10 +323,10 @@ gptoss_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> ModelSpec:
     config = gptoss_configs[flavor](
-        comm_backend=comm_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return ModelSpec(
         name="gpt_oss",

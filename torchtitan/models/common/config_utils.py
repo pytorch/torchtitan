@@ -43,10 +43,8 @@ def get_attention_config(
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
-        if has_cuda_capability(10, 0):
+        if has_cuda_capability(10, 0) or has_cuda_capability(9, 0):
             block_size = (256, 128)
-        elif has_cuda_capability(9, 0):
-            block_size = (128, 128)
         else:
             raise ValueError(
                 "Flash backend of FlexAttention is only supported on Hopper or Blackwell"

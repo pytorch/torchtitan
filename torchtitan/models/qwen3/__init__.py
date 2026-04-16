@@ -126,7 +126,7 @@ def _build_qwen3_moe_layers(
     num_experts: int,
     top_k: int,
     attn_backend: str = "sdpa",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
     capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models with depth-scaled inits."""
@@ -166,7 +166,7 @@ def _build_qwen3_moe_layers(
                         top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
                         score_before_experts=False,
-                        comm_backend=comm_backend,
+                        comm_backend=moe_comm_backend,
                         capacity_factor=capacity_factor,
                     ),
                 ),
@@ -437,7 +437,7 @@ def _32b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
 
 def _debugmodel_moe(
     attn_backend: str = "sdpa",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
@@ -471,14 +471,14 @@ def _debugmodel_moe(
             num_experts=64,
             top_k=8,
             attn_backend=attn_backend,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
 
 def _30b_a3b(
     attn_backend: str = "sdpa",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
@@ -512,14 +512,14 @@ def _30b_a3b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
 
 def _235b_a22b(
     attn_backend: str = "sdpa",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
@@ -553,7 +553,7 @@ def _235b_a22b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            comm_backend=comm_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
     )
 
@@ -575,11 +575,11 @@ qwen3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    comm_backend: str | None = None,
+    moe_comm_backend: str | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
-    if comm_backend is not None:
-        kwargs["comm_backend"] = comm_backend
+    if moe_comm_backend is not None:
+        kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
     return ModelSpec(
         name="qwen3",
