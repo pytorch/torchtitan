@@ -17,7 +17,6 @@ import copy
 import tempfile
 import unittest
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -26,7 +25,6 @@ from tests.utils import hash_gradient, hash_model
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
@@ -37,6 +35,9 @@ from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
 from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
+from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
+    build_minimal_trainer,
+)
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
@@ -56,43 +57,6 @@ def _set_deterministic(seed: int = SEED) -> None:
 
 
 _TOKENIZER_PATH = "./tests/assets/tokenizer"
-
-
-def _build_trainer(
-    model: nn.Module,
-    model_config,
-    trainer_cls: type,
-    *,
-    enable_passes: bool = True,
-) -> Trainer:
-    """Build a minimal Trainer/GraphTrainer for single-GPU non-distributed testing.
-
-    Uses object.__new__ to bypass __init__ because the full Trainer constructor
-    requires a distributed environment, job config, and checkpoint manager that
-    are unnecessary for single-GPU numerical verification. The attributes set
-    below are the minimal set required by forward_backward_step().
-    """
-    trainer = object.__new__(trainer_cls)
-    trainer.model_parts = [model]
-    trainer.loss_fn = cross_entropy_loss
-    trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context(False)
-    trainer.model_config = model_config
-    trainer.device = torch.device("cuda")
-    trainer.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-
-    if trainer_cls is GraphTrainer:
-        trainer.config = SimpleNamespace(
-            compile=SimpleNamespace(
-                mode="aot_fx_trace",
-                enable_passes=enable_passes,
-                precompile_artifact_dir="",
-            )
-        )
-        trainer._fwd_bwd_step_module = None
-        trainer._traced_step = None
-
-    return trainer
 
 
 @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
@@ -133,8 +97,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Annotate after deepcopy: annotate_fn wrappers capture bound methods
         # that don't rebind correctly through copy.deepcopy.
         self.annotate_model(model)
-        trainer = _build_trainer(
-            model, self.model_config, trainer_cls, enable_passes=enable_passes
+        trainer = build_minimal_trainer(
+            model,
+            self.model_config,
+            trainer_cls,
+            compile_enable_passes=enable_passes,
+            tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         )
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -436,11 +404,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             """8bb6e647c3edaa229cc65872086ccc5c4e1b7f1647bb01da4506ab777a64a0db""",
         )
 
-    # TODO: OOMs during flex_attention compilation on A100 GPUs.
-    # Revisit when GraphTrainer addresses peak memory during compilation.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on A100"
-    )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace with passes and eager produce bitwise identical results."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
