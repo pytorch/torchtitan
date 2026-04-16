@@ -169,6 +169,10 @@ def apply_moe_ep_tp(
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
+                    # Keep MoE output as DTensor so the residual add
+                    # ``h + self.moe(...)`` composes with config-based
+                    # attention (which flows DTensors).
+                    use_local_output=False,
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(
