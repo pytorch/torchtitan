@@ -464,6 +464,50 @@ class TestMetadataPropagation(unittest.TestCase):
                 )
                 self.assertEqual(custom.get("test_key"), "test_value")
 
+    def test_copy_fwd_metadata_preserves_existing_custom(self):
+        """_copy_fwd_metadata_to_bw_nodes must not overwrite existing custom metadata.
+
+        When multiple forward nodes share the same seq_nr (e.g. parameterless
+        ops that all get seq_nr=-1), the first node's custom metadata was
+        incorrectly copied to later nodes, overwriting their own custom values.
+        """
+        # Build a graph where two nodes share seq_nr but have distinct custom.
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        n1.meta["seq_nr"] = -1
+        n1.meta["custom"] = {"tag": "first"}
+        n2 = graph.call_function(torch.sigmoid, (n1,))
+        n2.meta["seq_nr"] = -1
+        n2.meta["custom"] = {"tag": "second"}
+        graph.output(n2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        # n2 should keep its own custom, not be overwritten by n1's.
+        nodes = [n for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertEqual(nodes[0].meta["custom"]["tag"], "first")
+        self.assertEqual(nodes[1].meta["custom"]["tag"], "second")
+
+    def test_copy_fwd_metadata_fills_missing_custom(self):
+        """_copy_fwd_metadata_to_bw_nodes copies custom to nodes that lack it."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        n1.meta["seq_nr"] = 5
+        n1.meta["custom"] = {"tag": "fwd"}
+        # n2 shares seq_nr but has no custom (simulates a backward node).
+        n2 = graph.call_function(torch.sigmoid, (n1,))
+        n2.meta["seq_nr"] = 5
+        graph.output(n2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        nodes = [n for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertEqual(nodes[1].meta["custom"]["tag"], "fwd")
+
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
