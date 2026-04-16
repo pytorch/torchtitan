@@ -96,10 +96,9 @@ python -m torchtitan.experiments.graph_trainer.precompile_main \
     --parallelism.tensor_parallel_degree 2
 
 # Step 2: load and train with torchrun (uses all GPUs)
-# Uses the dedicated graph_trainer run_train.sh which passes
-# --virtual-local-rank to torchrun.
+# Uses run_train_precompile.sh which passes --virtual-local-rank to torchrun.
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
-    ./torchtitan/experiments/graph_trainer/run_train.sh \
+    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
     --compile.passes full_inductor_compilation \
     --compile.joint_passes inductor_decomposition \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
