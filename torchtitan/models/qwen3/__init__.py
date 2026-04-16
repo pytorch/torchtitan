@@ -89,6 +89,7 @@ def _build_qwen3_layers(
     hidden_dim: int,
     inner_attention=None,
     mask_type: str = "causal",
+    fuse_qkv: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
     layers = []
@@ -109,6 +110,7 @@ def _build_qwen3_layers(
                         if inner_attention is not None
                         else ScaledDotProductAttention.Config()
                     ),
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="cos_sin",
                     qk_norm=_qwen3_norm(head_dim),
@@ -209,6 +211,44 @@ def _debugmodel() -> Qwen3Model.Config:
             n_kv_heads=8,
             head_dim=head_dim,
             hidden_dim=3072,
+        ),
+    )
+
+
+def _debugmodel_fused_qkv() -> Qwen3Model.Config:
+    dim = 256
+    head_dim = 128
+    n_layers = 8
+    vocab_size = 2048
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            hidden_dim=3072,
+            fuse_qkv=True,
         ),
     )
 
@@ -631,6 +671,7 @@ def _235b_a22b() -> Qwen3Model.Config:
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "debugmodel_flex": _debugmodel_flex,
     "debugmodel_flex_flash": _debugmodel_flex_flash,
     "debugmodel_varlen": _debugmodel_varlen,
