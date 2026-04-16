@@ -680,10 +680,8 @@ class TestTraceModels(unittest.TestCase):
         self._run_model_test(DeepSeekV3Model, config)
 
     def test_deepseek_v3_flex_attention(self):
-        """Multi-step bitwise test for DeepSeek MLA + flex attention + regional_inductor.
-
-        Uses a tiny model with small head dims to stay within triton shared
-        memory limits.  Annotates FlexAttention.forward via annotate_fn before
+        """Tests if we can propagate fwd node metadata reliably through backward.
+        Annotates FlexAttention.forward via annotate_fn before
         tracing so compile_with_inductor flows into the graph naturally.
         """
         from torch.fx.traceback import annotate_fn
