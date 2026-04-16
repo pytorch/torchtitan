@@ -34,7 +34,6 @@ from torch._inductor.output_code import OutputCode
 from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
-
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
@@ -90,7 +89,8 @@ def construct_default_graph_passes(
         # 3. User-editable codegen: users can directly modify the generated
         #    program on disk for fine-grain scheduling optimizations, with
         #    hot-reload picking up changes at runtime
-        custom_codegen_pass,
+        # TODO: Investigate why custom_codegen_pass hangs when dumping codegen file
+        # custom_codegen_pass,
     ]
 
     # cudagraph should be the last pass.
