@@ -414,6 +414,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             """b3f5b911dea6c9d36f508b08300220d7f39f142a7c34a49b7ef2543abb2065dc""",
         )
 
+    # TODO: OOMs during flex_attention compilation on A100 GPUs.
+    # Revisit when GraphTrainer addresses peak memory during compilation.
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on A100"
+    )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace with passes and eager produce bitwise identical results."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
