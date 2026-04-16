@@ -106,6 +106,7 @@ def construct_default_graph_passes(
                 cudagraph_pass,
                 is_forward=True,
                 static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
     return passes
@@ -279,6 +280,7 @@ def cudagraph_pass(
     *,
     is_forward: bool,
     static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -297,6 +299,10 @@ def cudagraph_pass(
             when ``static_input_indices`` is not provided.
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors (as
+            opposed to opaque values like DeviceMesh). Used to compute which
+            inputs need copying for cudagraph replay. When not provided, this
+            is inferred from ``example_inputs``.
     """
     if not isinstance(gm, torch.fx.GraphModule):
         raise TypeError(
@@ -314,7 +320,12 @@ def cudagraph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    gm.forward = CUDAGraphWrapper(
+        gm.forward,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
+    )
     return gm
 
 
