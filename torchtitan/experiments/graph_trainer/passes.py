@@ -90,8 +90,7 @@ def construct_default_graph_passes(
         # 3. User-editable codegen: users can directly modify the generated
         #    program on disk for fine-grain scheduling optimizations, with
         #    hot-reload picking up changes at runtime
-        # TODO: Investigate why custom_codegen_pass hangs when dumping codegen file
-        # custom_codegen_pass,
+        custom_codegen_pass,
     ]
 
     # cudagraph should be the last pass.
