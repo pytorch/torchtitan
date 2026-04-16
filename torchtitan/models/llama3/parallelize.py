@@ -114,6 +114,124 @@ def parallelize_llama(
     return model
 
 
+def apply_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    enable_loss_parallel: bool,
+    enable_float8_tensorwise_tp: bool,
+    enable_cp: bool = False,
+    enable_sp: bool = True,
+):
+    """Apply tensor parallelism."""
+    # 1. Parallelize the embedding and shard its outputs (which are the first
+    # transformer block's inputs)
+    # 2. Parallelize the root norm layer over the sequence dim
+    # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    embed_plan = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=sp_layout,
+        use_local_output=False,
+    )
+
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel(use_local_output=False)
+            if enable_sp
+            else NoParallel(),
+            "lm_head": ColwiseParallel(
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
+            ),
+        },
+    )
+
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears with tensorwise scaling.
+    if enable_float8_tensorwise_tp:
+        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
+        from torchao.float8.float8_tensor_parallel import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            Float8RowwiseParallel,
+            Float8ColwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+    else:
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            RowwiseParallel,
+            ColwiseParallel,
+            PrepareModuleInput,
+        )
+
+    # Apply tensor + sequence parallelism to every transformer block
+    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
+    #       by folding (and unfolding) the batch dimension and the sequence dimension.
+    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
+    rowwise_output_plan = rowwise_parallel(
+        output_layouts=sp_layout, use_local_output=False
+    )
+
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
+    # pyrefly: ignore [not-callable]
+    for transformer_block in model.layers.values():
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
+            }
+        layer_plan = {
+            "attention_norm": norm_plan,
+            "attention": prepare_module_input(
+                input_layouts=(sp_layout, Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
+            ),
+            **qkv_plan,
+            "attention.wo": rowwise_output_plan,
+            "ffn_norm": norm_plan,
+            "feed_forward": prepare_module_input(
+                input_layouts=(sp_layout,),
+                desired_input_layouts=(Replicate(),),
+            ),
+            "feed_forward.w1": colwise_parallel(use_local_output=False),
+            "feed_forward.w2": rowwise_output_plan,
+            "feed_forward.w3": colwise_parallel(use_local_output=False),
+        }
+
+        parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
+            module=transformer_block,
+            device_mesh=tp_mesh,
+            parallelize_plan=layer_plan,
+        )
+
+    logger.info(
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
+        "Tensor Parallelism to the model"
+    )
+
+
 def apply_fsdp(
     model: nn.Module,
     dp_mesh: DeviceMesh,
