@@ -10,6 +10,9 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.parallel_dims import ParallelDims
+
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -56,8 +59,19 @@ class GraphTrainer(Trainer):
             default_factory=GraphTrainerCompileConfig
         )
 
+    def init_distributed(self) -> ParallelDims:
+        parallel_dims = super().init_distributed()
+        parallel_dims._force_fsdp_mesh = False
+        return parallel_dims
+
     def __init__(self, config):
         super().__init__(config)
+
+        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
+            self.parallel_dims,
+            config.training.mixed_precision_param,
+            self.device.type,
+        )
 
         if self.config.compile.mode == "aot_fx_trace" and self.parallel_dims.pp_enabled:
             raise ValueError(
@@ -117,7 +131,7 @@ class GraphTrainer(Trainer):
         if self._traced_step is None:
             fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
             maybe_register_blockmask_pytree_node()
-            with self.train_context():
+            with self.train_context(), self.maybe_enable_amp:
                 self._traced_step = trace_train_step(fwd_bwd_fn)(
                     model,
                     inputs,
@@ -134,7 +148,7 @@ class GraphTrainer(Trainer):
                     self._traced_step.example_inputs,
                     passes,
                 )
-        with self.train_context():
+        with self.train_context(), self.maybe_enable_amp:
             outputs = run_traced_train_step(
                 self._traced_step,
                 model,
