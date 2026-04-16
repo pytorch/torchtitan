@@ -302,9 +302,9 @@ def model_registry(flavor: str) -> ModelSpec:
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_gptoss,
+        set_sharding_spec_fn=set_gptoss_sharding_spec,
         pipelining_fn=None,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
-        set_sharding_spec_fn=set_gptoss_sharding_spec,
     )
