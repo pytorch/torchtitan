@@ -20,14 +20,14 @@ def colwise_spec() -> ShardingSpec:
 
 
 def rowwise_spec(*, output_sp: bool = False) -> ShardingSpec:
-    """RowwiseParallel: weight Shard(1).
+    """RowwiseParallel: weight Shard(1), bias Replicate (no-op if bias absent).
 
     ``output_sp=True``  → output ``Shard(1)`` (reduce-scatter into SP region).
     ``output_sp=False`` → output ``Replicate()`` (all-reduce).
     """
     output: Placement = Shard(1) if output_sp else Replicate()
     return ShardingSpec(
-        state_shardings={"weight": {TP: Shard(1)}},
+        state_shardings={"weight": {TP: Shard(1)}, "bias": {TP: Replicate()}},
         out_shardings={TP: output},
     )
 
@@ -52,7 +52,8 @@ def replicate_norm_spec() -> ShardingSpec:
 
 
 def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -> None:
-    """Set sharding on tok_embeddings, norm, output — shared by all decoders.
+    """Set sharding on tok_embeddings, norm, output (and root ``freqs_cis`` buffer)
+    — shared by all decoders.
 
     ``enable_sp=True``  → SequenceParallel: activations are ``Shard(1)`` between
     the embedding, norm, and output layers.
@@ -61,8 +62,18 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
     """
     act_sp: Placement = Shard(1) if enable_sp else Replicate()
     output_loss: Placement = Shard(-1) if loss_parallel else Replicate()
+
+    # freqs_cis buffer on the decoder root: Replicate on all dims.
+    config.sharding_spec = ShardingSpec(
+        state_shardings={"freqs_cis": {TP: Replicate()}},
+    )
+    # tok_embeddings.weight is Shard(0) (vocab-parallel, a.k.a. RowwiseParallel
+    # for ``nn.Embedding``).  Output is Shard(0) too (ColwiseParallel Linear);
+    # using matching dim-0 sharding for both lets weight tying survive TP — a
+    # tied tok_embeddings/output pair ends up as a single distributed Parameter
+    # with a consistent local shape, which is what FSDP expects.
     config.tok_embeddings.sharding_spec = ShardingSpec(
-        state_shardings={"weight": {TP: Shard(1)}},
+        state_shardings={"weight": {TP: Shard(0)}},
         input_layouts={"input": {TP: Replicate()}},
         in_shardings={"input": {TP: Replicate()}},
         out_shardings={TP: act_sp},
