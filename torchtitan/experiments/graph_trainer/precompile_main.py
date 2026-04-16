@@ -68,16 +68,6 @@ from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
 
-class _DummyTokenizer:
-    """Minimal tokenizer stand-in for precompile.
-
-    Only eos_id is needed by get_attention_masks() to compute document
-    boundaries. Values don't matter — only pytree structure must match.
-    """
-
-    eos_id = 0
-
-
 def _common_setup(config):
     """Common setup for all precompile modes: fake PG, CooR, model build."""
     compile_config = config.compile
@@ -204,11 +194,13 @@ def _common_setup(config):
 
     logger.info("Model parallelized and materialized")
 
-    return model, model_config, model_spec, compile_config, parallel_dims, device
+    tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+    return model, model_config, model_spec, compile_config, parallel_dims, device, tokenizer
 
 
 def _precompile_aot(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device
+    config, model, model_config, model_spec, compile_config, parallel_dims, device, tokenizer
 ):
     """AOT mode precompilation: joint graph export + Inductor."""
     # Only one pass in the pipeline needs to produce serializable OutputCode.
@@ -293,7 +285,7 @@ def _precompile_aot(
 
 
 def _precompile_aot_fx_trace(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device
+    config, model, model_config, model_spec, compile_config, parallel_dims, device, tokenizer
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
@@ -334,7 +326,7 @@ def _precompile_aot_fx_trace(
         model_config,
         model,
         dummy_inputs,
-        tokenizer=_DummyTokenizer(),
+        tokenizer=tokenizer,
         parallel_dims=parallel_dims,
     )
 
@@ -420,6 +412,7 @@ def main():
         compile_config,
         parallel_dims,
         device,
+        tokenizer,
     ) = _common_setup(config)
 
     if mode == "aot":
@@ -431,6 +424,7 @@ def main():
             compile_config,
             parallel_dims,
             device,
+            tokenizer,
         )
     elif mode == "aot_fx_trace":
         _precompile_aot_fx_trace(
@@ -441,6 +435,7 @@ def main():
             compile_config,
             parallel_dims,
             device,
+            tokenizer,
         )
 
     dist.destroy_process_group()
