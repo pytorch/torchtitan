@@ -167,6 +167,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup | None = None
+        # TODO: these should be set at config time
         # Set at runtime by apply_moe_ep_tp from tp_mesh.get_local_rank()
         self.sp_size: int = 1
         self.sp_rank: int = -1

@@ -14,11 +14,11 @@ from collections.abc import Callable
 from typing import Literal
 
 from torchtitan.models.common.attention import (
+    FlexAttention,
     FusedQKVLinear,
     GQAttention,
     LocalMapInnerAttention,
     QKVLinear,
-    FlexAttention,
     ScaledDotProductAttention,
     VarlenAttention,
 )
