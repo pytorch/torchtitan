@@ -225,7 +225,7 @@ class VLLMAttentionWrapper(Module):
         scale: float | None = None
 
     def __init__(self, config: Config) -> None:
-        super().__init__(config)
+        super().__init__()
 
         from vllm.config import get_current_vllm_config
 
