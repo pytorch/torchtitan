@@ -320,6 +320,12 @@ def call(self, *args, **kwargs):
             if node.op in ("call_function", "call_method", "call_module")
         }
 
+        # Pre-compile a single regex to extract the leading identifier from
+        # assignment lines (``name = ...``) or tuple-unpacking lines
+        # (``name, ...``).  This replaces the previous O(lines × nodes)
+        # per-node regex scan with O(lines) extraction + O(1) dict lookup.
+        _leading_ident_re = re.compile(r"^([A-Za-z_]\w*)(?:\s*=\s|\s*,)")
+
         profiled_lines = [signature_line]
         for line in body_lines:
             stripped = line.strip()
@@ -330,14 +336,9 @@ def call(self, *args, **kwargs):
             indent = line[: len(line) - len(line.lstrip())]
 
             matched_node = None
-            for node_name, node in node_info.items():
-                # Use regex to match assignment (node_name = ...) or tuple
-                # unpacking (node_name, ...) patterns precisely, avoiding
-                # false matches on continuation lines of multi-line
-                # expressions.
-                if re.match(rf"^{re.escape(node_name)}(\s*=\s|\s*,)", stripped):
-                    matched_node = node
-                    break
+            m = _leading_ident_re.match(stripped)
+            if m:
+                matched_node = node_info.get(m.group(1))
 
             if matched_node:
                 label = self._get_profiler_label(matched_node).replace('"', '\\"')
