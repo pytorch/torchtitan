@@ -3,8 +3,6 @@ name: 8 GPU Integration Test on H100
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
