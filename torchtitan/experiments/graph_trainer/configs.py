@@ -40,6 +40,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
 
+    debug_graph_passes: bool = False
+    """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:

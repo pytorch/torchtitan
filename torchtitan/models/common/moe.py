@@ -306,12 +306,16 @@ class MoE(Module):
     The forward pass proceeds as:
     1. Router computes expert assignments
     2. GroupedExperts.forward() handles:
-       a. dispatch — reorder tokens + optional EP communication to expert-owning ranks
+       a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
+          With EP, also performs all-to-all communication to send tokens
+          to expert-owning ranks.
        b. expert computation
-       c. combine — starts async EP communication (NCCL all-to-all or DeepEP combine),
-          runs shared_experts in parallel with the async communication,
-          then forces sync (scatter_add for NCCL AllToAll, sync_combine for DeepEP)
-          and produces final output
+       c. combine (TokenDispatcher) — reverse the dispatch reordering.
+          With EP, starts async communication (NCCL all-to-all or DeepEP
+          combine), runs shared_experts in parallel, then forces sync
+          (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
+          produces final output.
+          Without EP (LocalTokenDispatcher), no communication is needed.
     """
 
     @dataclass(kw_only=True, slots=True)

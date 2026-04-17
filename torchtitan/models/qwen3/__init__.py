@@ -82,7 +82,8 @@ def _build_qwen3_layers(
     n_kv_heads: int,
     head_dim: int,
     hidden_dim: int,
-    attn_backend: str,
+    fuse_qkv: bool = False,
+    attn_backend: str = "sdpa",
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -100,6 +101,7 @@ def _build_qwen3_layers(
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="cos_sin",
                     qk_norm=_qwen3_norm(head_dim),
@@ -211,6 +213,57 @@ def _debugmodel(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             attn_backend=attn_backend,
         ),
     )
+
+
+def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+    dim = 256
+    head_dim = 128
+    n_layers = 8
+    vocab_size = 2048
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            hidden_dim=3072,
+            fuse_qkv=True,
+            attn_backend=attn_backend,
+        ),
+    )
+
+
+def _debugmodel_flex() -> Qwen3Model.Config:
+    return _debugmodel(attn_backend="flex")
+
+
+def _debugmodel_flex_flash() -> Qwen3Model.Config:
+    return _debugmodel(attn_backend="flex_flash")
+
+
+def _debugmodel_varlen() -> Qwen3Model.Config:
+    return _debugmodel(attn_backend="varlen")
 
 
 def _0_6b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
@@ -397,6 +450,10 @@ def _14b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
+def _14b_varlen() -> Qwen3Model.Config:
+    return _14b(attn_backend="varlen")
+
+
 def _32b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
@@ -560,6 +617,7 @@ def _235b_a22b(
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "0.6B": _0_6b,
     "1.7B": _1_7b,
     "4B": _4b,

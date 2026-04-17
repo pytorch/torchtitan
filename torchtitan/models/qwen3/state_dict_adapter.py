@@ -15,22 +15,38 @@ aligned with the HF implementation.
 import re
 from typing import Any
 
+import torch
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.utils import MoEStateDictAdapter
-
 from .model import Qwen3Model
 
 
 class Qwen3StateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_config: Qwen3Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
+        self.fuse_qkv = isinstance(
+            model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
+        )
+
+        if self.fuse_qkv:
+            qkv_map = {
+                "model.layers.{}.self_attn.q_proj.weight": None,
+                "model.layers.{}.self_attn.k_proj.weight": None,
+                "model.layers.{}.self_attn.v_proj.weight": None,
+            }
+        else:
+            qkv_map = {
+                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
+            }
+
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+            **qkv_map,  # pyrefly: ignore [invalid-argument]
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
             "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
@@ -51,12 +67,28 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "output.weight",
         }
 
+    def _get_attention_dims(self) -> tuple[int, int, int]:
+        """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        attn = self.model_config.layers[0].attention
+        n_heads = attn.n_heads
+        n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
+        head_dim = (
+            attn.head_dim
+            if attn.head_dim is not None
+            else self.model_config.dim // n_heads
+        )
+        return n_heads, n_kv_heads, head_dim
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
-        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
+        if self.fuse_qkv:
+            to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
+            n_heads, n_kv_heads, head_dim = self._get_attention_dims()
+        else:
+            to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
 
         for key, value in state_dict.items():
@@ -101,10 +133,32 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
+
+                if (
+                    self.fuse_qkv
+                    and abstract_key == "layers.{}.attention.qkv_linear.wqkv.weight"
+                ):
+                    wq, wk, wv = self.fused_to_separate_qkv(
+                        value,
+                        n_heads,  # pyrefly: ignore [unbound-name]
+                        n_kv_heads,  # pyrefly: ignore [unbound-name]
+                        head_dim,  # pyrefly: ignore [unbound-name]
+                    )
+                    hf_state_dict[
+                        f"model.layers.{layer_num}.self_attn.q_proj.weight"
+                    ] = wq
+                    hf_state_dict[
+                        f"model.layers.{layer_num}.self_attn.k_proj.weight"
+                    ] = wk
+                    hf_state_dict[
+                        f"model.layers.{layer_num}.self_attn.v_proj.weight"
+                    ] = wv
+                    continue
+
+                if abstract_key not in to_hf_map:
+                    continue
                 new_key = to_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
@@ -128,6 +182,11 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
+        # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
+        pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
+
+        if self.fuse_qkv:
+            n_heads, n_kv_heads, head_dim = self._get_attention_dims()
 
         if (
             # pyrefly: ignore [missing-attribute]
@@ -179,7 +238,34 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
+
+                if self.fuse_qkv and abstract_key in (
+                    "model.layers.{}.self_attn.q_proj.weight",
+                    "model.layers.{}.self_attn.k_proj.weight",
+                    "model.layers.{}.self_attn.v_proj.weight",
+                ):
+                    if layer_num not in pending_qkv:
+                        pending_qkv[layer_num] = {}
+                    proj = abstract_key.split(".")[-2]  # q_proj, k_proj, v_proj
+                    pending_qkv[layer_num][proj] = value
+                    if len(pending_qkv[layer_num]) == 3:
+                        fused = self.separate_to_fused_qkv(
+                            pending_qkv[layer_num]["q_proj"],
+                            pending_qkv[layer_num]["k_proj"],
+                            pending_qkv[layer_num]["v_proj"],
+                            n_heads,  # pyrefly: ignore [unbound-name]
+                            n_kv_heads,  # pyrefly: ignore [unbound-name]
+                            head_dim,  # pyrefly: ignore [unbound-name]
+                        )
+                        state_dict[
+                            f"layers.{layer_num}.attention.qkv_linear.wqkv.weight"
+                        ] = fused
+                        del pending_qkv[layer_num]
+                    continue
+
                 new_key = self.from_hf_map[abstract_key]
+                if new_key is None:
+                    continue
                 # pyrefly: ignore [missing-attribute]
                 new_key = new_key.format(layer_num)
                 state_dict[new_key] = value
@@ -188,5 +274,10 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 # pyrefly: ignore [unsupported-operation]
                 state_dict[new_key] = value
+
+        if self.fuse_qkv and pending_qkv:
+            raise ValueError(
+                f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
+            )
 
         return state_dict

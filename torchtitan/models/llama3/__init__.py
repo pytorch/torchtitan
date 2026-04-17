@@ -69,7 +69,8 @@ def _build_llama3_layers(
     n_heads: int,
     hidden_dim: int,
     n_kv_heads: int | None = None,
-    attn_backend: str,
+    fuse_qkv: bool = False,
+    attn_backend: str = "sdpa",
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -88,6 +89,7 @@ def _build_llama3_layers(
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="complex",
                 ),
@@ -131,6 +133,46 @@ def _debugmodel(attn_backend: str = "sdpa") -> Llama3Model.Config:
             attn_backend=attn_backend,
         ),
     )
+
+
+def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
+    dim = 256
+    n_heads = 16
+    n_layers = 6
+    return Llama3Model.Config(
+        dim=dim,
+        vocab_size=2048,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
+        ),
+        rope=RoPE.Config(
+            dim=dim // n_heads,
+            max_seq_len=131072,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+        ),
+        layers=_build_llama3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            fuse_qkv=True,
+            attn_backend=attn_backend,
+        ),
+    )
+
+
+def _debugmodel_flex_attn() -> Llama3Model.Config:
+    return _debugmodel(attn_backend="flex")
+
+
+def _debugmodel_varlen_attn() -> Llama3Model.Config:
+    return _debugmodel(attn_backend="varlen")
 
 
 def _1b(attn_backend: str = "sdpa") -> Llama3Model.Config:
@@ -331,6 +373,7 @@ def _405b(attn_backend: str = "sdpa") -> Llama3Model.Config:
 
 llama3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "1B": _1b,
     "3B": _3b,
     "8B": _8b,
