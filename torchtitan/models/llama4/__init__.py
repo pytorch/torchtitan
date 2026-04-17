@@ -209,7 +209,7 @@ def _debugmodel(
             interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
-            moe_comm_backend=moe_comm_backend,
+            moe_comm_backend="standard",
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,

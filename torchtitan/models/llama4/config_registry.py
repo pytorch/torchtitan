@@ -57,7 +57,6 @@ def llama4_debugmodel() -> Trainer.Config:
 
 
 def llama4_debugmodel_fp8() -> Trainer.Config:
-    converters = [Float8GroupedMMConverter.Config(fqns=["experts"])]
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -89,7 +88,9 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
             mode="selective",
         ),
         compile=CompileConfig(enable=True, components=["model", "loss"]),
-        model_converters=ModelConvertersContainer.Config(converters=converters),
+        model_converters=ModelConvertersContainer.Config(
+            converters=[Float8GroupedMMConverter.Config(fqns=["experts"])]
+        ),
     )
 
 

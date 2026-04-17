@@ -408,6 +408,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             routed_output, metadata.input_shape, metadata.permuted_indices
         )
 
+        assert self.ep_group is not None, (
+            "ep_group must be set before dispatch. "
+            "ExpertParallel._partition_fn() should set it."
+        )
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
         routed_output = all_to_all_single_autograd(
