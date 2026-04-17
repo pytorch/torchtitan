@@ -10,14 +10,13 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.sharding import (
-    colwise_spec,
     replicate_norm_spec,
-    rowwise_spec,
     sequence_parallel_spec,
     set_decoder_sharding_spec,
+    set_dense_ffn_sharding,
+    set_gqa_attention_sharding,
 )
-from torchtitan.models.common.attention import GQAttention
-from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import LocalMapSpec, ShardingSpec
 
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
@@ -109,48 +108,22 @@ def _set_llama3_layer_sharding(
     stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to
     Replicate.
     """
-    TP = MeshDimName.TP
-
-    # Narrow attention type — Llama3 always uses GQAttention.
-    attention = layer_cfg.attention
-    assert isinstance(
-        attention, GQAttention.Config
-    ), f"Llama3 layer attention must be GQAttention, got {type(attention).__name__}"
-
     norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
     layer_cfg.attention_norm.sharding_spec = norm_spec
     layer_cfg.ffn_norm.sharding_spec = norm_spec
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
-    # Attention needs Replicate activations internally for the linear ops.
-    # Under SP, x arrives Shard(1) and is all-gathered to Replicate.
-    # Without SP, x is already Replicate — in_shardings is an identity.
-    # rope_cache (freqs_cis) is always plain; annotate as Replicate.
-    attention.sharding_spec = ShardingSpec(
-        input_layouts={
-            "x": {TP: attn_x_placement},
-            "rope_cache": {TP: Replicate()},
-        },
-        in_shardings={
-            "x": {TP: Replicate()},
-            "rope_cache": {TP: Replicate()},
-        },
-    )
-    attention.wq.sharding_spec = colwise_spec()
-    attention.wkv.sharding_spec = colwise_spec()
-    attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
+    set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
 
     # Inner attention: local_map to convert DTensors to local tensors.
     # Under full DTensor, placements include DP/CP dims (K/V all-gathered on CP).
-    attention.inner_attention.sharding_spec = ShardingSpec(
+    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
         local_map=_build_inner_attn_local_map_spec(parallel_dims, full_dtensor),
     )
 
     assert layer_cfg.feed_forward is not None
-    layer_cfg.feed_forward.sharding_spec = ShardingSpec(
-        input_layouts={"x": {TP: attn_x_placement}},
-        in_shardings={"x": {TP: Replicate()}},
+    set_dense_ffn_sharding(
+        layer_cfg.feed_forward,
+        attn_x_placement=attn_x_placement,
+        enable_sp=enable_sp,
     )
-    layer_cfg.feed_forward.w1.sharding_spec = colwise_spec()
-    layer_cfg.feed_forward.w3.sharding_spec = colwise_spec()
-    layer_cfg.feed_forward.w2.sharding_spec = rowwise_spec(output_sp=enable_sp)

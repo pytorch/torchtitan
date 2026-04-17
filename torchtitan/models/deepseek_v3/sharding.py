@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import TYPE_CHECKING
+
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -13,14 +15,22 @@ from torchtitan.distributed.sharding import (
     rowwise_spec,
     sequence_parallel_spec,
     set_decoder_sharding_spec,
+    set_dense_ffn_sharding,
+    set_gqa_inner_attention_local_map,
 )
-from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
+if TYPE_CHECKING:
+    from torchtitan.models.deepseek_v3.model import (
+        DeepSeekV3Model,
+        DeepSeekV3TransformerBlock,
+    )
 
-def set_deepseekv3_sharding_spec(
-    config,
+
+def set_deepseek_v3_sharding_spec(
+    config: "DeepSeekV3Model.Config",
     parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
@@ -36,10 +46,12 @@ def set_deepseekv3_sharding_spec(
 
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_deepseekv3_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_deepseek_v3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
 
-def _set_deepseekv3_layer_sharding(layer_cfg, *, enable_sp: bool) -> None:
+def _set_deepseek_v3_layer_sharding(
+    layer_cfg: "DeepSeekV3TransformerBlock.Config", *, enable_sp: bool
+) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.
 
     MLA attention: low-rank projections (wkv_a, wq_a, kv_norm, q_norm)
@@ -74,16 +86,7 @@ def _set_deepseekv3_layer_sharding(layer_cfg, *, enable_sp: bool) -> None:
     layer_cfg.attention.wkv_b.sharding_spec = colwise_spec()
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
-    # Inner attention: local_map to convert TP DTensors to local tensors.
-    # MLA: q/k/v are (bs, seq, heads, head_dim) — no transpose, heads at dim 2.
-    qkv_placements = (Shard(2),)
-    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
-        local_map=LocalMapSpec(
-            in_placements=(qkv_placements, qkv_placements, qkv_placements),
-            out_placements=(qkv_placements,),
-            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
-        ),
-    )
+    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
     # Query projection: depends on q_lora_rank
     if layer_cfg.attention.q_lora_rank == 0:
@@ -96,10 +99,8 @@ def _set_deepseekv3_layer_sharding(layer_cfg, *, enable_sp: bool) -> None:
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
-        layer_cfg.feed_forward.sharding_spec = ShardingSpec(
-            input_layouts={"x": {TP: attn_x_placement}},
-            in_shardings={"x": {TP: Replicate()}},
+        set_dense_ffn_sharding(
+            layer_cfg.feed_forward,
+            attn_x_placement=attn_x_placement,
+            enable_sp=enable_sp,
         )
-        layer_cfg.feed_forward.w1.sharding_spec = colwise_spec()
-        layer_cfg.feed_forward.w3.sharding_spec = colwise_spec()
-        layer_cfg.feed_forward.w2.sharding_spec = rowwise_spec(output_sp=enable_sp)

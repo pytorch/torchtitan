@@ -6,7 +6,8 @@
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
+from torchtitan.models.common.attention import GQAttention
+from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
@@ -49,6 +50,80 @@ def replicate_norm_spec() -> ShardingSpec:
     activations; otherwise we'd mix plain Tensor and DTensor inside the op.
     """
     return ShardingSpec(state_shardings={"weight": {TP: Replicate()}})
+
+
+def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
+    """Standard GQA attention (``wq``/``wkv``/``wo``) TP sharding.
+
+    Shared by llama3, qwen3, and llama4 — all three have a GQA block whose
+    ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
+    Replicate internally) and a plain ``rope_cache`` (annotated Replicate).
+
+    Callers that have additional attention sub-state (e.g. ``qk_norm``,
+    ``sinks``) set those after calling this helper.
+    """
+    assert isinstance(attention_cfg, GQAttention.Config), (
+        f"set_gqa_attention_sharding requires GQAttention.Config, "
+        f"got {type(attention_cfg).__name__}"
+    )
+    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+    attention_cfg.sharding_spec = ShardingSpec(
+        input_layouts={
+            "x": {TP: attn_x_placement},
+            "rope_cache": {TP: Replicate()},
+        },
+        in_shardings={
+            "x": {TP: Replicate()},
+            "rope_cache": {TP: Replicate()},
+        },
+    )
+    attention_cfg.wq.sharding_spec = colwise_spec()
+    attention_cfg.wkv.sharding_spec = colwise_spec()
+    attention_cfg.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
+
+
+def set_gqa_inner_attention_local_map(
+    inner_attention_cfg, *, num_outputs: int = 1
+) -> None:
+    """Install a ``LocalMapSpec`` on an inner-attention config.
+
+    q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
+    TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
+    to local tensors before the kernel runs, then wraps outputs back.
+
+    ``num_outputs`` controls the number of tensor outputs: 1 for the usual
+    (attn_out) case; 2 for kernels that return ``(output, lse)`` like
+    GPT-OSS's flash attention with ``return_lse=True``.
+    """
+    qkv_placements = (Shard(2),)
+    inner_attention_cfg.sharding_spec = ShardingSpec(
+        local_map=LocalMapSpec(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,) * num_outputs,
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
+
+
+def set_dense_ffn_sharding(
+    feed_forward_cfg,
+    *,
+    attn_x_placement: Placement,
+    enable_sp: bool,
+) -> None:
+    """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
+
+    Shared by llama3, qwen3, llama4, and deepseek_v3. ``attn_x_placement``
+    should match the layout that the layer's attention block emits so the
+    FFN's input wrap is a no-op redistribute when placements already agree.
+    """
+    feed_forward_cfg.sharding_spec = ShardingSpec(
+        input_layouts={"x": {TP: attn_x_placement}},
+        in_shardings={"x": {TP: Replicate()}},
+    )
+    feed_forward_cfg.w1.sharding_spec = colwise_spec()
+    feed_forward_cfg.w3.sharding_spec = colwise_spec()
+    feed_forward_cfg.w2.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
 
 def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -> None:
