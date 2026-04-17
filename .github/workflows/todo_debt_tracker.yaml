@@ -19,7 +19,7 @@ on:
       - '.github/scripts/todo_debt_tracker.py'
 
 concurrency:
-  group: todo-tracker # Serial execution of simultaneous commits
+  group: todo-debt-tracker # Serial execution of simultaneous commits
 
 jobs:
   check_todos:
