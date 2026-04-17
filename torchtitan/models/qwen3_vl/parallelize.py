@@ -39,6 +39,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -79,8 +80,28 @@ def _apply_non_moe_tp_to_decoder(
     # tp_mesh (needed for consistent (fsdp, tp) mesh after FSDP). Its input
     # hook wraps plain tensors as DTensor(Replicate); its output stays as
     # DTensor (no unwrap) so downstream modules receive DTensors.
+
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": ColwiseParallel(use_local_output=False),
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wk": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
+            }
+
         layer_plan = {
             "attention_norm": NoParallel(),
             "ffn_norm": NoParallel(),
@@ -92,9 +113,7 @@ def _apply_non_moe_tp_to_decoder(
                 input_layouts=(Replicate(), Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
+            **qkv_plan,
             # Not actual sequence parallelism — SequenceParallel(sequence_dim=2)
             # tells DTensor that dim 2 (the head dimension) is the sharded dim,
             # so the per-head RMSNorm operates on each rank's local heads without

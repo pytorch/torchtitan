@@ -16,6 +16,7 @@ from torchtitan.distributed.sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
+
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 
