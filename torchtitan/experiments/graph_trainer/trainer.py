@@ -167,6 +167,7 @@ class GraphTrainer(Trainer):
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
                     passes,
+                    compile_config=self.config.compile,
                 )
         with self.train_context():
             outputs = run_traced_train_step(
