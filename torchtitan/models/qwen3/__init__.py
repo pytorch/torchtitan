@@ -90,6 +90,7 @@ def _build_qwen3_layers(
     hidden_dim: int,
     inner_attention=None,
     mask_type: str = "causal",
+    fuse_qkv: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
     layers = []
@@ -110,6 +111,7 @@ def _build_qwen3_layers(
                         if inner_attention is not None
                         else ScaledDotProductAttention.Config()
                     ),
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="cos_sin",
                     qk_norm=_qwen3_norm(head_dim),
@@ -210,6 +212,44 @@ def _debugmodel() -> Qwen3Model.Config:
             n_kv_heads=8,
             head_dim=head_dim,
             hidden_dim=3072,
+        ),
+    )
+
+
+def _debugmodel_fused_qkv() -> Qwen3Model.Config:
+    dim = 256
+    head_dim = 128
+    n_layers = 8
+    vocab_size = 2048
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+        layers=_build_qwen3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=16,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            hidden_dim=3072,
+            fuse_qkv=True,
         ),
     )
 
@@ -485,6 +525,19 @@ def _14b() -> Qwen3Model.Config:
     )
 
 
+def _14b_varlen() -> Qwen3Model.Config:
+    config = _14b()
+    varlen_cfg = VarlenAttention.Config()
+    layers = []
+    for layer_cfg in config.layers:
+        layer_cfg = deepcopy(layer_cfg)
+        layer_cfg.attention.inner_attention = varlen_cfg
+        layer_cfg.attention.mask_type = "block_causal"
+        layers.append(layer_cfg)
+    config.layers = layers
+    return config
+
+
 def _32b() -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
@@ -632,6 +685,7 @@ def _235b_a22b() -> Qwen3Model.Config:
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "debugmodel_flex": _debugmodel_flex,
     "debugmodel_flex_flash": _debugmodel_flex_flash,
     "debugmodel_varlen": _debugmodel_varlen,
@@ -643,6 +697,7 @@ qwen3_configs = {
     "8B": _8b,
     "8B_varlen": _8b_varlen,
     "14B": _14b,
+    "14B_varlen": _14b_varlen,
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,

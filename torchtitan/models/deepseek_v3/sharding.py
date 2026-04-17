@@ -17,6 +17,7 @@ from torchtitan.distributed.sharding import (
     set_decoder_sharding_spec,
     set_dense_ffn_sharding,
 )
+from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
@@ -55,13 +56,16 @@ def _set_deepseek_v3_layer_sharding(
     MLA attention: low-rank projections (wkv_a, wq_a, kv_norm, q_norm)
     stay replicated. Up-projections (wkv_b, wq_b, wq) are colwise.
     """
+    attention = layer_cfg.attention
+    assert isinstance(attention, Attention.Config)
+
     norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
     layer_cfg.attention_norm.sharding_spec = norm_spec
     layer_cfg.ffn_norm.sharding_spec = norm_spec
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
-    layer_cfg.attention.sharding_spec = ShardingSpec(
+    attention.sharding_spec = ShardingSpec(
         input_layouts={
             "x": {TP: attn_x_placement},
             "freqs_cis": {TP: Replicate()},
@@ -77,18 +81,18 @@ def _set_deepseek_v3_layer_sharding(
     replicate_weight = ShardingSpec(
         state_shardings={"weight": {TP: Replicate()}},
     )
-    layer_cfg.attention.wkv_a.sharding_spec = replicate_weight
-    layer_cfg.attention.kv_norm.sharding_spec = replicate_weight
+    attention.wkv_a.sharding_spec = replicate_weight
+    attention.kv_norm.sharding_spec = replicate_weight
 
     # wkv_b: ColwiseParallel (expands to full heads)
-    layer_cfg.attention.wkv_b.sharding_spec = colwise_spec()
-    layer_cfg.attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
+    attention.wkv_b.sharding_spec = colwise_spec()
+    attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
     # Inner attention: local_map to convert TP DTensors to local tensors.
     # MLA: q/k/v are (bs, seq, heads, head_dim) — no transpose, heads at dim 2.
     # Heads are TP-sharded regardless of SP.
     qkv_placements = (Shard(2),)
-    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
+    attention.inner_attention.sharding_spec = ShardingSpec(
         local_map=LocalMapSpec(
             in_placements=(qkv_placements, qkv_placements, qkv_placements),
             out_placements=(qkv_placements,),
@@ -97,13 +101,16 @@ def _set_deepseek_v3_layer_sharding(
     )
 
     # Query projection: depends on q_lora_rank
-    if layer_cfg.attention.q_lora_rank == 0:
-        layer_cfg.attention.wq.sharding_spec = colwise_spec()
+    if attention.q_lora_rank == 0:
+        assert attention.wq is not None
+        attention.wq.sharding_spec = colwise_spec()
     else:
         # Low-rank: wq_a + q_norm stay Replicate DTensors; wq_b is Colwise.
-        layer_cfg.attention.wq_a.sharding_spec = replicate_weight
-        layer_cfg.attention.q_norm.sharding_spec = replicate_weight
-        layer_cfg.attention.wq_b.sharding_spec = colwise_spec()
+        assert attention.wq_a is not None
+        assert attention.wq_b is not None
+        attention.wq_a.sharding_spec = replicate_weight
+        attention.q_norm.sharding_spec = replicate_weight
+        attention.wq_b.sharding_spec = colwise_spec()
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
