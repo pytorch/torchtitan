@@ -411,6 +411,42 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "Full DTensor CP (Varlen)",
+            "full_dtensor_cp_varlen",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor CP + FSDP (Varlen)",
+            "full_dtensor_cp_fsdp_varlen",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor TP + CP + FSDP (Varlen)",
+            "full_dtensor_tp_cp_fsdp_varlen",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]

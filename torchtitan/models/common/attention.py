@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -56,10 +56,20 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
+@dataclass(frozen=True, eq=False)
+class VarlenMetadata:
+    """Metadata for variable-length attention (``varlen_attn``).
 
+    ``cu_seq_q``, ``cu_seq_k``, ``max_q``, ``max_k`` are the standard
+    varlen kernel arguments describing document boundaries within a
+    packed sequence. The CP-specific subclass
+    :class:`torchtitan.distributed.varlen_cp.CPVarlenMetadata` extends
+    this with a ``k_local_indices`` gather index used to repack K/V
+    after CP all-gather.
+
+    Kept as a frozen dataclass so callers can rely on the object being
+    hashable-by-identity and immutable; CP infrastructure additionally
+    relies on the type being a leaf for pytree purposes.
     """
 
     cu_seq_q: torch.Tensor
@@ -116,12 +126,29 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        batch_size, seq_len, _, head_dim = q.shape
+        # Q and K may have different seq lengths under CP: K/V are
+        # all-gathered across the CP dim while Q stays sharded, so K's seq
+        # equals the global seq while Q's is the local shard.
+        batch_size, q_seq_len, _, head_dim = q.shape
+        k_seq_len = k.shape[1]
 
         # varlen attention expects (bs*seqlen, n_heads, head_dim)
-        xq_packed = q.reshape(batch_size * seq_len, -1, head_dim)
-        xk_packed = k.reshape(batch_size * seq_len, -1, head_dim)
-        xv_packed = v.reshape(batch_size * seq_len, -1, head_dim)
+        xq_packed = q.reshape(batch_size * q_seq_len, -1, head_dim)
+        xk_packed = k.reshape(batch_size * k_seq_len, -1, head_dim)
+        xv_packed = v.reshape(batch_size * k_seq_len, -1, head_dim)
+
+        # Under CP, the global K is replicated on each rank but cu_seq_k
+        # describes only the per-segment visible regions, which can be
+        # non-contiguous in the standard packed layout when B > 1 (gaps
+        # between batches). The CP metadata builder ships an index tensor
+        # that gathers the visible K (and V) positions into a contiguous
+        # layout matching cu_seq_k. ``k_local_indices`` only exists on
+        # CPVarlenMetadata; access it via getattr so this path stays
+        # decoupled from the CP module.
+        k_local_indices = getattr(attention_masks, "k_local_indices", None)
+        if k_local_indices is not None:
+            xk_packed = xk_packed.index_select(0, k_local_indices)
+            xv_packed = xv_packed.index_select(0, k_local_indices)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
@@ -160,7 +187,7 @@ class VarlenAttention(Module):
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
-        out = out_packed.view(batch_size, seq_len, -1, head_dim)
+        out = out_packed.view(batch_size, q_seq_len, -1, head_dim)
 
         return out.to(q.dtype)
 

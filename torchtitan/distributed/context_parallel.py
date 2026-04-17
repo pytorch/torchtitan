@@ -23,11 +23,13 @@ from torch.distributed.tensor.experimental._context_parallel._attention import (
 )
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.varlen_cp import CPVarlenMetadata
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
     ScaledDotProductAttention,
     VarlenAttention,
+    VarlenMetadata,
 )
 from torchtitan.tools.logging import logger
 
@@ -95,7 +97,10 @@ def apply_cp_to_forward(
             mod.forward = _make_cp_forward(original_forward, cp_mesh)
 
     elif isinstance(first, VarlenAttention):
-        raise NotImplementedError("Variable-length attention CP is not yet supported")
+        raise NotImplementedError(
+            "VarlenAttention CP requires parallelism.full_dtensor=True; "
+            "the legacy forward-wrapping path does not all-gather K/V."
+        )
     else:
         raise NotImplementedError(
             f"Context Parallel forward wrapping is not supported for "
@@ -171,10 +176,12 @@ def cp_shard(
         inputs: Tuple of input tensors to be sharded along the sequence
             dimension
         attention_masks: Attention masks to be sharded. Supports None,
-            BlockMask, or dict[str, BlockMask]
+            BlockMask, dict[str, BlockMask], or VarlenMetadata.
         load_balancer_type: Type of load balancer to use. Options:
-            - "headtail": Use HeadTailLoadBalancer (for SDPA)
-            - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
+            - "headtail": Use HeadTailLoadBalancer (works for SDPA, varlen,
+              and FlexAttention)
+            - "ptrr": Use PTRRLoadBalancer (FlexAttention only — varlen
+              support is added in PR2)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
@@ -195,6 +202,8 @@ def cp_shard(
             is None or a dict
     """
     seq_len = inputs[0].size(input_seq_dim)
+    # Inputs are (B, S) or (B, S, ...) with B = inputs[0].shape[0].
+    batch_size = inputs[0].size(0) if input_seq_dim > 0 else 1
     cp_world_size = cp_mesh.size(0)
 
     load_balancer = None
@@ -206,10 +215,15 @@ def cp_shard(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # For FlexAttention, we use _PTRRLoadBalancer.
-                # _PTRRLoadBalancer requires attention_masks to be a BlockMask.
-                # For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
-                # support the case where there are multiple masks.
+                # _PTRRLoadBalancer is FlexAttention-only today (it needs a
+                # BlockMask to compute per-block work).  Varlen support uses
+                # the same algorithm shape but reads work from cu_seq_q;
+                # that load balancer is added in PR2.
+                if isinstance(attention_masks, VarlenMetadata):
+                    raise ValueError(
+                        "PTRRLoadBalancer for varlen attention is added "
+                        "in PR2; use 'headtail' or None for now."
+                    )
                 if attention_masks is None or isinstance(attention_masks, dict):
                     raise ValueError(
                         "PTRRLoadBalancer requires attention_masks to be a "
@@ -237,29 +251,41 @@ def cp_shard(
         ),
     )
 
-    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
-    # on the Q seq dimension, not KV.
+    # BlockMask has shape [B, H, Q, KV] — we can only shard on the Q seq
+    # dimension, not KV. VarlenMetadata is sharded via the local
+    # CPVarlenMetadata builder rather than pytorch's dispatcher because
+    # the CP-aware varlen logic (per-doc segment construction,
+    # ``k_local_indices`` gather) lives entirely in torchtitan.
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
-        assert isinstance(attention_masks, (BlockMask, dict))
-        masks = (
-            [attention_masks]
-            if isinstance(attention_masks, BlockMask)
-            else list(attention_masks.values())
-        )
-        masks = _context_parallel_shard(
-            mesh=cp_mesh,
-            buffers=masks,
-            seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
-            load_balancer=load_balancer,
-        )
-        attention_masks = cast(
-            (BlockMask | dict[str, BlockMask]),
-            (
-                masks[0]
+        if isinstance(attention_masks, VarlenMetadata):
+            attention_masks = CPVarlenMetadata.from_global(
+                attention_masks,
+                device_mesh=cp_mesh,
+                batch_size=batch_size,
+                seq_length=seq_len,
+                load_balancer=load_balancer,
+            )
+        else:
+            assert isinstance(attention_masks, (BlockMask, dict))
+            masks = (
+                [attention_masks]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), masks)}
-            ),
-        )
+                else list(attention_masks.values())
+            )
+            masks = _context_parallel_shard(
+                mesh=cp_mesh,
+                buffers=masks,
+                seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
+                load_balancer=load_balancer,
+            )
+            attention_masks = cast(
+                (BlockMask | dict[str, BlockMask]),
+                (
+                    masks[0]
+                    if isinstance(attention_masks, BlockMask)
+                    else {k: v for k, v in zip(attention_masks.keys(), masks)}
+                ),
+            )
 
     return inputs, attention_masks

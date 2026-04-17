@@ -36,10 +36,7 @@ def validate_config(
     Walks ``model`` to discover the actual attention modules in use and
     raises ``NotImplementedError`` with a clear message if incompatible.
     """
-    from torchtitan.models.common.attention import (
-        ScaledDotProductAttention,
-        VarlenAttention,
-    )
+    from torchtitan.models.common.attention import ScaledDotProductAttention
 
     if parallel_dims.ep_enabled:
         raise NotImplementedError(
@@ -49,13 +46,12 @@ def validate_config(
 
     if parallel_dims.cp_enabled:
         if any(
-            isinstance(m, (ScaledDotProductAttention, VarlenAttention))
-            for m in model.modules()
+            isinstance(m, ScaledDotProductAttention) for m in model.modules()
         ):
             raise NotImplementedError(
                 "full_dtensor + CP is not supported with "
-                "ScaledDotProductAttention or VarlenAttention. "
-                "Use FlexAttention + CP or disable CP."
+                "ScaledDotProductAttention. "
+                "Use FlexAttention or VarlenAttention with CP, or disable CP."
             )
 
 
