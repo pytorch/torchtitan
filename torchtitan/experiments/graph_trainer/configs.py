@@ -73,10 +73,20 @@ def to_graph_trainer_config(
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
     graph_spec = model_registry(base_config.model_spec.flavor)
-    # Keep the base model config (which has moe_comm_backend baked in),
-    # only replace parallelize_fn from the graph_trainer registry.
+    # Wrap the base model config in the graph_trainer's model config class
+    # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values
+    # (including moe_comm_backend etc.).
+    graph_model_cls = type(graph_spec.model)
+    graph_model = graph_model_cls(
+        **{
+            f.name: getattr(base_config.model_spec.model, f.name)
+            for f in fields(base_config.model_spec.model)
+        }
+    )
     d["model_spec"] = replace(
-        base_config.model_spec, parallelize_fn=graph_spec.parallelize_fn
+        base_config.model_spec,
+        parallelize_fn=graph_spec.parallelize_fn,
+        model=graph_model,
     )
     d.pop("compile")
 
