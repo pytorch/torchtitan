@@ -16,7 +16,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
-    _patch_engine_run_backward,
     extract_module_state,
     minimal_fx_tracer,
     run_traced,
@@ -391,7 +390,7 @@ class TestTraceDTensor(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMetadataPropagation(unittest.TestCase):
-    """Tests for _patch_engine_run_backward and _copy_fwd_metadata_to_bw_nodes."""
+    """Tests for _copy_fwd_metadata_to_bw_nodes."""
 
     DEVICE = "cuda"
     DTYPE = torch.float32
@@ -400,7 +399,7 @@ class TestMetadataPropagation(unittest.TestCase):
         torch.manual_seed(42)
 
     def test_backward_nodes_have_seq_nr(self):
-        """Verify that backward FX nodes get seq_nr metadata via the patched engine."""
+        """Verify that backward FX nodes get seq_nr metadata via patched autograd.grad."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         train_step = make_train_step(get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
@@ -450,12 +449,15 @@ class TestMetadataPropagation(unittest.TestCase):
         # Run the copy pass again
         _copy_fwd_metadata_to_bw_nodes(gm)
 
+        def is_backward(node: torch.fx.Node) -> bool:
+            return node.meta.get("autograd_backward", False)
+
         # Check that bwd nodes with shared seq_nr got the custom metadata
         for node in gm.graph.nodes:
             if node.op != "call_function" or "seq_nr" not in node.meta:
                 continue
             seq_nr = node.meta["seq_nr"]
-            if node is not seq_nr_first.get(seq_nr):
+            if node is not seq_nr_first.get(seq_nr) and is_backward(node):
                 # This is a backward node
                 custom = node.meta.get("custom")
                 self.assertIsNotNone(
@@ -463,6 +465,21 @@ class TestMetadataPropagation(unittest.TestCase):
                     f"Backward node {node.name} with seq_nr={seq_nr} missing custom metadata",
                 )
                 self.assertEqual(custom.get("test_key"), "test_value")
+
+    def test_copy_fwd_metadata_uses_backward_tagging(self):
+        graph = torch.fx.Graph()
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(1, 2))
+        fwd.meta["seq_nr"] = 7
+        fwd.meta["custom"] = {"test_key": "test_value"}
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 3))
+        bwd.meta["seq_nr"] = 7
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        self.assertEqual(bwd.meta["custom"].get("test_key"), "test_value")
 
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""
@@ -498,22 +515,6 @@ class TestMetadataPropagation(unittest.TestCase):
             [],
             f"Backward nodes missing stack_trace: {bwd_nodes_missing_stack_trace}",
         )
-
-    def test_patch_engine_restores_original(self):
-        """Verify that _patch_engine_run_backward restores the original function."""
-        import torch.autograd
-        import torch.autograd.graph
-
-        orig_fn = torch.autograd.graph._engine_run_backward
-
-        with _patch_engine_run_backward():
-            # Inside the context, it should be patched
-            self.assertIsNot(torch.autograd.graph._engine_run_backward, orig_fn)
-            self.assertIsNot(torch.autograd._engine_run_backward, orig_fn)
-
-        # After the context, it should be restored
-        self.assertIs(torch.autograd.graph._engine_run_backward, orig_fn)
-        self.assertIs(torch.autograd._engine_run_backward, orig_fn)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -660,6 +661,137 @@ class TestTraceModels(unittest.TestCase):
 
         config = deepseekv3_configs["debugmodel"]()
         self._run_model_test(DeepSeekV3Model, config)
+
+    def test_deepseek_v3_flex_attention(self):
+        """Tests if we can propagate fwd node metadata reliably through backward.
+        Annotates FlexAttention.forward via annotate_fn before
+        tracing so compile_with_inductor flows into the graph naturally.
+        """
+        from torch.fx.traceback import annotate_fn
+        from torch.nn.attention.flex_attention import and_masks
+
+        from torchtitan.models.common.attention import (
+            create_attention_mask,
+            FlexAttention,
+            get_causal_mask_mod,
+            get_document_mask_mod,
+        )
+        from torchtitan.models.common.linear import Linear
+        from torchtitan.models.common.rmsnorm import RMSNorm
+        from torchtitan.models.common.rope import RoPE
+        from torchtitan.models.deepseek_v3.model import Attention as DSAttention
+
+        dim = 64
+        n_heads = 4
+        rope_dim = 16
+        seq_len = 64
+        vocab_size = 128
+
+        # Build a tiny model: embedding -> MLA flex attention -> projection
+        class TinyFlexMLA(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = nn.Embedding(vocab_size, dim)
+                kv_lora_rank = 32
+                qk_nope_head_dim = 16
+                v_head_dim = 16
+                qk_head_dim = qk_nope_head_dim + rope_dim
+                self.attn = DSAttention(
+                    DSAttention.Config(
+                        n_heads=n_heads,
+                        dim=dim,
+                        q_lora_rank=0,
+                        kv_lora_rank=kv_lora_rank,
+                        qk_nope_head_dim=qk_nope_head_dim,
+                        qk_rope_head_dim=rope_dim,
+                        v_head_dim=v_head_dim,
+                        q_norm=RMSNorm.Config(normalized_shape=1),
+                        kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
+                        inner_attention=FlexAttention.Config(),
+                        mask_type="block_causal",
+                        wq=Linear.Config(
+                            in_features=dim,
+                            out_features=n_heads * qk_head_dim,
+                        ),
+                        wkv_a=Linear.Config(
+                            in_features=dim,
+                            out_features=kv_lora_rank + rope_dim,
+                        ),
+                        wkv_b=Linear.Config(
+                            in_features=kv_lora_rank,
+                            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                        ),
+                        wo=Linear.Config(
+                            in_features=n_heads * v_head_dim,
+                            out_features=dim,
+                        ),
+                    ),
+                )
+                self.rope = RoPE(
+                    RoPE.Config(
+                        dim=rope_dim,
+                        max_seq_len=seq_len,
+                        backend="complex",
+                        scaling="none",
+                    )
+                )
+                self.proj = nn.Linear(dim, vocab_size)
+
+            def init_states(self, buffer_device=None):
+                self.rope._init_self_buffers(
+                    buffer_device=buffer_device or torch.device("cuda")
+                )
+
+            def forward(self, tokens, block_mask):
+                x = self.embed(tokens)
+                x = self.attn(x, self.rope.cache, block_mask)
+                return self.proj(x)
+
+        model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)
+        with torch.no_grad():
+            model.init_states(buffer_device=torch.device(self.DEVICE))
+
+        tokens = torch.randint(0, vocab_size, (1, seq_len), device=self.DEVICE)
+        # Insert EOS tokens to create document boundaries for block_causal mask
+        tokens[:, 15::16] = 1
+        labels = torch.randint(0, vocab_size, (1, seq_len), device=self.DEVICE)
+        block_mask = create_attention_mask(
+            and_masks(get_causal_mask_mod(), get_document_mask_mod(tokens, eos_id=1)),
+            B=1,
+            H=None,
+            Q_LEN=seq_len,
+            KV_LEN=seq_len,
+        )
+
+        # Annotate FlexAttention.forward so compile_with_inductor flows into
+        # the traced graph. Restore the original after tracing.
+        orig_forward = FlexAttention.forward
+        FlexAttention.forward = annotate_fn(
+            {
+                "compile_with_inductor": {
+                    "inductor_configs": FlexAttention.inductor_configs
+                }
+            }
+        )(FlexAttention.forward)
+        try:
+            train_step = make_train_step(get_loss)
+            maybe_register_blockmask_pytree_node()
+            traced = trace_train_step(train_step)(model, tokens, block_mask, labels)
+        finally:
+            FlexAttention.forward = orig_forward
+
+        # Verify flex attention HOPs got the annotation
+        for node in traced.gm.graph.nodes:
+            if node.target in {
+                torch.ops.higher_order.flex_attention,
+                torch.ops.higher_order.flex_attention_backward,
+            }:
+                custom = node.meta.get("custom", {})
+                self.assertIn(
+                    "compile_with_inductor",
+                    custom,
+                    f"{node.name} missing compile_with_inductor annotation",
+                )
 
     def test_llama4(self):
         from torchtitan.models.llama4 import llama4_configs
