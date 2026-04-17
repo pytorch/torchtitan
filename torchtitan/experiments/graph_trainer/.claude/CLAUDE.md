@@ -72,6 +72,20 @@ python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_d
     --test_suite graph_trainer_default --ngpu 8
 ```
 
+### Debugging Graph Passes
+
+Add `--compile.debug_graph_passes` to enable per-pass instrumentation:
+timing, before/after tlparse graph dumps, and op-count diff summaries.
+Use with `TORCH_TRACE` and `tlparse` to inspect graphs in the browser.
+
+```bash
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --compile.debug_graph_passes \
+    --dataloader.dataset c4_test \
+    --training.steps 10
+```
+
 ### Dumping Graph Modules for Debugging
 
 To inspect a `GraphModule` at any point, dump it to a temporary file:
@@ -111,7 +125,9 @@ diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
 ### Benchmark
 
 Use `./run_train.sh` with a small number of steps. Disable tensorboard,
-profiling, and flight recorder for cleaner timing:
+profiling, and flight recorder for cleaner timing. Always use
+`--dataloader.dataset c4_test` for local runs to avoid downloading the
+full C4 dataset from HuggingFace:
 
 ```bash
 # Llama3 8B aot_fx_trace (8×H100, FSDP+TP, 20 steps)
@@ -119,6 +135,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
+    --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
     --profiling.no-enable_profiling \
     --comm.trace_buf_size=0 \
@@ -130,6 +147,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --parallelism.expert_parallel_degree=2 \
+    --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
     --profiling.no-enable_profiling \
     --comm.trace_buf_size=0 \
@@ -154,6 +172,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
+    --dataloader.dataset c4_test \
     --profiling.enable_profiling \
     --profiling.profile_freq 10
 ```
@@ -174,6 +193,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
+    --dataloader.dataset c4_test \
     --profiling.enable_memory_snapshot \
     --profiling.profile_freq 10
 ```

@@ -73,6 +73,7 @@ def _build_llama3_layers(
     n_kv_heads: int | None = None,
     inner_attention=None,
     mask_type: str = "causal",
+    fuse_qkv: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     layers = []
@@ -94,6 +95,7 @@ def _build_llama3_layers(
                         if inner_attention is not None
                         else ScaledDotProductAttention.Config()
                     ),
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="complex",
                 ),
@@ -134,6 +136,37 @@ def _debugmodel() -> Llama3Model.Config:
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+        ),
+    )
+
+
+def _debugmodel_fused_qkv() -> Llama3Model.Config:
+    dim = 256
+    n_heads = 16
+    n_layers = 6
+    return Llama3Model.Config(
+        dim=dim,
+        vocab_size=2048,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
+        ),
+        rope=RoPE.Config(
+            dim=dim // n_heads,
+            max_seq_len=131072,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+        ),
+        layers=_build_llama3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            fuse_qkv=True,
         ),
     )
 
@@ -383,6 +416,7 @@ def _405b() -> Llama3Model.Config:
 
 llama3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "debugmodel_flex_attn": _debugmodel_flex_attn,
     "debugmodel_varlen_attn": _debugmodel_varlen_attn,
     "1B": _1b,
