@@ -13,7 +13,12 @@ fields set at config creation time.
 from collections.abc import Callable
 from typing import Literal
 
-from torchtitan.models.common.attention import GQAttention, LocalMapInnerAttention
+from torchtitan.models.common.attention import (
+    FusedQKVLinear,
+    GQAttention,
+    LocalMapInnerAttention,
+    QKVLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
@@ -29,6 +34,7 @@ def make_gqa_config(
     inner_attention: LocalMapInnerAttention.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
+    fuse_qkv: bool = False,
     use_rope: bool = True,
     mask_type: str = "causal",
     rope_backend: str = "complex",
@@ -36,20 +42,44 @@ def make_gqa_config(
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
-    hd = head_dim if head_dim is not None else dim // n_heads
+    per_head_dim = head_dim if head_dim is not None else dim // n_heads
+
+    if fuse_qkv:
+        qkv = FusedQKVLinear.Config(
+            head_dim=per_head_dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv,
+            wqkv=Linear.Config(
+                in_features=dim,
+                out_features=(n_heads + 2 * n_kv) * per_head_dim,
+                param_init=wqkv_param_init,
+            ),
+        )
+    else:
+        qkv = QKVLinear.Config(
+            head_dim=per_head_dim,
+            wq=Linear.Config(
+                in_features=dim,
+                out_features=n_heads * per_head_dim,
+                param_init=wqkv_param_init,
+            ),
+            wkv=Linear.Config(
+                in_features=dim,
+                out_features=n_kv * per_head_dim,
+                param_init=wqkv_param_init,
+            ),
+        )
+
     return GQAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        wq=Linear.Config(
-            in_features=dim, out_features=n_heads * hd, param_init=wqkv_param_init
-        ),
-        wkv=Linear.Config(
-            in_features=dim, out_features=n_kv * hd, param_init=wqkv_param_init
-        ),
+        qkv_linear=qkv,
         wo=Linear.Config(
-            in_features=n_heads * hd, out_features=dim, param_init=wo_param_init
+            in_features=n_heads * per_head_dim,
+            out_features=dim,
+            param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
         use_rope=use_rope,
