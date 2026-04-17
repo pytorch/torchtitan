@@ -161,7 +161,6 @@ class ConfigManager:
             DeprecationWarning,
             stacklevel=2,
         )
-        # pyrefly: ignore [unknown-name]
         result: list[str | tuple[str, Any] | tuple[str, Any, Any]] = []
         b_map = {f.name: f for f in fields(base)}
         c_map = {f.name: f for f in fields(custom)}
@@ -196,7 +195,6 @@ class ConfigManager:
         # pyrefly: ignore [missing-attribute]
         if not os.path.exists(self.config.hf_assets_path):
             logger.warning(
-                # pyrefly: ignore [missing-attribute]
                 f"HF assets path {self.config.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
@@ -254,10 +252,8 @@ if __name__ == "__main__":
 
     try:
 
-        # pyrefly: ignore[missing-import]
         from rich import print as rprint
 
-        # pyrefly: ignore[missing-import]
         from rich.pretty import Pretty
 
         config_manager = ConfigManager()

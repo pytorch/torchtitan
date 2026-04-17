@@ -96,7 +96,6 @@ class Llama3Model(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
-                # pyrefly: ignore [missing-attribute]
                 n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(

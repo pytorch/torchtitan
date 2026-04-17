@@ -225,7 +225,6 @@ def apply_tp(
                 "attention.qkv_linear.wk": colwise_parallel(),
                 "attention.qkv_linear.wv": colwise_parallel(),
             }
-        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(
@@ -248,7 +247,6 @@ def apply_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

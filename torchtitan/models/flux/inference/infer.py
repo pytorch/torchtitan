@@ -23,7 +23,6 @@ def inference(config: FluxTrainer.Config):
     # Distributed processing setup: Each GPU/process handles a subset of prompts
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
-    # pyrefly: ignore [missing-attribute]
     original_prompts = open(config.inference.prompts_path).readlines()
     total_prompts = len(original_prompts)
 
@@ -46,14 +45,11 @@ def inference(config: FluxTrainer.Config):
 
     if prompts:
         # Generate images for this process's assigned prompts
-        # pyrefly: ignore [missing-attribute]
         bs = config.inference.local_batch_size
-        # pyrefly: ignore [missing-attribute]
         img_size = config.inference.img_size
 
         output_dir = os.path.join(
             config.dump_folder,
-            # pyrefly: ignore [missing-attribute]
             config.inference.save_img_folder,
         )
         # Create mapping from local indices to global prompt indices
@@ -65,11 +61,8 @@ def inference(config: FluxTrainer.Config):
                 dtype=trainer._dtype,
                 img_height=16 * (img_size // 16),
                 img_width=16 * (img_size // 16),
-                # pyrefly: ignore [missing-attribute]
                 enable_classifier_free_guidance=config.inference.sampling.enable_classifier_free_guidance,
-                # pyrefly: ignore [missing-attribute]
                 denoising_steps=config.inference.sampling.denoising_steps,
-                # pyrefly: ignore [missing-attribute]
                 classifier_free_guidance_scale=config.inference.sampling.classifier_free_guidance_scale,
                 # pyrefly: ignore [bad-argument-type]
                 model=trainer.model_parts[0],

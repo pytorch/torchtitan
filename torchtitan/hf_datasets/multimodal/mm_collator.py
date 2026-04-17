@@ -69,13 +69,10 @@ class MultiModalCollator:
 
         padded_patches = torch.zeros(len(all_patches), max_num_patch, patch_dim)
         for i, patches in enumerate(all_patches):
-            # pyrefly: ignore [unsupported-operation]
             padded_patches[i, : patches.shape[0]] = patches
 
-        # pyrefly: ignore [bad-argument-type]
         grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
 
-        # pyrefly: ignore [bad-return]
         return padded_patches, grid_thw
 
     def collate_text(
@@ -113,7 +110,6 @@ class MultiModalCollator:
         if positions.shape[1] < self.seq_len + 1:
             positions = torch.nn.functional.pad(
                 positions,
-                # pyrefly: ignore [bad-argument-type]
                 (0, self.seq_len + 1 - positions.shape[1]),
                 value=0,
             )
@@ -131,12 +127,10 @@ class MultiModalCollator:
         if positions.shape[0] < self.batch_size:
             positions = torch.nn.functional.pad(
                 positions,
-                # pyrefly: ignore [bad-argument-type]
                 (0, 0, 0, self.batch_size - positions.shape[0]),
                 value=0,
             )
 
-        # pyrefly: ignore [bad-return]
         return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]
 
     def __call__(

@@ -269,7 +269,6 @@ class FluxDataset(IterableDataset, Stateful):
 
             # Classifier-free guidance: Replace some of the strings with empty strings.
             # Distinct random seed is initialized at the beginning of training for each FSDP rank.
-            # pyrefly: ignore [missing-attribute]
             dropout_prob = self.prompt_dropout_prob
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:

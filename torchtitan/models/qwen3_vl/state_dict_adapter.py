@@ -144,7 +144,6 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             else:
                 if tt_key not in to_hf_map:
                     continue
-                # pyrefly: ignore [missing-attribute]
                 if tt_key == "output.weight" and self.model_config.enable_weight_tying:
                     continue
                 hf_key = to_hf_map[tt_key]

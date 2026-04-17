@@ -258,9 +258,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
 
     # Replace FlexAttention with SDPA for single-process inference
     # (unfused FlexAttention without torch.compile has poor fp16 numerics).
-    from torchtitan.models.common.attention import (
-        ScaledDotProductAttention,  # pyrefly: ignore [missing-module-attribute]
-    )
+    from torchtitan.models.common.attention import ScaledDotProductAttention
 
     for layer in model.layers.values():
         layer.attention.attn_backend = "sdpa"

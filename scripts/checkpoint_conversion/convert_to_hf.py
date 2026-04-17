@@ -33,7 +33,6 @@ def convert_to_hf(
         model = model_config.build()
     model = ModelWrapper(model)
 
-    # pyrefly: ignore[bad-instantiation, not-callable]
     sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
         sd_adapter is not None

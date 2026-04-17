@@ -116,7 +116,6 @@ class Validator(BaseValidator):
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        # pyrefly: ignore [unexpected-keyword]
         self.dl_config = replace(config.dataloader, infinite=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank

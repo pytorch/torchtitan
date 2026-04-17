@@ -94,7 +94,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
         n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
             self.model_config.layers[0].attention.n_kv_heads
-            # pyrefly: ignore [missing-attribute]
             if self.model_config.layers[0].attention.n_kv_heads is not None
             else n_heads
         )
@@ -145,7 +144,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     if abstract_key == "layers.{}.attention.qkv_linear.wq.weight":
                         value = self._permute(value, n_heads)
                     if abstract_key == "layers.{}.attention.qkv_linear.wk.weight":
-                        # pyrefly: ignore [unsupported-operation]
                         key_value_dim = head_dim * n_kv_heads
                         value = self._permute(value, n_kv_heads, key_value_dim, dim)
 
@@ -170,7 +168,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
         n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
             self.model_config.layers[0].attention.n_kv_heads
-            # pyrefly: ignore [missing-attribute]
             if self.model_config.layers[0].attention.n_kv_heads is not None
             else n_heads
         )
@@ -191,7 +188,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
                     value = self._reverse_permute(value, n_heads)
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
-                    # pyrefly: ignore [unsupported-operation]
                     key_value_dim = head_dim * n_kv_heads
                     value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
 
@@ -235,5 +231,4 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
             )
 
-        # pyrefly: ignore [bad-return]
         return state_dict

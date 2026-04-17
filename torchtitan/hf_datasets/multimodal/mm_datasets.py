@@ -152,7 +152,6 @@ def _process_mm_sample(
                 )
                 processed_images.append(processed_img)
                 num_image_tokens.append(num_tokens)
-                # pyrefly: ignore [unsupported-operation]
                 texts[idx] = None
 
     if len(processed_images) != len([_ for _ in images if _ is not None]):
@@ -246,9 +245,7 @@ def _process_cc12_wd_sample(
     images = [image, None]
 
     return _process_mm_sample(
-        # pyrefly: ignore [bad-argument-type]
         texts=texts,
-        # pyrefly: ignore [bad-argument-type]
         images=images,
         tokenizer=tokenizer,
         patch_size=patch_size,

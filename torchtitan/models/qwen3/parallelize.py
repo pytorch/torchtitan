@@ -249,7 +249,6 @@ def apply_non_moe_tp(
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }
-        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(
@@ -284,7 +283,6 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
