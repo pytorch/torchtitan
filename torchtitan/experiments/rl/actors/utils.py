@@ -35,6 +35,13 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     Returns logprobs for positions 1..N (the predicted tokens).
     Output shape is ``[batch, seq_len - 1]``.
     """
+    from torch.distributed.tensor import DTensor
+
+    # Config-based TP returns logits as a Replicate DTensor. Downstream RL
+    # code (gather with plain-tensor indices, slicing per-sample) expects a
+    # plain tensor — materialize once here.
+    if isinstance(logits, DTensor):
+        logits = logits.full_tensor()
     shift_logits = logits[:, :-1, :].float()
     shift_targets = token_ids[:, 1:]
     logprobs = F.log_softmax(shift_logits, dim=-1)
