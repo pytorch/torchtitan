@@ -173,9 +173,14 @@ class GraphModule(torch.nn.Module):
 - Change the numerical result in any way (even 1 ULP difference)
 - Change input/output signatures
 - Import external packages not already available (torch, triton are fine)
-- Use `torch.compile` inside the model (the whole point is to optimize
-  the explicit ops)
 - Remove or skip gradient computations
+- **Modify files outside of `candidate_models/` (and helper files you
+  create alongside them).** All optimizations — including custom CUDA/Triton
+  kernels, helper functions, and binding code — must live within or next to
+  the candidate model files under `targets/<fingerprint>/candidate_models/`.
+  Never modify core torchtitan source, `flattened_models/`, or any other
+  files in the repository. The `optimized_models/` directory is managed
+  exclusively by the `--promote` workflow.
 
 ## Common Options
 
