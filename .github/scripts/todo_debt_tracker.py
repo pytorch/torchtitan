@@ -233,34 +233,59 @@ def scan_file_for_todos(file_path: str) -> list[dict[str, str]]:
     found = []
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            current_block, block_start = [], 0
+            current_block = []
+            block_start = 0
+            in_todo_block = False
 
-            for i, line in enumerate(lines, start=1):
+            for i, line in enumerate(f, start=1):
                 stripped = line.lstrip()
                 is_comment = stripped.startswith("#")
-                is_new_todo = "TODO" in stripped
+                has_todo = "TODO" in stripped
 
-                # Logic: End current block if we hit code OR a brand new todo line
-                if not is_comment or (is_new_todo and current_block):
+                # Rule 1: Start a new block on a todo line
+                if is_comment and has_todo:
+                    # If we were already in a block, process it before starting new one
                     if current_block:
                         item = parse_comment_block(
                             current_block, block_start, file_path
                         )
                         if item:
                             found.append(item)
-                    current_block = []
 
-                if is_comment:
-                    if not current_block:
-                        block_start = i
+                    current_block = [line.rstrip()]
+                    block_start = i
+                    in_todo_block = True
+                    continue
+
+                # Rule 2: While in a block, keep adding comment lines
+                if in_todo_block and is_comment:
                     current_block.append(line.rstrip())
 
-            # Catch trailing blocks at the end of the file
+                    # Rule 3: If we found a link, this specific todo is "complete"
+                    # We look for the link in the current line specifically
+                    if LINK_REGEX.search(line):
+                        item = parse_comment_block(
+                            current_block, block_start, file_path
+                        )
+                        if item:
+                            found.append(item)
+                        current_block = []
+                        in_todo_block = False
+
+                # Rule 4: If we hit code, the block is over
+                elif not is_comment and in_todo_block:
+                    item = parse_comment_block(current_block, block_start, file_path)
+                    if item:
+                        found.append(item)
+                    current_block = []
+                    in_todo_block = False
+
+            # Catch trailing blocks
             if current_block:
                 item = parse_comment_block(current_block, block_start, file_path)
                 if item:
                     found.append(item)
+
     except Exception as e:
         print(f"Error reading {file_path}: {e}", file=sys.stderr)
     return found
