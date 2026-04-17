@@ -378,11 +378,16 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
             sorting_timestamp_key = (
                 "blocker_created_at" if status == "open" else "blocker_event_at"
             )
+            FALLBACK = datetime(2000, 1, 1, tzinfo=timezone.utc)
             sorted_items = sorted(
                 groups[status],
                 key=lambda x: (
-                    x[sorting_timestamp_key] or "2001-01-01",
-                    int(x["blocker_github_number"]),
+                    datetime.fromisoformat(
+                        x[sorting_timestamp_key].replace("Z", "+00:00")
+                    )
+                    if x[sorting_timestamp_key]
+                    else FALLBACK,
+                    int(x.get("blocker_github_number", 0)),
                 ),
             )
 
