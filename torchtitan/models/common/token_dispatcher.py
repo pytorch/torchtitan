@@ -171,9 +171,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         self.ep_size = config.ep_size
         self.sp_size = config.sp_size
         # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
-        self.ep_group: dist.ProcessGroup
+        self.ep_group: dist.ProcessGroup | None = None
         # Set at runtime by apply_moe_ep_tp from tp_mesh.get_local_rank()
-        self.sp_rank: int = 0
+        self.sp_rank: int = -1
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
@@ -214,7 +214,16 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert_local: (num_local_experts,) token counts
             metadata: AllToAllDispatchMetadata for combine()
         """
+        assert self.ep_group is not None, (
+            "ep_group must be set before dispatch. "
+            "ExpertParallel._partition_fn() should set it."
+        )
+
         if self.sp_size > 1:
+            assert self.sp_rank >= 0, (
+                "sp_rank must be set before use. "
+                "apply_moe_ep_tp() should set it from tp_mesh.get_local_rank()."
+            )
             # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
             # shape (batch_size * seq_len // ep_size, top_k)
             x, top_scores, selected_experts_indices = self._split_along_sp(
@@ -540,7 +549,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         )
         self.pad_multiple = config.pad_multiple
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
-        self.ep_group: dist.ProcessGroup
+        self.ep_group: dist.ProcessGroup | None = None
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -556,6 +565,10 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        assert self.ep_group is not None, (
+            "ep_group must be set before dispatch. "
+            "ExpertParallel._partition_fn() should set it."
+        )
         num_local_experts = self.num_experts // self.ep_size
 
         if self.comm_backend == "hybridep":

@@ -13,6 +13,11 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+)
+
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
@@ -44,10 +49,6 @@ class TensorParallel(ParallelStyle):
 
 class ExpertParallel(ParallelStyle):
     def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
-        from torchtitan.models.common.token_dispatcher import (
-            AllToAllTokenDispatcher,
-            DeepEPTokenDispatcher,
-        )
 
         for param_name, param in mod.named_parameters(recurse=False):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
@@ -98,10 +99,6 @@ class ExpertTensorParallel(ExpertParallel):
         )  # Column-wise sharding
         # Set ep_group on the token dispatcher for all-to-all communication.
         # device_mesh is the 2D (EP, ETP) mesh; slice the EP dimension.
-        from torchtitan.models.common.token_dispatcher import (
-            AllToAllTokenDispatcher,
-            DeepEPTokenDispatcher,
-        )
 
         assert hasattr(
             mod, "token_dispatcher"
