@@ -3,8 +3,6 @@ name: GraphTrainer 8 GPU H100 Integration Tests
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
@@ -68,7 +66,8 @@ jobs:
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
 
-        # Run bitwise deterministic guardrail test (includes H100-only hardcoded-hash tests)
+        # Run bitwise deterministic and SAC peak-memory guardrail tests
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_sac_peak_memory.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

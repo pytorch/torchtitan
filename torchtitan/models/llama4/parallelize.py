@@ -45,7 +45,6 @@ from torchtitan.distributed.tensor_parallel import (
     maybe_enable_async_tp,
     NoParallel,
 )
-
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
