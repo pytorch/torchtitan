@@ -195,12 +195,40 @@ NGPU=<n>           Number of GPUs (default: 1)
 ### Benchmarker-specific Options
 
 ```
---promote          Auto-promote candidate if bitwise correct AND >=1% faster
-                   on all benchmark runs
---promote-runs N   Number of consecutive runs that must all pass (default: 3)
---num-warmup N     Warmup iterations before timing (default: 5)
---num-bench N      Benchmark iterations per run (default: 20)
+--promote              Auto-promote candidate if bitwise correct AND >=1% faster
+                       on all benchmark runs
+--promote-runs N       Number of consecutive runs that must all pass (default: 3)
+--num-model-warmup N   Model warmup calls BEFORE equivalence check (default: 3)
+--num-warmup N         Warmup iterations before timing (default: 5)
+--num-bench N          Benchmark iterations per run (default: 20)
 ```
+
+### How Benchmarking Works
+
+The benchmarker runs each model through three phases:
+
+1. **Model warmup** (`--num-model-warmup`, default 3): The model is called
+   N times *before* the bitwise equivalence check or any timing. These calls
+   are not timed and not checked for correctness. This phase exists so that
+   models can initialize internal state — for example, populating caches,
+   warming up JIT compilers, or recording CUDA graphs. Your candidate model
+   can do arbitrary work during these calls (build lookup tables, capture
+   graphs, profile and specialize) as long as it produces correct outputs
+   from call N+1 onward.
+
+2. **Equivalence check**: One call per model, outputs compared bitwise.
+   This runs *after* model warmup, so it tests the "warmed up" code path.
+
+3. **Benchmark loop** (`--num-warmup` + `--num-bench`): Additional warmup
+   iterations (not timed), then timed iterations measured with CUDA events.
+   The median time across `--num-bench` iterations is reported.
+
+Because model warmup calls are never timed or checked, you are free to use
+compile-like transformations in your candidate. For example, you can cache
+CPU-side scalar values during warmup and replay them in later calls, or
+capture the entire forward pass as a CUDA graph during warmup and replay it
+during benchmark. The only requirement is that outputs are bitwise identical
+from the equivalence check onward (call `num_model_warmup + 1`).
 
 ## Supported Models
 
