@@ -57,9 +57,23 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
+def deepseek_v3_debugmodel_ep() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    return config
+
+
 def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="flex")
+    return config
+
+
+def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel", attn_backend="flex", moe_comm_backend="standard"
+    )
     return config
 
 

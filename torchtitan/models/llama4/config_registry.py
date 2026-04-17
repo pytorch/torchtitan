@@ -56,6 +56,12 @@ def llama4_debugmodel() -> Trainer.Config:
     )
 
 
+def llama4_debugmodel_ep() -> Trainer.Config:
+    config = llama4_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    return config
+
+
 def llama4_debugmodel_fp8() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
