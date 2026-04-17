@@ -6,7 +6,7 @@
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import LocalMapSpec, MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
@@ -52,8 +52,26 @@ def replicate_norm_spec() -> ShardingSpec:
     return ShardingSpec(state_shardings={"weight": {TP: Replicate()}})
 
 
+def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
+    """Colwise-shard each Q/K/V projection of a ``BaseQKVLinear``.
+
+    Handles both ``QKVLinear`` (separate ``wq`` + ``wkv``) and
+    ``FusedQKVLinear`` (single ``wqkv``).
+    """
+    if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
+        qkv_linear_cfg.wqkv.sharding_spec = colwise_spec()
+    elif isinstance(qkv_linear_cfg, QKVLinear.Config):
+        qkv_linear_cfg.wq.sharding_spec = colwise_spec()
+        qkv_linear_cfg.wkv.sharding_spec = colwise_spec()
+    else:
+        raise TypeError(
+            f"set_qkv_linear_sharding requires QKVLinear.Config or "
+            f"FusedQKVLinear.Config, got {type(qkv_linear_cfg).__name__}"
+        )
+
+
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
-    """Standard GQA attention (``wq``/``wkv``/``wo``) TP sharding.
+    """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
     Shared by llama3, qwen3, and llama4 — all three have a GQA block whose
     ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
@@ -77,8 +95,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
             "rope_cache": {TP: Replicate()},
         },
     )
-    attention_cfg.wq.sharding_spec = colwise_spec()
-    attention_cfg.wkv.sharding_spec = colwise_spec()
+    set_qkv_linear_sharding(attention_cfg.qkv_linear)
     attention_cfg.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
 

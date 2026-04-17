@@ -10,13 +10,14 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.sharding import (
-    colwise_spec,
     replicate_norm_spec,
     rowwise_spec,
     sequence_parallel_spec,
     set_decoder_sharding_spec,
     set_gqa_inner_attention_local_map,
+    set_qkv_linear_sharding,
 )
+from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
@@ -53,6 +54,9 @@ def _set_gpt_oss_layer_sharding(
     All GPT-OSS blocks are MoE — only attention/norms are sharded here.
     MoE FFN stays under apply_moe_ep_tp.
     """
+    attention = layer_cfg.attention
+    assert isinstance(attention, Attention.Config)
+
     norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
     layer_cfg.attention_norm.sharding_spec = norm_spec
     layer_cfg.ffn_norm.sharding_spec = norm_spec
@@ -60,7 +64,7 @@ def _set_gpt_oss_layer_sharding(
 
     # Attention: input x gathered to Replicate, freqs_cis always Replicate.
     # sinks parameter is sharded across heads via state_shardings.
-    layer_cfg.attention.sharding_spec = ShardingSpec(
+    attention.sharding_spec = ShardingSpec(
         state_shardings={"sinks": {TP: Shard(0)}},
         input_layouts={
             "x": {TP: attn_x_placement},
@@ -71,11 +75,8 @@ def _set_gpt_oss_layer_sharding(
             "freqs_cis": {TP: Replicate()},
         },
     )
-    layer_cfg.attention.wq.sharding_spec = colwise_spec()
-    layer_cfg.attention.wkv.sharding_spec = colwise_spec()
-    layer_cfg.attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
+    set_qkv_linear_sharding(attention.qkv_linear)
+    attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
     # GPT-OSS flash attention always returns (output, lse), hence num_outputs=2.
-    set_gqa_inner_attention_local_map(
-        layer_cfg.attention.inner_attention, num_outputs=2
-    )
+    set_gqa_inner_attention_local_map(attention.inner_attention, num_outputs=2)
