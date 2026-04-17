@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import TYPE_CHECKING
+
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -18,9 +20,12 @@ from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
 
 TP = MeshDimName.TP
 
+if TYPE_CHECKING:
+    from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
-def set_gptoss_sharding_spec(
-    config,
+
+def set_gpt_oss_sharding_spec(
+    config: "GptOssModel.Config",
     parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
@@ -35,10 +40,12 @@ def set_gptoss_sharding_spec(
 
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_gptoss_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
 
-def _set_gptoss_layer_sharding(layer_cfg, *, enable_sp: bool) -> None:
+def _set_gpt_oss_layer_sharding(
+    layer_cfg: "GptOssTransformerBlock.Config", *, enable_sp: bool
+) -> None:
     """Set sharding on one GPT-OSS transformer layer.
 
     All GPT-OSS blocks are MoE — only attention/norms are sharded here.
@@ -62,6 +69,6 @@ def _set_gptoss_layer_sharding(layer_cfg, *, enable_sp: bool) -> None:
             "freqs_cis": {TP: Replicate()},
         },
     )
-    for w in (layer_cfg.attention.wq, layer_cfg.attention.wkv):
-        w.sharding_spec = colwise_spec()
+    layer_cfg.attention.wq.sharding_spec = colwise_spec()
+    layer_cfg.attention.wkv.sharding_spec = colwise_spec()
     layer_cfg.attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)

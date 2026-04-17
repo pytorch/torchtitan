@@ -27,7 +27,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 
 from .parallelize import parallelize_deepseekv3
-from .sharding import set_deepseekv3_sharding_spec
+from .sharding import set_deepseek_v3_sharding_spec
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
@@ -578,7 +578,7 @@ def model_registry(flavor: str) -> ModelSpec:
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_deepseekv3,
-        set_sharding_spec_fn=set_deepseekv3_sharding_spec,
+        set_sharding_spec_fn=set_deepseek_v3_sharding_spec,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
