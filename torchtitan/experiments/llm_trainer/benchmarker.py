@@ -216,6 +216,7 @@ def _compare_outputs(opt_outputs, cand_outputs):
     return all_match, details
 
 
+
 def _benchmark_model(model, inputs, num_warmup, num_bench):
     """Benchmark a model's execution time using CUDA events.
 
@@ -268,6 +269,11 @@ def main():
     device_type = utils.device_type
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)
+
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
     world_size = dist_utils.init_distributed(
         config.comm,

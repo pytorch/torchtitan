@@ -35,13 +35,14 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
 
-from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -302,10 +303,15 @@ def _generate_metadata(
                 "shape": [int(s) for s in inp.shape],
             })
         else:
+            try:
+                json.dumps(inp)
+                value = inp
+            except (TypeError, ValueError):
+                value = str(inp)
             specs.append({
                 "index": i,
                 "type": type(inp).__name__,
-                "value": inp,
+                "value": value,
             })
 
     metadata = {
@@ -371,7 +377,12 @@ def _verify_equivalence(gm, example_inputs, model_filepath, device):
                         f"(shape={list(ref.shape)}, dtype={ref.dtype})"
                     )
             else:
-                logger.error(f"  Output {i}: MISMATCH!")
+                max_diff = (ref.float() - gen.float()).abs().max().item()
+                logger.error(
+                    f"  Output {i}: MISMATCH! "
+                    f"(shape={list(ref.shape)}, dtype={ref.dtype}, "
+                    f"max_diff={max_diff:.6e})"
+                )
                 all_match = False
     if all_match:
         n = len(ref_outputs)
@@ -391,6 +402,9 @@ def main():
     config = config_manager.parse_args(remaining_args)
 
     config.compile.mode = "aot_fx_trace"
+    config.debug.deterministic = True
+    if config.debug.seed is None:
+        config.debug.seed = 42
 
     (
         model,
@@ -432,14 +446,38 @@ def main():
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
     extra_inputs: dict[str, torch.Tensor] = {}
+    extra_kwargs: dict[str, Any] = {}
 
-    extra_kwargs = build_forward_extra_kwargs(
-        model_config,
-        model,
-        dummy_inputs,
-        tokenizer=tokenizer,
-        parallel_dims=parallel_dims,
-    )
+    if isinstance(model_config, Decoder.Config):
+        layer = model_config.layers[0]
+        attn_config = layer.attention
+    else:
+        attn_config = None
+    mask_type = getattr(attn_config, "mask_type", "causal")
+
+    if mask_type == "block_causal":
+        extra_kwargs["positions"] = torch.arange(
+            0, seq_len, dtype=torch.int32, device=device
+        ).unsqueeze(0).expand(local_batch_size, -1)
+    elif parallel_dims.cp_enabled:
+        extra_kwargs["positions"] = torch.arange(
+            0, seq_len, dtype=torch.int32, device=device
+        ).expand(local_batch_size, seq_len)
+
+    inner_attention = getattr(attn_config, "inner_attention", None)
+    if inner_attention is not None:
+        from torchtitan.models.common.attention import (
+            FlexAttention,
+            VarlenAttention,
+        )
+        if isinstance(
+            inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+        ):
+            extra_kwargs["attention_masks"] = model.get_attention_masks(
+                input_batch=dummy_inputs,
+                tokenizer=tokenizer,
+                extra_inputs=extra_inputs,
+            )
 
     loss_parallel_enabled = (
         parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
