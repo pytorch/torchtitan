@@ -246,15 +246,18 @@ def apply_compile(
         parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
     )
 
-    if compile_config.precompile_artifact_dir and mode != "aot":
+    if compile_config.precompile_artifact_dir and mode not in ("aot", "aot_fx_trace"):
         logger.warning(
             "--compile.precompile_artifact_dir is only supported with "
-            f"--compile.mode=aot, but mode is '{mode}'. Ignoring precompile."
+            f"--compile.mode=aot or aot_fx_trace, but mode is '{mode}'. "
+            "Ignoring precompile."
         )
         compile_config = dataclasses.replace(compile_config, precompile_artifact_dir="")
 
-    if compile_config.precompile_artifact_dir and not (
-        _SERIALIZABLE_PASSES & set(compile_config.passes)
+    if (
+        compile_config.precompile_artifact_dir
+        and mode == "aot"
+        and not (_SERIALIZABLE_PASSES & set(compile_config.passes))
     ):
         raise ValueError(
             "--compile.precompile_artifact_dir requires at least one pass that "
@@ -281,10 +284,18 @@ def apply_compile(
         )
     elif mode == "aot_fx_trace":
         # aot_fx_trace traces fwd+loss+bwd together inside forward_backward_step,
-        # so no model-level wrapping is needed here.
-        logger.info(
-            "aot_fx_trace compile mode: graph capture will happen at training time"
-        )
+        # so no model-level wrapping is needed here. If precompile_artifact_dir
+        # is set, the precompiled artifact will be loaded lazily in
+        # GraphTrainer._make_fx_forward_backward_step.
+        if compile_config.precompile_artifact_dir:
+            logger.info(
+                "aot_fx_trace compile mode: precompiled artifact will be loaded "
+                f"from {compile_config.precompile_artifact_dir}"
+            )
+        else:
+            logger.info(
+                "aot_fx_trace compile mode: graph capture will happen at training time"
+            )
         return model
     else:
         raise ValueError(
