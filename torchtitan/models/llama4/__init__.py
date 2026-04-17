@@ -84,10 +84,10 @@ def _build_llama4_layers(
     every_n_layers_nope: int = 4,
     interleave_moe_layer_step: int = 1,
     fixed_attn_block_size: int = 8192,
-    attn_backend: str = "flex",
+    attn_backend: str,
     shared_experts_hidden_dim: int | None = None,
     moe_comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for a Llama4 model.
 
@@ -134,7 +134,7 @@ def _build_llama4_layers(
                 top_k=router.top_k,
                 param_init=_depth_experts_init(layer_id),
                 comm_backend=moe_comm_backend,
-                capacity_factor=capacity_factor,
+                non_blocking_capacity_factor=non_blocking_capacity_factor,
             )
             shared_experts = make_ffn_config(
                 dim=dim,

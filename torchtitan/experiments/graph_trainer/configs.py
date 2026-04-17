@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
 from torchtitan.config import ActivationCheckpointConfig
@@ -69,7 +69,12 @@ def to_graph_trainer_config(
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
-    d["model_spec"] = model_registry(base_config.model_spec.flavor)
+    graph_spec = model_registry(base_config.model_spec.flavor)
+    # Keep the base model config (which has moe_comm_backend baked in),
+    # only replace parallelize_fn from the graph_trainer registry.
+    d["model_spec"] = replace(
+        base_config.model_spec, parallelize_fn=graph_spec.parallelize_fn
+    )
     d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any

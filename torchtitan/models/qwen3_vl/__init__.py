@@ -186,7 +186,7 @@ def _build_qwen3_vl_moe_layers(
     num_experts: int,
     top_k: int,
     moe_comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
     layers = []
@@ -225,7 +225,7 @@ def _build_qwen3_vl_moe_layers(
                         param_init=_depth_experts_init(layer_id),
                         score_before_experts=False,
                         comm_backend=moe_comm_backend,
-                        capacity_factor=capacity_factor,
+                        non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
                 ),
             )

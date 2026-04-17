@@ -77,7 +77,7 @@ def _make_dsv3_attn_config(
     qk_rope_head_dim: int,
     v_head_dim: int,
     mscale: float = 1.0,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
 ) -> Attention.Config:
     """Build a fully-specified DeepSeek V3 MLA Attention.Config.
 
@@ -170,9 +170,9 @@ def _build_dsv3_layers(
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
     score_before_experts: bool = False,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
     moe_comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -228,7 +228,7 @@ def _build_dsv3_layers(
                     param_init=_depth_experts_init(layer_id),
                     score_before_experts=score_before_experts,
                     comm_backend=moe_comm_backend,
-                    capacity_factor=capacity_factor,
+                    non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
                 shared_experts=make_ffn_config(
                     dim=dim,

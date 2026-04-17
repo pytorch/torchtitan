@@ -82,7 +82,7 @@ def _build_qwen3_layers(
     n_kv_heads: int,
     head_dim: int,
     hidden_dim: int,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -125,9 +125,9 @@ def _build_qwen3_moe_layers(
     moe_hidden_dim: int,
     num_experts: int,
     top_k: int,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
     moe_comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -167,7 +167,7 @@ def _build_qwen3_moe_layers(
                         param_init=_depth_experts_init(layer_id),
                         score_before_experts=False,
                         comm_backend=moe_comm_backend,
-                        capacity_factor=capacity_factor,
+                        non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
                 ),
             )

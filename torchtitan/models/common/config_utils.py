@@ -43,15 +43,13 @@ def get_attention_config(
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
-        if has_cuda_capability(10, 0) or has_cuda_capability(9, 0):
-            block_size = (256, 128)
-        else:
+        if not has_cuda_capability(9, 0):
             raise ValueError(
                 "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
             )
         return (
             FlexAttention.Config(
-                block_size=block_size, kernel_options={"BACKEND": "FLASH"}
+                block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
             ),
             "block_causal",
         )
@@ -176,7 +174,7 @@ def make_token_dispatcher_config(
     top_k: int,
     score_before_experts: bool = True,
     comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> (
     LocalTokenDispatcher.Config
     | AllToAllTokenDispatcher.Config
@@ -203,7 +201,7 @@ def make_token_dispatcher_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             comm_backend=comm_backend,
-            capacity_factor=capacity_factor,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
     elif comm_backend == "torchao":
         return TorchAOTokenDispatcher.Config(
@@ -234,7 +232,7 @@ def make_experts_config(
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
     comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -248,6 +246,6 @@ def make_experts_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             comm_backend=comm_backend,
-            capacity_factor=capacity_factor,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
     )

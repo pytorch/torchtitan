@@ -518,7 +518,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         Args:
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
-            capacity_factor: Enable non-blocking HybridEP dispatch with a
+            non_blocking_capacity_factor: Enable non-blocking HybridEP dispatch with a
                 given capacity factor.
 
                 Setting this to a float in (0, 1] enables CPU-free non-blocking
@@ -548,12 +548,12 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """
 
         comm_backend: str
-        capacity_factor: float | None = None
+        non_blocking_capacity_factor: float | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.comm_backend = config.comm_backend
-        self.capacity_factor = config.capacity_factor
+        self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
         # pad_multiple: Alignment size for token groups needed by quantized
         # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
@@ -589,7 +589,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 self.num_experts,
                 self.ep_group,
                 score_before_experts=self.score_before_experts,
-                non_blocking_expert_capacity_factor=self.capacity_factor,
+                non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
                 pad_multiple=self.pad_multiple,
             )
         else:

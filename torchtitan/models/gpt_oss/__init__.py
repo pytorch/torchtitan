@@ -104,7 +104,7 @@ def _make_gptoss_experts_config(
     top_k: int,
     score_before_experts: bool,
     moe_comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> GptOssGroupedExperts.Config:
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
     std = depth_scaled_std(0.02, layer_id)
@@ -124,7 +124,7 @@ def _make_gptoss_experts_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             comm_backend=moe_comm_backend,
-            capacity_factor=capacity_factor,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
     )
 
@@ -139,7 +139,7 @@ def _build_gptoss_layers(
     score_before_experts: bool,
     load_balance_coeff: float,
     moe_comm_backend: str | None = None,
-    capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -157,7 +157,7 @@ def _build_gptoss_layers(
             top_k=top_k,
             score_before_experts=score_before_experts,
             moe_comm_backend=moe_comm_backend,
-            capacity_factor=capacity_factor,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
         moe_cfg = GptOssMoE.Config(
             num_experts=num_experts,

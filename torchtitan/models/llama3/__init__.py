@@ -69,7 +69,7 @@ def _build_llama3_layers(
     n_heads: int,
     hidden_dim: int,
     n_kv_heads: int | None = None,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
