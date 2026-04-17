@@ -208,7 +208,12 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 )
         else:
             assert "data" in state_dict
-            self._data.load_state_dict(state_dict["data"])
+            data_state = state_dict["data"]
+            # HuggingFace IterableDataset sync epoch
+            saved_epoch = data_state.get("epoch", 0)
+            if saved_epoch != self._data.epoch:
+                self._data.set_epoch(saved_epoch)
+            self._data.load_state_dict(data_state)
 
     def state_dict(self):
         _state_dict: dict[str, Any] = {
@@ -319,6 +324,8 @@ class ChatDataset(IterableDataset, Stateful):
         self._inputs_buffer: list[int] = []
         self._labels_buffer: list[int] = []
         self._positions_buffer: list[int] = []
+        self._pending_input_ids: list[int] = []
+        self._pending_label_ids: list[int] = []
 
         self._logged_first_sample = False
 
@@ -409,6 +416,18 @@ class ChatDataset(IterableDataset, Stateful):
         The model's flex/varlen attention mask uses these EOS positions to
         prevent cross-document attention.
         """
+        # resume from ckpt edge case
+        if self._pending_input_ids:
+            input_ids = self._pending_input_ids
+            label_ids = self._pending_label_ids
+            self._pending_input_ids = []
+            self._pending_label_ids = []
+            self._inputs_buffer.extend(input_ids)
+            self._labels_buffer.extend(label_ids)
+            self._positions_buffer.extend(range(len(input_ids)))
+            self._sample_idx += 1
+            if len(self._inputs_buffer) == self.seq_len:
+                yield self._flush_buffers()
         while True:
             for sample in self._get_data_iter():
                 # pyrefly: ignore [bad-argument-type]
@@ -426,8 +445,14 @@ class ChatDataset(IterableDataset, Stateful):
                     self._inputs_buffer.extend([self._eos_id] * pad_len)
                     self._labels_buffer.extend([IGNORE_INDEX] * pad_len)
                     self._positions_buffer.extend(range(pad_len))
-
+                    self._pending_input_ids = input_ids
+                    self._pending_label_ids = label_ids
                     yield self._flush_buffers()
+                    # resumed generator continues here or fresh generator handles pending at top (resume path)
+                    input_ids = self._pending_input_ids
+                    label_ids = self._pending_label_ids
+                    self._pending_input_ids = []
+                    self._pending_label_ids = []
 
                 # Add example to buffer with positions resetting to 0
                 self._inputs_buffer.extend(input_ids)
@@ -481,6 +506,8 @@ class ChatDataset(IterableDataset, Stateful):
             "inputs_buffer": self._inputs_buffer,
             "labels_buffer": self._labels_buffer,
             "positions_buffer": self._positions_buffer,
+            "pending_input_ids": self._pending_input_ids,
+            "pending_label_ids": self._pending_label_ids,
         }
 
         if isinstance(self._data, Dataset):
@@ -495,6 +522,8 @@ class ChatDataset(IterableDataset, Stateful):
         self._inputs_buffer = state_dict["inputs_buffer"]
         self._labels_buffer = state_dict["labels_buffer"]
         self._positions_buffer = state_dict["positions_buffer"]
+        self._pending_input_ids = state_dict["pending_input_ids"]
+        self._pending_label_ids = state_dict["pending_label_ids"]
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
@@ -505,7 +534,12 @@ class ChatDataset(IterableDataset, Stateful):
                 )
         else:
             assert "data" in state_dict
-            self._data.load_state_dict(state_dict["data"])
+            data_state = state_dict["data"]
+            # HuggingFace IterableDataset sync epoch
+            saved_epoch = data_state.get("epoch", 0)
+            if saved_epoch != self._data.epoch:
+                self._data.set_epoch(saved_epoch)
+            self._data.load_state_dict(data_state)
 
 
 class ChatDataLoader(ParallelAwareDataloader):
