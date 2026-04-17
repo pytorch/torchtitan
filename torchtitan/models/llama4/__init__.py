@@ -124,10 +124,14 @@ def _build_llama4_layers(
                 num_experts=num_experts,
                 gate_param_init=_depth_init(layer_id),
             )
+            # Defaults to LocalTokenDispatcher (EP=1).
+            # Trainer.Config.__post_init__ calls apply_ep() to
+            # replace with the correct dispatcher based on EP settings.
             experts = make_experts_config(
                 dim=dim,
                 hidden_dim=moe_hidden_dim,
                 num_experts=num_experts,
+                top_k=router.top_k,
                 param_init=_depth_experts_init(layer_id),
             )
             shared_experts = make_ffn_config(

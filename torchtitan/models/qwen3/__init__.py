@@ -157,7 +157,6 @@ def _build_qwen3_moe_layers(
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,
-                    score_before_experts=False,
                     router=make_router_config(
                         dim=dim,
                         num_experts=num_experts,
@@ -170,7 +169,9 @@ def _build_qwen3_moe_layers(
                         dim=dim,
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,
+                        top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
+                        score_before_experts=False,
                     ),
                 ),
             )
