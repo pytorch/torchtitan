@@ -88,6 +88,16 @@ def _parse_args():
     parser.add_argument("--num-warmup", type=int, default=5)
     parser.add_argument("--num-bench", type=int, default=20)
     parser.add_argument(
+        "--num-model-warmup",
+        type=int,
+        default=3,
+        help=(
+            "Number of warmup calls to each model BEFORE the equivalence "
+            "check and benchmarking. Allows models to initialize internal "
+            "state (e.g. CUDA graph capture). Default: 3."
+        ),
+    )
+    parser.add_argument(
         "--hardware",
         type=str,
         required=True,
@@ -341,6 +351,18 @@ def main():
     inputs = _create_inputs_from_metadata(meta, device)
     num_tensor_inputs = sum(1 for x in inputs if isinstance(x, torch.Tensor))
     print(f"  {len(inputs)} inputs ({num_tensor_inputs} tensors)")
+
+    # Model warmup: let models initialize internal state (e.g. CUDA graph
+    # capture, JIT compilation, caching). These calls happen BEFORE the
+    # equivalence check so the check tests the "warmed up" code path.
+    if bench_args.num_model_warmup > 0:
+        print(f"\nModel warmup: {bench_args.num_model_warmup} calls per model...")
+        with torch.no_grad():
+            for wi in range(bench_args.num_model_warmup):
+                optimized_gm(*inputs)
+                candidate_gm(*inputs)
+        torch.cuda.synchronize()
+        print("  Done.")
 
     print("\n--- Bitwise Equivalence Check ---")
     with torch.no_grad():

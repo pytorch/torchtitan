@@ -120,36 +120,6 @@ import torch.nn as nn
 from torch import device, tensor
 
 
-
-import triton
-import triton.language as tl
-
-@triton.jit
-def _swiglu_fwd_kernel(
-    X_ptr, Y_ptr, OUT_ptr,
-    N: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < N
-    x = tl.load(X_ptr + offsets, mask=mask)
-    y = tl.load(Y_ptr + offsets, mask=mask)
-    sigmoid_x = tl.sigmoid(x.to(tl.float32)).to(x.dtype)
-    silu_x = x * sigmoid_x
-    out = silu_x * y
-    tl.store(OUT_ptr + offsets, out, mask=mask)
-
-
-def fused_swiglu(x, y):
-    out = torch.empty_like(x)
-    N = x.numel()
-    BLOCK_SIZE = 1024
-    grid = ((N + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    _swiglu_fwd_kernel[grid](x, y, out, N, BLOCK_SIZE=BLOCK_SIZE)
-    return out
-
-
 class GraphModule(torch.nn.Module):
     def forward(self, arg0_1: "f32[256, 256][256, 1]cuda:1", arg1_1, arg2_1: "f32[384, 256][256, 1]cuda:1", arg3_1, arg4_1: "f32[72, 256][256, 1]cuda:1", arg5_1, arg6_1: "f32[64][1]cuda:1", arg7_1, arg8_1: "f32[512, 512][512, 1]cuda:1", arg9_1, arg10_1: "f32[32, 2048][2048, 1]cuda:1", arg11_1, arg12_1: "f32[32][1]cuda:1", arg13_1, arg14_1: "f32[32][1]cuda:1", arg15_1, arg16_1: "f32[128, 256][256, 1]cuda:1", arg17_1, arg18_1: "f32[32, 1024][1024, 1]cuda:1", arg19_1, arg20_1: "f32[128, 256][256, 1]cuda:1", arg21_1, arg22_1: "f32[384, 256][256, 1]cuda:1", arg23_1, arg24_1: "f32[72, 256][256, 1]cuda:1", arg25_1, arg26_1: "f32[64][1]cuda:1", arg27_1, arg28_1: "f32[512, 512][512, 1]cuda:1", arg29_1, arg30_1: "f32[32, 2048][2048, 1]cuda:1", arg31_1, arg32_1: "f32[32][1]cuda:1", arg33_1, arg34_1: "f32[32][1]cuda:1", arg35_1, arg36_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg37_1, arg38_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg39_1, arg40_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg41_1, arg42_1: "f32[1, 256][256, 1]cuda:1", arg43_1, arg44_1: "f32[64, 256][256, 1]cuda:1", arg45_1, arg46_1: "f32[32, 512][512, 1]cuda:1", arg47_1, arg48_1: "f32[64, 256][256, 1]cuda:1", arg49_1, arg50_1: "f32[384, 256][256, 1]cuda:1", arg51_1, arg52_1: "f32[72, 256][256, 1]cuda:1", arg53_1, arg54_1: "f32[64][1]cuda:1", arg55_1, arg56_1: "f32[512, 512][512, 1]cuda:1", arg57_1, arg58_1: "f32[32, 2048][2048, 1]cuda:1", arg59_1, arg60_1: "f32[32][1]cuda:1", arg61_1, arg62_1: "f32[32][1]cuda:1", arg63_1, arg64_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg65_1, arg66_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg67_1, arg68_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg69_1, arg70_1: "f32[1, 256][256, 1]cuda:1", arg71_1, arg72_1: "f32[64, 256][256, 1]cuda:1", arg73_1, arg74_1: "f32[32, 512][512, 1]cuda:1", arg75_1, arg76_1: "f32[64, 256][256, 1]cuda:1", arg77_1, arg78_1: "f32[384, 256][256, 1]cuda:1", arg79_1, arg80_1: "f32[72, 256][256, 1]cuda:1", arg81_1, arg82_1: "f32[64][1]cuda:1", arg83_1, arg84_1: "f32[512, 512][512, 1]cuda:1", arg85_1, arg86_1: "f32[32, 2048][2048, 1]cuda:1", arg87_1, arg88_1: "f32[32][1]cuda:1", arg89_1, arg90_1: "f32[32][1]cuda:1", arg91_1, arg92_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg93_1, arg94_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg95_1, arg96_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg97_1, arg98_1: "f32[1, 256][256, 1]cuda:1", arg99_1, arg100_1: "f32[64, 256][256, 1]cuda:1", arg101_1, arg102_1: "f32[32, 512][512, 1]cuda:1", arg103_1, arg104_1: "f32[64, 256][256, 1]cuda:1", arg105_1, arg106_1: "f32[384, 256][256, 1]cuda:1", arg107_1, arg108_1: "f32[72, 256][256, 1]cuda:1", arg109_1, arg110_1: "f32[64][1]cuda:1", arg111_1, arg112_1: "f32[512, 512][512, 1]cuda:1", arg113_1, arg114_1: "f32[32, 2048][2048, 1]cuda:1", arg115_1, arg116_1: "f32[32][1]cuda:1", arg117_1, arg118_1: "f32[32][1]cuda:1", arg119_1, arg120_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg121_1, arg122_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg123_1, arg124_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg125_1, arg126_1: "f32[1, 256][256, 1]cuda:1", arg127_1, arg128_1: "f32[64, 256][256, 1]cuda:1", arg129_1, arg130_1: "f32[32, 512][512, 1]cuda:1", arg131_1, arg132_1: "f32[64, 256][256, 1]cuda:1", arg133_1, arg134_1: "f32[384, 256][256, 1]cuda:1", arg135_1, arg136_1: "f32[72, 256][256, 1]cuda:1", arg137_1, arg138_1: "f32[64][1]cuda:1", arg139_1, arg140_1: "f32[512, 512][512, 1]cuda:1", arg141_1, arg142_1: "f32[32, 2048][2048, 1]cuda:1", arg143_1, arg144_1: "f32[32][1]cuda:1", arg145_1, arg146_1: "f32[32][1]cuda:1", arg147_1, arg148_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg149_1, arg150_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg151_1, arg152_1: "f32[1, 256, 256][65536, 256, 1]cuda:1", arg153_1, arg154_1: "f32[1, 256][256, 1]cuda:1", arg155_1, arg156_1: "f32[64, 256][256, 1]cuda:1", arg157_1, arg158_1: "f32[32, 512][512, 1]cuda:1", arg159_1, arg160_1: "f32[64, 256][256, 1]cuda:1", arg161_1, arg162_1: "f32[32][1]cuda:1", arg163_1, arg164_1: "f32[256, 256][256, 1]cuda:1", arg165_1, arg166_1: "c64[2048, 32][32, 1]cuda:1", arg167_1: "f32[8][1]cuda:1", arg168_1: "f32[8][1]cuda:1", arg169_1: "f32[8][1]cuda:1", arg170_1: "f32[8][1]cuda:1", arg171_1: "f32[8][1]cuda:1", arg172_1: "f32[8][1]cuda:1", arg173_1: "f32[8][1]cuda:1", arg174_1: "f32[8][1]cuda:1", arg175_1: "f32[8][1]cuda:1", arg176_1: "f32[8][1]cuda:1", arg177_1: "i64[8, 2048][2048, 1]cuda:1", arg178_1: "i64[8, 2048][2048, 1]cuda:1", arg179_1):
         # File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
@@ -307,22 +277,22 @@ class GraphModule(torch.nn.Module):
         transpose_3: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.transpose.int(_to_copy_11, -2, -1);  _to_copy_11 = None
         mul_3: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.mul.Scalar(transpose_3, 0.2686424829558855);  transpose_3 = None
         expand_1: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.expand.default(mul_2, [8, 16, 2048, 192]);  mul_2 = None
-        # clone: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_1, memory_format = torch.contiguous_format)
-        _unsafe_view_3: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten.reshape.default(expand_1, [128, 2048, 192]);  clone = None
+        clone: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_1, memory_format = torch.contiguous_format);  expand_1 = None
+        _unsafe_view_3: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone, [128, 2048, 192]);  clone = None
         expand_2: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.expand.default(mul_3, [8, 16, 192, 2048]);  mul_3 = None
-        # clone_1: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_2, memory_format = torch.contiguous_format)
-        _unsafe_view_4: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten.reshape.default(expand_2, [128, 192, 2048]);  clone_1 = None
+        clone_1: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_2, memory_format = torch.contiguous_format);  expand_2 = None
+        _unsafe_view_4: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_1, [128, 192, 2048]);  clone_1 = None
         bmm: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.bmm.default(_unsafe_view_3, _unsafe_view_4)
         _unsafe_view_5: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm, [8, 16, 2048, 2048]);  bmm = None
         add: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.add.Tensor(_unsafe_view_5, where);  _unsafe_view_5 = where = None
         _safe_softmax: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._safe_softmax.default(add, -1);  add = None
         detach_2: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.detach.default(_safe_softmax)
-        # REMOVED dead code: _to_copy_13 (result immediately discarded)
+        _to_copy_13: "bf16[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(_safe_softmax, dtype = torch.bfloat16);  _to_copy_13 = None
         expand_3: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_safe_softmax, [8, 16, 2048, 2048]);  _safe_softmax = None
         view_17: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.view.default(expand_3, [128, 2048, 2048]);  expand_3 = None
         expand_4: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_to_copy_12, [8, 16, 2048, 128]);  _to_copy_12 = None
-        # clone_2: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_4, memory_format = torch.contiguous_format)
-        _unsafe_view_6: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(expand_4, [128, 2048, 128]);  clone_2 = None
+        clone_2: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_4, memory_format = torch.contiguous_format);  expand_4 = None
+        _unsafe_view_6: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_2, [128, 2048, 128]);  clone_2 = None
         bmm_1: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(view_17, _unsafe_view_6)
         _unsafe_view_7: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_1, [8, 16, 2048, 128]);  bmm_1 = None
         _to_copy_14: "bf16[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._to_copy.default(_unsafe_view_7, dtype = torch.bfloat16);  _unsafe_view_7 = None
@@ -401,8 +371,7 @@ class GraphModule(torch.nn.Module):
         _unsafe_view_10: "bf16[8, 2048, 1024][2097152, 1024, 1]cuda:1" = torch.ops.aten._unsafe_view.default(mm_5, [8, 2048, 1024]);  mm_5 = None
 
         # Annotation: {'ac_region_id': 0} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/feed_forward.py:54 in forward, code: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # mul_4: "bf16[8, 2048, 1024][2097152, 1024, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu, _unsafe_view_10)
-        mul_4: "bf16[8, 2048, 1024][2097152, 1024, 1]cuda:1" = fused_swiglu(_unsafe_view_9, _unsafe_view_10)
+        mul_4: "bf16[8, 2048, 1024][2097152, 1024, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu, _unsafe_view_10)
 
         # Annotation: {'ac_region_id': 0} File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
         _to_copy_19: "bf16[32, 1024][1024, 1]cuda:1" = torch.ops.aten._to_copy.default(arg18_1, dtype = torch.bfloat16);  arg18_1 = None
@@ -556,27 +525,30 @@ class GraphModule(torch.nn.Module):
         _to_copy_30: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_6, dtype = torch.float32);  transpose_6 = None
         _to_copy_31: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_7, dtype = torch.float32);  transpose_7 = None
         mul_7: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.mul.Scalar(_to_copy_29, 0.2686424829558855);  _to_copy_29 = None
-        # CACHED: reuse causal mask from first attention layer
-        where_1 = where
+        ones_1: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.ones.default([2048, 2048], dtype = torch.bool, layout = torch.strided, device = device(type='cuda', index=1))
+        tril_1: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.tril.default(ones_1);  ones_1 = None
+        scalar_tensor_2: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(-inf, dtype = torch.float32, device = device(type='cuda', index=1))
+        scalar_tensor_3: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1))
+        where_1: "f32[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.where.self(tril_1, scalar_tensor_3, scalar_tensor_2);  tril_1 = scalar_tensor_3 = scalar_tensor_2 = None
         transpose_8: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.transpose.int(_to_copy_30, -2, -1);  _to_copy_30 = None
         mul_8: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.mul.Scalar(transpose_8, 0.2686424829558855);  transpose_8 = None
         expand_6: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.expand.default(mul_7, [8, 16, 2048, 192]);  mul_7 = None
-        # clone_4: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_6, memory_format = torch.contiguous_format)
-        _unsafe_view_15: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten.reshape.default(expand_6, [128, 2048, 192]);  clone_4 = None
+        clone_4: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_6, memory_format = torch.contiguous_format);  expand_6 = None
+        _unsafe_view_15: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_4, [128, 2048, 192]);  clone_4 = None
         expand_7: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.expand.default(mul_8, [8, 16, 192, 2048]);  mul_8 = None
-        # clone_5: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_7, memory_format = torch.contiguous_format)
-        _unsafe_view_16: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten.reshape.default(expand_7, [128, 192, 2048]);  clone_5 = None
+        clone_5: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_7, memory_format = torch.contiguous_format);  expand_7 = None
+        _unsafe_view_16: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_5, [128, 192, 2048]);  clone_5 = None
         bmm_2: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.bmm.default(_unsafe_view_15, _unsafe_view_16)
         _unsafe_view_17: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_2, [8, 16, 2048, 2048]);  bmm_2 = None
         add_3: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.add.Tensor(_unsafe_view_17, where_1);  _unsafe_view_17 = where_1 = None
         _safe_softmax_1: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._safe_softmax.default(add_3, -1);  add_3 = None
         detach_6: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.detach.default(_safe_softmax_1)
-        # REMOVED dead code: _to_copy_32 (result immediately discarded)
+        _to_copy_32: "bf16[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(_safe_softmax_1, dtype = torch.bfloat16);  _to_copy_32 = None
         expand_8: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_safe_softmax_1, [8, 16, 2048, 2048]);  _safe_softmax_1 = None
         view_44: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.view.default(expand_8, [128, 2048, 2048]);  expand_8 = None
         expand_9: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_to_copy_31, [8, 16, 2048, 128]);  _to_copy_31 = None
-        # clone_6: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_9, memory_format = torch.contiguous_format)
-        _unsafe_view_18: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(expand_9, [128, 2048, 128]);  clone_6 = None
+        clone_6: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_9, memory_format = torch.contiguous_format);  expand_9 = None
+        _unsafe_view_18: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_6, [128, 2048, 128]);  clone_6 = None
         bmm_3: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(view_44, _unsafe_view_18)
         _unsafe_view_19: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_3, [8, 16, 2048, 128]);  bmm_3 = None
         _to_copy_33: "bf16[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._to_copy.default(_unsafe_view_19, dtype = torch.bfloat16);  _unsafe_view_19 = None
@@ -647,7 +619,7 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 1, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:249 in forward, code: _, selected_experts_indices = torch.topk(
         topk = torch.ops.aten.topk.default(add_5, 3, -1, True, False);  add_5 = None
-        # REMOVED dead code: getitem_24 (result immediately discarded)
+        getitem_24: "f32[16384, 3][3, 1]cuda:1" = topk[0];  getitem_24 = None
         getitem_25: "i64[16384, 3][3, 1]cuda:1" = topk[1];  topk = None
 
         # Annotation: {'ac_region_id': 1, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:256 in forward, code: top_scores = scores.gather(dim=1, index=selected_experts_indices)
@@ -662,7 +634,7 @@ class GraphModule(torch.nn.Module):
         histc_1: "i64[8][1]cuda:1" = torch.ops.aten.histc.default(view_52, 8, 0, 8);  view_52 = None
         view_53: "i64[49152][1]cuda:1" = torch.ops.aten.view.default(getitem_25, [-1])
         sort = torch.ops.aten.sort.stable(view_53, stable = True);  view_53 = None
-        # REMOVED dead code: getitem_26 (result immediately discarded)
+        getitem_26: "i64[49152][1]cuda:1" = sort[0];  getitem_26 = None
         getitem_27: "i64[49152][1]cuda:1" = sort[1];  sort = None
 
         # Annotation: {'ac_region_id': 1, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:327 in forward, code: top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
@@ -818,8 +790,7 @@ class GraphModule(torch.nn.Module):
         silu_1: "bf16[u16, 256][256, 1]cuda:1" = torch.ops.aten.silu.default(_grouped_mm)
         transpose_11: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_79, -2, -1);  view_79 = None
         _grouped_mm_1: "bf16[u16, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(index_4, transpose_11, cumsum_2)
-        # mul_10: "bf16[u16, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_1, _grouped_mm_1)
-        mul_10: "bf16[u16, 256][256, 1]cuda:1" = fused_swiglu(_grouped_mm, _grouped_mm_1)
+        mul_10: "bf16[u16, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_1, _grouped_mm_1)
         transpose_12: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_74, -2, -1);  view_74 = None
         _grouped_mm_2: "bf16[u16, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(mul_10, transpose_12, cumsum_2)
         sym_size_int: "Sym(u10 + u11 + u12 + u13 + u14 + u15 + u8 + u9)" = torch.ops.aten.sym_size.int(all_to_all_single_1, 0);  all_to_all_single_1 = None
@@ -862,8 +833,7 @@ class GraphModule(torch.nn.Module):
         mm_13: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mm.default(view_49, t_15)
 
         # Annotation: {'ac_region_id': 1, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/feed_forward.py:54 in forward, code: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # mul_11: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_2, mm_13)
-        mul_11: "bf16[16384, 512][512, 1]cuda:1" = fused_swiglu(mm_12, mm_13)
+        mul_11: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_2, mm_13)
 
         # Annotation: {'ac_region_id': 1, 'EP': 'compute'} File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
         _to_copy_47: "bf16[32, 512][512, 1]cuda:1" = torch.ops.aten._to_copy.default(arg46_1, dtype = torch.bfloat16);  arg46_1 = None
@@ -1035,27 +1005,30 @@ class GraphModule(torch.nn.Module):
         _to_copy_60: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_14, dtype = torch.float32);  transpose_14 = None
         _to_copy_61: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_15, dtype = torch.float32);  transpose_15 = None
         mul_15: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.mul.Scalar(_to_copy_59, 0.2686424829558855);  _to_copy_59 = None
-        # CACHED: reuse causal mask from first attention layer
-        where_2 = where
+        ones_2: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.ones.default([2048, 2048], dtype = torch.bool, layout = torch.strided, device = device(type='cuda', index=1))
+        tril_2: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.tril.default(ones_2);  ones_2 = None
+        scalar_tensor_4: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(-inf, dtype = torch.float32, device = device(type='cuda', index=1))
+        scalar_tensor_5: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1))
+        where_2: "f32[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.where.self(tril_2, scalar_tensor_5, scalar_tensor_4);  tril_2 = scalar_tensor_5 = scalar_tensor_4 = None
         transpose_16: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.transpose.int(_to_copy_60, -2, -1);  _to_copy_60 = None
         mul_16: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.mul.Scalar(transpose_16, 0.2686424829558855);  transpose_16 = None
         expand_12: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.expand.default(mul_15, [8, 16, 2048, 192]);  mul_15 = None
-        # clone_8: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_12, memory_format = torch.contiguous_format)
-        _unsafe_view_24: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten.reshape.default(expand_12, [128, 2048, 192]);  clone_8 = None
+        clone_8: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_12, memory_format = torch.contiguous_format);  expand_12 = None
+        _unsafe_view_24: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_8, [128, 2048, 192]);  clone_8 = None
         expand_13: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.expand.default(mul_16, [8, 16, 192, 2048]);  mul_16 = None
-        # clone_9: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_13, memory_format = torch.contiguous_format)
-        _unsafe_view_25: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten.reshape.default(expand_13, [128, 192, 2048]);  clone_9 = None
+        clone_9: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_13, memory_format = torch.contiguous_format);  expand_13 = None
+        _unsafe_view_25: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_9, [128, 192, 2048]);  clone_9 = None
         bmm_4: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.bmm.default(_unsafe_view_24, _unsafe_view_25)
         _unsafe_view_26: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_4, [8, 16, 2048, 2048]);  bmm_4 = None
         add_8: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.add.Tensor(_unsafe_view_26, where_2);  _unsafe_view_26 = where_2 = None
         _safe_softmax_2: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._safe_softmax.default(add_8, -1);  add_8 = None
         detach_11: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.detach.default(_safe_softmax_2)
-        # REMOVED dead code: _to_copy_62 (result immediately discarded)
+        _to_copy_62: "bf16[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(_safe_softmax_2, dtype = torch.bfloat16);  _to_copy_62 = None
         expand_14: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_safe_softmax_2, [8, 16, 2048, 2048]);  _safe_softmax_2 = None
         view_102: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.view.default(expand_14, [128, 2048, 2048]);  expand_14 = None
         expand_15: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_to_copy_61, [8, 16, 2048, 128]);  _to_copy_61 = None
-        # clone_10: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_15, memory_format = torch.contiguous_format)
-        _unsafe_view_27: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(expand_15, [128, 2048, 128]);  clone_10 = None
+        clone_10: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_15, memory_format = torch.contiguous_format);  expand_15 = None
+        _unsafe_view_27: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_10, [128, 2048, 128]);  clone_10 = None
         bmm_5: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(view_102, _unsafe_view_27)
         _unsafe_view_28: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_5, [8, 16, 2048, 128]);  bmm_5 = None
         _to_copy_63: "bf16[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._to_copy.default(_unsafe_view_28, dtype = torch.bfloat16);  _unsafe_view_28 = None
@@ -1126,7 +1099,7 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 2, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:249 in forward, code: _, selected_experts_indices = torch.topk(
         topk_1 = torch.ops.aten.topk.default(add_10, 3, -1, True, False);  add_10 = None
-        # REMOVED dead code: getitem_56 (result immediately discarded)
+        getitem_56: "f32[16384, 3][3, 1]cuda:1" = topk_1[0];  getitem_56 = None
         getitem_57: "i64[16384, 3][3, 1]cuda:1" = topk_1[1];  topk_1 = None
 
         # Annotation: {'ac_region_id': 2, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:256 in forward, code: top_scores = scores.gather(dim=1, index=selected_experts_indices)
@@ -1141,7 +1114,7 @@ class GraphModule(torch.nn.Module):
         histc_3: "i64[8][1]cuda:1" = torch.ops.aten.histc.default(view_110, 8, 0, 8);  view_110 = None
         view_111: "i64[49152][1]cuda:1" = torch.ops.aten.view.default(getitem_57, [-1])
         sort_1 = torch.ops.aten.sort.stable(view_111, stable = True);  view_111 = None
-        # REMOVED dead code: getitem_58 (result immediately discarded)
+        getitem_58: "i64[49152][1]cuda:1" = sort_1[0];  getitem_58 = None
         getitem_59: "i64[49152][1]cuda:1" = sort_1[1];  sort_1 = None
 
         # Annotation: {'ac_region_id': 2, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:327 in forward, code: top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
@@ -1297,8 +1270,7 @@ class GraphModule(torch.nn.Module):
         silu_3: "bf16[u34, 256][256, 1]cuda:1" = torch.ops.aten.silu.default(_grouped_mm_3)
         transpose_19: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_137, -2, -1);  view_137 = None
         _grouped_mm_4: "bf16[u34, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(index_9, transpose_19, cumsum_5)
-        # mul_18: "bf16[u34, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_3, _grouped_mm_4)
-        mul_18: "bf16[u34, 256][256, 1]cuda:1" = fused_swiglu(_grouped_mm_3, _grouped_mm_4)
+        mul_18: "bf16[u34, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_3, _grouped_mm_4)
         transpose_20: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_132, -2, -1);  view_132 = None
         _grouped_mm_5: "bf16[u34, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(mul_18, transpose_20, cumsum_5)
         sym_size_int_1: "Sym(u26 + u27 + u28 + u29 + u30 + u31 + u32 + u33)" = torch.ops.aten.sym_size.int(all_to_all_single_4, 0);  all_to_all_single_4 = None
@@ -1341,8 +1313,7 @@ class GraphModule(torch.nn.Module):
         mm_21: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mm.default(view_107, t_25)
 
         # Annotation: {'ac_region_id': 2, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/feed_forward.py:54 in forward, code: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # mul_19: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_4, mm_21)
-        mul_19: "bf16[16384, 512][512, 1]cuda:1" = fused_swiglu(mm_20, mm_21)
+        mul_19: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_4, mm_21)
 
         # Annotation: {'ac_region_id': 2, 'EP': 'compute'} File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
         _to_copy_77: "bf16[32, 512][512, 1]cuda:1" = torch.ops.aten._to_copy.default(arg74_1, dtype = torch.bfloat16);  arg74_1 = None
@@ -1514,27 +1485,30 @@ class GraphModule(torch.nn.Module):
         _to_copy_90: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_22, dtype = torch.float32);  transpose_22 = None
         _to_copy_91: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_23, dtype = torch.float32);  transpose_23 = None
         mul_23: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.mul.Scalar(_to_copy_89, 0.2686424829558855);  _to_copy_89 = None
-        # CACHED: reuse causal mask from first attention layer
-        where_3 = where
+        ones_3: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.ones.default([2048, 2048], dtype = torch.bool, layout = torch.strided, device = device(type='cuda', index=1))
+        tril_3: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.tril.default(ones_3);  ones_3 = None
+        scalar_tensor_6: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(-inf, dtype = torch.float32, device = device(type='cuda', index=1))
+        scalar_tensor_7: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1))
+        where_3: "f32[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.where.self(tril_3, scalar_tensor_7, scalar_tensor_6);  tril_3 = scalar_tensor_7 = scalar_tensor_6 = None
         transpose_24: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.transpose.int(_to_copy_90, -2, -1);  _to_copy_90 = None
         mul_24: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.mul.Scalar(transpose_24, 0.2686424829558855);  transpose_24 = None
         expand_18: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.expand.default(mul_23, [8, 16, 2048, 192]);  mul_23 = None
-        # clone_12: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_18, memory_format = torch.contiguous_format)
-        _unsafe_view_33: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten.reshape.default(expand_18, [128, 2048, 192]);  clone_12 = None
+        clone_12: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_18, memory_format = torch.contiguous_format);  expand_18 = None
+        _unsafe_view_33: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_12, [128, 2048, 192]);  clone_12 = None
         expand_19: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.expand.default(mul_24, [8, 16, 192, 2048]);  mul_24 = None
-        # clone_13: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_19, memory_format = torch.contiguous_format)
-        _unsafe_view_34: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten.reshape.default(expand_19, [128, 192, 2048]);  clone_13 = None
+        clone_13: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_19, memory_format = torch.contiguous_format);  expand_19 = None
+        _unsafe_view_34: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_13, [128, 192, 2048]);  clone_13 = None
         bmm_6: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.bmm.default(_unsafe_view_33, _unsafe_view_34)
         _unsafe_view_35: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_6, [8, 16, 2048, 2048]);  bmm_6 = None
         add_13: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.add.Tensor(_unsafe_view_35, where_3);  _unsafe_view_35 = where_3 = None
         _safe_softmax_3: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._safe_softmax.default(add_13, -1);  add_13 = None
         detach_16: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.detach.default(_safe_softmax_3)
-        # REMOVED dead code: _to_copy_92 (result immediately discarded)
+        _to_copy_92: "bf16[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(_safe_softmax_3, dtype = torch.bfloat16);  _to_copy_92 = None
         expand_20: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_safe_softmax_3, [8, 16, 2048, 2048]);  _safe_softmax_3 = None
         view_160: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.view.default(expand_20, [128, 2048, 2048]);  expand_20 = None
         expand_21: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_to_copy_91, [8, 16, 2048, 128]);  _to_copy_91 = None
-        # clone_14: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_21, memory_format = torch.contiguous_format)
-        _unsafe_view_36: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(expand_21, [128, 2048, 128]);  clone_14 = None
+        clone_14: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_21, memory_format = torch.contiguous_format);  expand_21 = None
+        _unsafe_view_36: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_14, [128, 2048, 128]);  clone_14 = None
         bmm_7: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(view_160, _unsafe_view_36)
         _unsafe_view_37: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_7, [8, 16, 2048, 128]);  bmm_7 = None
         _to_copy_93: "bf16[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._to_copy.default(_unsafe_view_37, dtype = torch.bfloat16);  _unsafe_view_37 = None
@@ -1605,7 +1579,7 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 3, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:249 in forward, code: _, selected_experts_indices = torch.topk(
         topk_2 = torch.ops.aten.topk.default(add_15, 3, -1, True, False);  add_15 = None
-        # REMOVED dead code: getitem_88 (result immediately discarded)
+        getitem_88: "f32[16384, 3][3, 1]cuda:1" = topk_2[0];  getitem_88 = None
         getitem_89: "i64[16384, 3][3, 1]cuda:1" = topk_2[1];  topk_2 = None
 
         # Annotation: {'ac_region_id': 3, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:256 in forward, code: top_scores = scores.gather(dim=1, index=selected_experts_indices)
@@ -1620,7 +1594,7 @@ class GraphModule(torch.nn.Module):
         histc_5: "i64[8][1]cuda:1" = torch.ops.aten.histc.default(view_168, 8, 0, 8);  view_168 = None
         view_169: "i64[49152][1]cuda:1" = torch.ops.aten.view.default(getitem_89, [-1])
         sort_2 = torch.ops.aten.sort.stable(view_169, stable = True);  view_169 = None
-        # REMOVED dead code: getitem_90 (result immediately discarded)
+        getitem_90: "i64[49152][1]cuda:1" = sort_2[0];  getitem_90 = None
         getitem_91: "i64[49152][1]cuda:1" = sort_2[1];  sort_2 = None
 
         # Annotation: {'ac_region_id': 3, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:327 in forward, code: top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
@@ -1776,8 +1750,7 @@ class GraphModule(torch.nn.Module):
         silu_5: "bf16[u52, 256][256, 1]cuda:1" = torch.ops.aten.silu.default(_grouped_mm_6)
         transpose_27: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_195, -2, -1);  view_195 = None
         _grouped_mm_7: "bf16[u52, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(index_14, transpose_27, cumsum_8)
-        # mul_26: "bf16[u52, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_5, _grouped_mm_7)
-        mul_26: "bf16[u52, 256][256, 1]cuda:1" = fused_swiglu(_grouped_mm_6, _grouped_mm_7)
+        mul_26: "bf16[u52, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_5, _grouped_mm_7)
         transpose_28: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_190, -2, -1);  view_190 = None
         _grouped_mm_8: "bf16[u52, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(mul_26, transpose_28, cumsum_8)
         sym_size_int_2: "Sym(u44 + u45 + u46 + u47 + u48 + u49 + u50 + u51)" = torch.ops.aten.sym_size.int(all_to_all_single_7, 0);  all_to_all_single_7 = None
@@ -1820,8 +1793,7 @@ class GraphModule(torch.nn.Module):
         mm_29: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mm.default(view_165, t_35)
 
         # Annotation: {'ac_region_id': 3, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/feed_forward.py:54 in forward, code: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # mul_27: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_6, mm_29)
-        mul_27: "bf16[16384, 512][512, 1]cuda:1" = fused_swiglu(mm_28, mm_29)
+        mul_27: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_6, mm_29)
 
         # Annotation: {'ac_region_id': 3, 'EP': 'compute'} File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
         _to_copy_107: "bf16[32, 512][512, 1]cuda:1" = torch.ops.aten._to_copy.default(arg102_1, dtype = torch.bfloat16);  arg102_1 = None
@@ -1993,27 +1965,30 @@ class GraphModule(torch.nn.Module):
         _to_copy_120: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_30, dtype = torch.float32);  transpose_30 = None
         _to_copy_121: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_31, dtype = torch.float32);  transpose_31 = None
         mul_31: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.mul.Scalar(_to_copy_119, 0.2686424829558855);  _to_copy_119 = None
-        # CACHED: reuse causal mask from first attention layer
-        where_4 = where
+        ones_4: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.ones.default([2048, 2048], dtype = torch.bool, layout = torch.strided, device = device(type='cuda', index=1))
+        tril_4: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.tril.default(ones_4);  ones_4 = None
+        scalar_tensor_8: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(-inf, dtype = torch.float32, device = device(type='cuda', index=1))
+        scalar_tensor_9: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1))
+        where_4: "f32[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.where.self(tril_4, scalar_tensor_9, scalar_tensor_8);  tril_4 = scalar_tensor_9 = scalar_tensor_8 = None
         transpose_32: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.transpose.int(_to_copy_120, -2, -1);  _to_copy_120 = None
         mul_32: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.mul.Scalar(transpose_32, 0.2686424829558855);  transpose_32 = None
         expand_24: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.expand.default(mul_31, [8, 16, 2048, 192]);  mul_31 = None
-        # clone_16: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_24, memory_format = torch.contiguous_format)
-        _unsafe_view_42: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten.reshape.default(expand_24, [128, 2048, 192]);  clone_16 = None
+        clone_16: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_24, memory_format = torch.contiguous_format);  expand_24 = None
+        _unsafe_view_42: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_16, [128, 2048, 192]);  clone_16 = None
         expand_25: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.expand.default(mul_32, [8, 16, 192, 2048]);  mul_32 = None
-        # clone_17: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_25, memory_format = torch.contiguous_format)
-        _unsafe_view_43: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten.reshape.default(expand_25, [128, 192, 2048]);  clone_17 = None
+        clone_17: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_25, memory_format = torch.contiguous_format);  expand_25 = None
+        _unsafe_view_43: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_17, [128, 192, 2048]);  clone_17 = None
         bmm_8: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.bmm.default(_unsafe_view_42, _unsafe_view_43)
         _unsafe_view_44: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_8, [8, 16, 2048, 2048]);  bmm_8 = None
         add_18: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.add.Tensor(_unsafe_view_44, where_4);  _unsafe_view_44 = where_4 = None
         _safe_softmax_4: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._safe_softmax.default(add_18, -1);  add_18 = None
         detach_21: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.detach.default(_safe_softmax_4)
-        # REMOVED dead code: _to_copy_122 (result immediately discarded)
+        _to_copy_122: "bf16[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(_safe_softmax_4, dtype = torch.bfloat16);  _to_copy_122 = None
         expand_26: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_safe_softmax_4, [8, 16, 2048, 2048]);  _safe_softmax_4 = None
         view_218: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.view.default(expand_26, [128, 2048, 2048]);  expand_26 = None
         expand_27: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_to_copy_121, [8, 16, 2048, 128]);  _to_copy_121 = None
-        # clone_18: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_27, memory_format = torch.contiguous_format)
-        _unsafe_view_45: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(expand_27, [128, 2048, 128]);  clone_18 = None
+        clone_18: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_27, memory_format = torch.contiguous_format);  expand_27 = None
+        _unsafe_view_45: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_18, [128, 2048, 128]);  clone_18 = None
         bmm_9: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(view_218, _unsafe_view_45)
         _unsafe_view_46: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_9, [8, 16, 2048, 128]);  bmm_9 = None
         _to_copy_123: "bf16[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._to_copy.default(_unsafe_view_46, dtype = torch.bfloat16);  _unsafe_view_46 = None
@@ -2084,7 +2059,7 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 4, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:249 in forward, code: _, selected_experts_indices = torch.topk(
         topk_3 = torch.ops.aten.topk.default(add_20, 3, -1, True, False);  add_20 = None
-        # REMOVED dead code: getitem_120 (result immediately discarded)
+        getitem_120: "f32[16384, 3][3, 1]cuda:1" = topk_3[0];  getitem_120 = None
         getitem_121: "i64[16384, 3][3, 1]cuda:1" = topk_3[1];  topk_3 = None
 
         # Annotation: {'ac_region_id': 4, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:256 in forward, code: top_scores = scores.gather(dim=1, index=selected_experts_indices)
@@ -2099,7 +2074,7 @@ class GraphModule(torch.nn.Module):
         histc_7: "i64[8][1]cuda:1" = torch.ops.aten.histc.default(view_226, 8, 0, 8);  view_226 = None
         view_227: "i64[49152][1]cuda:1" = torch.ops.aten.view.default(getitem_121, [-1])
         sort_3 = torch.ops.aten.sort.stable(view_227, stable = True);  view_227 = None
-        # REMOVED dead code: getitem_122 (result immediately discarded)
+        getitem_122: "i64[49152][1]cuda:1" = sort_3[0];  getitem_122 = None
         getitem_123: "i64[49152][1]cuda:1" = sort_3[1];  sort_3 = None
 
         # Annotation: {'ac_region_id': 4, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:327 in forward, code: top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
@@ -2255,8 +2230,7 @@ class GraphModule(torch.nn.Module):
         silu_7: "bf16[u70, 256][256, 1]cuda:1" = torch.ops.aten.silu.default(_grouped_mm_9)
         transpose_35: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_253, -2, -1);  view_253 = None
         _grouped_mm_10: "bf16[u70, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(index_19, transpose_35, cumsum_11)
-        # mul_34: "bf16[u70, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_7, _grouped_mm_10)
-        mul_34: "bf16[u70, 256][256, 1]cuda:1" = fused_swiglu(_grouped_mm_9, _grouped_mm_10)
+        mul_34: "bf16[u70, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_7, _grouped_mm_10)
         transpose_36: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_248, -2, -1);  view_248 = None
         _grouped_mm_11: "bf16[u70, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(mul_34, transpose_36, cumsum_11)
         sym_size_int_3: "Sym(u62 + u63 + u64 + u65 + u66 + u67 + u68 + u69)" = torch.ops.aten.sym_size.int(all_to_all_single_10, 0);  all_to_all_single_10 = None
@@ -2299,8 +2273,7 @@ class GraphModule(torch.nn.Module):
         mm_37: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mm.default(view_223, t_45)
 
         # Annotation: {'ac_region_id': 4, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/feed_forward.py:54 in forward, code: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # mul_35: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_8, mm_37)
-        mul_35: "bf16[16384, 512][512, 1]cuda:1" = fused_swiglu(mm_36, mm_37)
+        mul_35: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_8, mm_37)
 
         # Annotation: {'ac_region_id': 4, 'EP': 'compute'} File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
         _to_copy_137: "bf16[32, 512][512, 1]cuda:1" = torch.ops.aten._to_copy.default(arg130_1, dtype = torch.bfloat16);  arg130_1 = None
@@ -2472,27 +2445,30 @@ class GraphModule(torch.nn.Module):
         _to_copy_150: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_38, dtype = torch.float32);  transpose_38 = None
         _to_copy_151: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_39, dtype = torch.float32);  transpose_39 = None
         mul_39: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.mul.Scalar(_to_copy_149, 0.2686424829558855);  _to_copy_149 = None
-        # CACHED: reuse causal mask from first attention layer
-        where_5 = where
+        ones_5: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.ones.default([2048, 2048], dtype = torch.bool, layout = torch.strided, device = device(type='cuda', index=1))
+        tril_5: "b8[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.tril.default(ones_5);  ones_5 = None
+        scalar_tensor_10: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(-inf, dtype = torch.float32, device = device(type='cuda', index=1))
+        scalar_tensor_11: "f32[][]cuda:1" = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1))
+        where_5: "f32[2048, 2048][2048, 1]cuda:1" = torch.ops.aten.where.self(tril_5, scalar_tensor_11, scalar_tensor_10);  tril_5 = scalar_tensor_11 = scalar_tensor_10 = None
         transpose_40: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.transpose.int(_to_copy_150, -2, -1);  _to_copy_150 = None
         mul_40: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.mul.Scalar(transpose_40, 0.2686424829558855);  transpose_40 = None
         expand_30: "f32[8, 16, 2048, 192][6291456, 192, 3072, 1]cuda:1" = torch.ops.aten.expand.default(mul_39, [8, 16, 2048, 192]);  mul_39 = None
-        # clone_20: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_30, memory_format = torch.contiguous_format)
-        _unsafe_view_51: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten.reshape.default(expand_30, [128, 2048, 192]);  clone_20 = None
+        clone_20: "f32[8, 16, 2048, 192][6291456, 393216, 192, 1]cuda:1" = torch.ops.aten.clone.default(expand_30, memory_format = torch.contiguous_format);  expand_30 = None
+        _unsafe_view_51: "f32[128, 2048, 192][393216, 192, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_20, [128, 2048, 192]);  clone_20 = None
         expand_31: "f32[8, 16, 192, 2048][6291456, 192, 1, 3072]cuda:1" = torch.ops.aten.expand.default(mul_40, [8, 16, 192, 2048]);  mul_40 = None
-        # clone_21: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_31, memory_format = torch.contiguous_format)
-        _unsafe_view_52: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten.reshape.default(expand_31, [128, 192, 2048]);  clone_21 = None
+        clone_21: "f32[8, 16, 192, 2048][6291456, 393216, 2048, 1]cuda:1" = torch.ops.aten.clone.default(expand_31, memory_format = torch.contiguous_format);  expand_31 = None
+        _unsafe_view_52: "f32[128, 192, 2048][393216, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_21, [128, 192, 2048]);  clone_21 = None
         bmm_10: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.bmm.default(_unsafe_view_51, _unsafe_view_52)
         _unsafe_view_53: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_10, [8, 16, 2048, 2048]);  bmm_10 = None
         add_23: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.add.Tensor(_unsafe_view_53, where_5);  _unsafe_view_53 = where_5 = None
         _safe_softmax_5: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._safe_softmax.default(add_23, -1);  add_23 = None
         detach_26: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.detach.default(_safe_softmax_5)
-        # REMOVED dead code: _to_copy_152 (result immediately discarded)
+        _to_copy_152: "bf16[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(_safe_softmax_5, dtype = torch.bfloat16);  _to_copy_152 = None
         expand_32: "f32[8, 16, 2048, 2048][67108864, 4194304, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_safe_softmax_5, [8, 16, 2048, 2048]);  _safe_softmax_5 = None
         view_276: "f32[128, 2048, 2048][4194304, 2048, 1]cuda:1" = torch.ops.aten.view.default(expand_32, [128, 2048, 2048]);  expand_32 = None
         expand_33: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten.expand.default(_to_copy_151, [8, 16, 2048, 128]);  _to_copy_151 = None
-        # clone_22: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_33, memory_format = torch.contiguous_format)
-        _unsafe_view_54: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(expand_33, [128, 2048, 128]);  clone_22 = None
+        clone_22: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(expand_33, memory_format = torch.contiguous_format);  expand_33 = None
+        _unsafe_view_54: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_22, [128, 2048, 128]);  clone_22 = None
         bmm_11: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(view_276, _unsafe_view_54)
         _unsafe_view_55: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(bmm_11, [8, 16, 2048, 128]);  bmm_11 = None
         _to_copy_153: "bf16[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten._to_copy.default(_unsafe_view_55, dtype = torch.bfloat16);  _unsafe_view_55 = None
@@ -2563,7 +2539,7 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 5, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:249 in forward, code: _, selected_experts_indices = torch.topk(
         topk_4 = torch.ops.aten.topk.default(add_25, 3, -1, True, False);  add_25 = None
-        # REMOVED dead code: getitem_152 (result immediately discarded)
+        getitem_152: "f32[16384, 3][3, 1]cuda:1" = topk_4[0];  getitem_152 = None
         getitem_153: "i64[16384, 3][3, 1]cuda:1" = topk_4[1];  topk_4 = None
 
         # Annotation: {'ac_region_id': 5, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:256 in forward, code: top_scores = scores.gather(dim=1, index=selected_experts_indices)
@@ -2578,7 +2554,7 @@ class GraphModule(torch.nn.Module):
         histc_9: "i64[8][1]cuda:1" = torch.ops.aten.histc.default(view_284, 8, 0, 8);  view_284 = None
         view_285: "i64[49152][1]cuda:1" = torch.ops.aten.view.default(getitem_153, [-1])
         sort_4 = torch.ops.aten.sort.stable(view_285, stable = True);  view_285 = None
-        # REMOVED dead code: getitem_154 (result immediately discarded)
+        getitem_154: "i64[49152][1]cuda:1" = sort_4[0];  getitem_154 = None
         getitem_155: "i64[49152][1]cuda:1" = sort_4[1];  sort_4 = None
 
         # Annotation: {'ac_region_id': 5, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/moe.py:327 in forward, code: top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
@@ -2734,8 +2710,7 @@ class GraphModule(torch.nn.Module):
         silu_9: "bf16[u88, 256][256, 1]cuda:1" = torch.ops.aten.silu.default(_grouped_mm_12)
         transpose_43: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_311, -2, -1);  view_311 = None
         _grouped_mm_13: "bf16[u88, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(index_24, transpose_43, cumsum_14)
-        # mul_42: "bf16[u88, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_9, _grouped_mm_13)
-        mul_42: "bf16[u88, 256][256, 1]cuda:1" = fused_swiglu(_grouped_mm_12, _grouped_mm_13)
+        mul_42: "bf16[u88, 256][256, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_9, _grouped_mm_13)
         transpose_44: "bf16[1, 256, 256][65536, 1, 256]cuda:1" = torch.ops.aten.transpose.int(view_306, -2, -1);  view_306 = None
         _grouped_mm_14: "bf16[u88, 256][256, 1]cuda:1" = torch.ops.aten._grouped_mm.default(mul_42, transpose_44, cumsum_14)
         sym_size_int_4: "Sym(u80 + u81 + u82 + u83 + u84 + u85 + u86 + u87)" = torch.ops.aten.sym_size.int(all_to_all_single_13, 0);  all_to_all_single_13 = None
@@ -2778,8 +2753,7 @@ class GraphModule(torch.nn.Module):
         mm_45: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mm.default(view_281, t_55)
 
         # Annotation: {'ac_region_id': 5, 'EP': 'compute'} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/feed_forward.py:54 in forward, code: return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # mul_43: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_10, mm_45)
-        mul_43: "bf16[16384, 512][512, 1]cuda:1" = fused_swiglu(mm_44, mm_45)
+        mul_43: "bf16[16384, 512][512, 1]cuda:1" = torch.ops.aten.mul.Tensor(silu_10, mm_45)
 
         # Annotation: {'ac_region_id': 5, 'EP': 'compute'} File: /home/bobren/local/a/pytorch/torch/distributed/tensor/_redistribute.py:1835 in forward, code: local_tensor = input._local_tensor.to(dtype=forward_dtype)
         _to_copy_167: "bf16[32, 512][512, 1]cuda:1" = torch.ops.aten._to_copy.default(arg158_1, dtype = torch.bfloat16);  arg158_1 = None
@@ -3154,8 +3128,8 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 5} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/attention.py:375 in forward, code: out = F.scaled_dot_product_attention(
         _to_copy_218: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_57, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1));  transpose_57 = None
-        # clone_24: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_218, memory_format = torch.contiguous_format)
-        _unsafe_view_58: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(_to_copy_218, [128, 2048, 128]);  clone_24 = None
+        clone_24: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_218, memory_format = torch.contiguous_format);  _to_copy_218 = None
+        _unsafe_view_58: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_24, [128, 2048, 128]);  clone_24 = None
         transpose_58: "f32[128, 2048, 2048][4194304, 1, 2048]cuda:1" = torch.ops.aten.transpose.int(view_276, 1, 2);  view_276 = None
         bmm_12: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(transpose_58, _unsafe_view_58);  transpose_58 = None
         transpose_59: "f32[128, 128, 2048][262144, 1, 128]cuda:1" = torch.ops.aten.transpose.int(_unsafe_view_54, 1, 2);  _unsafe_view_54 = None
@@ -3586,8 +3560,8 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 4} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/attention.py:375 in forward, code: out = F.scaled_dot_product_attention(
         _to_copy_276: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_78, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1));  transpose_78 = None
-        # clone_28: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_276, memory_format = torch.contiguous_format)
-        _unsafe_view_59: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(_to_copy_276, [128, 2048, 128]);  clone_28 = None
+        clone_28: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_276, memory_format = torch.contiguous_format);  _to_copy_276 = None
+        _unsafe_view_59: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_28, [128, 2048, 128]);  clone_28 = None
         transpose_79: "f32[128, 2048, 2048][4194304, 1, 2048]cuda:1" = torch.ops.aten.transpose.int(view_218, 1, 2);  view_218 = None
         bmm_16: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(transpose_79, _unsafe_view_59);  transpose_79 = None
         transpose_80: "f32[128, 128, 2048][262144, 1, 128]cuda:1" = torch.ops.aten.transpose.int(_unsafe_view_45, 1, 2);  _unsafe_view_45 = None
@@ -4018,8 +3992,8 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 3} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/attention.py:375 in forward, code: out = F.scaled_dot_product_attention(
         _to_copy_330: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_99, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1));  transpose_99 = None
-        # clone_32: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_330, memory_format = torch.contiguous_format)
-        _unsafe_view_60: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(_to_copy_330, [128, 2048, 128]);  clone_32 = None
+        clone_32: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_330, memory_format = torch.contiguous_format);  _to_copy_330 = None
+        _unsafe_view_60: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_32, [128, 2048, 128]);  clone_32 = None
         transpose_100: "f32[128, 2048, 2048][4194304, 1, 2048]cuda:1" = torch.ops.aten.transpose.int(view_160, 1, 2);  view_160 = None
         bmm_20: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(transpose_100, _unsafe_view_60);  transpose_100 = None
         transpose_101: "f32[128, 128, 2048][262144, 1, 128]cuda:1" = torch.ops.aten.transpose.int(_unsafe_view_36, 1, 2);  _unsafe_view_36 = None
@@ -4450,8 +4424,8 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 2} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/attention.py:375 in forward, code: out = F.scaled_dot_product_attention(
         _to_copy_384: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_120, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1));  transpose_120 = None
-        # clone_36: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_384, memory_format = torch.contiguous_format)
-        _unsafe_view_61: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(_to_copy_384, [128, 2048, 128]);  clone_36 = None
+        clone_36: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_384, memory_format = torch.contiguous_format);  _to_copy_384 = None
+        _unsafe_view_61: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_36, [128, 2048, 128]);  clone_36 = None
         transpose_121: "f32[128, 2048, 2048][4194304, 1, 2048]cuda:1" = torch.ops.aten.transpose.int(view_102, 1, 2);  view_102 = None
         bmm_24: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(transpose_121, _unsafe_view_61);  transpose_121 = None
         transpose_122: "f32[128, 128, 2048][262144, 1, 128]cuda:1" = torch.ops.aten.transpose.int(_unsafe_view_27, 1, 2);  _unsafe_view_27 = None
@@ -4882,8 +4856,8 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 1} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/attention.py:375 in forward, code: out = F.scaled_dot_product_attention(
         _to_copy_438: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_141, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1));  transpose_141 = None
-        # clone_40: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_438, memory_format = torch.contiguous_format)
-        _unsafe_view_62: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(_to_copy_438, [128, 2048, 128]);  clone_40 = None
+        clone_40: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_438, memory_format = torch.contiguous_format);  _to_copy_438 = None
+        _unsafe_view_62: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_40, [128, 2048, 128]);  clone_40 = None
         transpose_142: "f32[128, 2048, 2048][4194304, 1, 2048]cuda:1" = torch.ops.aten.transpose.int(view_44, 1, 2);  view_44 = None
         bmm_28: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(transpose_142, _unsafe_view_62);  transpose_142 = None
         transpose_143: "f32[128, 128, 2048][262144, 1, 128]cuda:1" = torch.ops.aten.transpose.int(_unsafe_view_18, 1, 2);  _unsafe_view_18 = None
@@ -5178,8 +5152,8 @@ class GraphModule(torch.nn.Module):
 
         # Annotation: {'ac_region_id': 0} File: /home/bobren/local/a/torchtitan/torchtitan/models/common/attention.py:375 in forward, code: out = F.scaled_dot_product_attention(
         _to_copy_478: "f32[8, 16, 2048, 128][4194304, 128, 2048, 1]cuda:1" = torch.ops.aten._to_copy.default(transpose_150, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=1));  transpose_150 = None
-        # clone_44: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_478, memory_format = torch.contiguous_format)
-        _unsafe_view_63: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.reshape.default(_to_copy_478, [128, 2048, 128]);  clone_44 = None
+        clone_44: "f32[8, 16, 2048, 128][4194304, 262144, 128, 1]cuda:1" = torch.ops.aten.clone.default(_to_copy_478, memory_format = torch.contiguous_format);  _to_copy_478 = None
+        _unsafe_view_63: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten._unsafe_view.default(clone_44, [128, 2048, 128]);  clone_44 = None
         transpose_151: "f32[128, 2048, 2048][4194304, 1, 2048]cuda:1" = torch.ops.aten.transpose.int(view_17, 1, 2);  view_17 = None
         bmm_32: "f32[128, 2048, 128][262144, 128, 1]cuda:1" = torch.ops.aten.bmm.default(transpose_151, _unsafe_view_63);  transpose_151 = None
         transpose_152: "f32[128, 128, 2048][262144, 1, 128]cuda:1" = torch.ops.aten.transpose.int(_unsafe_view_6, 1, 2);  _unsafe_view_6 = None
