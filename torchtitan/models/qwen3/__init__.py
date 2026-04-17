@@ -254,18 +254,6 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _debugmodel_flex() -> Qwen3Model.Config:
-    return _debugmodel(attn_backend="flex")
-
-
-def _debugmodel_flex_flash() -> Qwen3Model.Config:
-    return _debugmodel(attn_backend="flex_flash")
-
-
-def _debugmodel_varlen() -> Qwen3Model.Config:
-    return _debugmodel(attn_backend="varlen")
-
-
 def _0_6b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
@@ -450,10 +438,6 @@ def _14b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _14b_varlen() -> Qwen3Model.Config:
-    return _14b(attn_backend="varlen")
-
-
 def _32b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
@@ -618,15 +602,11 @@ def _235b_a22b(
 qwen3_configs = {
     "debugmodel": _debugmodel,
     "debugmodel_fused_qkv": _debugmodel_fused_qkv,
-    "debugmodel_flex": _debugmodel_flex,
-    "debugmodel_flex_flash": _debugmodel_flex_flash,
-    "debugmodel_varlen": _debugmodel_varlen,
     "0.6B": _0_6b,
     "1.7B": _1_7b,
     "4B": _4b,
     "8B": _8b,
     "14B": _14b,
-    "14B_varlen": _14b_varlen,
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,

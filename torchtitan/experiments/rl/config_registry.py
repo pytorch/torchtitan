@@ -109,7 +109,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
-    model_spec = model_registry("14B_varlen")
+    model_spec = model_registry("14B", attn_backend="varlen")
     return RLTrainer.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
