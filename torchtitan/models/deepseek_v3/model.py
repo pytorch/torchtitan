@@ -223,18 +223,6 @@ class DeepSeekV3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    if parallelism.expert_parallel_comm_backend in (
-                        "deepep",
-                        "hybridep",
-                    ):
-                        from torchtitan.models.common.moe_deepep import DeepEPMoE
-
-                        init_kwargs = {
-                            f.name: getattr(layer_cfg.moe, f.name)
-                            for f in dataclasses.fields(layer_cfg.moe)
-                            if f.init
-                        }
-                        layer_cfg.moe = DeepEPMoE.Config(**init_kwargs)
 
             if parallelism.context_parallel_degree > 1 and not isinstance(
                 self.layers[0].attention.inner_attention,

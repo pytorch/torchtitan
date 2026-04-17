@@ -8,7 +8,7 @@
 DeepEP primitives for MoE Expert Parallel.
 
 Provides low-level functions and autograd wrappers for DeepEP communication.
-Used by DeepEPExpertParallel in expert_parallel.py.
+Used by DeepEPTokenDispatcher in token_dispatcher.py.
 """
 
 from dataclasses import dataclass

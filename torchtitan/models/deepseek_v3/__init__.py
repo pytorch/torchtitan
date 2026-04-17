@@ -214,7 +214,6 @@ def _build_dsv3_layers(
             ffn_cfg = None
             moe_cfg = make_moe_config(
                 num_experts=num_experts,
-                score_before_experts=score_before_experts,
                 router=make_router_config(
                     dim=dim,
                     num_experts=num_experts,
@@ -230,7 +229,9 @@ def _build_dsv3_layers(
                     dim=dim,
                     hidden_dim=moe_hidden_dim,
                     num_experts=num_experts,
+                    top_k=router_top_k,
                     param_init=_depth_experts_init(layer_id),
+                    score_before_experts=score_before_experts,
                 ),
                 shared_experts=make_ffn_config(
                     dim=dim,
