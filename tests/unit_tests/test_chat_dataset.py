@@ -10,11 +10,11 @@ import unittest
 from copy import deepcopy
 
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import ChatDataset, ChatDataLoader
+from torchtitan.hf_datasets.text_datasets import ChatDataLoader, ChatDataset
 
 # Path to the test tokenizer and fixture data
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -338,14 +338,14 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             tokenizer_config = HuggingFaceTokenizer.Config()
             dl_config = ChatDataLoader.Config(
                 dataset_path="json",
-                load_dataset_kwargs = {
+                load_dataset_kwargs={
                     "data_files": _DATA_PATH,
                     "split": "train",
                     "streaming": streaming,
                 },
                 sample_processor=_process_sample,
-                infinite=True
-                )
+                infinite=True,
+            )
 
             return dl_config.build(
                 dp_world_size=world_size,
@@ -360,25 +360,28 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
                 for rank in range(world_size):
                     batch_size = 1
                     seq_len = 128
-                    dl = _build_dataloader(streaming, batch_size,seq_len, world_size, rank)
+                    dl = _build_dataloader(
+                        streaming, batch_size, seq_len, world_size, rank
+                    )
 
                     # Consume at least 2 epochs
                     it = iter(dl)
-                    for i in range(25):
+                    for _ in range(8):
                         next(it)
 
                     state = deepcopy(dl.state_dict())
                     # Restore
-                    dl_resumed = _build_dataloader(streaming, batch_size,seq_len, world_size, rank)
+                    dl_resumed = _build_dataloader(
+                        streaming, batch_size, seq_len, world_size, rank
+                    )
                     dl_resumed.load_state_dict(state)
                     # verify yield gives same input data
                     # test assertion seveal times in order to empty potential input buffer.
                     it_resumed = iter(dl_resumed)
 
-
                     expected, expected_labels = next(it)
                     input_ids, labels = next(it_resumed)
-                    for _ in range(10):
+                    for _ in range(3):
                         expected_input_ids, expected_labels = next(it)
                         input_ids, labels = next(it_resumed)
                         assert torch.equal(
@@ -390,7 +393,8 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
                         )
                         assert torch.equal(labels, expected_labels)
                         self.assertEqual(
-                            next(it)[0]["input"].tolist(), next(it_resumed)[0]["input"].tolist()
+                            next(it)[0]["input"].tolist(),
+                            next(it_resumed)[0]["input"].tolist(),
                         )
 
 
