@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import operator
+import time
 from collections import defaultdict
 from collections.abc import Callable
 
@@ -38,6 +39,10 @@ from torch.utils.checkpoint import CheckpointPolicy
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
+from torchtitan.experiments.graph_trainer.debug_utils import (
+    log_graph_diff,
+    snapshot_graph,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
@@ -69,7 +74,6 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     return [
-        functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
@@ -133,6 +137,8 @@ def apply_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
     passes: list[Callable],
+    *,
+    compile_config: "GraphTrainerCompileConfig | None" = None,
 ) -> torch.fx.GraphModule:
     """Apply graph passes to the traced fwd+bwd graph.
 
@@ -141,9 +147,32 @@ def apply_graph_passes(
         example_inputs: Example (fake) inputs matching the graph signature.
         passes: Ordered list of pass callables, each with signature
             ``(gm, example_inputs, **kwargs) -> gm``.
+        compile_config: Optional compile config. When provided and
+            ``debug_graph_passes`` is True, logs timing, op-count diffs,
+            and before/after graphs to tlparse for each pass.
     """
+    debug = compile_config is not None and compile_config.debug_graph_passes
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
     for pass_fn in passes:
+        pass_name = (
+            pass_fn.func.__name__
+            if isinstance(pass_fn, functools.partial)
+            else pass_fn.__name__
+        )
+        if debug:
+            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+            before_snapshot = snapshot_graph(gm)
+            start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
+        assert isinstance(
+            gm, torch.fx.GraphModule
+        ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
+        if debug:
+            elapsed = time.perf_counter() - start
+            logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
+            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+            after_snapshot = snapshot_graph(gm)
+            log_graph_diff(before_snapshot, after_snapshot, pass_name)
     return gm
 
 
@@ -741,6 +770,7 @@ def tlparse_log_graph_pass(
             include_stride=True,
             include_device=True,
             expanded_def=True,
+            additional_meta=["autograd_backward"],
         ),
         expect_trace_id=False,
     )

@@ -47,6 +47,7 @@ def build_minimal_trainer(
                 if compile_joint_passes is None
                 else list(compile_joint_passes),
                 precompile_artifact_dir="",
+                debug_graph_passes=False,
             ),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode=activation_checkpoint_mode
