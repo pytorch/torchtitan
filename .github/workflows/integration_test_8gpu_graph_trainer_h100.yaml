@@ -7,7 +7,7 @@ on:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
