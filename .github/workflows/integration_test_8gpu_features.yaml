@@ -46,7 +46,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 60
+      timeout: ${{ matrix.gpu-arch-type == 'rocm' && 60 || 45 }} # TODO: change it to 45min when MI350 label is added.
       script: |
         set -eux
 
