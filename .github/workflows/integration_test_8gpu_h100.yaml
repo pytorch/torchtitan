@@ -33,7 +33,7 @@ jobs:
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner-rocm: linux.rocm.gpu.gfx942.8
+      runner-rocm: linux.rocm.gpu.gfx950.4
       runner-cuda: linux.aws.h100.8
 
   # Step 2: Use the dynamic matrix in the build-test job
