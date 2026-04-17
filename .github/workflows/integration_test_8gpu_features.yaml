@@ -46,7 +46,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 60
+      timeout: 45
       script: |
         set -eux
 
@@ -105,6 +105,8 @@ jobs:
           # But this is more an unknown issue that AMD people may want to
           # figure out the root cause or confirm that this is an expected
           # behavior.
+          rocm_gpu_arch=$(rocminfo | grep -o -i 'gfx[0-9a-z]\{3,5\}' | sort -u)
+          echo "****** Using rocm GPU arch: ${rocm_gpu_arch} ******"
           LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
           STEPS=1
         else
