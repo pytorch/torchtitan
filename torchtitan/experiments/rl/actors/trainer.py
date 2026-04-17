@@ -228,6 +228,16 @@ class PolicyTrainer(Actor, Configurable):
             model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
 
+        # Fill sharding specs on the config BEFORE build (RL's trainer bypasses
+        # the standard torchtitan Trainer which would otherwise do this).
+        if model_spec.set_sharding_spec_fn is not None:
+            model_spec.set_sharding_spec_fn(
+                model_spec.model,
+                self.parallel_dims,
+                loss_parallel=not config.parallelism.disable_loss_parallel,
+                enable_sp=config.parallelism.enable_sequence_parallel,
+            )
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
