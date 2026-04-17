@@ -21,7 +21,7 @@ class TestPermute(unittest.TestCase):
     def _make_dispatcher(self) -> AllToAllTokenDispatcher:
         """Create a minimal AllToAllTokenDispatcher for testing _permute."""
         cfg = AllToAllTokenDispatcher.Config(
-            num_experts=1, top_k=1, score_before_experts=True, ep_size=1
+            num_experts=1, top_k=1, score_before_experts=True
         )
         return AllToAllTokenDispatcher(cfg)
 

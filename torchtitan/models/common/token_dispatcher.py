@@ -161,18 +161,15 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        ep_size: int
-        # Sequence parallel size. When EP borrows from TP (ETP=1),
-        # set to TP group size to split tokens across ranks.
-        sp_size: int = 1
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_size = config.ep_size
-        self.sp_size = config.sp_size
         # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup | None = None
+        # TODO: these should be set at config time
         # Set at runtime by apply_moe_ep_tp from tp_mesh.get_local_rank()
+        self.sp_size: int = 1
         self.sp_rank: int = -1
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
@@ -218,6 +215,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             "ep_group must be set before dispatch. "
             "ExpertParallel._partition_fn() should set it."
         )
+        ep_size = self.ep_group.size()
 
         if self.sp_size > 1:
             assert self.sp_rank >= 0, (
@@ -229,8 +227,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             x, top_scores, selected_experts_indices = self._split_along_sp(
                 x, top_scores, selected_experts_indices
             )
-
-        ep_size = self.ep_size
 
         # TODO: Extract this local reordering block (histc, argsort, score
         # application) into a shared helper — it's duplicated in
@@ -275,10 +271,14 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
                 num_tokens_per_expert_group
             )
+            # non_blocking=True is safe in eager, but under torch.compile the
+            # async D2H transfer can race with the subsequent .tolist()/.item()
+            # calls, producing stale values and failing unbacked-symint guards.
+            non_blocking = not torch.compiler.is_compiling()
             input_splits = (
                 num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=non_blocking)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
@@ -463,11 +463,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AllToAllTokenDispatcher.Config):
-        pad_multiple: int
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.pad_multiple = config.pad_multiple
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
+        self.pad_multiple: int
 
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
@@ -529,29 +530,48 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """Config for DeepEP/HybridEP token dispatcher.
 
         Args:
-            ep_size: Expert parallel size.
             comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
-            hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
-                float in (0, 1] = non-blocking mode; controls the fused-permute
-                output tensor size (num_permuted_tokens). Only used with hybridep.
-            pad_multiple: Alignment size for token groups needed by quantized grouped
-                GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
-                None means no padding.
+            non_blocking_capacity_factor: Enable non-blocking HybridEP dispatch with a
+                given capacity factor.
+
+                Setting this to a float in (0, 1] enables CPU-free non-blocking
+                dispatch and controls num_permuted_tokens — the fused-permute
+                output capacity, estimated as:
+                num_tokens × ep_size × min(num_local_experts, top_k) × cf,
+                aligned for MXFP8.  Tokens whose permuted offset exceeds this
+                limit are silently dropped (overflow_flag is set on GPU).
+
+                - None = blocking mode (default).  HybridEP calls
+                  cudaStreamSynchronize after dispatch, copies
+                  tokens_per_expert to pinned CPU memory, and computes the
+                  exact num_permuted_tokens on the host.  No token dropping.
+                - 1.0 = non-blocking, worst-case sizing: every token can reach
+                  every local expert, no drops, highest memory.
+                - < 1.0 = non-blocking, reduced memory; controls the
+                  fused-permute output tensor size (num_permuted_tokens).
+                  Safe in practice when forced load balancing (e.g. aux-loss /
+                  round-robin) keeps distribution roughly uniform.
+
+                Note: this factor has no lasting effect on the all-to-all
+                communication buffer.  HybridEP's dispatch_with_permute
+                internally passes the actual num_tokens to
+                update_template_config, which auto-grows the buffer to the
+                full token count on the first dispatch regardless of this
+                setting.
         """
 
-        ep_size: int
         comm_backend: str
-        hybridep_non_blocking_expert_capacity_factor: float | None = None
-        pad_multiple: int | None = None
+        non_blocking_capacity_factor: float | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_size = config.ep_size
         self.comm_backend = config.comm_backend
-        self.hybridep_non_blocking_expert_capacity_factor = (
-            config.hybridep_non_blocking_expert_capacity_factor
-        )
-        self.pad_multiple = config.pad_multiple
+        self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
+        # pad_multiple: Alignment size for token groups needed by quantized
+        # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
+        # with hybridep. None means no padding.
+        self.pad_multiple: int | None = None
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup | None = None
 
@@ -573,8 +593,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
             "ep_group must be set before dispatch. "
             "ExpertParallel._partition_fn() should set it."
         )
-        num_local_experts = self.num_experts // self.ep_size
-
+        num_local_experts = self.num_experts // self.ep_group.size()
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep.hybridep import dispatch_tokens
 
@@ -586,7 +605,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 self.num_experts,
                 self.ep_group,
                 score_before_experts=self.score_before_experts,
-                non_blocking_expert_capacity_factor=self.hybridep_non_blocking_expert_capacity_factor,
+                non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
                 pad_multiple=self.pad_multiple,
             )
         else:
