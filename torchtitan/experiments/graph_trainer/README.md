@@ -1,3 +1,4 @@
+<!-- CI trigger test: inside graph_trainer path -->
 ## GraphTrainer
 
 [![integration and numerics tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer.yaml?query=branch%3Amain)
