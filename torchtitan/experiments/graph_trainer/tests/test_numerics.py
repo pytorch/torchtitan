@@ -144,9 +144,9 @@ def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="qwen3",
-        baseline_config="qwen3_moe_debug",
+        baseline_config="qwen3_moe_debug_ep",
         test_module="graph_trainer.qwen3",
-        test_config="graph_trainer_qwen3_debugmodel_moe",
+        test_config="graph_trainer_qwen3_debugmodel_moe_ep",
         baseline_options=QWEN3_MOE_PARALLELISM,
         test_options=test_options,
     )

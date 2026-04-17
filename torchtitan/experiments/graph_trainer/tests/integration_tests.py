@@ -489,7 +489,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.qwen3",
-                    "--config graph_trainer_qwen3_debugmodel_moe",
+                    "--config graph_trainer_qwen3_debugmodel_moe_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",

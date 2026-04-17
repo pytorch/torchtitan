@@ -14,10 +14,13 @@ from collections.abc import Callable
 from typing import Literal
 
 from torchtitan.models.common.attention import (
+    FlexAttention,
     FusedQKVLinear,
     GQAttention,
     LocalMapInnerAttention,
     QKVLinear,
+    ScaledDotProductAttention,
+    VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -29,6 +32,33 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     TorchAOTokenDispatcher,
 )
+
+
+def get_attention_config(
+    backend: str,
+) -> tuple[LocalMapInnerAttention.Config, str]:
+    """Map backend string to (inner_attention config, mask_type)."""
+    if backend == "sdpa":
+        return ScaledDotProductAttention.Config(), "causal"
+    elif backend == "flex":
+        return FlexAttention.Config(), "block_causal"
+    elif backend == "flex_flash":
+        from torchtitan.tools.utils import has_cuda_capability
+
+        if not has_cuda_capability(9, 0):
+            raise ValueError(
+                "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+            )
+        return (
+            FlexAttention.Config(
+                block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
+            ),
+            "block_causal",
+        )
+    elif backend == "varlen":
+        return VarlenAttention.Config(), "block_causal"
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
 
 
 def make_gqa_config(
@@ -170,83 +200,48 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    comm_backend: str = "standard",
-    ep_size: int = 1,
-    sp_size: int = 1,
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
-    pad_multiple: int | None = None,
+    comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
-    Returns the right Config subclass based on parallelism settings:
-    - EP=1 (default): LocalTokenDispatcher.Config → LocalTokenDispatcher
-    - EP>1, standard: AllToAllTokenDispatcher.Config → AllToAllTokenDispatcher
-    - EP>1, standard, pad_multiple: TorchAOTokenDispatcher.Config → TorchAOTokenDispatcher
-    - EP>1, deepep/hybridep: DeepEPTokenDispatcher.Config → DeepEPTokenDispatcher
-      (pad_multiple is handled internally by the DeepEP/HybridEP library)
+    Returns the right Config subclass based on comm_backend:
+    - None: LocalTokenDispatcher.Config (no EP communication)
+    - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
+    - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
+    - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
-    if ep_size > 1 and comm_backend in ("deepep", "hybridep"):
-        return DeepEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
-        )
-    elif ep_size > 1 and pad_multiple is not None:
-        return TorchAOTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            sp_size=sp_size,
-            pad_multiple=pad_multiple,
-        )
-    elif ep_size > 1:
-        return AllToAllTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-            ep_size=ep_size,
-            sp_size=sp_size,
-        )
-    else:
+    if comm_backend is None:
         return LocalTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
         )
-
-
-def apply_ep(
-    layers: list,
-    *,
-    ep_size: int,
-    sp_size: int = 1,
-    comm_backend: str = "standard",
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
-    pad_multiple: int | None = None,
-) -> None:
-    """Replace token dispatchers in MoE layers for expert parallelism.
-
-    Mutates layer configs in-place: for each MoE layer, replaces the
-    token_dispatcher with the appropriate config based on EP settings.
-    """
-    for layer_cfg in layers:
-        if layer_cfg.moe is not None:
-            td = layer_cfg.moe.experts.token_dispatcher
-            layer_cfg.moe.experts.token_dispatcher = make_token_dispatcher_config(
-                num_experts=td.num_experts,
-                top_k=td.top_k,
-                score_before_experts=td.score_before_experts,
-                ep_size=ep_size,
-                sp_size=sp_size,
-                comm_backend=comm_backend,
-                hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-                pad_multiple=pad_multiple,
-            )
+    elif comm_backend in ("deepep", "hybridep"):
+        return DeepEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            comm_backend=comm_backend,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
+        )
+    elif comm_backend == "torchao":
+        return TorchAOTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    elif comm_backend == "standard":
+        return AllToAllTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    else:
+        raise ValueError(
+            f"Unknown comm_backend: '{comm_backend}'. "
+            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
+        )
 
 
 def make_experts_config(
@@ -258,10 +253,8 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    ep_size: int = 1,
-    comm_backend: str = "standard",
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
-    pad_multiple: int | None = None,
+    comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -274,9 +267,7 @@ def make_experts_config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            ep_size=ep_size,
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
     )
