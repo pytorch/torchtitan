@@ -4,12 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-
-# TODO: Re-enable once we have closed
-# https://github.com/pytorch/torchtitan/issues/2722
-os.environ.setdefault("DISABLE_LLVM_OPT", "1")
-
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import ClassVar, NamedTuple
@@ -47,8 +41,11 @@ from torchtitan.protocols.module import Module
 
 __all__ = [
     "FlexAttention",
+    "BaseQKVLinear",
+    "FusedQKVLinear",
     "GQAttention",
     "LocalMapInnerAttention",
+    "QKVLinear",
     "ScaledDotProductAttention",
     "VarlenAttention",
     "VarlenMetadata",
@@ -215,6 +212,10 @@ class VarlenAttention(LocalMapInnerAttention):
                 # Only needed for FA3; FA2 is automatically batch-invariant.
                 varlen_kwargs["num_splits"] = 1
 
+        # Forward enable_gqa from GQAttention when Q and KV head counts differ
+        if kwargs.get("enable_gqa", False):
+            varlen_kwargs["enable_gqa"] = True
+
         out_packed = varlen_attn(
             xq_packed,
             xk_packed,
@@ -262,10 +263,17 @@ class FlexAttention(LocalMapInnerAttention):
         kernel_options: dict = field(default_factory=dict)
 
     inductor_configs: ClassVar[dict[str, bool]] = {
-        # TODO: turn on wrap_inductor_compiled_regions after PyTorch fix is
-        # landed again: https://github.com/pytorch/pytorch/pull/175733.
-        "wrap_inductor_compiled_regions": False,
+        "wrap_inductor_compiled_regions": True,
+        # Recommended workflow: run once with max_autotune=True to discover
+        # good kernel_options, then set kernel_options explicitly in the config
+        # and keep max_autotune disabled for faster compilation.
         "max_autotune": True,
+        # When enabled, after max_autotune selects the best kernel config,
+        # coordinate descent iteratively tunes individual parameters (block
+        # sizes, num_warps, num_stages) one at a time -- doubling/halving each
+        # and accepting changes that improve runtime by >0.1%. This can also
+        # run without max_autotune but starts from a weaker baseline config.
+        # See torch/_inductor/runtime/coordinate_descent_tuner.py.
         "coordinate_descent_tuning": True,
         "triton.cudagraphs": False,
     }
@@ -562,37 +570,125 @@ class BaseAttention(Module):
                 )
 
 
+class BaseQKVLinear(Module):
+    """Base class for Q/K/V projection strategies.
+
+    Subclasses implement different projection approaches (separate or fused)
+    while providing a uniform interface to :class:`GQAttention`.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        head_dim: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.head_dim = config.head_dim
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project input into Q, K, V tensors.
+
+        Returns:
+            (xq, xk, xv) each with shape [B, L, local_heads, head_dim].
+        """
+        raise NotImplementedError
+
+
+class QKVLinear(BaseQKVLinear):
+    """Three separate linear projections for Q, K, V."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseQKVLinear.Config):
+        wq: Linear.Config
+        wkv: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.wq = config.wq.build()
+        self.wk = config.wkv.build()
+        self.wv = config.wkv.build()
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        bs, seqlen, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        # Use -1 instead of n_heads (or n_kv_heads) to infer the
+        # actual local heads from sizes as TP may have sharded them.
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        return xq, xk, xv
+
+
+class FusedQKVLinear(BaseQKVLinear):
+    """Single fused linear projection, split along R dimension.
+
+    Uses a single linear layer and splits the output along the R dimension,
+    where R = n_heads // n_kv_heads + 2 (Q-heads-per-KV-group + K + V).
+    Reduces kernel launch overhead compared to three separate projections.
+
+    Compatible with ColwiseParallel on the ``wqkv`` linear layer.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseQKVLinear.Config):
+        n_heads: int
+        n_kv_heads: int
+        wqkv: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(
+                f"n_heads ({config.n_heads}) must be divisible by "
+                f"n_kv_heads ({config.n_kv_heads}) for fused QKV"
+            )
+        self.wqkv = config.wqkv.build()
+        self.heads_per_kv = config.n_heads // config.n_kv_heads
+        self.r_dim = self.heads_per_kv + 2
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        bs, seqlen, _ = x.shape
+        # Fused QKV: single matmul, then reshape and split along R dim.
+        # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
+        # Use -1 for n_kv_heads so TP sharding is handled automatically.
+        qkv = self.wqkv(x)
+        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        # torch.split returns contiguous views for size-1 splits (xk, xv).
+        # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
+        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
+        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
+        return xq, xk, xv
+
+
 class GQAttention(BaseAttention):
-    """Grouped-Query Attention module shared across Llama3, Llama4, Qwen3.
+    """Grouped-Query Attention with pluggable Q/K/V projection.
 
-    Supports GQA (grouped-query attention) with optional QK normalization,
-    optional RoPE (for iRoPE layers), and multiple attention backends
-    (flex, varlen, sdpa).
-
-    Config parameters define the attention head structure. Runtime ``dim``
-    is passed via ``build(dim=...)``.
+    The QKV projection strategy is determined by the ``qkv_linear`` config field:
+    use :class:`QKVLinear` for three independent projections, or
+    :class:`FusedQKVLinear` for a single fused projection.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
         dim: int
-        wq: Linear.Config
-        wkv: Linear.Config
+        qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config
-        q_norm: RMSNorm.Config | None = None
-        k_norm: RMSNorm.Config | None = None
+        qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
         inner_attention: LocalMapInnerAttention.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
-
-        def __post_init__(self):
-            BaseAttention.Config.__post_init__(self)
-            if (self.q_norm is None) != (self.k_norm is None):
-                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -609,22 +705,20 @@ class GQAttention(BaseAttention):
         self.use_rope = config.use_rope
         self.rope_backend = config.rope_backend
 
+        # Pluggable QKV projection
+        self.qkv_linear = config.qkv_linear.build()
+        self.wo = config.wo.build()
+        self.inner_attention = config.inner_attention.build()
+
         # Optional QK normalization (Qwen3-style)
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
-        if config.q_norm is not None and config.k_norm is not None:
-            self.q_norm = config.q_norm.build()
-            self.k_norm = config.k_norm.build()
+        if config.qk_norm is not None:
+            self.q_norm = config.qk_norm.build()
+            self.k_norm = config.qk_norm.build()
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
-
-        self.wq = config.wq.build()
-        self.wk = config.wkv.build()
-        self.wv = config.wkv.build()
-        self.wo = config.wo.build()
-
-        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -634,19 +728,12 @@ class GQAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
-        # local heads from sizes of xq, xk, and xv as TP may have sharded them
-        # after the above linear ops.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        xq, xk, xv = self.qkv_linear(x)
 
         # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None:
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
             xq = self.q_norm(xq)
-        if self.k_norm is not None:
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
@@ -663,6 +750,7 @@ class GQAttention(BaseAttention):
             mask_key = "rope" if self.use_rope else "nope"
             attention_masks = attention_masks[mask_key]
 
+        # pyrefly: ignore [not-callable]
         output = self.inner_attention(
             xq,
             xk,
@@ -672,4 +760,4 @@ class GQAttention(BaseAttention):
             enable_gqa=self.enable_gqa,
         ).contiguous()
         output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+        return self.wo(output)  # pyrefly: ignore [not-callable]

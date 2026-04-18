@@ -32,7 +32,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--profiling.enable_profiling",
+                    "--profiler.enable_profiling",
                     "--metrics.enable_tensorboard",
                 ],
             ],
@@ -308,6 +308,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Foreach Optimizer Test",
             "optimizer_foreach",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--optimizer.name AdamW --optimizer.implementation fused_opt_states_bf16",
+                ]
+            ],
+            "BF16 Optimizer States Test",
+            "optimizer_bf16_states",
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -606,6 +616,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "SFT ChatDataset integration test",
             "sft",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable",
+                    "--checkpoint.create_seed_checkpoint",
+                ],
+            ],
+            "Seed checkpoint creation",
+            "seed_checkpoint",
+            ngpu=1,
+            timeout=30,
         ),
     ]
 

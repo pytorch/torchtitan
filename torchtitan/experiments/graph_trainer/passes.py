@@ -15,10 +15,13 @@ Pass Types:
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
 
+from __future__ import annotations
+
+import functools
 import operator
+import time
 from collections import defaultdict
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
@@ -28,33 +31,153 @@ from torch._inductor.fx_passes.bucketing import (
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch._inductor.output_code import OutputCode
 from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
+from torchtitan.experiments.graph_trainer.debug_utils import (
+    log_graph_diff,
+    snapshot_graph,
+)
+from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    remove_detach_pass,
+    remove_identity_slice_pass,
+    remove_identity_view_pass,
+)
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
 
 
-def apply_default_graph_passes(
-    gm: torch.fx.GraphModule, example_inputs: tuple
-) -> torch.fx.GraphModule:
-    """Entry point for optimizing the traced fwd+bwd graph.
+def _is_backward_node(node: torch.fx.Node) -> bool:
+    return node.meta.get("autograd_backward", False)
 
-    Called by GraphTrainer after tracing to apply graph-level optimization
-    passes before execution. Individual passes are defined below.
+
+def compile_time_passes(
+    traced_result: "TracedResult",
+) -> list[Callable]:
+    """Cleanup, FlexAttention annotation, and regional_inductor passes.
+
+    If precompile is enabled, these are applied before serialization so
+    that compiled Triton kernels are baked into the artifact. Otherwise
+    they run at trace time via ``construct_default_graph_passes``.
+
+    cudagraph is excluded because it needs to re-capture the graph into
+    an in-memory CUDA graph at runtime
     """
-    gm = tlparse_log_graph_pass(gm, example_inputs, graph_name="make_fx_graph_traced")
+    from torchtitan.models.common.attention import FlexAttention
 
+    return [
+        remove_detach_pass,
+        remove_identity_view_pass,
+        remove_identity_slice_pass,
+        selective_activation_remat_pass,
+        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # produce bitwise identical results to the eager Trainer path.
+        # When left uncompiled, flex_attention still runs correctly but
+        # produces different numerical results.
+        functools.partial(
+            annotate_flex_attention_for_regional_inductor_pass,
+            flex_compile_config=FlexAttention.inductor_configs,
+        ),
+        regional_inductor_pass,
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
+        custom_codegen_pass,
+    ]
+
+
+def construct_default_graph_passes(
+    traced_result: "TracedResult",
+    *,
+    precompiled: bool = False,
+) -> list[Callable]:
+    """Build the pass list for the aot_fx_trace path.
+
+    When ``precompiled=False`` (default), returns the full list: cleanup,
+    FlexAttention annotation, regional_inductor, and cudagraph.
+
+    When ``precompiled=True``, the artifact already has cleanup and
+    regional_inductor baked in, so only cudagraph is returned.
+    """
+    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
+
+    passes: list[Callable] = []
+    if not precompiled:
+        passes.extend(compile_time_passes(traced_result))
+
+    # cudagraph should be the last pass.
+    if is_cudagraph_compatible(traced_result.gm):
+        static_input_indices = list(range(traced_result.num_static_inputs))
+        passes.append(
+            functools.partial(
+                cudagraph_pass,
+                is_forward=True,
+                static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
+            )
+        )
+    return passes
+
+
+def apply_graph_passes(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    passes: list[Callable],
+    *,
+    compile_config: "GraphTrainerCompileConfig | None" = None,
+) -> torch.fx.GraphModule:
+    """Apply graph passes to the traced fwd+bwd graph.
+
+    Args:
+        gm: The traced forward+backward graph module.
+        example_inputs: Example (fake) inputs matching the graph signature.
+        passes: Ordered list of pass callables, each with signature
+            ``(gm, example_inputs, **kwargs) -> gm``.
+        compile_config: Optional compile config. When provided and
+            ``debug_graph_passes`` is True, logs timing, op-count diffs,
+            and before/after graphs to tlparse for each pass.
+    """
+    debug = compile_config is not None and compile_config.debug_graph_passes
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
+    for pass_fn in passes:
+        pass_name = (
+            pass_fn.func.__name__
+            if isinstance(pass_fn, functools.partial)
+            else pass_fn.__name__
+        )
+        if debug:
+            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+            before_snapshot = snapshot_graph(gm)
+            start = time.perf_counter()
+        gm = pass_fn(gm, example_inputs)
+        assert isinstance(
+            gm, torch.fx.GraphModule
+        ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
+        if debug:
+            elapsed = time.perf_counter() - start
+            logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
+            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+            after_snapshot = snapshot_graph(gm)
+            log_graph_diff(before_snapshot, after_snapshot, pass_name)
     return gm
 
 
 def autobucketing_reordering_pass(
-    gm: torch.fx.GraphModule, example_inputs=None
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """
     Apply autobucketing and reordering optimization.
@@ -68,7 +191,10 @@ def autobucketing_reordering_pass(
 
 
 def transformer_block_bucketing_reordering_pass(
-    gm: torch.fx.GraphModule, example_inputs, fsdp_manual_buckets
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    fsdp_manual_buckets,
 ) -> torch.fx.GraphModule:
     """
     Apply aten-level manual bucketing and reordering optimization.
@@ -85,29 +211,89 @@ def _ops_filter_with_distributed(name: str) -> bool:
 
     The default GraphPickler ops filter only allows aten and fbgemm ops.
     SimpleFSDP uses _c10d_functional collectives that must also be
-    allowed for the graph to serialize correctly.
+    allowed for the graph to serialize correctly.  The device_mesh ops
+    (e.g. _get_submesh) appear in the backward graph when DTensor
+    reconstructs submeshes from tracked ancestor meshes.
     """
     return name.startswith(
         (
             "torch.ops.aten",
             "torch.ops.fbgemm",
             "torch.ops._c10d_functional",
+            "torch.ops._dtensor",
+            "torch.ops.device_mesh",
         )
     )
 
 
-def regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs, *, serializable: bool = False
-) -> torch.fx.GraphModule:
-    """
-    Apply regional inductor compilation based on user annotation.
+def _node_metadata_key_filter_distributed(key: str) -> bool:
+    """Metadata key filter for regional_inductor with distributed ops.
 
-    When serializable=True (precompile mode), sets force_autograd_cache
-    so that regional_inductor wraps its output in RegionalOutputCode,
-    and overrides the ops filter to allow distributed collective ops.
+    Distributed ops (e.g. _get_submesh, mesh_get_process_group) produce
+    opaque values (DeviceMesh, ProcessGroup) in node.meta["val"] and
+    node.meta["eager_input_vals"] that cannot be pickled.  We strip
+    both — they are not needed at runtime.
     """
+    if key in ("val", "eager_input_vals"):
+        return False
+    return key not in ["source_fn_stack", "nn_module_stack", "fwd_source_fn_stack"]
+
+
+def regional_inductor_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
+) -> torch.fx.GraphModule:
+    """Compile tagged graph regions with ``regional_inductor``.
+
+    Scans the graph for nodes whose ``node.meta["custom"]`` contains a
+    ``compile_with_inductor`` key and compiles those regions with
+    TorchInductor.  Nodes without this tag are left unchanged.  If no
+    nodes are tagged the pass is a no-op.
+
+    Inductor is configured for bitwise-equal numerics so that the
+    compiled regions match eager execution exactly.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs for shape propagation.
+        serializable: When True (precompile mode), sets
+            ``force_autograd_cache`` so that ``regional_inductor`` wraps
+            its output in ``RegionalOutputCode``, and overrides the ops
+            filter to allow distributed collective ops.
+    """
+    import torch._inductor.config as ic
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
+        """Extract the FakeTensorMode from a graph module's placeholder metadata."""
+        for node in gm.graph.nodes:
+            if node.op == "placeholder" and "val" in node.meta:
+                val = node.meta["val"]
+                if isinstance(val, FakeTensor):
+                    return val.fake_mode
+        return None
+
+    # Ensure inductor produces bitwise-equal numerics vs eager.
+    ic.eager_numerics.division_rounding = True
+    # Recommended by inductor team — uncomment as needed:
+    # ic.emulate_precision_casts = True
+    # ic.eager_numerics.disable_ftz = True
+    # ic.eager_numerics.use_pytorch_libdevice = True
+    # ic.fallback_random = True
+
+    # regional_inductor calls standalone_compile with
+    # dynamic_shapes="from_tracing_context", which requires an active
+    # TracingContext with a FakeTensorMode.  When this pass is called
+    # outside torch.compile (e.g. after make_fx tracing in graph_trainer),
+    # no TracingContext exists, so we create one from the graph's fake
+    # tensor metadata.
+    fake_mode = _get_fake_mode_from_gm(gm)
+    tracing_ctx = torch._guards.TracingContext(fake_mode)
+
     if serializable:
-        with torch._functorch.config.patch("force_autograd_cache", True):
+        with (
+            torch._guards.tracing(tracing_ctx),
+            torch._functorch.config.patch("force_autograd_cache", True),
+        ):
             result = regional_inductor(gm, example_inputs)
         from torch._inductor.output_code import RegionalOutputCode
 
@@ -116,17 +302,31 @@ def regional_inductor_pass(
         # collective ops like _c10d_functional through GraphPickler.
         if isinstance(result, RegionalOutputCode):
             result._ops_filter = _ops_filter_with_distributed
+            result._node_metadata_key_filter = _node_metadata_key_filter_distributed
         else:
             logger.warning(
                 "regional_inductor with serializable=True did not produce "
                 "RegionalOutputCode; distributed ops may not serialize correctly."
             )
         return result
-    return regional_inductor(gm, example_inputs)
+
+    with torch._guards.tracing(tracing_ctx):
+        gm = regional_inductor(gm, example_inputs)
+
+    # regional_inductor may switch to boxed calling convention; reset to
+    # default so the graph can be called with positional args as usual.
+    gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    gm.recompile()
+    return gm
 
 
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    is_forward: bool,
+    static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -136,7 +336,27 @@ def cudagraph_pass(
     - For the first run, it will warm up operators such as nccl.
     - For the second run, it will record cudagraph and replay cudagraph.
     - For the following runs, it will replay cudagraph.
+
+    Args:
+        gm: The graph module to wrap.
+        example_inputs: Example inputs for warmup/recording.
+        is_forward: Whether this is a forward graph (True) or backward graph
+            (False). Used to infer which inputs have stable tensor addresses
+            when ``static_input_indices`` is not provided.
+        static_input_indices: Explicit list of input indices with stable tensor
+            addresses. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors (as
+            opposed to opaque values like DeviceMesh). Used to compute which
+            inputs need copying for cudagraph replay. When not provided, this
+            is inferred from ``example_inputs``.
     """
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure cudagraph is not combined with passes that replace the "
+            f"GraphModule (e.g. full_inductor_compilation)."
+        )
+
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
     from torchtitan.experiments.graph_trainer.cudagraph import (
@@ -144,26 +364,86 @@ def cudagraph_pass(
         get_static_input_indices,
     )
 
-    static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    if static_input_indices is None:
+        static_input_indices = get_static_input_indices(gm, is_forward)
+    gm.forward = CUDAGraphWrapper(
+        gm.forward,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
+    )
     return gm
 
 
-def validate_flex_attn_annotation_pass(
+def annotate_flex_attention_for_regional_inductor_pass(
     gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    flex_compile_config: dict | None,
+    mask_compile_config: dict | None = None,
 ) -> torch.fx.GraphModule:
-    """Verify user annotations show up in the graph."""
+    """Tag flex attention HOPs with compile_with_inductor for regional_inductor.
+
+    Annotates three sets of nodes so that regional_inductor correctly
+    scoops and compiles flex attention regions:
+    1. The HOP node itself (flex_attention / flex_attention_backward)
+    2. The get_attr nodes referencing score_mod / mask_mod submodules.
+    3. All nodes inside those submodule graphs.
+
+    Args:
+        gm: The graph module to annotate.
+        example_inputs: Example inputs (unused, required by pass interface).
+        flex_compile_config: Inductor config dict for flex attention HOP
+            nodes and their get_attr submodule references. When provided,
+            wrapped as ``{"inductor_configs": flex_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+        mask_compile_config: Inductor config dict for nodes inside mask_mod
+            subgraphs. When provided, wrapped as
+            ``{"inductor_configs": mask_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+    """
+    flex_compile_annotation: dict = (
+        {"inductor_configs": flex_compile_config}
+        if flex_compile_config is not None
+        else {}
+    )
+    mask_compile_annotation: dict = (
+        {"inductor_configs": mask_compile_config}
+        if mask_compile_config is not None
+        else {}
+    )
+
     for node in gm.graph.nodes:
-        if node.target in {
+        if node.target not in {
             torch.ops.higher_order.flex_attention,
             torch.ops.higher_order.flex_attention_backward,
         }:
-            assert "compile_with_inductor" in node.meta.get("custom", {})
+            continue
+        node.meta.setdefault("custom", {})[
+            "compile_with_inductor"
+        ] = flex_compile_annotation
+        for inp in node.all_input_nodes:
+            if inp.op != "get_attr":
+                continue
+            submod = getattr(gm, inp.target, None)
+            if not isinstance(submod, torch.fx.GraphModule):
+                continue
+            inp.meta.setdefault("custom", {})[
+                "compile_with_inductor"
+            ] = flex_compile_annotation
+
+            # Following are the nodes in mask_mod subgraph
+            for sub_node in submod.graph.nodes:
+                sub_node.meta.setdefault("custom", {})[
+                    "compile_with_inductor"
+                ] = mask_compile_annotation
     return gm
 
 
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
     op_list_to_save: set | None = None,
 ) -> torch.fx.GraphModule:
     """
@@ -206,6 +486,11 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
+        # Skip backward nodes — they must not carry recompute tags,
+        # otherwise the remat pass would try to duplicate backward ops.
+        if _is_backward_node(node):
+            continue
+
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -223,7 +508,6 @@ def apply_sac_pass(
                 node.meta["recompute"] = parent.meta["recompute"]
                 node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
-
         custom_meta = node.meta.get("custom", {})
         ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
         node.meta["ac_graph_id"] = ac_region_id
@@ -258,9 +542,33 @@ def apply_sac_pass(
     return gm
 
 
+def selective_activation_remat_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """Apply graph-based SAC to a traced fwd+loss+bwd graph.
+
+    Tags forward nodes with recompute policy via apply_sac_pass (backward
+    nodes are skipped automatically via ``node.meta["autograd_backward"]``), then
+    applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
+    PREFER_RECOMPUTE forward ops before backward and DCE originals.
+
+    The model must have been annotated with annotate_ac_regions before
+    tracing so that nodes have custom["ac_region_id"] metadata.
+    """
+    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
+        remat_using_tags_for_fwd_loss_bwd_graph,
+    )
+
+    apply_sac_pass(gm)
+    return remat_using_tags_for_fwd_loss_bwd_graph(gm)
+
+
 # Apply activation checkpointing on joint graph before partitioner
 def fsdp_reshard_after_fwd_pass(
-    gm: torch.fx.GraphModule, reshard_after_forward: bool
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    reshard_after_forward: bool,
 ) -> torch.fx.GraphModule:
     # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
     # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
@@ -274,6 +582,8 @@ def fsdp_reshard_after_fwd_pass(
 
 def inductor_decomposition_pass(
     gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
     joint_with_descriptors: JointWithDescriptors,
 ) -> torch.fx.GraphModule:
     """
@@ -353,7 +663,7 @@ def inductor_decomposition_pass(
             f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
         )
 
-    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders, strict=True):
         # Copy all metadata from original to decomposed
         for key, value in orig.meta.items():
             if key not in decomp.meta:
@@ -370,8 +680,8 @@ def inductor_decomposition_pass(
 
 
 def full_inductor_compilation_pass(
-    gm: torch.fx.GraphModule, example_inputs
-) -> torch.fx.GraphModule:
+    gm: torch.fx.GraphModule, example_inputs: tuple
+) -> OutputCode:
     """
     Apply full Inductor compilation with code generation.
 
@@ -382,14 +692,17 @@ def full_inductor_compilation_pass(
         example_inputs: Example inputs for compilation
 
     Returns:
-        The compiled graph module
+        The compiled OutputCode from Inductor
     """
+    # TODO: This pass returns OutputCode instead of GraphModule, violating the
+    # unified graph pass signature convention. Should be addressed to comply.
     return compile_fx_inner(gm, example_inputs)
 
 
 def reassign_to_pg_pass(
     gm: torch.fx.GraphModule,
-    example_inputs,
+    example_inputs: tuple | None = None,
+    *,
     source_pg_name: str,
     target_pg_name: str,
 ) -> torch.fx.GraphModule:
@@ -428,7 +741,7 @@ def reassign_to_pg_pass(
 
 def tlparse_log_graph_pass(
     gm: torch.fx.GraphModule,
-    example_inputs: Sequence[Any],
+    example_inputs: tuple | None = None,
     *,
     graph_name: str,
 ) -> torch.fx.GraphModule:
@@ -457,6 +770,7 @@ def tlparse_log_graph_pass(
             include_stride=True,
             include_device=True,
             expanded_def=True,
+            additional_meta=["autograd_backward"],
         ),
         expect_trace_id=False,
     )
@@ -469,6 +783,7 @@ AVAILABLE_COMPILER_PASSES = {
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "custom_codegen": custom_codegen_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
@@ -477,6 +792,5 @@ AVAILABLE_COMPILER_PASSES = {
 AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
     "apply_sac": apply_sac_pass,
 }

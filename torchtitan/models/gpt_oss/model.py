@@ -15,6 +15,7 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    BaseQKVLinear,
     create_attention_mask,
     FlexAttention,
     get_causal_mask_mod,
@@ -41,8 +42,7 @@ class Attention(BaseAttention):
         n_kv_heads: int = 8
         head_dim: int = 64
         dim: int
-        wq: Linear.Config  # query projection
-        wkv: Linear.Config  # shared config for key + value (build() copies)
+        qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config  # output projection
         inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
             default_factory=FlexAttention.Config
@@ -62,9 +62,7 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        self.wq = config.wq.build()
-        self.wk = config.wkv.build()  # build() copies — independent module
-        self.wv = config.wkv.build()  # build() copies — independent module
+        self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert isinstance(
@@ -92,11 +90,8 @@ class Attention(BaseAttention):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         bsz, seqlen, _ = x.size()
-        hidden_shape = (bsz, seqlen, -1, self.head_dim)
 
-        q = self.wq(x).view(hidden_shape)
-        k = self.wk(x).view(hidden_shape)
-        v = self.wv(x).view(hidden_shape)
+        q, k, v = self.qkv_linear(x)
 
         q, k = apply_rotary_emb_cos_sin(q, k, freqs_cis, positions)
 

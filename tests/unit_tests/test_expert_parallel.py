@@ -8,21 +8,38 @@ import unittest
 
 import torch
 
-from torchtitan.distributed.expert_parallel import _generate_permute_indices
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
 
-class TestGeneratePermuteIndices(unittest.TestCase):
-    """Test _generate_permute_indices which reorders tokens from rank-major to expert-major layout.
+class TestPermute(unittest.TestCase):
+    """Test AllToAllTokenDispatcher._permute which reorders tokens from rank-major to expert-major layout.
 
     Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
     Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
     """
 
+    def _make_dispatcher(self) -> AllToAllTokenDispatcher:
+        """Create a minimal AllToAllTokenDispatcher for testing _permute."""
+        cfg = AllToAllTokenDispatcher.Config(
+            num_experts=1, top_k=1, score_before_experts=True
+        )
+        return AllToAllTokenDispatcher(cfg)
+
+    def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
+        """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
+        dispatcher = self._make_dispatcher()
+        total = tokens_per_expert_group.sum().item()
+        dummy_input = torch.zeros(total, 1)
+        _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+            dummy_input, tokens_per_expert_group, num_ranks, experts_per_rank
+        )
+        return permuted_indices, num_tokens_per_expert
+
     def test_basic_2ranks_2experts(self):
         # 2 ranks, 2 experts per rank
         # tokens_per_expert_group: [r0e0, r0e1, r1e0, r1e1] = [2, 3, 1, 4]
         tokens_per_expert_group = torch.tensor([2, 3, 1, 4])
-        permuted_indices, num_tokens_per_expert = _generate_permute_indices(
+        permuted_indices, num_tokens_per_expert = self._permute(
             tokens_per_expert_group, experts_per_rank=2, num_ranks=2
         )
 
@@ -42,7 +59,7 @@ class TestGeneratePermuteIndices(unittest.TestCase):
     def test_single_rank(self):
         # 1 rank, 3 experts: no reordering needed
         tokens_per_expert_group = torch.tensor([4, 2, 5])
-        permuted_indices, num_tokens_per_expert = _generate_permute_indices(
+        permuted_indices, num_tokens_per_expert = self._permute(
             tokens_per_expert_group, experts_per_rank=3, num_ranks=1
         )
 
@@ -53,7 +70,7 @@ class TestGeneratePermuteIndices(unittest.TestCase):
     def test_single_expert(self):
         # 3 ranks, 1 expert per rank: no reordering needed
         tokens_per_expert_group = torch.tensor([3, 5, 2])
-        permuted_indices, num_tokens_per_expert = _generate_permute_indices(
+        permuted_indices, num_tokens_per_expert = self._permute(
             tokens_per_expert_group, experts_per_rank=1, num_ranks=3
         )
 
@@ -68,7 +85,7 @@ class TestGeneratePermuteIndices(unittest.TestCase):
         # 2 ranks, 2 experts, some with zero tokens
         # [r0e0, r0e1, r1e0, r1e1] = [0, 3, 2, 0]
         tokens_per_expert_group = torch.tensor([0, 3, 2, 0])
-        permuted_indices, num_tokens_per_expert = _generate_permute_indices(
+        permuted_indices, num_tokens_per_expert = self._permute(
             tokens_per_expert_group, experts_per_rank=2, num_ranks=2
         )
 
@@ -83,7 +100,7 @@ class TestGeneratePermuteIndices(unittest.TestCase):
 
     def test_all_zero_tokens(self):
         tokens_per_expert_group = torch.tensor([0, 0, 0, 0])
-        permuted_indices, num_tokens_per_expert = _generate_permute_indices(
+        permuted_indices, num_tokens_per_expert = self._permute(
             tokens_per_expert_group, experts_per_rank=2, num_ranks=2
         )
 
@@ -95,7 +112,7 @@ class TestGeneratePermuteIndices(unittest.TestCase):
         # 3 ranks, 2 experts, uniform token counts
         # [r0e0, r0e1, r1e0, r1e1, r2e0, r2e1] = [2, 2, 2, 2, 2, 2]
         tokens_per_expert_group = torch.tensor([2, 2, 2, 2, 2, 2])
-        permuted_indices, num_tokens_per_expert = _generate_permute_indices(
+        permuted_indices, num_tokens_per_expert = self._permute(
             tokens_per_expert_group, experts_per_rank=2, num_ranks=3
         )
 
@@ -112,7 +129,7 @@ class TestGeneratePermuteIndices(unittest.TestCase):
     def test_permutation_is_valid(self):
         # The output should be a permutation of [0, total)
         tokens_per_expert_group = torch.tensor([3, 1, 4, 1, 5, 9])
-        permuted_indices, _ = _generate_permute_indices(
+        permuted_indices, _ = self._permute(
             tokens_per_expert_group, experts_per_rank=3, num_ranks=2
         )
 

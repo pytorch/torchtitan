@@ -24,8 +24,15 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
-def _run_cmd(cmd):
-    return subprocess.run([cmd], text=True, shell=True, capture_output=True)
+def _run_cmd(cmd, timeout=None):
+    return subprocess.run(
+        [cmd],
+        encoding="utf-8",
+        errors="replace",
+        shell=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def run_single_test(
@@ -67,7 +74,13 @@ def run_single_test(
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
             )
 
-        result = _run_cmd(cmd)
+        try:
+            result = _run_cmd(cmd, timeout=test_flavor.timeout)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"\nTest timed out after {test_flavor.timeout}s: {test_flavor.test_descr}.\n"
+                f"Command: {cmd}\n"
+            ) from e
         if result.stdout:
             logger.info(result.stdout)
         if result.returncode != 0:
@@ -80,7 +93,6 @@ def run_single_test(
 
 def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
     """Run all integration tests to test the core features of TorchTitan"""
-
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}

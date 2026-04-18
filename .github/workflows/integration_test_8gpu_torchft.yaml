@@ -3,13 +3,12 @@ name: TorchFT 8 GPU Integration Test
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/ft/**'
       - 'torchtitan/components/checkpoint.py'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/ft/**'
       - 'torchtitan/components/checkpoint.py'

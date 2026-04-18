@@ -3,12 +3,11 @@ name: VLM 8 GPU Integration Tests
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/vlm/**'
       - '.github/workflows/integration_test_8gpu_vlm.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/vlm/**'
       - '.github/workflows/integration_test_8gpu_vlm.yaml'

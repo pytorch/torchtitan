@@ -101,10 +101,53 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel",
+        baseline_config="deepseek_v3_debugmodel_ep",
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel",
+        test_config="graph_trainer_deepseek_v3_debugmodel_ep",
         baseline_options=DSV3_PARALLELISM,
+        test_options=test_options,
+    )
+
+
+QWEN3_PARALLELISM = (
+    "--parallelism.tensor_parallel_degree=2"
+    " --parallelism.data_parallel_shard_degree=4"
+)
+
+
+def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
+    """Run loss_compare for qwen3 vs graph_trainer.qwen3 with FSDP+TP."""
+    test_options = QWEN3_PARALLELISM
+    if test_options_extra:
+        test_options += f" {test_options_extra}"
+    return run_loss_compare(
+        baseline_module="qwen3",
+        baseline_config="qwen3_debugmodel",
+        test_module="graph_trainer.qwen3",
+        test_config="graph_trainer_qwen3_debugmodel",
+        baseline_options=QWEN3_PARALLELISM,
+        test_options=test_options,
+    )
+
+
+QWEN3_MOE_PARALLELISM = (
+    "--parallelism.data_parallel_shard_degree=4"
+    " --parallelism.tensor_parallel_degree=2"
+    " --parallelism.expert_parallel_degree=2"
+)
+
+
+def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
+    """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
+    test_options = QWEN3_MOE_PARALLELISM
+    if test_options_extra:
+        test_options += f" {test_options_extra}"
+    return run_loss_compare(
+        baseline_module="qwen3",
+        baseline_config="qwen3_moe_debug_ep",
+        test_module="graph_trainer.qwen3",
+        test_config="graph_trainer_qwen3_debugmodel_moe_ep",
+        baseline_options=QWEN3_MOE_PARALLELISM,
         test_options=test_options,
     )
 
@@ -112,84 +155,96 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
-    def test_llama3_aot_vs_eager(self):
+    def test_dense_llama3_aot_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot"),
         )
 
-    def test_llama3_auto_bucketing_aot_vs_eager(self):
+    def test_dense_llama3_auto_bucketing_aot_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(
                 test_options_extra="--compile.mode aot --compile.passes auto_bucketing"
             ),
         )
 
-    def test_llama3_manual_bucketing_aot_vs_eager(self):
+    def test_dense_llama3_manual_bucketing_aot_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(
                 test_options_extra="--compile.mode aot --compile.passes transformer_block_bucketing"
             ),
         )
 
-    def test_llama3_cudagraph_aot_vs_eager(self):
+    def test_dense_llama3_cudagraph_aot_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(
                 test_options_extra="--compile.mode aot --compile.passes cudagraph"
             ),
         )
 
-    def test_dsv3_aot_vs_eager(self):
+    def test_moe_dsv3_aot_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode aot"),
         )
 
-    def test_dsv3_manual_bucketing_aot_vs_eager(self):
+    def test_moe_dsv3_manual_bucketing_aot_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
                 test_options_extra="--compile.mode aot --compile.passes transformer_block_bucketing"
             ),
         )
 
-    def test_llama3_aot_fx_trace_vs_eager(self):
+    def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
 
-    def test_llama3_jit_vs_eager(self):
+    def test_dense_llama3_jit_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode jit"),
         )
 
-    def test_llama3_auto_bucketing_jit_vs_eager(self):
+    def test_dense_llama3_auto_bucketing_jit_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(
                 test_options_extra="--compile.mode jit --compile.passes auto_bucketing"
             ),
         )
 
-    def test_llama3_manual_bucketing_jit_vs_eager(self):
+    def test_dense_llama3_manual_bucketing_jit_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(
                 test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
             ),
         )
 
-    def test_dsv3_jit_vs_eager(self):
+    def test_moe_dsv3_jit_vs_eager(self):
         """Test graph_trainer.deepseek_v3 matches deepseek_v3 (JIT)."""
         self.assertTrue(
             _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode jit"),
         )
 
-    def test_dsv3_manual_bucketing_jit_vs_eager(self):
+    def test_moe_dsv3_manual_bucketing_jit_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
                 test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
             ),
         )
 
-    def test_dsv3_aot_fx_trace_vs_eager(self):
+    def test_moe_dsv3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
+                test_options_extra="--compile.mode aot_fx_trace"
+            ),
+        )
+
+    def test_dense_qwen3_aot_fx_trace_vs_eager(self):
+        self.assertTrue(
+            _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
+        )
+
+    def test_moe_qwen3_aot_fx_trace_vs_eager(self):
+        self.assertTrue(
+            _run_qwen3_moe_loss_compare(
                 test_options_extra="--compile.mode aot_fx_trace"
             ),
         )

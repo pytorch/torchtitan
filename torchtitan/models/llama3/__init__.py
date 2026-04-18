@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from copy import deepcopy
 from functools import partial
 
 import torch.nn as nn
@@ -20,12 +19,11 @@ from torchtitan.models.common import (
     RoPE,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import (
-    FlexAttention,
-    ScaledDotProductAttention,
-    VarlenAttention,
+from torchtitan.models.common.config_utils import (
+    get_attention_config,
+    make_ffn_config,
+    make_gqa_config,
 )
-from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -71,10 +69,11 @@ def _build_llama3_layers(
     n_heads: int,
     hidden_dim: int,
     n_kv_heads: int | None = None,
-    inner_attention=None,
-    mask_type: str = "causal",
+    fuse_qkv: bool = False,
+    attn_backend: str = "sdpa",
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
+    inner_attention, mask_type = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -89,11 +88,8 @@ def _build_llama3_layers(
                     n_kv_heads=n_kv_heads,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
-                    inner_attention=(
-                        inner_attention
-                        if inner_attention is not None
-                        else ScaledDotProductAttention.Config()
-                    ),
+                    inner_attention=inner_attention,
+                    fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
                     rope_backend="complex",
                 ),
@@ -108,7 +104,7 @@ def _build_llama3_layers(
     return layers
 
 
-def _debugmodel() -> Llama3Model.Config:
+def _debugmodel(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 6
@@ -134,37 +130,44 @@ def _debugmodel() -> Llama3Model.Config:
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            attn_backend=attn_backend,
         ),
     )
 
 
-def _debugmodel_flex_attn() -> Llama3Model.Config:
-    config = _debugmodel()
-    flex_cfg = FlexAttention.Config()
-    layers = []
-    for layer_cfg in config.layers:
-        layer_cfg = deepcopy(layer_cfg)
-        layer_cfg.attention.inner_attention = flex_cfg
-        layer_cfg.attention.mask_type = "block_causal"
-        layers.append(layer_cfg)
-    config.layers = layers
-    return config
+def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
+    dim = 256
+    n_heads = 16
+    n_layers = 6
+    return Llama3Model.Config(
+        dim=dim,
+        vocab_size=2048,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
+        ),
+        rope=RoPE.Config(
+            dim=dim // n_heads,
+            max_seq_len=131072,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+        ),
+        layers=_build_llama3_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            fuse_qkv=True,
+            attn_backend=attn_backend,
+        ),
+    )
 
 
-def _debugmodel_varlen_attn() -> Llama3Model.Config:
-    config = _debugmodel()
-    varlen_cfg = VarlenAttention.Config()
-    layers = []
-    for layer_cfg in config.layers:
-        layer_cfg = deepcopy(layer_cfg)
-        layer_cfg.attention.inner_attention = varlen_cfg
-        layer_cfg.attention.mask_type = "block_causal"
-        layers.append(layer_cfg)
-    config.layers = layers
-    return config
-
-
-def _1b() -> Llama3Model.Config:
+def _1b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
     n_kv_heads = 8
@@ -200,11 +203,12 @@ def _1b() -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
+            attn_backend=attn_backend,
         ),
     )
 
 
-def _3b() -> Llama3Model.Config:
+def _3b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
     n_kv_heads = 8
@@ -240,11 +244,12 @@ def _3b() -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
+            attn_backend=attn_backend,
         ),
     )
 
 
-def _8b() -> Llama3Model.Config:
+def _8b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
@@ -277,37 +282,12 @@ def _8b() -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.3
             ),
+            attn_backend=attn_backend,
         ),
     )
 
 
-def _8b_flex() -> Llama3Model.Config:
-    config = _8b()
-    flex_cfg = FlexAttention.Config()
-    layers = []
-    for layer_cfg in config.layers:
-        layer_cfg = deepcopy(layer_cfg)
-        layer_cfg.attention.inner_attention = flex_cfg
-        layer_cfg.attention.mask_type = "block_causal"
-        layers.append(layer_cfg)
-    config.layers = layers
-    return config
-
-
-def _8b_varlen() -> Llama3Model.Config:
-    config = _8b()
-    varlen_cfg = VarlenAttention.Config()
-    layers = []
-    for layer_cfg in config.layers:
-        layer_cfg = deepcopy(layer_cfg)
-        layer_cfg.attention.inner_attention = varlen_cfg
-        layer_cfg.attention.mask_type = "block_causal"
-        layers.append(layer_cfg)
-    config.layers = layers
-    return config
-
-
-def _70b() -> Llama3Model.Config:
+def _70b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
     n_kv_heads = 8
@@ -340,11 +320,12 @@ def _70b() -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.3
             ),
+            attn_backend=attn_backend,
         ),
     )
 
 
-def _405b() -> Llama3Model.Config:
+def _405b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
     n_kv_heads = 8
@@ -377,29 +358,27 @@ def _405b() -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.2
             ),
+            attn_backend=attn_backend,
         ),
     )
 
 
 llama3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_flex_attn": _debugmodel_flex_attn,
-    "debugmodel_varlen_attn": _debugmodel_varlen_attn,
+    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "1B": _1b,
     "3B": _3b,
     "8B": _8b,
-    "8B_flex": _8b_flex,
-    "8B_varlen": _8b_varlen,
     "70B": _70b,
     "405B": _405b,
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    # TODO(fegin): revisit
-    # https://github.com/pytorch/torchtitan/pull/2785#issuecomment-4184528111
-    # and resolve how we expand flex/varlen/sdpa for the config.
-    config = llama3_configs[flavor]()
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+) -> ModelSpec:
+    config = llama3_configs[flavor](attn_backend=attn_backend)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
