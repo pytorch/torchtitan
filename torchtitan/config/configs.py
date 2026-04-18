@@ -8,7 +8,7 @@
 Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
-  - ProfilingConfig                 (in tools/profiling.py)
+  - Profiler.Config                 (in tools/profiler.py)
   - OptimizersContainer.Config      (in components/optimizer.py)
   - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)

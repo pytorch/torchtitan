@@ -13,7 +13,7 @@ from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.tools.profiling import ProfilingConfig
+from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 
@@ -21,7 +21,7 @@ from . import model_registry
 def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
     return FaultTolerantTrainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=10,
             profiler_active=10,
