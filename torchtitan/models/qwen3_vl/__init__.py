@@ -185,6 +185,8 @@ def _build_qwen3_vl_moe_layers(
     moe_hidden_dim: int,
     num_experts: int,
     top_k: int,
+    moe_comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
     layers = []
@@ -207,7 +209,6 @@ def _build_qwen3_vl_moe_layers(
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,
-                    score_before_experts=False,
                     router=make_router_config(
                         dim=dim,
                         num_experts=num_experts,
@@ -220,7 +221,11 @@ def _build_qwen3_vl_moe_layers(
                         dim=dim,
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,
+                        top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
+                        score_before_experts=False,
+                        comm_backend=moe_comm_backend,
+                        non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
                 ),
             )
@@ -277,7 +282,9 @@ def _debugmodel() -> Qwen3VLModel.Config:
     )
 
 
-def _debugmodel_moe() -> Qwen3VLModel.Config:
+def _debugmodel_moe(
+    moe_comm_backend: str | None = None,
+) -> Qwen3VLModel.Config:
     dim = 256
     head_dim = 64
     n_layers = 1
@@ -311,6 +318,7 @@ def _debugmodel_moe() -> Qwen3VLModel.Config:
             moe_hidden_dim=768,
             num_experts=64,
             top_k=8,
+            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=256,
@@ -430,7 +438,9 @@ def _8b() -> Qwen3VLModel.Config:
 # Qwen3-VL MoE models
 
 
-def _30b_a3b() -> Qwen3VLModel.Config:
+def _30b_a3b(
+    moe_comm_backend: str | None = None,
+) -> Qwen3VLModel.Config:
     dim = 2048
     head_dim = 128
     n_layers = 48
@@ -464,6 +474,7 @@ def _30b_a3b() -> Qwen3VLModel.Config:
             moe_hidden_dim=768,
             num_experts=128,
             top_k=8,
+            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -481,7 +492,9 @@ def _30b_a3b() -> Qwen3VLModel.Config:
     )
 
 
-def _235b_a22b() -> Qwen3VLModel.Config:
+def _235b_a22b(
+    moe_comm_backend: str | None = None,
+) -> Qwen3VLModel.Config:
     dim = 4096
     head_dim = 128
     n_layers = 94
@@ -515,6 +528,7 @@ def _235b_a22b() -> Qwen3VLModel.Config:
             moe_hidden_dim=1536,
             num_experts=128,
             top_k=8,
+            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -542,8 +556,15 @@ qwen3_vl_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    config = qwen3_vl_configs[flavor]()
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str | None = None,
+) -> ModelSpec:
+    kwargs = {}
+    if moe_comm_backend is not None:
+        kwargs["moe_comm_backend"] = moe_comm_backend
+    config = qwen3_vl_configs[flavor](**kwargs)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,

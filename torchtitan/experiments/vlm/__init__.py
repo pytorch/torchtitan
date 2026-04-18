@@ -44,7 +44,7 @@ def _get_dict(obj) -> dict[str, Any]:
 
 
 def _debugmodel() -> Llama3Siglip2Transformer.Config:
-    base = llama3_configs["debugmodel_flex_attn"]()
+    base = llama3_configs["debugmodel"](attn_backend="flex")
     dim = 128
     ffn_dim = 256
     n_layers = 4

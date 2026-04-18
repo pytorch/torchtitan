@@ -23,9 +23,8 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-from torchtitan.tools.profiling import ProfilingConfig
+from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -74,13 +73,13 @@ def llama3_debugmodel_fused_qkv() -> Trainer.Config:
 
 def llama3_debugmodel_flex_attn() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel_flex_attn")
+    config.model_spec = model_registry("debugmodel", attn_backend="flex")
     return config
 
 
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel_varlen_attn")
+    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
     return config
 
 
@@ -120,7 +119,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -151,7 +150,7 @@ def llama3_8b() -> Trainer.Config:
 def llama3_70b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -183,7 +182,7 @@ def llama3_70b() -> Trainer.Config:
 def llama3_405b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-405B",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -233,14 +232,7 @@ def sft_debugmodel() -> Trainer.Config:
             {"role": "assistant", "content": sample["answer"]},
         ]
 
-    from torchtitan.models.common import FlexAttention
-
-    model_spec = model_registry("debugmodel")
-    assert isinstance(model_spec.model, Decoder.Config)
-
-    for layer_cfg in model_spec.model.layers:
-        layer_cfg.attention.inner_attention = FlexAttention.Config()
-        layer_cfg.attention.mask_type = "block_causal"
+    model_spec = model_registry("debugmodel", attn_backend="flex")
 
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",

@@ -13,6 +13,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
+from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
@@ -121,6 +122,10 @@ def _make_gptoss_experts_config(
     hidden_dim: int,
     num_experts: int,
     layer_id: int,
+    top_k: int,
+    score_before_experts: bool,
+    moe_comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> GptOssGroupedExperts.Config:
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
     std = depth_scaled_std(0.02, layer_id)
@@ -135,6 +140,13 @@ def _make_gptoss_experts_config(
         hidden_dim=hidden_dim,
         num_experts=num_experts,
         param_init=experts_init,
+        token_dispatcher=make_token_dispatcher_config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            comm_backend=moe_comm_backend,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
+        ),
     )
 
 
@@ -148,6 +160,8 @@ def _build_gptoss_layers(
     score_before_experts: bool,
     load_balance_coeff: float,
     fuse_qkv: bool = False,
+    moe_comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -164,10 +178,13 @@ def _build_gptoss_layers(
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             layer_id=layer_id,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            moe_comm_backend=moe_comm_backend,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
         moe_cfg = GptOssMoE.Config(
             num_experts=num_experts,
-            score_before_experts=score_before_experts,
             load_balance_coeff=load_balance_coeff,
             experts=experts_cfg,
             router=TokenChoiceTopKRouter.Config(
@@ -194,7 +211,9 @@ def _build_gptoss_layers(
     return layers
 
 
-def _debugmodel() -> GptOssModel.Config:
+def _debugmodel(
+    moe_comm_backend: str | None = None,
+) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
     n_layers = 4
@@ -218,6 +237,7 @@ def _debugmodel() -> GptOssModel.Config:
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -233,7 +253,9 @@ def _debugmodel() -> GptOssModel.Config:
     )
 
 
-def _20b() -> GptOssModel.Config:
+def _20b(
+    moe_comm_backend: str | None = None,
+) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
     n_layers = 24
@@ -257,6 +279,7 @@ def _20b() -> GptOssModel.Config:
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -272,7 +295,9 @@ def _20b() -> GptOssModel.Config:
     )
 
 
-def _120b() -> GptOssModel.Config:
+def _120b(
+    moe_comm_backend: str | None = None,
+) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
     n_layers = 36
@@ -296,6 +321,7 @@ def _120b() -> GptOssModel.Config:
             top_k=4,
             score_before_experts=False,
             load_balance_coeff=1e-3,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=64,
@@ -318,8 +344,14 @@ gptoss_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    config = gptoss_configs[flavor]()
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str | None = None,
+) -> ModelSpec:
+    config = gptoss_configs[flavor](
+        moe_comm_backend=moe_comm_backend,
+    )
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,
