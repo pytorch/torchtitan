@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-
-import torch
+from unittest import mock
 
 from torchtitan.tools.profiler import Profiler
 
@@ -141,9 +140,15 @@ class TestProfilerDisabledPaths(unittest.TestCase):
             prof.step()
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestProfilerEnabledPathsGPU(unittest.TestCase):
-    """GPU-dependent tests — skipped automatically when no GPU is present."""
+class TestProfilerEnabledPaths(unittest.TestCase):
+    """Tests for enabled profiler paths — uses mocked distributed rank."""
+
+    def setUp(self):
+        self.patcher_rank = mock.patch("torch.distributed.get_rank", return_value=0)
+        self.patcher_rank.start()
+
+    def tearDown(self):
+        self.patcher_rank.stop()
 
     def test_build_torch_profiler_returns_active_handle(self):
         import tempfile

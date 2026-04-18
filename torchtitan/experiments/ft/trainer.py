@@ -511,7 +511,7 @@ class FaultTolerantTrainer(Trainer):
                 global_step=self.step,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
-            ) as prof_session,
+            ) as profiler,
             # FT addition: maybe_semi_sync_training context manager
             maybe_semi_sync_training(
                 config.fault_tolerance,
@@ -551,7 +551,7 @@ class FaultTolerantTrainer(Trainer):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                prof_session.step()
+                profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

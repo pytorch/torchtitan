@@ -346,7 +346,7 @@ class Trainer(ForgeEngine):
         with self.profiler.active(
             global_step=self.step,
             base_folder=config.dump_folder,
-        ) as prof_session:
+        ) as profiler:
             data_iterator = self.batch_generator(self.dataloader)
             while self.step < config.training.steps:
                 self.step += 1
@@ -368,7 +368,7 @@ class Trainer(ForgeEngine):
                 )
 
                 # signal the profiler that the next profiling step has started
-                prof_session.step()
+                profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

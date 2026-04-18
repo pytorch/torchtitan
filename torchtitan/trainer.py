@@ -845,7 +845,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         with config.profiler.build(
             global_step=self.step,
             base_folder=config.dump_folder,
-        ) as prof_session:
+        ) as profiler:
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
@@ -867,7 +867,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                prof_session.step()
+                profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

@@ -304,18 +304,14 @@ class Profiler(Configurable):
         assert (
             wait >= 0
         ), "profile_freq must be greater than or equal to warmup + active"
-        gpu_device_profiled = None
+        activities = [torch.profiler.ProfilerActivity.CPU]
         if torch.cuda.is_available():
-            gpu_device_profiled = torch.profiler.ProfilerActivity.CUDA
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
         elif torch.xpu.is_available():
-            gpu_device_profiled = torch.profiler.ProfilerActivity.XPU
+            activities.append(torch.profiler.ProfilerActivity.XPU)
 
         torch_profiler = torch.profiler.profile(
-            # pyrefly: ignore [bad-argument-type]
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                gpu_device_profiled,
-            ],
+            activities=activities,
             schedule=torch.profiler.schedule(
                 wait=wait, warmup=warmup, active=active, **additional_params
             ),
