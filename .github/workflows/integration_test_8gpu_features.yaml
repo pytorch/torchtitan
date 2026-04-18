@@ -105,8 +105,9 @@ jobs:
           # But this is more an unknown issue that AMD people may want to
           # figure out the root cause or confirm that this is an expected
           # behavior.
-          rocm_gpu_marketing_name=$(python -c "import torch; print(torch.cuda.get_device_name(None))")
-          echo "****** Using rocm GPU marketing name: ${rocm_gpu_marketing_name} ******"
+          rocm_device_name=$(python -c "import torch; print(torch.cuda.get_device_name(None))")
+          rocm_device_tag=$(echo "$rocm_device_name" | grep -oE 'MI[0-9]+X')
+          echo "****** Using rocm GPU name: ${rocm_device_name}, GPU Tag: ${rocm_device_tag} ******"
           LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
           STEPS=1
         else
