@@ -242,5 +242,4 @@ class GptOssMoE(MoE):
             param_init=config.experts.param_init,
             token_dispatcher=config.experts.token_dispatcher,
         )
-        # pyrefly: ignore [bad-assignment]
         self.experts = gptoss_experts_config.build()

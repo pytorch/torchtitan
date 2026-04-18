@@ -266,7 +266,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[abstract_key]
                 if new_key is None:
                     continue
-                # pyrefly: ignore [missing-attribute]
                 new_key = new_key.format(layer_num)
                 state_dict[new_key] = value
 

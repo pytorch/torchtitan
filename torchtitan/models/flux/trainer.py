@@ -50,7 +50,6 @@ class FluxTrainer(Trainer):
         latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
         seq_len_img = latent_side_width * latent_side_height
 
-        # pyrefly: ignore [missing-attribute]
         seq_len_txt = config.tokenizer.max_t5_encoding_len
         config.training.seq_len = seq_len_img + seq_len_txt
 
