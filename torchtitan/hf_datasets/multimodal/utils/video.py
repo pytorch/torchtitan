@@ -45,11 +45,8 @@ def load_video(
             video_fps = float(stream.average_rate or stream.guessed_rate or 24)
             total_frames = stream.frames
             if total_frames == 0 and stream.duration:
-                # pyrefly: ignore [unsupported-operation]
                 total_frames = int(
-                    # pyrefly: ignore [unsupported-operation]
-                    float(stream.duration * stream.time_base)
-                    * video_fps
+                    float(stream.duration * stream.time_base) * video_fps
                 )
             if total_frames == 0:
                 # No metadata available — decode all frames to count them
@@ -66,7 +63,6 @@ def load_video(
                 nframes = min(nframes, total_frames)
                 indices = np.linspace(0, total_frames - 1, nframes).astype(int).tolist()
                 selected = [all_frames[i] for i in indices]
-                # pyrefly: ignore [bad-return]
                 return torch.from_numpy(np.stack(selected))
 
             duration = total_frames / video_fps
@@ -91,7 +87,6 @@ def load_video(
         if not frames:
             return None
 
-        # pyrefly: ignore [bad-return]
         return torch.from_numpy(np.stack(frames))  # (T, H, W, C)
 
     except Exception as e:

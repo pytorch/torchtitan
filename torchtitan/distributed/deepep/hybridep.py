@@ -181,7 +181,7 @@ def _dispatch_impl(
             _buffer.group_size,
             num_local_experts,
             topk_idx.shape[1],
-            moe_expert_capacity_factor,  # pyrefly: ignore [bad-argument-type]
+            moe_expert_capacity_factor,
             pad_multiple=pad_multiple,
         )
 
