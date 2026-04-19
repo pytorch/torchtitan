@@ -129,6 +129,7 @@ def _process_mm_sample(
         return {
             "input_ids": input_ids,
             "labels": labels,
+            "positions": torch.arange(len(input_ids)),
             "pixel_values": processed_images,
         }
 

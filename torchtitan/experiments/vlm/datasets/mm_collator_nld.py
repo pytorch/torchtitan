@@ -127,15 +127,16 @@ class MultiModalCollatorNLD:
     def collate_text(
         self,
         batch: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process text inputs and labels from batch.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Process text inputs, labels, and positions from batch.
 
         Args:
-            batch: list of dictionaries containing "input_ids" and "labels"
+            batch: list of dictionaries containing "input_ids", "labels", and "positions"
 
         Returns:
             input_ids: Tensor of shape (B, L)
             labels: Tensor of shape (B, L)
+            positions: Tensor of shape (B, L)
 
         Note:
             B = batch size (padded if needed)
@@ -152,6 +153,11 @@ class MultiModalCollatorNLD:
             batch_first=True,
             padding_value=self.special_tokens.pad_id,
         )
+        positions = pad_sequence(
+            [s["positions"] for s in batch],
+            batch_first=True,
+            padding_value=0,
+        )
 
         # Handle sequence length
         input_ids, labels = pad_text_batch(
@@ -161,6 +167,16 @@ class MultiModalCollatorNLD:
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
+        # Pad positions to match input_ids length
+        B, L = input_ids.shape
+        if positions.shape[1] < L:
+            padding = torch.zeros(
+                B, L - positions.shape[1], dtype=positions.dtype, device=positions.device
+            )
+            positions = torch.cat([positions, padding], dim=1)
+        elif positions.shape[1] > L:
+            positions = positions[:, :L]
+
         input_ids, labels = pad_input_ids_and_labels_to_target_batch_size(
             input_ids,
             labels,
@@ -168,8 +184,17 @@ class MultiModalCollatorNLD:
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
+        # Pad positions batch dimension
+        if positions.shape[0] < self.batch_size:
+            padding = torch.zeros(
+                self.batch_size - positions.shape[0],
+                positions.shape[1],
+                dtype=positions.dtype,
+                device=positions.device,
+            )
+            positions = torch.cat([positions, padding], dim=0)
 
-        return input_ids[:, :-1], labels[:, 1:]  # Shift for next token prediction
+        return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]  # Shift for next token prediction
 
     def __call__(
         self, batch: list[dict[str, Any]]
@@ -216,9 +241,10 @@ class MultiModalCollatorNLD:
         patches, grids = self.collate_images(all_images)
 
         # Process text and pad to batch size
-        input_ids, labels = self.collate_text(batch)
+        input_ids, labels, positions = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
+            "positions": positions,
             "pixel_values": patches,
             "grid_thw": grids,
             "special_tokens": self.special_tokens,
