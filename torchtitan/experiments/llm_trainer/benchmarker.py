@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Benchmarker: compares bitwise equivalence and performance between the
+Benchmarker: validates convergence and compares performance between the
 current optimized model and a candidate model.
 
 Usage (via shell script):
@@ -13,7 +13,7 @@ Usage (via shell script):
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_debugmodel
 
-    # Auto-promote if bitwise correct AND >= 1% faster:
+    # Auto-promote if valid AND >= 1% faster:
     NGPU=8 HARDWARE=h100-sm90 ./torchtitan/experiments/llm_trainer/run_benchmarker.sh \
         --promote \
         --module graph_trainer.llama3 \
@@ -22,17 +22,16 @@ Usage (via shell script):
 This will:
   1. Load metadata (input shapes, FLOPs info) from optimized_models/
   2. Import both the optimized and candidate GraphModules
-  3. Run both with identical inputs and compare outputs bitwise
+  3. Run both for N training steps (default 100) and compare final loss
   4. Benchmark execution time and compute MFU for both
   5. Print a comparison report
-  6. With --promote: promote candidate if bitwise correct AND >= 1% faster
+  6. With --promote: promote candidate if valid AND >= 1% faster
 """
 
 import argparse
 import importlib.util
 import json
 import os
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +66,7 @@ def _build_fingerprint(hardware, parallel_dims):
             parts.append(f"{name}{val}")
     return "_".join(parts)
 
+
 _PROMOTE_SPEEDUP_THRESHOLD = 1.01
 _PROMOTE_RUNS_DEFAULT = 3
 
@@ -92,10 +92,25 @@ def _parse_args():
         type=int,
         default=3,
         help=(
-            "Number of warmup calls to each model BEFORE the equivalence "
+            "Number of warmup calls to each model BEFORE the validation "
             "check and benchmarking. Allows models to initialize internal "
             "state (e.g. CUDA graph capture). Default: 3."
         ),
+    )
+    parser.add_argument(
+        "--num-validation-steps",
+        type=int,
+        default=100,
+        help=(
+            "Number of training steps to run for validation. The candidate's "
+            "final loss must be <= the optimized model's final loss. Default: 100."
+        ),
+    )
+    parser.add_argument(
+        "--validation-lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate for SGD updates during validation steps. Default: 1e-3.",
     )
     parser.add_argument(
         "--hardware",
@@ -122,17 +137,11 @@ def _create_inputs_from_metadata(meta, device):
             dtype = getattr(torch, spec["dtype"].replace("torch.", ""))
             shape = spec["shape"]
             if dtype.is_floating_point:
-                inputs.append(
-                    torch.randn(shape, dtype=dtype, device=device) * 0.01
-                )
+                inputs.append(torch.randn(shape, dtype=dtype, device=device) * 0.01)
             elif dtype in (torch.int32, torch.int64):
-                inputs.append(
-                    torch.randint(0, 1000, shape, dtype=dtype, device=device)
-                )
+                inputs.append(torch.randint(0, 1000, shape, dtype=dtype, device=device))
             else:
-                inputs.append(
-                    torch.zeros(shape, dtype=dtype, device=device)
-                )
+                inputs.append(torch.zeros(shape, dtype=dtype, device=device))
         else:
             inputs.append(spec["value"])
     return inputs
@@ -148,83 +157,41 @@ def _load_graph_module(filepath):
     return mod.GraphModule()
 
 
-def _bitwise_equal(a, b):
-    """Byte-level tensor comparison (handles NaN correctly)."""
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return False
-    a_flat = a.contiguous().reshape(-1)
-    b_flat = b.contiguous().reshape(-1)
-    if a_flat.numel() == 0:
-        return True
-    return torch.equal(
-        a_flat.view(torch.uint8),
-        b_flat.view(torch.uint8),
-    )
+def _run_validation_steps(model, inputs, num_state, num_steps, lr):
+    """Run model for num_steps training steps with SGD updates.
 
-
-def _compare_outputs(opt_outputs, cand_outputs):
-    """Compare two sets of outputs for bitwise equivalence.
-
-    Returns (all_match, details) where details is a list of per-output
-    comparison results.
+    Returns a list of per-step loss values. The state inputs (first
+    num_state entries) are cloned and updated with gradients each step;
+    data inputs are reused unchanged.
     """
-    if isinstance(opt_outputs, torch.Tensor):
-        opt_outputs = (opt_outputs,)
-    if isinstance(cand_outputs, torch.Tensor):
-        cand_outputs = (cand_outputs,)
-    if isinstance(opt_outputs, list):
-        opt_outputs = tuple(opt_outputs)
-    if isinstance(cand_outputs, list):
-        cand_outputs = tuple(cand_outputs)
+    state = [
+        inp.clone() if isinstance(inp, torch.Tensor) else inp
+        for inp in inputs[:num_state]
+    ]
+    data = list(inputs[num_state:])
 
-    if len(opt_outputs) != len(cand_outputs):
-        return False, [
-            f"Output count mismatch: optimized={len(opt_outputs)}, "
-            f"candidate={len(cand_outputs)}"
-        ]
+    losses = []
+    for step in range(num_steps):
+        current_inputs = list(state) + data
+        with torch.no_grad():
+            outputs = model(*current_inputs)
 
-    all_match = True
-    details = []
-    num_matched = 0
-    for i, (opt, cand) in enumerate(zip(opt_outputs, cand_outputs)):
-        if isinstance(opt, torch.Tensor) and isinstance(cand, torch.Tensor):
-            if _bitwise_equal(opt, cand):
-                num_matched += 1
-            else:
-                label = "loss" if i == 0 else f"grad_{i}"
-                if opt.shape != cand.shape:
-                    details.append(
-                        f"  [{i}] {label}: SHAPE MISMATCH "
-                        f"({list(opt.shape)} vs {list(cand.shape)})"
-                    )
-                elif opt.dtype != cand.dtype:
-                    details.append(
-                        f"  [{i}] {label}: DTYPE MISMATCH "
-                        f"({opt.dtype} vs {cand.dtype})"
-                    )
-                else:
-                    max_diff = (opt.float() - cand.float()).abs().max().item()
-                    details.append(
-                        f"  [{i}] {label}: MISMATCH (max_diff={max_diff:.6e})"
-                    )
-                all_match = False
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
 
-    n_total = len(opt_outputs) if isinstance(opt_outputs, (tuple, list)) else 1
-    if all_match:
-        details.insert(
-            0,
-            f"  All {num_matched}/{n_total} outputs MATCH "
-            f"(loss + {num_matched - 1} gradients)",
-        )
-    else:
-        details.insert(
-            0,
-            f"  {num_matched}/{n_total} matched, "
-            f"{n_total - num_matched} MISMATCHED:",
-        )
+        losses.append(outputs[0].item())
 
-    return all_match, details
+        grads = outputs[1:]
+        for i in range(min(len(grads), num_state)):
+            g = grads[i]
+            if (
+                isinstance(g, torch.Tensor)
+                and isinstance(state[i], torch.Tensor)
+                and g.shape == state[i].shape
+            ):
+                state[i] = state[i] - lr * g
 
+    return losses
 
 
 def _benchmark_model(model, inputs, num_warmup, num_bench):
@@ -296,9 +263,7 @@ def main():
 
     model_spec = config.model_spec
     if model_spec is None:
-        raise ValueError(
-            "model_spec must be set. Pass --module to specify the model."
-        )
+        raise ValueError("model_spec must be set. Pass --module to specify the model.")
 
     model_name = model_spec.name.split("/")[-1]
     output_name = f"{model_name}_{model_spec.flavor}"
@@ -354,7 +319,7 @@ def main():
 
     # Model warmup: let models initialize internal state (e.g. CUDA graph
     # capture, JIT compilation, caching). These calls happen BEFORE the
-    # equivalence check so the check tests the "warmed up" code path.
+    # validation check so the check tests the "warmed up" code path.
     if bench_args.num_model_warmup > 0:
         print(f"\nModel warmup: {bench_args.num_model_warmup} calls per model...")
         with torch.no_grad():
@@ -364,22 +329,42 @@ def main():
         torch.cuda.synchronize()
         print("  Done.")
 
-    print("\n--- Bitwise Equivalence Check ---")
-    with torch.no_grad():
-        opt_outputs = optimized_gm(*inputs)
-        cand_outputs = candidate_gm(*inputs)
+    num_state = meta["num_state_inputs"]
+    num_steps = bench_args.num_validation_steps
+    val_lr = bench_args.validation_lr
 
-    all_match, details = _compare_outputs(opt_outputs, cand_outputs)
-    for d in details:
-        print(d)
+    print(f"\n--- Validation ({num_steps} training steps, lr={val_lr}) ---")
 
-    if all_match:
-        n_outputs = len(
-            opt_outputs if isinstance(opt_outputs, (tuple, list)) else [opt_outputs]
+    print("  Running optimized model...")
+    opt_losses = _run_validation_steps(
+        optimized_gm, inputs, num_state, num_steps, val_lr
+    )
+
+    print("  Running candidate model...")
+    cand_losses = _run_validation_steps(
+        candidate_gm, inputs, num_state, num_steps, val_lr
+    )
+
+    print(f"\n  {'Step':>6}  {'Optimized Loss':>15}  {'Candidate Loss':>15}")
+    print(f"  {'----':>6}  {'-' * 15}  {'-' * 15}")
+    for step in range(num_steps):
+        if step == 0 or (step + 1) % 10 == 0:
+            print(
+                f"  {step + 1:>6}  {opt_losses[step]:>15.6f}"
+                f"  {cand_losses[step]:>15.6f}"
+            )
+
+    valid = cand_losses[-1] <= opt_losses[-1]
+    if valid:
+        print(
+            f"\n  RESULT: CANDIDATE VALID "
+            f"(final loss {cand_losses[-1]:.6f} <= {opt_losses[-1]:.6f})"
         )
-        print(f"\n  RESULT: ALL {n_outputs} OUTPUTS MATCH")
     else:
-        print(f"\n  RESULT: MISMATCH DETECTED")
+        print(
+            f"\n  RESULT: CANDIDATE FAILED "
+            f"(final loss {cand_losses[-1]:.6f} > {opt_losses[-1]:.6f})"
+        )
 
     num_flops_per_token = meta.get("num_flops_per_token", 0)
     seq_len = meta.get("seq_len", 1)
@@ -395,7 +380,9 @@ def main():
 
     for run_idx in range(num_bench_rounds):
         if num_bench_rounds > 1:
-            print(f"\n--- Performance Benchmark (run {run_idx + 1}/{num_bench_rounds}) ---")
+            print(
+                f"\n--- Performance Benchmark (run {run_idx + 1}/{num_bench_rounds}) ---"
+            )
         else:
             print(f"\n--- Performance Benchmark ---")
         print(
@@ -432,15 +419,17 @@ def main():
         print(f"  {'Speedup':<25} {'':>15} {speedup:>15.3f}x")
 
         if speedup < _PROMOTE_SPEEDUP_THRESHOLD and bench_args.promote:
-            print(f"\n  Run {run_idx + 1}: speedup {speedup:.3f}x < {_PROMOTE_SPEEDUP_THRESHOLD:.2f}x threshold, stopping early")
+            print(
+                f"\n  Run {run_idx + 1}: speedup {speedup:.3f}x < {_PROMOTE_SPEEDUP_THRESHOLD:.2f}x threshold, stopping early"
+            )
             break
 
     all_passed = all(s >= _PROMOTE_SPEEDUP_THRESHOLD for s in speedups)
     enough_runs = len(speedups) == num_bench_rounds
 
     print(f"\n--- Summary ---")
-    if not all_match:
-        print(f"  CANDIDATE FAILED: outputs do not match")
+    if not valid:
+        print(f"  CANDIDATE FAILED: final loss exceeds baseline")
     elif all_passed and enough_runs:
         print(
             f"  CANDIDATE IS VALID AND >={pct:.0f}% FASTER "
@@ -458,17 +447,17 @@ def main():
         print(f"  CANDIDATE IS VALID BUT SLOWER")
 
     if bench_args.promote:
-        can_promote = all_match and all_passed and enough_runs
+        can_promote = valid and all_passed and enough_runs
         if can_promote:
             print(f"\n  Promoting candidate to optimized...")
             _promote_with_mfu_comment(
                 candidate_path, optimized_path, cand_mfu, fingerprint
             )
             print(f"  Done! {candidate_path.name} -> {optimized_path}")
-        elif not all_match:
+        elif not valid:
             print(
-                f"\n  Cannot promote: candidate outputs do not match. "
-                f"Fix correctness first."
+                f"\n  Cannot promote: candidate final loss exceeds baseline. "
+                f"Fix convergence first."
             )
         else:
             print(

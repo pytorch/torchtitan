@@ -5,7 +5,8 @@
 You are tasked with optimizing a flattened PyTorch training step. The training
 step (forward + loss + backward) has been traced into a straight-line sequence
 of `torch.ops.aten.*` operations. Your job is to rewrite these operations to
-run faster while producing **bitwise identical** outputs.
+run faster while maintaining convergence — the candidate's validation loss
+after 100 training steps must be **less than or equal to** the baseline's.
 
 ## Directory Layout
 
@@ -81,8 +82,8 @@ NGPU=8 HARDWARE=h100-sm90 ./torchtitan/experiments/llm_trainer/run_benchmarker.s
 
 This will:
 1. Load both the optimized and candidate models
-2. Run both with identical inputs
-3. Check that all outputs are **bitwise identical**
+2. Run both for 100 training steps (SGD updates) from identical initial state
+3. Check that the candidate's final loss is **<= the baseline's**
 4. Measure execution time and MFU for both
 5. Print a comparison report
 
@@ -96,10 +97,11 @@ NGPU=8 HARDWARE=h100-sm90 ./torchtitan/experiments/llm_trainer/run_benchmarker.s
 ```
 
 `--promote` copies the candidate to `optimized_models/` **only if** the
-candidate is bitwise correct AND at least 1% faster on every benchmark
-run (default: 3 consecutive runs; override with `--promote-runs N`).
-A comment is inserted at the top of the promoted file recording the MFU
-and timestamp, making the optimization history self-documenting.
+candidate's final validation loss is <= the baseline's AND it is at least
+1% faster on every benchmark run (default: 3 consecutive runs; override
+with `--promote-runs N`). A comment is inserted at the top of the promoted
+file recording the MFU and timestamp, making the optimization history
+self-documenting.
 
 ## Understanding the Model File
 
@@ -131,10 +133,10 @@ class GraphModule(torch.nn.Module):
 ## Optimization Rules
 
 ### MUST follow:
-1. **Bitwise identical outputs.** For the same inputs, your optimized version
-   must produce the exact same loss and gradients, bit for bit. No numerical
-   approximations, no reordering of floating-point operations that changes
-   rounding, no "close enough."
+1. **Validation loss <= baseline.** When both models are run for 100 training
+   steps (SGD updates from identical initial state), the candidate's final
+   loss must be less than or equal to the baseline's. Numerical approximations
+   are allowed as long as they do not hurt convergence.
 
 2. **Same function signature.** The `forward` method must accept the same
    arguments in the same order with the same types. Do not add, remove, or
@@ -170,7 +172,7 @@ class GraphModule(torch.nn.Module):
   same file if it helps organize the code.
 
 ### CANNOT do:
-- Change the numerical result in any way (even 1 ULP difference)
+- Introduce changes that cause the final validation loss to exceed the baseline
 - Change input/output signatures
 - Import external packages not already available (torch, triton are fine)
 - Remove or skip gradient computations
@@ -195,12 +197,14 @@ NGPU=<n>           Number of GPUs (default: 1)
 ### Benchmarker-specific Options
 
 ```
---promote              Auto-promote candidate if bitwise correct AND >=1% faster
-                       on all benchmark runs
---promote-runs N       Number of consecutive runs that must all pass (default: 3)
---num-model-warmup N   Model warmup calls BEFORE equivalence check (default: 3)
---num-warmup N         Warmup iterations before timing (default: 5)
---num-bench N          Benchmark iterations per run (default: 20)
+--promote                  Auto-promote candidate if valid AND >=1% faster
+                           on all benchmark runs
+--promote-runs N           Number of consecutive runs that must all pass (default: 3)
+--num-model-warmup N       Model warmup calls BEFORE validation check (default: 3)
+--num-validation-steps N   Training steps for validation (default: 100)
+--validation-lr LR         SGD learning rate for validation steps (default: 1e-3)
+--num-warmup N             Warmup iterations before timing (default: 5)
+--num-bench N              Benchmark iterations per run (default: 20)
 ```
 
 ### How Benchmarking Works
@@ -208,16 +212,19 @@ NGPU=<n>           Number of GPUs (default: 1)
 The benchmarker runs each model through three phases:
 
 1. **Model warmup** (`--num-model-warmup`, default 3): The model is called
-   N times *before* the bitwise equivalence check or any timing. These calls
-   are not timed and not checked for correctness. This phase exists so that
-   models can initialize internal state — for example, populating caches,
-   warming up JIT compilers, or recording CUDA graphs. Your candidate model
-   can do arbitrary work during these calls (build lookup tables, capture
-   graphs, profile and specialize) as long as it produces correct outputs
-   from call N+1 onward.
+   N times *before* the validation check or any timing. These calls are not
+   timed and not checked for correctness. This phase exists so that models
+   can initialize internal state — for example, populating caches, warming
+   up JIT compilers, or recording CUDA graphs. Your candidate model can do
+   arbitrary work during these calls (build lookup tables, capture graphs,
+   profile and specialize) as long as it produces correct outputs from call
+   N+1 onward.
 
-2. **Equivalence check**: One call per model, outputs compared bitwise.
-   This runs *after* model warmup, so it tests the "warmed up" code path.
+2. **Validation check** (`--num-validation-steps`, default 100): Both models
+   are run for N training steps from identical initial state. On each step
+   the model is called, the loss is recorded, and the state parameters are
+   updated via SGD (`param -= lr * grad`) using `--validation-lr` (default
+   1e-3). The candidate passes if its final loss is <= the baseline's.
 
 3. **Benchmark loop** (`--num-warmup` + `--num-bench`): Additional warmup
    iterations (not timed), then timed iterations measured with CUDA events.
@@ -227,8 +234,8 @@ Because model warmup calls are never timed or checked, you are free to use
 compile-like transformations in your candidate. For example, you can cache
 CPU-side scalar values during warmup and replay them in later calls, or
 capture the entire forward pass as a CUDA graph during warmup and replay it
-during benchmark. The only requirement is that outputs are bitwise identical
-from the equivalence check onward (call `num_model_warmup + 1`).
+during benchmark. The only requirement is that the candidate's validation
+loss does not exceed the baseline's after the configured number of steps.
 
 ## Supported Models
 
