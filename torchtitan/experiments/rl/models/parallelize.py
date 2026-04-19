@@ -26,8 +26,9 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import apply_compile_dense
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def parallelize_qwen3(
         and compile_config.enable
         and "model" in compile_config.components
     ):
-        apply_compile_dense(model, compile_config)
+        apply_compile(model, compile_config)
 
     return model
 
@@ -120,9 +121,27 @@ def apply_non_moe_tp(
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     positions_layout = Replicate() if has_position_id else None
 
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,
+        FusedQKVLinear,  # pyrefly: ignore [missing-attribute]
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         qk_norm_plan = SequenceParallel(sequence_dim=2)
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": ColwiseParallel(use_local_output=False),
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wk": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
+            }
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": PrepareModuleInput(
@@ -139,9 +158,7 @@ def apply_non_moe_tp(
                     positions_layout,
                 ),
             ),
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
+            **qkv_plan,
             "attention.q_norm": qk_norm_plan,
             "attention.k_norm": qk_norm_plan,
             "attention.wo": RowwiseParallel(

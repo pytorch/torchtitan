@@ -20,6 +20,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -30,10 +31,10 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
-from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -91,17 +92,13 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            pad_multiple=pad_multiple,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -121,7 +118,7 @@ def parallelize_qwen3(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -225,9 +222,30 @@ def apply_non_moe_tp(
         output_layouts=sp_layout, use_local_output=enable_sp
     )
 
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
-        # pyrefly: ignore [no-matching-overload]
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
+                "attention.q_norm": qk_norm_plan,
+                "attention.k_norm": qk_norm_plan,
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
+                "attention.q_norm": qk_norm_plan,
+                "attention.k_norm": qk_norm_plan,
+            }
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(
@@ -239,11 +257,7 @@ def apply_non_moe_tp(
                     positions_sharding,
                 ),
             ),
-            "attention.wq": colwise_parallel(use_local_output=False),
-            "attention.wk": colwise_parallel(use_local_output=False),
-            "attention.wv": colwise_parallel(use_local_output=False),
-            "attention.q_norm": qk_norm_plan,
-            "attention.k_norm": qk_norm_plan,
+            **qkv_plan,
             "attention.wo": rowwise_output_plan,
             "ffn_norm": norm_plan,
         }
@@ -266,7 +280,6 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

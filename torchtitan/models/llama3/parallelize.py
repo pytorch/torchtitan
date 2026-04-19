@@ -30,13 +30,14 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_dense
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -117,7 +118,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile_dense(model, compile_config)
+        apply_compile(model, compile_config)
 
     names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     dp_mesh = parallel_dims.get_mesh(names)
@@ -204,18 +205,33 @@ def apply_tp(
         output_layouts=sp_layout, use_local_output=enable_sp
     )
 
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
-        # pyrefly: ignore [no-matching-overload]
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": colwise_parallel(),
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": colwise_parallel(),
+                "attention.qkv_linear.wk": colwise_parallel(),
+                "attention.qkv_linear.wv": colwise_parallel(),
+            }
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(
                 input_layouts=(sp_layout, None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
+            **qkv_plan,
             "attention.wo": rowwise_output_plan,
             "ffn_norm": norm_plan,
             "feed_forward": prepare_module_input(
@@ -231,7 +247,6 @@ def apply_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

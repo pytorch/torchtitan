@@ -327,7 +327,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode jit",
                     "--parallelism.data_parallel_shard_degree 8",
                     "--parallelism.expert_parallel_degree 2",
@@ -343,7 +343,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode jit",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -377,7 +377,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode jit",
                     "--compile.backend inductor",
                     "--parallelism.tensor_parallel_degree 1",
@@ -395,7 +395,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -412,7 +412,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel_flex_attn",
+                    "--config graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -429,7 +429,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -450,7 +450,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -467,7 +467,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel_flex_attn",
+                    "--config graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -504,7 +504,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.qwen3",
-                    "--config graph_trainer_qwen3_debugmodel_moe",
+                    "--config graph_trainer_qwen3_debugmodel_moe_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",

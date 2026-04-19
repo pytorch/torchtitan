@@ -15,6 +15,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -25,7 +26,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
@@ -99,10 +100,6 @@ def parallelize_deepseekv3(
             )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -110,8 +107,7 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -134,7 +130,7 @@ def parallelize_deepseekv3(
         )
 
     if model_compile_enabled:
-        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -227,7 +223,6 @@ def apply_non_moe_tp(
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
-        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(

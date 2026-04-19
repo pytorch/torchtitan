@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed.compile import apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -42,41 +42,32 @@ class TinyModel(Module):
 
 
 class TestApplyCompile(unittest.TestCase):
-    def test_patched_once(self):
-        """
-        Calls apply_compile multiple times, as in the case with PP.
-        But patches should only happen once
-        """
-        unused_model1 = TinyModel(num_layers=2, dim=128)
-        unused_model2 = TinyModel(num_layers=2, dim=128)
-        compile_config = CompileConfig(backend="eager")
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_grouped_mm_compiles_and_runs(self):
+        model = TinyModel(num_layers=2, dim=128).cuda()
+        compile_config = CompileConfig(backend="inductor")
 
-        apply_compile_sparse(unused_model1, compile_config, ep_enabled=True)
-        apply_compile_sparse(unused_model2, compile_config, ep_enabled=True)
+        apply_compile(model, compile_config)
 
         from torchtitan.models.common import moe as moe_module
 
-        # Generate sample inputs for _run_experts_grouped_mm
         num_experts = 8
         dim = 128
         hidden_dim = 256
-        w1 = torch.randn(num_experts, hidden_dim, dim)
-        w2 = torch.randn(num_experts, dim, hidden_dim)
-        w3 = torch.randn(num_experts, hidden_dim, dim)
+        w1 = torch.randn(num_experts, hidden_dim, dim, device="cuda")
+        w2 = torch.randn(num_experts, dim, hidden_dim, device="cuda")
+        w3 = torch.randn(num_experts, hidden_dim, dim, device="cuda")
         num_tokens_per_expert = torch.tensor(
-            [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32
+            [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device="cuda"
         )
         total_tokens = num_tokens_per_expert.sum().item()
-        x = torch.randn(total_tokens, dim)
+        x = torch.randn(total_tokens, dim, device="cuda")
 
-        # Call the function, should not error
         output = moe_module._run_experts_grouped_mm(
             w1, w2, w3, x, num_tokens_per_expert
         )
 
-        print(f"Input shape: {x.shape}")
-        print(f"Output shape: {output.shape}")
-        print(f"Num tokens per expert: {num_tokens_per_expert}")
+        self.assertEqual(output.shape, x.shape)
 
 
 if __name__ == "__main__":

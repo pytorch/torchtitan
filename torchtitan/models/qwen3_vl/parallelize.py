@@ -26,6 +26,8 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
+
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -36,9 +38,10 @@ from torchtitan.config import (
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.compile import apply_compile_dense, apply_compile_sparse
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -79,8 +82,28 @@ def _apply_non_moe_tp_to_decoder(
     # tp_mesh (needed for consistent (fsdp, tp) mesh after FSDP). Its input
     # hook wraps plain tensors as DTensor(Replicate); its output stays as
     # DTensor (no unwrap) so downstream modules receive DTensors.
+
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": ColwiseParallel(use_local_output=False),
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wk": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
+            }
+
         layer_plan = {
             "attention_norm": NoParallel(),
             "ffn_norm": NoParallel(),
@@ -92,9 +115,7 @@ def _apply_non_moe_tp_to_decoder(
                 input_layouts=(Replicate(), Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
+            **qkv_plan,
             # Not actual sequence parallelism — SequenceParallel(sequence_dim=2)
             # tells DTensor that dim 2 (the head dimension) is the sharded dim,
             # so the per-head RMSNorm operates on each rank's local heads without
@@ -295,6 +316,7 @@ def parallelize_qwen3_vl(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=False,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     # Apply activation checkpointing
@@ -311,11 +333,11 @@ def parallelize_qwen3_vl(
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile_sparse(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
     if compile_config.enable:
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
-            apply_compile_dense(model.vision_encoder, compile_config)
+            apply_compile(model.vision_encoder, compile_config)
 
     # Apply FSDP / HSDP unconditionally (fully_shard handles dp_shard=1)
     dp_mesh_names = (
