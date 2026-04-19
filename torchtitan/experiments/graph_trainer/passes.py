@@ -130,6 +130,11 @@ def construct_default_graph_passes(
                 tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
+    passes.append(
+        functools.partial(
+            tlparse_log_graph_pass, graph_name="make_fx_graph_after_passes"
+        )
+    )
     return passes
 
 

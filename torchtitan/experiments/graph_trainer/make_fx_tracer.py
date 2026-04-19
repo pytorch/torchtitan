@@ -493,7 +493,17 @@ def trace_train_step(fn: Callable) -> Callable[..., TracedResult]:
             with stateless._reparametrize_module(module, state):
                 return fn(module, *user_args)
 
-        return minimal_fx_tracer(_stateless_fn)(extract_module_state(module), *args)
+        traced_result = minimal_fx_tracer(_stateless_fn)(
+            extract_module_state(module), *args
+        )
+
+        # Log the raw traced graph before GraphTrainer constructs default passes.
+        from torchtitan.experiments.graph_trainer.tlparse_utils import (
+            tlparse_log_traced_result,
+        )
+
+        tlparse_log_traced_result(traced_result)
+        return traced_result
 
     return _trace_with_module
 
