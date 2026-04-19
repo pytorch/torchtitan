@@ -9,11 +9,9 @@ from typing import Any
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
-
 from torchtitan.tools.logging import logger
 
 from ..model.args import SpecialTokens
-
 from .utils.image import (
     convert_to_patches,
     pad_empty_images_to_target_batch_size,
@@ -171,7 +169,10 @@ class MultiModalCollatorNLD:
         B, L = input_ids.shape
         if positions.shape[1] < L:
             padding = torch.zeros(
-                B, L - positions.shape[1], dtype=positions.dtype, device=positions.device
+                B,
+                L - positions.shape[1],
+                dtype=positions.dtype,
+                device=positions.device,
             )
             positions = torch.cat([positions, padding], dim=1)
         elif positions.shape[1] > L:
@@ -194,7 +195,11 @@ class MultiModalCollatorNLD:
             )
             positions = torch.cat([positions, padding], dim=0)
 
-        return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]  # Shift for next token prediction
+        return (
+            input_ids[:, :-1],
+            labels[:, 1:],
+            positions[:, :-1],
+        )  # Shift for next token prediction
 
     def __call__(
         self, batch: list[dict[str, Any]]

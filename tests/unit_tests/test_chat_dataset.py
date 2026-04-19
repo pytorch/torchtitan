@@ -710,5 +710,6 @@ class TestChatDatasetPositionBoundaries(unittest.TestCase):
         metadata = create_varlen_metadata_for_document(positions=positions)
         self.assertEqual(metadata.cu_seq_q.tolist(), [0, sample_len, sample_len * 2])
 
+
 if __name__ == "__main__":
     unittest.main()

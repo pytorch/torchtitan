@@ -87,9 +87,7 @@ class SamplePacker:
                 {
                     "input_ids": torch.cat([s["input_ids"] for s in current_sequence]),
                     "labels": torch.cat([s["labels"] for s in current_sequence]),
-                    "positions": torch.cat(
-                        [s["positions"] for s in current_sequence]
-                    ),
+                    "positions": torch.cat([s["positions"] for s in current_sequence]),
                     "pixel_values": [
                         img for s in current_sequence for img in s["pixel_values"]
                     ],

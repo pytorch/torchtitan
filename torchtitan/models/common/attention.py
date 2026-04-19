@@ -30,7 +30,6 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
