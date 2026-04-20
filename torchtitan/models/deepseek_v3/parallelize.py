@@ -15,6 +15,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -99,10 +100,6 @@ def parallelize_deepseekv3(
             )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -110,8 +107,7 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -227,7 +223,6 @@ def apply_non_moe_tp(
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
-        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(

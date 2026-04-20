@@ -101,9 +101,9 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel",
+        baseline_config="deepseek_v3_debugmodel_ep",
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel",
+        test_config="graph_trainer_deepseek_v3_debugmodel_ep",
         baseline_options=DSV3_PARALLELISM,
         test_options=test_options,
     )
@@ -144,9 +144,9 @@ def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="qwen3",
-        baseline_config="qwen3_moe_debug",
+        baseline_config="qwen3_moe_debug_ep",
         test_module="graph_trainer.qwen3",
-        test_config="graph_trainer_qwen3_debugmodel_moe",
+        test_config="graph_trainer_qwen3_debugmodel_moe_ep",
         baseline_options=QWEN3_MOE_PARALLELISM,
         test_options=test_options,
     )

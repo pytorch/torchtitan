@@ -8,7 +8,7 @@
 DeepEP primitives for MoE Expert Parallel.
 
 Provides low-level functions and autograd wrappers for DeepEP communication.
-Used by DeepEPExpertParallel in expert_parallel.py.
+Used by DeepEPTokenDispatcher in token_dispatcher.py.
 """
 
 from dataclasses import dataclass
@@ -31,7 +31,6 @@ except ImportError as e:
 
 
 # Global buffer (single buffer per process, recreated if group changes)
-# pyrefly: ignore [bad-assignment]
 _buffer: Buffer = None
 
 # Global cache for dispatch handles, keyed by handle_id
@@ -118,7 +117,6 @@ def _dispatch_op_impl(
     recv_num_tokens_per_expert = torch.tensor(
         recv_num_tokens_per_expert_list, dtype=torch.int32, device="cpu"
     )
-    # pyrefly: ignore [bad-return]
     return recv_x, recv_indices, recv_scores, recv_num_tokens_per_expert, handle_id
 
 
