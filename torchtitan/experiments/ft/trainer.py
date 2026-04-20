@@ -108,12 +108,6 @@ class FaultTolerantTrainer(Trainer):
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
-        with (
-            torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
-        ):
-            model = model_config.build()
-
         # Build the collection of model converters. No-op if converters empty
         model_compile_enabled = (
             config.compile.enable and "model" in config.compile.components
@@ -122,6 +116,17 @@ class FaultTolerantTrainer(Trainer):
             parallel_dims=parallel_dims,
             model_compile_enabled=model_compile_enabled,
         )
+
+        # Apply config-level conversions before building the model
+        model_converters.convert_config(model_config)
+
+        with (
+            torch.device("meta"),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+        ):
+            model = model_config.build()
+
+        # Apply model-level conversions (e.g. MoE quantization)
         model_converters.convert(model)
 
         # Verify all submodules satisfy the Module protocol

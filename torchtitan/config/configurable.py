@@ -6,6 +6,7 @@
 
 import dataclasses
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
 
@@ -64,6 +65,32 @@ class Configurable:
                     return repr(val)
 
             return {f.name: _convert(getattr(self, f.name)) for f in fields(self)}
+
+        def walk(
+            self, config_cls: type, *, _prefix: str = ""
+        ) -> Iterator[tuple[str, "Configurable.Config"]]:
+            """Yield ``(fqn, config)`` for every nested config of *config_cls*.
+
+            Recursively walks dataclass fields, including items inside lists.
+            The *fqn* mirrors the module FQN that ``build()`` would produce
+            (e.g. ``"layers.0.feed_forward.w1"``).
+            """
+            for f in fields(self):
+                val = getattr(self, f.name)
+                fqn = f"{_prefix}.{f.name}" if _prefix else f.name
+                if isinstance(val, config_cls):
+                    yield fqn, val
+                elif isinstance(val, list):
+                    for i, item in enumerate(val):
+                        item_fqn = f"{fqn}.{i}"
+                        if isinstance(item, config_cls):
+                            yield item_fqn, item
+                        elif dataclasses.is_dataclass(item) and not isinstance(
+                            item, type
+                        ):
+                            yield from item.walk(config_cls, _prefix=item_fqn)
+                elif dataclasses.is_dataclass(val) and not isinstance(val, type):
+                    yield from val.walk(config_cls, _prefix=fqn)
 
         def build(self, **kwargs):
             """Construct the owning class. Auto-wired by __init_subclass__.

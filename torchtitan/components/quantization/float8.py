@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
-from functools import partial
 from typing import ClassVar, Literal
 
 import torch
@@ -21,7 +20,6 @@ from .module_utils import (
     inject_module_protocol,
     verify_module_protocol,
 )
-from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
@@ -91,8 +89,10 @@ class Float8LinearConverter(QuantizationConverter):
             )
             return
 
-        self.filter_fqns = float8_config.filter_fqns
-        self.filter_fn = self._init_filter_fn(float8_config)
+        self.filter_fqns = [
+            fqn for fqn in float8_config.filter_fqns if fqn != AUTO_FILTER_SMALL_KN_FLAG
+        ]
+        self.use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
 
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (
@@ -133,75 +133,60 @@ class Float8LinearConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def _init_filter_fn(self, float8_config: Config):
-        # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
-        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
-        if use_auto_filter:
+    def _should_convert(self, config: Linear.Config, fqn: str) -> bool:
+        """Check if a Linear.Config at the given FQN should be converted."""
+        if config.in_features % 16 != 0 or config.out_features % 16 != 0:
+            return False
+        if any(filter_fqn in fqn for filter_fqn in self.filter_fqns):
+            return False
+
+        if self.use_auto_filter:
             try:
                 from torchao.float8 import _auto_filter_for_recipe
 
-                logger.info(
-                    "Using _auto_filter_for_recipe to avoid converting linear layers with dims too small "
-                    "to benefit from float8 training. See docs/float8.md for more info."
-                )
-
                 recipe_name = (
-                    float8_config.recipe_name
-                    if float8_config.recipe_name
-                    else "tensorwise"
+                    getattr(self.torchao_config, "recipe_name", None) or "tensorwise"
                 )
-
-                # remove auto filter flag from filter_fqns before passing to _auto_filter_for_recipe
-                float8_config.filter_fqns.remove(AUTO_FILTER_SMALL_KN_FLAG)
-
-                return _auto_filter_for_recipe(
-                    recipe_name,
-                    filter_fqns=float8_config.filter_fqns,
+                auto_filter = _auto_filter_for_recipe(
+                    recipe_name, filter_fqns=self.filter_fqns
                 )
-            except ImportError:
-                logger.warning(
-                    (
-                        "Using default module_filter_fn for float8 model conversion. "
-                        "To use _auto_filter_for_recipe, please install torchao nightly build."
+                # Create a lightweight module on meta device for the filter check
+                with torch.device("meta"):
+                    dummy = nn.Linear(
+                        config.in_features, config.out_features, bias=config.bias
                     )
-                )
+                return auto_filter(dummy, fqn)
+            except ImportError:
+                pass
 
-        # use default filter func
-        return partial(module_filter_fn, filter_fqns=float8_config.filter_fqns)
+        return True
 
-    def convert(self, model: nn.Module):
-        """
-        This function converts the linear layers of `model` to `Float8Linear`.
-        Note that today, only dynamic tensor scaling (the default) is supported.
-        This will mutate the model inplace.
-        """
+    def convert_config(self, model_config) -> None:
+        """Inject float8 conversion into matching Linear.Config instances."""
         if not self.enabled:
             return
 
         from torchao.float8 import convert_to_float8_training
 
-        # Capture Module attrs before conversion (Float8 creates new instances).
-        # We need to first verify if all nn.Linear have been converted to Linear.
-        verify_module_protocol(model, nn.Linear, Linear)
-        saved_attrs = capture_module_attrs(
-            model, ["_param_init"], nn_module_cls=nn.Linear
-        )
+        torchao_config = self.torchao_config
 
-        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-        convert_to_float8_training(
-            model,
-            config=self.torchao_config,
-            module_filter_fn=self.filter_fn,
-        )
+        def convert_fn(mod: nn.Module) -> nn.Module:
+            container = nn.Module()
+            container.linear = mod
+            convert_to_float8_training(container, config=torchao_config)
+            return container.linear
 
-        # Re-inject Linear protocol and re-attach attrs lost during conversion
-        inject_module_protocol(model, Linear, saved_attrs)
-        verify_module_protocol(model, nn.Linear, Linear)
+        for fqn, linear_config in model_config.walk(Linear.Config):
+            if self._should_convert(linear_config, fqn):
+                linear_config._convert_fn = convert_fn
 
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.torchao_config.enable_fsdp_float8_all_gather}"
         )
+
+    def convert(self, model: nn.Module):
+        pass
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         if not self.enabled:
@@ -256,6 +241,9 @@ class Float8GroupedMMConverter(QuantizationConverter):
         ), "Float8 MoE training prototype does not yet support context parallelism"
 
         self.enabled = True
+
+    def convert_config(self, model_config) -> None:
+        pass
 
     def convert(self, model: nn.Module):
         """

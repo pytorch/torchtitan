@@ -109,7 +109,7 @@ def parallelize_gptoss(
 
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )

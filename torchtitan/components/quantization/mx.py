@@ -82,6 +82,9 @@ class MXFP8Converter(QuantizationConverter):
         self.enabled = True
         logger.info("MXFP8 MoE training enabled")
 
+    def convert_config(self, model_config) -> None:
+        pass
+
     def convert(self, model: nn.Module):
         """
         Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor.
