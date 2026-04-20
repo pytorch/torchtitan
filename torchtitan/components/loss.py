@@ -11,7 +11,7 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import CompileConfig, Function
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -31,52 +31,53 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
 
 
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Common MSE loss function with sum reduction for Transformer models training."""
+    """MSE loss with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
         pred.float(), labels.float().detach(), reduction="sum"
     )
 
 
-class CrossEntropyLoss(Configurable):
+class BaseLoss(Function):
+    """Base class for all loss functions.
+
+    Provides compile support and a unified ``__call__`` signature:
+    ``(pred, labels, global_valid_tokens) -> scaled_loss``.
+    Subclasses set ``Config.fn`` to their raw loss function.
+    """
+
+    def __init__(self, config, *, compile_config: CompileConfig | None = None):
+        super().__init__(config)
+        if (
+            compile_config is not None
+            and compile_config.enable
+            and "loss" in compile_config.components
+        ):
+            logger.info("Compiling the loss function with torch.compile")
+            self.fn = torch.compile(self.fn, backend=compile_config.backend)
+
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.fn(pred, labels) / global_valid_tokens
+
+
+class CrossEntropyLoss(BaseLoss):
     """Cross-entropy loss with sum reduction for token-based normalization."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        pass
-
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        self._fn: LossFunction = cross_entropy_loss
-        if (
-            compile_config is not None
-            and compile_config.enable
-            and "loss" in compile_config.components
-        ):
-            logger.info("Compiling the loss function with torch.compile")
-            self._fn = torch.compile(self._fn, backend=compile_config.backend)
-
-    def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        return self._fn(pred, labels)
+    class Config(Function.Config):
+        fn: LossFunction = cross_entropy_loss
 
 
-class MSELoss(Configurable):
+class MSELoss(BaseLoss):
     """MSE loss with sum reduction for Transformer models training (e.g. Flux)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        pass
-
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        self._fn: LossFunction = mse_loss
-        if (
-            compile_config is not None
-            and compile_config.enable
-            and "loss" in compile_config.components
-        ):
-            logger.info("Compiling the loss function with torch.compile")
-            self._fn = torch.compile(self._fn, backend=compile_config.backend)
-
-    def __call__(self, pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        return self._fn(pred, labels)
+    class Config(Function.Config):
+        fn: LossFunction = mse_loss
 
 
 class GradAccumulator:
@@ -135,7 +136,9 @@ class GradAccumulator:
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
-        # Extract local tensor if DTensor
+        # Extract local tensor if DTensor (e.g. when TP is enabled)
+        from torch.distributed.tensor import DTensor
+
         if isinstance(chunk_grad, DTensor):
             chunk_grad = chunk_grad.to_local()
 
@@ -165,7 +168,7 @@ class GradAccumulator:
         return self._buffer
 
 
-class ChunkedCELoss(Configurable):
+class ChunkedCELoss(BaseLoss):
     """Chunked cross-entropy loss that splits the sequence dimension to reduce peak memory.
 
     Instead of materializing the full [B, L, V] logits tensor at once, this splits
@@ -188,9 +191,15 @@ class ChunkedCELoss(Configurable):
         unsharded across all chunks (avoiding repeated all-gathers). Reduce-scatter
         fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
 
-    TP with Loss Parallel:
-        Loss parallel still works within each chunk since the ``loss_parallel()``
-        context wraps the entire chunked computation.
+    TP / SP composability:
+        Hidden states are redistributed to ``Replicate()`` on the TP mesh
+        before chunking, so each chunk enters the lm_head as ``Replicate()``
+        input regardless of whether SP is enabled. With SP, this is an
+        all-gather from ``Shard(1)``; without SP, it's a no-op.
+
+        When loss parallel is applied, each TP rank
+        computes partial CE on its ``V/tp`` slice, with an internal
+        all-reduce for the correct log-sum-exp.
 
     CP: Further chunks the local sequence dimension. Works out of the box.
 
@@ -198,7 +207,8 @@ class ChunkedCELoss(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(Function.Config):
+        fn: LossFunction = cross_entropy_loss
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
 
@@ -208,11 +218,13 @@ class ChunkedCELoss(Configurable):
         *,
         compile_config: CompileConfig | None = None,
     ):
+        super().__init__(config, compile_config=compile_config)
         self.num_chunks = config.num_chunks
-        self.loss_fn = CrossEntropyLoss(
-            CrossEntropyLoss.Config(), compile_config=compile_config
-        )
         self.lm_head: nn.Module | None = None
+
+    def set_lm_head(self, lm_head: nn.Module) -> None:
+        """Set the lm_head module. Must be called before the first __call__."""
+        self.lm_head = lm_head
 
     def __call__(
         self,
@@ -236,21 +248,20 @@ class ChunkedCELoss(Configurable):
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
-        is_fsdp = isinstance(lm_head, FSDPModule)
+        fsdp_enabled = isinstance(lm_head, FSDPModule)
 
-        # If SP is enabled, hidden states are Shard(1) on the TP mesh.
-        # Redistribute to Replicate before chunking so that the lm_head
-        # receives Replicate input and produces correct Shard(-1) output
-        # for loss parallel.
+        # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
+        # Redistribute only the TP dim to Replicate before chunking so that
+        # the lm_head receives Replicate input on TP. Other mesh dims (e.g.
+        # CP) are left unchanged.
         if isinstance(hidden_states, DTensor):
-            placements = hidden_states.placements
-            new_placements = tuple(
-                Replicate() if not isinstance(p, Replicate) else p for p in placements
-            )
-            if new_placements != placements:
-                hidden_states = hidden_states.redistribute(
-                    hidden_states.device_mesh, new_placements
-                )
+            mesh = hidden_states.device_mesh
+            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
+                tp_dim = mesh.mesh_dim_names.index("tp")
+                placements = list(hidden_states.placements)
+                if not isinstance(placements[tp_dim], Replicate):
+                    placements[tp_dim] = Replicate()
+                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
 
         # Detach hidden states to stop gradient propagation at this boundary.
         h_detached = hidden_states.detach().requires_grad_(True)
@@ -259,7 +270,9 @@ class ChunkedCELoss(Configurable):
         # Use .contiguous() to break shared storage from torch.chunk(),
         # otherwise all chunks share the same underlying memory and the
         # autograd graph retains references, preventing memory from being freed.
-        h_chunks = torch.chunk(h_detached, num_chunks, dim=1)
+        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
+        # directly with Shard(1) on CP. Need local_map to operate on local tensors
+        h_chunks: tuple[Tensor, ...] = torch.chunk(h_detached, num_chunks, dim=1)
         h_chunks = [c.contiguous().detach().requires_grad_(True) for c in h_chunks]
         label_chunks = torch.chunk(labels, num_chunks, dim=1)
 
@@ -267,7 +280,7 @@ class ChunkedCELoss(Configurable):
         # Pass hidden_states as reference so GradAccumulator tracks DTensor
         # metadata and returns a DTensor from result() if needed.
         grad_accumulator = GradAccumulator(
-            hidden_states,
+            h_detached.shape,
             num_chunks=num_chunks,
             dtype=torch.float32,
         )
@@ -277,26 +290,25 @@ class ChunkedCELoss(Configurable):
         # Disable FSDP reshard on lm_head to keep weight unsharded across
         # all chunks, avoiding repeated all-gathers. Reduce-scatter fires
         # per-chunk, and FSDP2 accumulates the sharded gradients correctly.
-        if is_fsdp:
+        if fsdp_enabled:
             lm_head.set_reshard_after_forward(False)
             lm_head.set_reshard_after_backward(False)
 
         for h_chunk, label_chunk in zip(h_chunks, label_chunks):
             logits = lm_head(h_chunk)
 
-            chunk_loss = self.loss_fn(logits, label_chunk)
+            chunk_loss_sum = self.fn(logits, label_chunk)
+            chunk_loss = chunk_loss_sum / global_valid_tokens
             total_loss = total_loss + chunk_loss.detach()
 
-            # Scale loss before backward so gradients are properly normalized
-            scaled_chunk_loss = chunk_loss / global_valid_tokens
-            scaled_chunk_loss.backward()
+            chunk_loss.backward()
 
             # Collect this chunk's gradient and free it before the next
             # chunk to keep only one chunk's activations in memory.
             grad_accumulator.add(h_chunk.grad)
             h_chunk.grad = None
 
-        if is_fsdp:
+        if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)
             lm_head.set_reshard_after_backward(True)
             lm_head.reshard()
@@ -307,8 +319,7 @@ class ChunkedCELoss(Configurable):
         # .backward() is called (by the trainer or PP schedule), autograd
         # calls _DeferredBackward.backward which returns accumulated_grad
         # as the gradient for hidden_states, propagating through the decoder.
-        loss = total_loss / global_valid_tokens
-        return _DeferredBackward.apply(hidden_states, accumulated_grad, loss)
+        return _DeferredBackward.apply(hidden_states, accumulated_grad, total_loss)
 
 
 class _DeferredBackward(torch.autograd.Function):
@@ -339,5 +350,8 @@ class _DeferredBackward(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None]:
         (accumulated_grad,) = ctx.saved_tensors
         # Return accumulated_grad as the gradient for hidden_states.
-        # Autograd propagates it through the decoder model's existing graph.
+        # Autograd then propagates this through hidden_states' existing
+        # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
+        # but expressed as a return value so autograd handles the traversal
+        # in a single pass (no "backward through graph twice" error).
         return accumulated_grad, None, None

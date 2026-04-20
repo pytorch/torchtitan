@@ -10,7 +10,6 @@ from typing import Any
 
 import torch.nn as nn
 
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
@@ -139,7 +138,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=config,
         parallelize_fn=parallelize_vlm,
         pipelining_fn=None,
-        loss=CrossEntropyLoss.Config(),
         post_optimizer_build_fn=None,
         state_dict_adapter=None,
     )

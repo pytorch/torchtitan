@@ -9,7 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import (
@@ -571,7 +570,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_qwen3_vl,
         pipelining_fn=None,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3VLStateDictAdapter,
     )

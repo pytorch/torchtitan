@@ -9,7 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
@@ -358,7 +357,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=None,
-        loss=CrossEntropyLoss.Config(),
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
     )

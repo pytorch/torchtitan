@@ -218,7 +218,7 @@ class TestChunkedCELoss(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedCELoss for testing."""
         model = _FakeDecoder(dim, vocab_size)
-        chunked_loss = ChunkedCELoss(num_chunks=num_chunks)
+        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
         # Bypass isinstance(model, Decoder) check for unit testing
         chunked_loss.lm_head = model.output
         return model, chunked_loss
@@ -252,8 +252,9 @@ class TestChunkedCELoss(unittest.TestCase):
 
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
-        chunked_loss.set_global_valid_tokens(global_valid_tokens)
-        loss_chunked = chunked_loss(hidden_chunked, labels)
+
+        loss_chunked = chunked_loss(hidden_chunked, labels, global_valid_tokens)
+        loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
         lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
 
@@ -302,8 +303,9 @@ class TestChunkedCELoss(unittest.TestCase):
                 ref_state_dict = model.output.state_dict()
 
             h = hidden_states.detach().requires_grad_(True)
-            chunked_loss.set_global_valid_tokens(global_valid_tokens)
-            loss = chunked_loss(h, labels)
+
+            loss = chunked_loss(h, labels, global_valid_tokens)
+            loss.backward()
             losses.append(loss.item())
 
         for i in range(1, len(losses)):

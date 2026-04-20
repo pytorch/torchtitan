@@ -96,6 +96,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         activation_checkpoint: ActivationCheckpointConfig = field(
             default_factory=ActivationCheckpointConfig
         )
+        # loss is excluded from tyro CLI parsing (init=False) because
+        # Function.Config contains a Callable field that tyro can't serialize.
+        loss: ChunkedCELoss.Config = field(
+            init=False, default_factory=ChunkedCELoss.Config
+        )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
@@ -314,7 +319,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = model_spec.loss.build(
+        self.loss_fn = config.loss.build(
             compile_config=config.compile,
         )
 
@@ -409,9 +414,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
-        # Set lm_head reference for ChunkedCELoss after model construction
+        # Set lm_head reference for ChunkedCELoss after model construction.
+        # - Non-PP: single model part always has lm_head.
+        # - PP: only the last stage has lm_head; other stages have None
+        #   so ChunkedCELoss.set_lm_head is never called for non-last stage.
         if isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.lm_head = self.model_parts[-1].lm_head
+            lm_head = self.model_parts[-1].lm_head
+            if lm_head is not None:
+                self.loss_fn.set_lm_head(lm_head)
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -661,19 +671,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels
         )
 
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            extra_kwargs["skip_lm_head"] = True
+
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            is_chunked = isinstance(self.loss_fn, ChunkedCELoss)
-            if is_chunked:
-                self.loss_fn._global_valid_tokens = global_valid_tokens
-
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
-                if is_chunked:
-                    extra_kwargs["skip_lm_head"] = True
-
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
@@ -695,31 +701,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             if self.pp_has_last_stage:
                 assert losses is not None
-                if is_chunked:
-                    # ChunkedCELoss already returns scaled loss per microbatch
-                    loss = torch.sum(torch.stack(losses)).to(self.device)
-                else:
-                    loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
-                        self.device
-                    )
+                # All loss classes scale by global_valid_tokens internally
+                loss = torch.sum(torch.stack(losses)).to(self.device)
             else:
                 loss = torch.tensor([-1.0], device=self.device)
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            is_chunked = isinstance(self.loss_fn, ChunkedCELoss)
             with self.train_context():
-                pred = model_parts[0](
-                    inputs,
-                    **extra_inputs,
-                    **extra_kwargs,
-                    **({"skip_lm_head": True} if is_chunked else {}),
-                )
-
-                if is_chunked:
-                    loss = self.loss_fn(pred, labels, global_valid_tokens)
-                else:
-                    loss = self.loss_fn(pred, labels) / global_valid_tokens
+                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                loss = self.loss_fn(pred, labels, global_valid_tokens)
 
                 del pred
                 loss.backward()

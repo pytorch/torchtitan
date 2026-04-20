@@ -6,7 +6,6 @@
 
 from dataclasses import fields
 
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -34,7 +33,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        loss=CrossEntropyLoss.Config(),
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
     )

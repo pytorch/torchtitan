@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import torch
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
+from torchtitan.components.loss import MSELoss
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
@@ -35,6 +36,10 @@ class FluxTrainer(Trainer):
         # Overwrite parent class tokenizer
         tokenizer: FluxTokenizerContainer.Config = (  # pyrefly: ignore [bad-override]
             field(default_factory=FluxTokenizerContainer.Config)
+        )
+        # Overwrite parent class loss (CE → MSE for diffusion)
+        loss: MSELoss.Config = field(  # pyrefly: ignore [bad-override]
+            init=False, default_factory=MSELoss.Config
         )
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""

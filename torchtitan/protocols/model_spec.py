@@ -11,7 +11,6 @@ from typing import TypeAlias
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.config import Configurable
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
@@ -31,7 +30,6 @@ class ModelSpec:
     name: str
     flavor: str
     model: BaseModel.Config
-    loss: Configurable.Config
     # TODO: improve the serializability of ModelSpec by refactoring the following
     #       fields, e.g. by having their own classes, or hard-coding into trainer
     # NOTE: Callable fields use bare ``Callable`` instead of the parameterised

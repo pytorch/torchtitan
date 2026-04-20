@@ -102,11 +102,12 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_chunked_loss() -> Trainer.Config:
-    from torchtitan.components.loss import ChunkedCELoss
+def llama3_debugmodel_ce_loss() -> Trainer.Config:
+    """Debug model with standard (non-chunked) CrossEntropyLoss."""
+    from torchtitan.components.loss import CrossEntropyLoss
 
     config = llama3_debugmodel()
-    config.model_spec.loss = ChunkedCELoss.Config(num_chunks=4)
+    config.loss = CrossEntropyLoss.Config()
     return config
 
 

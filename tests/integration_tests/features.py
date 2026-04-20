@@ -629,19 +629,15 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=1,
             timeout=30,
         ),
-        # Chunked CE loss tests use --module llama3 --config llama3_debugmodel_chunked_loss
+        # Test standard (non-chunked) CE loss (default is ChunkedCELoss)
         OverrideDefinitions(
             [
                 [
-                    "--module llama3 --config llama3_debugmodel_chunked_loss",
-                ],
-                [
-                    "--module llama3 --config llama3_debugmodel_chunked_loss",
-                    "--parallelism.context_parallel_degree 2",
+                    "--module llama3 --config llama3_debugmodel_ce_loss",
                 ],
             ],
-            "Chunked CE loss with FSDP, FSDP+CP",
-            "chunked_loss",
+            "Standard CE loss with FSDP",
+            "ce_loss",
             ngpu=4,
         ),
     ]

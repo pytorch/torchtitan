@@ -9,7 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -385,7 +384,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        loss=CrossEntropyLoss.Config(),
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
     )

@@ -10,7 +10,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -629,7 +628,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
-        loss=CrossEntropyLoss.Config(),
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
     )
