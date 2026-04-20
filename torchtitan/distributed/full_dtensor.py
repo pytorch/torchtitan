@@ -27,11 +27,22 @@ from torch.distributed.tensor.placement_types import Placement
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 
-def validate_config(parallel_dims: ParallelDims, model_config: Any) -> None:
+def validate_config(
+    parallel_dims: ParallelDims,
+    model_spec: Any,
+    model_config: Any,
+) -> None:
     """Validate that the current configuration is compatible with full DTensor.
 
     Raises NotImplementedError with a clear message if incompatible.
     """
+    if model_spec.name != "llama3":
+        raise NotImplementedError(
+            f"full_dtensor is currently only implemented for llama3, "
+            f"got model {model_spec.name!r}. Disable full_dtensor or switch "
+            "to llama3."
+        )
+
     if parallel_dims.ep_enabled:
         raise NotImplementedError(
             "full_dtensor is not supported with Expert Parallel. "
@@ -42,11 +53,13 @@ def validate_config(parallel_dims: ParallelDims, model_config: Any) -> None:
     layer = layers[0] if layers else None
     attn_config = getattr(layer, "attention", None) if layer else None
     attn_backend = getattr(attn_config, "attn_backend", "sdpa")
-    if attn_backend in ("flex", "varlen"):
+    if parallel_dims.cp_enabled and attn_backend in ("sdpa", "varlen"):
         raise NotImplementedError(
-            f"full_dtensor is not supported with {attn_backend} attention. "
-            "Flex/varlen attention does not support DTensor dispatch. "
-            "Use sdpa attention or disable full_dtensor."
+            f"full_dtensor + CP is not supported with {attn_backend} attention. "
+            "After K/V all-gather on CP, Q and K/V have asymmetric sequence "
+            "lengths, which sdpa/varlen cannot handle with is_causal=True. "
+            "Use FlexAttention (e.g. --config llama3_debugmodel_flex_attn) "
+            "or disable CP."
         )
 
 

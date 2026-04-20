@@ -36,7 +36,6 @@ def set_deepseek_v3_sharding_spec(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    full_dtensor: bool = False,
 ) -> None:
     """Fill ``sharding_spec`` on all DeepSeek V3 sub-configs.
 

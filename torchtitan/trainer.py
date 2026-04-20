@@ -253,17 +253,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if config.training.full_dtensor:
             from torchtitan.distributed import full_dtensor
 
-            full_dtensor.validate_config(parallel_dims, model_config)
+            full_dtensor.validate_config(parallel_dims, model_spec, model_config)
 
         # Fill sharding specs based on parallelism settings (before build)
         if model_spec.set_sharding_spec_fn is not None:
-            loss_parallel = not config.parallelism.disable_loss_parallel
+            sharding_kwargs: dict[str, bool] = {
+                "loss_parallel": not config.parallelism.disable_loss_parallel,
+                "enable_sp": config.parallelism.enable_sequence_parallel,
+            }
+            if config.training.full_dtensor:
+                sharding_kwargs["full_dtensor"] = True
             model_spec.set_sharding_spec_fn(
-                model_config,
-                parallel_dims,
-                loss_parallel=loss_parallel,
-                enable_sp=config.parallelism.enable_sequence_parallel,
-                full_dtensor=config.training.full_dtensor,
+                model_config, parallel_dims, **sharding_kwargs
             )
 
         logger.info(

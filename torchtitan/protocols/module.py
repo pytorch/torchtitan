@@ -192,7 +192,8 @@ class Module(nn.Module, Configurable):
         mesh_dim_names = mesh.mesh_dim_names
 
         # Distribute parameters and buffers per state_shardings.
-        # Unconstrained dims default to Replicate for state distribution.
+        # Unconstrained dims default to Replicate for state distribution
+        # (distribute_tensor requires concrete placements).
         from torch.distributed.tensor import Replicate as _Replicate
 
         def _resolve_state(named_pl):
@@ -297,10 +298,10 @@ class Module(nn.Module, Configurable):
                 )
                 value = DTensor.from_local(value, mesh, layout, run_check=False)
 
-            # Step 2: Redistribute to desired placement if needed
+            # Step 2: Redistribute to desired placement if needed.
+            # Unconstrained dims preserve the tensor's existing placement.
             if name in in_shardings and isinstance(value, DTensor):
                 desired = resolve_placements(in_shardings[name], mesh_dim_names)
-                # Unconstrained dims preserve existing placement
                 desired = tuple(
                     actual if isinstance(d, Unconstrained) else d
                     for d, actual in zip(desired, value.placements)
@@ -334,7 +335,7 @@ class Module(nn.Module, Configurable):
         assert mesh.mesh_dim_names is not None
         desired = resolve_placements(spec.out_shardings, mesh.mesh_dim_names)
         if isinstance(outputs, DTensor):
-            # Unconstrained dims preserve existing placement
+            # Unconstrained dims preserve the tensor's existing placement
             desired = tuple(
                 actual if isinstance(d, Unconstrained) else d
                 for d, actual in zip(desired, outputs.placements)

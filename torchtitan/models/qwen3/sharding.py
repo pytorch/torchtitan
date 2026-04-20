@@ -32,7 +32,6 @@ def set_qwen3_sharding_spec(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    full_dtensor: bool = False,
 ) -> None:
     """Fill ``sharding_spec`` on all Qwen3 sub-configs.
 
