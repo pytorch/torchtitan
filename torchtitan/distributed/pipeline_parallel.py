@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining._utils import GetMeshCallback
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -170,10 +171,11 @@ def pipeline_llm(
     elif parallel_dims.tp_enabled:
         pp_dtensor_mesh = parallel_dims.get_mesh("tp")
     if pp_dtensor_mesh is not None:
+        get_mesh_cb: GetMeshCallback = (
+            lambda mesh_dim_names, mesh_layout: pp_dtensor_mesh
+        )
         for stage in stages:
-            stage._mesh_cache._get_mesh_cb = (
-                lambda names, layout: pp_dtensor_mesh  # pyrefly: ignore[bad-assignment]
-            )
+            stage._mesh_cache._get_mesh_cb = get_mesh_cb
 
     pp_schedule = build_pipeline_schedule(
         parallelism=parallelism,

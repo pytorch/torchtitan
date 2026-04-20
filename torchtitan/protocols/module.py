@@ -291,7 +291,7 @@ class Module(nn.Module, Configurable):
                 from torch.distributed.tensor import Replicate as _Replicate
 
                 layout = resolve_placements(input_layouts[name], mesh_dim_names)
-                # Plain tensor needs concrete placements; Unconstrained → Replicate
+                # Plain tensor needs concrete placements; Unconstrained -> Replicate
                 layout = tuple(
                     _Replicate() if isinstance(p, Unconstrained) else p for p in layout
                 )

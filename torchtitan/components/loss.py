@@ -23,7 +23,7 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     from torch.distributed.tensor import DTensor
 
     if isinstance(pred, DTensor) and pred.ndim == 3:
-        # 3D DTensor: (batch, seq, vocab) → (batch, vocab, seq) so that
+        # 3D DTensor: (batch, seq, vocab) -> (batch, vocab, seq) so that
         # F.cross_entropy treats dim 1 as the class dim.  Avoids
         # flatten(0, 1) which produces _StridedShard when batch and seq
         # are sharded on different mesh dims (e.g. dp_shard + cp).
