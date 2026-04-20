@@ -38,7 +38,6 @@ DeviceMemStats = namedtuple(
 
 class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
-        # pyrefly: ignore [read-only]
         self.device = torch.device(device)  # device object
         self.device_name = device_module.get_device_name(self.device)
         self.device_index = device_module.current_device()

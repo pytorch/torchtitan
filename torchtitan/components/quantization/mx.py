@@ -127,6 +127,11 @@ class MXFP8Converter(QuantizationConverter):
                 elif hasattr(config, "token_dispatcher") and isinstance(
                     config.token_dispatcher, DeepEPTokenDispatcher.Config
                 ):
+                    if config.token_dispatcher.comm_backend == "deepep":
+                        raise ValueError(
+                            "DeepEP does not support pad_multiple. "
+                            "Use hybridep or standard comm backend instead."
+                        )
                     config.token_dispatcher.pad_multiple = PAD_MULTIPLE_MAP["mxfp8"]
 
         logger.info(
