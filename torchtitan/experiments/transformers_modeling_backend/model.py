@@ -101,12 +101,14 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=attn_implementation, **kwargs
             )
-            # Set param_init before Module.Config.build() accesses it.
-            # PretrainedConfig.__getattribute__ doesn't recognize the
-            # param_init slot inherited from Module.Config.
+            # Set param_init and sharding_spec before Module.Config.build()
+            # accesses them. PretrainedConfig.__getattribute__ doesn't
+            # recognize slots inherited from Module.Config.
             self.param_init = (
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
+            self.sharding_spec = None
+
             assert titan_dense_config is not None, "titan_dense_config is required"
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
