@@ -106,9 +106,15 @@ def _apply_non_moe_tp_to_decoder(
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             **qkv_plan,
-            "attention.q_norm": SequenceParallel(sequence_dim=2, use_local_output=False),
-            "attention.k_norm": SequenceParallel(sequence_dim=2, use_local_output=False),
-            "attention.wo": RowwiseParallel(output_layouts=Replicate()),  # return plain tensor for x + attention(...)
+            "attention.q_norm": SequenceParallel(
+                sequence_dim=2, use_local_output=False
+            ),
+            "attention.k_norm": SequenceParallel(
+                sequence_dim=2, use_local_output=False
+            ),
+            "attention.wo": RowwiseParallel(
+                output_layouts=Replicate()
+            ),  # return plain tensor for x + attention(...)
         }
 
         # pyrefly: ignore [missing-attribute]
@@ -116,7 +122,9 @@ def _apply_non_moe_tp_to_decoder(
             layer_plan.update(
                 {
                     "feed_forward.w1": ColwiseParallel(use_local_output=False),
-                    "feed_forward.w2": RowwiseParallel(output_layouts=Replicate()),  # returns plain tensor for x + feed_forward(...)
+                    "feed_forward.w2": RowwiseParallel(
+                        output_layouts=Replicate()
+                    ),  # returns plain tensor for x + feed_forward(...)
                     "feed_forward.w3": ColwiseParallel(use_local_output=False),
                 }
             )
