@@ -80,7 +80,7 @@ class MXFP8Converter(QuantizationConverter):
 
         Walks the model config tree and sets ``_convert_fn`` on modules
         matching the target FQNs so that ``build()`` replaces instances of
-        nn.Parameter with ScaledGroupedMMTensor. This will use low precision grouped
+        nn.Parameter with MXFP8TrainingWeightWrapperTensor. This will use low precision grouped
         GEMMs with dynamic quantization using the specified MX dtype, rather than
         the default high precision grouped GEMMs, for the target MoE FQNs.
         """

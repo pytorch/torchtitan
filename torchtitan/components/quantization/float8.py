@@ -258,7 +258,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
 
         Walks the model config tree and sets ``_convert_fn`` on modules
         matching the target FQNs so that ``build()`` replaces instances of
-        nn.Parameter with ScaledGroupedMMTensor, to perform dynamic float8
+        nn.Parameter with MXFP8TrainingWeightWrapperTensor, to perform dynamic float8
         rowwise quantization + scaled grouped GEMMs.
         """
         from torchao.quantization.quant_api import quantize_
