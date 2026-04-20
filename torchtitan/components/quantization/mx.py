@@ -92,31 +92,42 @@ class MXFP8Converter(QuantizationConverter):
             MXFP8TrainingRecipe,
         )
         from torchao.quantization.quant_api import quantize_
-
-        def convert_fn(mod: nn.Module) -> nn.Module:
-            recipe = MXFP8TrainingRecipe(self.config.recipe_name)
-            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            mxfp8_op_config.pad_token_groups_for_grouped_mm = (
-                self.pad_token_groups_for_grouped_mm
-            )
-            quantize_(mod, config=mxfp8_op_config)
-            return mod
-
+        from torchtitan.components.quantization import PAD_MULTIPLE_MAP
         from torchtitan.models.common.token_dispatcher import (
             AllToAllTokenDispatcher,
+            DeepEPTokenDispatcher,
             TorchAOTokenDispatcher,
         )
         from torchtitan.protocols.module import Module
 
-        for fqn, config in model_config.walk(Module.Config):
-            if any(target_fqn in fqn for target_fqn in self.config.fqns):
-                config._convert_fn = convert_fn
+        pad_token_groups = self.pad_token_groups_for_grouped_mm
+        recipe_name = self.config.recipe_name
 
-        # Swap AllToAllTokenDispatcher -> TorchAOTokenDispatcher for
-        # matching FQNs so grouped GEMMs use padded token dispatch.
-        for fqn, config in model_config.walk(AllToAllTokenDispatcher.Config):
-            if any(target_fqn in fqn for target_fqn in self.config.fqns):
-                config.__class__ = TorchAOTokenDispatcher.Config
+        def convert_fn(mod: nn.Module) -> nn.Module:
+            recipe = MXFP8TrainingRecipe(recipe_name)
+            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+            mxfp8_op_config.pad_token_groups_for_grouped_mm = pad_token_groups
+            quantize_(mod, config=mxfp8_op_config)
+            return mod
+
+        fqns = self.config.fqns
+        for fqn, config in model_config.walk(Module.Config):
+            if any(target_fqn in fqn for target_fqn in fqns):
+                config._convert_fn = convert_fn
+                if hasattr(config, "token_dispatcher") and isinstance(
+                    config.token_dispatcher, AllToAllTokenDispatcher.Config
+                ):
+                    td = config.token_dispatcher
+                    config.token_dispatcher = TorchAOTokenDispatcher.Config(
+                        num_experts=td.num_experts,
+                        top_k=td.top_k,
+                        score_before_experts=td.score_before_experts,
+                        pad_multiple=PAD_MULTIPLE_MAP["mxfp8"],
+                    )
+                elif hasattr(config, "token_dispatcher") and isinstance(
+                    config.token_dispatcher, DeepEPTokenDispatcher.Config
+                ):
+                    config.token_dispatcher.pad_multiple = PAD_MULTIPLE_MAP["mxfp8"]
 
         logger.info(
             f"Converted layers matching FQNS {self.config.fqns} "

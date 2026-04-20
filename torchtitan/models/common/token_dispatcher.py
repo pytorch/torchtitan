@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-
 from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
@@ -461,12 +460,11 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AllToAllTokenDispatcher.Config):
-        pass
+        pad_multiple: int
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
-        self.pad_multiple: int
+        self.pad_multiple = config.pad_multiple
 
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
@@ -560,16 +558,16 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         comm_backend: str
         non_blocking_capacity_factor: float | None = None
+        pad_multiple: int | None = None
+        """Alignment size for token groups needed by quantized grouped GEMMs
+        (e.g. 16 for FP8, 32 for MXFP8). Only supported with hybridep.
+        None means no padding. Set by quantization converters at config time."""
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
-        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
-        # pad_multiple: Alignment size for token groups needed by quantized
-        # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
-        # with hybridep. None means no padding.
-        self.pad_multiple: int | None = None
+        self.pad_multiple = config.pad_multiple
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_group: dist.ProcessGroup | None = None
 

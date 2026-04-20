@@ -270,26 +270,36 @@ class Float8GroupedMMConverter(QuantizationConverter):
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
             ) from e
 
+        from torchtitan.components.quantization import PAD_MULTIPLE_MAP
+        from torchtitan.models.common.token_dispatcher import (
+            AllToAllTokenDispatcher,
+            DeepEPTokenDispatcher,
+            TorchAOTokenDispatcher,
+        )
+        from torchtitan.protocols.module import Module
+
         def convert_fn(mod: nn.Module) -> nn.Module:
             config = Float8TrainingOpConfig()
             quantize_(mod, config=config)
             return mod
 
-        from torchtitan.models.common.token_dispatcher import (
-            AllToAllTokenDispatcher,
-            TorchAOTokenDispatcher,
-        )
-        from torchtitan.protocols.module import Module
-
         for fqn, config in model_config.walk(Module.Config):
             if any(target_fqn in fqn for target_fqn in self.fqns):
                 config._convert_fn = convert_fn
-
-        # Swap AllToAllTokenDispatcher -> TorchAOTokenDispatcher for
-        # matching FQNs so grouped GEMMs use padded token dispatch.
-        for fqn, config in model_config.walk(AllToAllTokenDispatcher.Config):
-            if any(target_fqn in fqn for target_fqn in self.fqns):
-                config.__class__ = TorchAOTokenDispatcher.Config
+                if hasattr(config, "token_dispatcher") and isinstance(
+                    config.token_dispatcher, AllToAllTokenDispatcher.Config
+                ):
+                    td = config.token_dispatcher
+                    config.token_dispatcher = TorchAOTokenDispatcher.Config(
+                        num_experts=td.num_experts,
+                        top_k=td.top_k,
+                        score_before_experts=td.score_before_experts,
+                        pad_multiple=PAD_MULTIPLE_MAP["float8"],
+                    )
+                elif hasattr(config, "token_dispatcher") and isinstance(
+                    config.token_dispatcher, DeepEPTokenDispatcher.Config
+                ):
+                    config.token_dispatcher.pad_multiple = PAD_MULTIPLE_MAP["float8"]
 
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
