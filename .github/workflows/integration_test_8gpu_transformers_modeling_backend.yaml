@@ -64,8 +64,10 @@ jobs:
         if [ -n "${{ matrix.torch-version }}" ]; then
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
+        # NOTE: reinstall torchvision alongside torch so their ABIs stay in sync;
+        # otherwise transformers' transitive `import torchvision` fails at test time.
         python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
 
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"

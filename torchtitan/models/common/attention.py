@@ -86,7 +86,6 @@ class VarlenAttention(Module):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
 
-    # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
         xq: torch.Tensor,
@@ -139,8 +138,8 @@ class VarlenAttention(Module):
             xv_packed,
             cu_seq_q,
             cu_seq_k,
-            max_q,  # pyrefly: ignore [bad-argument-type]
-            max_k,  # pyrefly: ignore [bad-argument-type]
+            max_q,
+            max_k,
             scale=scale,
             # window_size=(left, right) controls the attention window relative to each
             # query position. 'left' is how many tokens before the query to attend to,
@@ -205,7 +204,6 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
-    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -276,7 +274,6 @@ class ScaledDotProductAttention(Module):
                 SDPBackend.MATH,
             ]
 
-    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -669,7 +666,6 @@ class GQAttention(BaseAttention):
             mask_key = "rope" if self.use_rope else "nope"
             attention_masks = attention_masks[mask_key]
 
-        # pyrefly: ignore [not-callable]
         output = self.inner_attention(
             xq,
             xk,
@@ -679,4 +675,4 @@ class GQAttention(BaseAttention):
             enable_gqa=self.enable_gqa,
         ).contiguous()
         output = output.view(bs, seqlen, -1)
-        return self.wo(output)  # pyrefly: ignore [not-callable]
+        return self.wo(output)
