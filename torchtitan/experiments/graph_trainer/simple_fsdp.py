@@ -45,37 +45,6 @@ class MixedPrecisionPolicy:
     reduce_dtype: torch.dtype | None = None
 
 
-class _ScaledPartial(Partial):
-    # A subclass of Partial placement that allows user to perform reduction with a custom
-    # factor (reduction_divide_factor) other than the default world size.
-    def __init__(
-        self,
-        reduction_divide_factor: float,
-    ):
-        self.reduction_divide_factor = reduction_divide_factor
-        super().__init__(reduce_op="sum")
-
-    def _reduce_value(
-        self, tensor: torch.Tensor, mesh: DeviceMesh, mesh_dim: int
-    ) -> torch.Tensor:
-        # for all_reduce in DDP
-        tensor.div_(self.reduction_divide_factor)
-        reduced = super()._reduce_value(tensor, mesh, mesh_dim)
-        return reduced
-
-    def _reduce_shard_value(
-        self,
-        tensor: torch.Tensor,
-        mesh: DeviceMesh,
-        mesh_dim: int,
-        shard_spec: Placement,
-    ) -> torch.Tensor:
-        # for reduce_scatter in FSDP
-        tensor.div_(self.reduction_divide_factor)
-        reduced = super()._reduce_shard_value(tensor, mesh, mesh_dim, shard_spec)
-        return reduced
-
-
 def _distribute_dtensor(
     tensor: DTensor,
     device_mesh: DeviceMesh,
@@ -203,7 +172,6 @@ class ReplicateComputation(Module):
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
         full_dtensor: bool = False,
-        reduction_divide_factor: float | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -211,11 +179,7 @@ class ReplicateComputation(Module):
         self.mode = mode
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
         self.grad_placements: list[Placement] = [
-            _ScaledPartial(
-                reduction_divide_factor=reduction_divide_factor,
-            )
-            if reduction_divide_factor is not None
-            else Partial(reduce_op="avg")
+            Partial(reduce_op="sum")
         ] * self.device_mesh.ndim
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
@@ -300,7 +264,6 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
-    reduction_divide_factor: float | None = None,
     full_dtensor: bool = False,
     ignored_params: set[nn.Parameter] | None = None,
 ) -> nn.Module:
@@ -371,7 +334,6 @@ def data_parallel(
                 param_sharding,
                 mode,
                 mp_policy=mp_policy,
-                reduction_divide_factor=reduction_divide_factor,
                 full_dtensor=full_dtensor,
             ),
         )
