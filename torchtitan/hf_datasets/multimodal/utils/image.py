@@ -15,8 +15,8 @@ import math
 import einops as E
 import requests
 import torch
-import torchvision.io
-import torchvision.transforms.v2.functional as TVF
+import torchvision.io  # pyrefly: ignore [missing-import]
+import torchvision.transforms.v2.functional as TVF  # pyrefly: ignore [missing-import]
 
 from PIL import Image
 

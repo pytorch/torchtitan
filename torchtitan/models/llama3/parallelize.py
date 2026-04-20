@@ -99,7 +99,7 @@ def parallelize_llama(
 
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute]
+            # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
