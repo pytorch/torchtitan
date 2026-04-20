@@ -357,9 +357,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         output_starts = segment_lens.cumsum(0) - segment_lens
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(
-                total, device=device
-            )
+            + torch.arange(total, device=device)
             - output_starts[seg_ids]
         )
 
