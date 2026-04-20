@@ -86,7 +86,6 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_a.sharding_spec = replicate_weight
     attention.kv_norm.sharding_spec = replicate_weight
 
-    # wkv_b: ColwiseParallel (expands to full heads)
     attention.wkv_b.sharding_spec = colwise_spec()
     attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
