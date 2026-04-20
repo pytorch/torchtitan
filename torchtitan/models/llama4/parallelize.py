@@ -20,6 +20,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -33,12 +34,9 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.expert_parallel import (
-    DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
-    ReordererSequenceParallel,
     TensorParallel,
-    TorchAOExpertParallel,
 )
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
@@ -50,6 +48,12 @@ from torchtitan.distributed.tensor_parallel import (
     NoParallel,
 )
 from torchtitan.models.common.attention import FusedQKVLinear
+
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -124,10 +128,6 @@ def parallelize_llama(
             )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -135,9 +135,8 @@ def parallelize_llama(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
             enable_sp=True,
-            pad_multiple=pad_multiple,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -277,7 +276,6 @@ def apply_non_moe_tp(
                 "attention.qkv_linear.wk": colwise_parallel(),
                 "attention.qkv_linear.wv": colwise_parallel(),
             }
-        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(
@@ -532,7 +530,6 @@ def apply_moe_ep_tp(
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
-    hybridep_non_blocking_expert_capacity_factor: float | None = None,
     enable_sp: bool = True,
     pad_multiple: int | None = None,
 ):
@@ -564,12 +561,6 @@ def apply_moe_ep_tp(
                     local_output_grad_placements=(Partial(),),
                 ),
             }
-            if ep_mesh is not None and etp_mesh is None:
-                # If TP is borrowed for EP, then split the tokens across TP ranks so that
-                # the reorderer, the all-to-all comms, and routed experts computation
-                # are effectively running Sequence Parallel (split along the folded bs*slen dim)
-                # pyrefly: ignore [no-matching-overload]
-                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
                 # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
@@ -610,28 +601,34 @@ def apply_moe_ep_tp(
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
             if comm_backend in ("deepep", "hybridep"):
+                # pyrefly: ignore [missing-attribute]
+                dispatcher = transformer_block.moe.experts.token_dispatcher
+                assert isinstance(dispatcher, DeepEPTokenDispatcher)
                 if comm_backend == "deepep" and pad_multiple is not None:
                     raise ValueError(
                         "DeepEP does not support pad_multiple. "
                         "Use hybridep or standard comm backend instead."
                     )
-                # pyrefly: ignore [missing-attribute]
-                score_before_experts = transformer_block.moe.score_before_experts
-
-                experts_plan = DeepEPExpertParallel(
-                    score_before_experts=score_before_experts,
-                    comm_backend=comm_backend,
-                    hybridep_non_blocking_expert_capacity_factor=hybridep_non_blocking_expert_capacity_factor,
-                    pad_multiple=pad_multiple,
-                )
+                dispatcher.pad_multiple = pad_multiple
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            elif pad_multiple is not None:
-                experts_plan = TorchAOExpertParallel(pad_multiple)
-            else:
-                # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+            # sp_size and sp_rank are set for sequence-parallel token splitting
+            # when EP borrows from TP (ETP=1).
+            experts_plan = ExpertParallel()
+            # pyrefly: ignore [missing-attribute]
+            dispatcher = transformer_block.moe.experts.token_dispatcher
+            if tp_mesh is not None:
+                if isinstance(dispatcher, AllToAllTokenDispatcher):
+                    dispatcher.sp_size = tp_mesh.size()
+                    dispatcher.sp_rank = tp_mesh.get_local_rank()
+            if isinstance(dispatcher, TorchAOTokenDispatcher):
+                assert (
+                    pad_multiple is not None
+                ), "pad_multiple must be set for TorchAOTokenDispatcher"
+                dispatcher.pad_multiple = pad_multiple
         else:
-            if pad_multiple is not None:
+            # pyrefly: ignore [missing-attribute]
+            dispatcher = transformer_block.moe.experts.token_dispatcher
+            if isinstance(dispatcher, TorchAOTokenDispatcher):
                 raise NotImplementedError(
                     "Quantized grouped GEMMs (FP8/MXFP8) with Expert Tensor "
                     "Parallelism (ETP) is not yet supported. "
