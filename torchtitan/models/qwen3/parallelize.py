@@ -98,12 +98,7 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-<<<<<<< HEAD
             pad_multiple=find_pad_multiple(model_converters.converters),
-=======
-            enable_sp=parallelism.enable_sequence_parallel,
-            pad_multiple=pad_multiple,
->>>>>>> 3d4776ab (add qwen3_vl plan)
         )
 
     if parallel_dims.cp_enabled:
