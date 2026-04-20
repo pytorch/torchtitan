@@ -137,7 +137,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
-    --profiling.no-enable_profiling \
+    --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --training.steps 20
 
@@ -149,7 +149,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
     --parallelism.expert_parallel_degree=2 \
     --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
-    --profiling.no-enable_profiling \
+    --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --training.steps 20
 ```
@@ -163,8 +163,8 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 ### Profiling
 
-Add `--profiling.enable_profiling` to any `./run_train.sh` command.
-Set `--profiling.profile_freq` to control which step is captured
+Add `--profiler.enable_profiling` to any `./run_train.sh` command.
+Set `--profiler.profile_freq` to control which step is captured
 (default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
 
 ```bash
@@ -173,13 +173,13 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --profiling.enable_profiling \
-    --profiling.profile_freq 10
+    --profiler.enable_profiling \
+    --profiler.profile_freq 10
 ```
 
 ### Memory Snapshot
 
-Add `--profiling.enable_memory_snapshot` to capture a memory snapshot.
+Add `--profiler.enable_memory_snapshot` to capture a memory snapshot.
 The snapshot fires at every `profile_freq`-th step and is saved to
 `{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
 Each rank produces its own file:
@@ -194,8 +194,8 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --profiling.enable_memory_snapshot \
-    --profiling.profile_freq 10
+    --profiler.enable_memory_snapshot \
+    --profiler.profile_freq 10
 ```
 
 ### Bitwise Deterministic Guardrail
