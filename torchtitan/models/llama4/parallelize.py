@@ -542,7 +542,6 @@ def apply_moe_ep_tp(
         etp_mesh: Expert tensor-parallel device mesh.
         ep_etp_mesh: Combined EP/ETP mesh.
         comm_backend: MoE communication backend.
-        hybridep_non_blocking_expert_capacity_factor: Optional HybridEP non-blocking capacity factor.
         enable_sp: Whether sequence parallelism is enabled.
         pad_multiple: Optional token padding multiple for compatible expert kernels.
         use_local_output: Controls the MoE module final output placements in
