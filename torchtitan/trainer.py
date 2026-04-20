@@ -676,6 +676,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
+            self.pp_schedule._loss_kwargs = {
+                "global_valid_tokens": global_valid_tokens,
+            }
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
@@ -711,9 +714,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
-
                 del pred
-                loss.backward()
+                # ChunkedCELoss does backward internally; CrossEntropyLoss/MSELoss
+                # return a differentiable loss that needs explicit backward.
+                if loss.requires_grad:
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
