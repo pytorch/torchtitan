@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
-from functools import partial
 from typing import ClassVar, Literal
 
 import torch
@@ -12,16 +11,10 @@ import torch._inductor.config
 import torch.nn as nn
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, inject_linear_protocol
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
-from .module_utils import (
-    capture_module_attrs,
-    inject_module_protocol,
-    verify_module_protocol,
-)
-from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
@@ -133,7 +126,11 @@ class Float8LinearConverter(QuantizationConverter):
         self.enabled = True
 
     def _init_filter_fn(self, float8_config: Config):
-        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
+        """Return a ``(config: Linear.Config, fqn: str) -> bool`` filter."""
+        filter_fqns = float8_config.filter_fqns
+
+        # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
+        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in filter_fqns
         if use_auto_filter:
             try:
                 from torchao.float8 import _auto_filter_for_recipe
@@ -149,12 +146,28 @@ class Float8LinearConverter(QuantizationConverter):
                     else "tensorwise"
                 )
 
-                float8_config.filter_fqns.remove(AUTO_FILTER_SMALL_KN_FLAG)
+                # remove auto filter flag from filter_fqns before passing to _auto_filter_for_recipe
+                filter_fqns = [
+                    fqn for fqn in filter_fqns if fqn != AUTO_FILTER_SMALL_KN_FLAG
+                ]
 
-                return _auto_filter_for_recipe(
+                torchao_filter = _auto_filter_for_recipe(
                     recipe_name,
-                    filter_fqns=float8_config.filter_fqns,
+                    filter_fqns=filter_fqns,
                 )
+
+                def auto_config_filter(
+                    config: Linear.Config, fqn: str
+                ) -> bool:
+                    with torch.device("meta"):
+                        dummy = nn.Linear(
+                            config.in_features,
+                            config.out_features,
+                            bias=config.bias,
+                        )
+                    return torchao_filter(dummy, fqn)
+
+                return auto_config_filter
             except ImportError:
                 logger.warning(
                     (
@@ -163,10 +176,23 @@ class Float8LinearConverter(QuantizationConverter):
                     )
                 )
 
-        return partial(module_filter_fn, filter_fqns=float8_config.filter_fqns)
+        def config_filter(config: Linear.Config, fqn: str) -> bool:
+            dims_multiples_of_16 = (
+                config.in_features % 16 == 0 and config.out_features % 16 == 0
+            )
+            is_filtered_fqn = any(f in fqn for f in filter_fqns)
+            return dims_multiples_of_16 and not is_filtered_fqn
+
+        return config_filter
 
     def convert_config(self, model_config) -> None:
-        """Inject float8 conversion into matching Linear.Config instances."""
+        """Convert the linear layers of the model config to ``Float8Linear``.
+
+        Walks the model config tree and sets ``_convert_fn`` on matching
+        ``Linear.Config`` instances so that ``build()`` produces
+        ``Float8Linear`` modules directly.
+        Note that today, only dynamic tensor scaling (the default) is supported.
+        """
         if not self.enabled:
             return
 
@@ -175,16 +201,13 @@ class Float8LinearConverter(QuantizationConverter):
         torchao_config = self.torchao_config
 
         def convert_fn(mod: nn.Module) -> nn.Module:
-            return Float8Linear.from_float(mod, config=torchao_config)
+            converted = Float8Linear.from_float(mod, config=torchao_config)
+            if not isinstance(converted, Linear):
+                inject_linear_protocol(converted)
+            return converted
 
         for fqn, linear_config in model_config.walk(Linear.Config):
-            with torch.device("meta"):
-                dummy = nn.Linear(
-                    linear_config.in_features,
-                    linear_config.out_features,
-                    bias=linear_config.bias,
-                )
-            if self.filter_fn(dummy, fqn):
+            if self.filter_fn(linear_config, fqn):
                 linear_config._convert_fn = convert_fn
 
         logger.info(
@@ -250,12 +273,11 @@ class Float8GroupedMMConverter(QuantizationConverter):
         self.enabled = True
 
     def convert_config(self, model_config) -> None:
-        pass
+        """Convert MoE expert layers in the model config to use float8 grouped GEMMs.
 
-    def convert(self, model: nn.Module):
-        """
-        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
-        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        Walks the model config tree and sets ``_convert_fn`` on modules
+        matching the target FQNs so that ``build()`` applies dynamic
+        float8 rowwise quantization on grouped GEMM operations.
         """
         from torchao.quantization.quant_api import quantize_
 
@@ -266,30 +288,26 @@ class Float8GroupedMMConverter(QuantizationConverter):
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
             ) from e
 
-        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
-            for target_fqn in self.fqns:
-                if target_fqn in cur_fqn:
-                    return True
-            return False
+        fqns = self.fqns
 
-        # Capture Module attrs before conversion (Float8 creates new instances).
-        # We need to first verify if all nn.Linear have been converted to Linear.
-        verify_module_protocol(model, nn.Linear, Linear)
-        saved_attrs = capture_module_attrs(
-            model, ["_param_init"], nn_module_cls=nn.Linear
-        )
+        def convert_fn(mod: nn.Module) -> nn.Module:
+            config = Float8TrainingOpConfig()
+            quantize_(mod, config=config)
+            return mod
 
-        config = Float8TrainingOpConfig()
-        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+        from torchtitan.protocols.module import Module
 
-        # Re-inject Linear protocol and re-attach attrs
-        inject_module_protocol(model, Linear, saved_attrs)
-        verify_module_protocol(model, nn.Linear, Linear)
+        for fqn, config in model_config.walk(Module.Config):
+            if any(target_fqn in fqn for target_fqn in fqns):
+                config._convert_fn = convert_fn
 
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
             "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
         )
+
+    def convert(self, model: nn.Module):
+        pass
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         pass

@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch.nn as nn
 
@@ -31,22 +30,6 @@ class Linear(nn.Linear, Module):
         out_features: int
         bias: bool = False
 
-        _convert_fn: Callable[[nn.Module], nn.Module] | None = field(
-            default=None, repr=False
-        )
-        """Set by quantization converters; not for direct use."""
-
-        def build(self, **kwargs):
-            instance = Module.Config.build(self, **kwargs)
-            if self._convert_fn is not None:
-                param_init = getattr(instance, "_param_init", None)
-                instance = self._convert_fn(instance)
-                if not isinstance(instance, Linear):
-                    _inject_linear_protocol(instance)
-                if param_init is not None:
-                    instance._param_init = param_init
-            return instance
-
     def __init__(self, config: Config):
         super().__init__(
             config.in_features,
@@ -55,7 +38,7 @@ class Linear(nn.Linear, Module):
         )
 
 
-def _inject_linear_protocol(mod: nn.Module) -> None:
+def inject_linear_protocol(mod: nn.Module) -> None:
     """Patch *mod*'s class to also inherit from ``Linear``."""
     orig_cls = type(mod)
     if orig_cls not in _patched_classes:
