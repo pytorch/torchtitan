@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
+from functools import partial
 from typing import ClassVar, Literal
 
 import torch
@@ -20,6 +21,7 @@ from .module_utils import (
     inject_module_protocol,
     verify_module_protocol,
 )
+from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
@@ -89,10 +91,7 @@ class Float8LinearConverter(QuantizationConverter):
             )
             return
 
-        self.filter_fqns = [
-            fqn for fqn in float8_config.filter_fqns if fqn != AUTO_FILTER_SMALL_KN_FLAG
-        ]
-        self.use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
+        self.filter_fn = self._init_filter_fn(float8_config)
 
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (
@@ -133,51 +132,59 @@ class Float8LinearConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def _should_convert(self, config: Linear.Config, fqn: str) -> bool:
-        """Check if a Linear.Config at the given FQN should be converted."""
-        if config.in_features % 16 != 0 or config.out_features % 16 != 0:
-            return False
-        if any(filter_fqn in fqn for filter_fqn in self.filter_fqns):
-            return False
-
-        if self.use_auto_filter:
+    def _init_filter_fn(self, float8_config: Config):
+        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
+        if use_auto_filter:
             try:
                 from torchao.float8 import _auto_filter_for_recipe
 
-                recipe_name = (
-                    getattr(self.torchao_config, "recipe_name", None) or "tensorwise"
+                logger.info(
+                    "Using _auto_filter_for_recipe to avoid converting linear layers with dims too small "
+                    "to benefit from float8 training. See docs/float8.md for more info."
                 )
-                auto_filter = _auto_filter_for_recipe(
-                    recipe_name, filter_fqns=self.filter_fqns
-                )
-                # Create a lightweight module on meta device for the filter check
-                with torch.device("meta"):
-                    dummy = nn.Linear(
-                        config.in_features, config.out_features, bias=config.bias
-                    )
-                return auto_filter(dummy, fqn)
-            except ImportError:
-                pass
 
-        return True
+                recipe_name = (
+                    float8_config.recipe_name
+                    if float8_config.recipe_name
+                    else "tensorwise"
+                )
+
+                float8_config.filter_fqns.remove(AUTO_FILTER_SMALL_KN_FLAG)
+
+                return _auto_filter_for_recipe(
+                    recipe_name,
+                    filter_fqns=float8_config.filter_fqns,
+                )
+            except ImportError:
+                logger.warning(
+                    (
+                        "Using default module_filter_fn for float8 model conversion. "
+                        "To use _auto_filter_for_recipe, please install torchao nightly build."
+                    )
+                )
+
+        return partial(module_filter_fn, filter_fqns=float8_config.filter_fqns)
 
     def convert_config(self, model_config) -> None:
         """Inject float8 conversion into matching Linear.Config instances."""
         if not self.enabled:
             return
 
-        from torchao.float8 import convert_to_float8_training
+        from torchao.float8 import Float8Linear
 
         torchao_config = self.torchao_config
 
         def convert_fn(mod: nn.Module) -> nn.Module:
-            container = nn.Module()
-            container.linear = mod
-            convert_to_float8_training(container, config=torchao_config)
-            return container.linear
+            return Float8Linear.from_float(mod, config=torchao_config)
 
         for fqn, linear_config in model_config.walk(Linear.Config):
-            if self._should_convert(linear_config, fqn):
+            with torch.device("meta"):
+                dummy = nn.Linear(
+                    linear_config.in_features,
+                    linear_config.out_features,
+                    bias=linear_config.bias,
+                )
+            if self.filter_fn(dummy, fqn):
                 linear_config._convert_fn = convert_fn
 
         logger.info(
