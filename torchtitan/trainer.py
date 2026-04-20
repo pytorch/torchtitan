@@ -250,10 +250,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.model_config = model_config
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
-        logger.debug(
-            f"Model config:\n"
-            f"{json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
-        )
+
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
