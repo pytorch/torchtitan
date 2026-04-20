@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
+from functools import partial
 from typing import ClassVar, Literal
 
 import torch
@@ -15,6 +16,7 @@ from torchtitan.models.common.linear import Linear, inject_linear_protocol
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
+from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
@@ -84,6 +86,7 @@ class Float8LinearConverter(QuantizationConverter):
             )
             return
 
+        self.filter_fqns = float8_config.filter_fqns
         self.filter_fn = self._init_filter_fn(float8_config)
 
         if float8_config.recipe_name is not None:
@@ -127,10 +130,8 @@ class Float8LinearConverter(QuantizationConverter):
 
     def _init_filter_fn(self, float8_config: Config):
         """Return a ``(config: Linear.Config, fqn: str) -> bool`` filter."""
-        filter_fqns = float8_config.filter_fqns
-
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
-        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in filter_fqns
+        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
             try:
                 from torchao.float8 import _auto_filter_for_recipe
@@ -147,27 +148,12 @@ class Float8LinearConverter(QuantizationConverter):
                 )
 
                 # remove auto filter flag from filter_fqns before passing to _auto_filter_for_recipe
-                filter_fqns = [
-                    fqn for fqn in filter_fqns if fqn != AUTO_FILTER_SMALL_KN_FLAG
-                ]
+                float8_config.filter_fqns.remove(AUTO_FILTER_SMALL_KN_FLAG)
 
-                torchao_filter = _auto_filter_for_recipe(
+                return _auto_filter_for_recipe(
                     recipe_name,
-                    filter_fqns=filter_fqns,
+                    filter_fqns=float8_config.filter_fqns,
                 )
-
-                def auto_config_filter(
-                    config: Linear.Config, fqn: str
-                ) -> bool:
-                    with torch.device("meta"):
-                        dummy = nn.Linear(
-                            config.in_features,
-                            config.out_features,
-                            bias=config.bias,
-                        )
-                    return torchao_filter(dummy, fqn)
-
-                return auto_config_filter
             except ImportError:
                 logger.warning(
                     (
@@ -176,14 +162,8 @@ class Float8LinearConverter(QuantizationConverter):
                     )
                 )
 
-        def config_filter(config: Linear.Config, fqn: str) -> bool:
-            dims_multiples_of_16 = (
-                config.in_features % 16 == 0 and config.out_features % 16 == 0
-            )
-            is_filtered_fqn = any(f in fqn for f in filter_fqns)
-            return dims_multiples_of_16 and not is_filtered_fqn
-
-        return config_filter
+        # use default filter func
+        return partial(module_filter_fn, filter_fqns=float8_config.filter_fqns)
 
     def convert_config(self, model_config) -> None:
         """Convert the linear layers of the model config to ``Float8Linear``.
