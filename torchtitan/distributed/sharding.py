@@ -70,41 +70,30 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
         )
 
 
-def set_gqa_attention_sharding(
-    attention_cfg, *, enable_sp: bool, include_positions: bool = False
-) -> None:
+def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
-    Shared by llama3, qwen3, and llama4 — all three have a GQA block whose
+    Shared by llama3, qwen3, and llama4 -- all three have a GQA block whose
     ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
     Replicate internally) and a plain ``rope_cache`` (annotated Replicate).
 
     Callers that have additional attention sub-state (e.g. ``qk_norm``,
     ``sinks``) set those after calling this helper.
-
-    ``include_positions=True`` annotates the optional ``positions`` argument
-    as ``Replicate`` on TP. The generator path (vLLM inference) passes
-    ``positions`` explicitly; training paths leave it ``None``.
     """
     assert isinstance(attention_cfg, GQAttention.Config), (
         f"set_gqa_attention_sharding requires GQAttention.Config, "
         f"got {type(attention_cfg).__name__}"
     )
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
-    input_layouts: dict = {
-        "x": {TP: attn_x_placement},
-        "rope_cache": {TP: Replicate()},
-    }
-    in_shardings: dict = {
-        "x": {TP: Replicate()},
-        "rope_cache": {TP: Replicate()},
-    }
-    if include_positions:
-        input_layouts["positions"] = {TP: Replicate()}
-        in_shardings["positions"] = {TP: Replicate()}
     attention_cfg.sharding_spec = ShardingSpec(
-        input_layouts=input_layouts,
-        in_shardings=in_shardings,
+        input_layouts={
+            "x": {TP: attn_x_placement},
+            "rope_cache": {TP: Replicate()},
+        },
+        in_shardings={
+            "x": {TP: Replicate()},
+            "rope_cache": {TP: Replicate()},
+        },
     )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
     attention_cfg.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)

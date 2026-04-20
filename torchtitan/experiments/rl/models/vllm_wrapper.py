@@ -188,14 +188,12 @@ class TorchTitanVLLMModelWrapper(Module):
 
         # Fill sharding specs on the config BEFORE build so every sub-module
         # (including VLLMAttentionWrapper) is constructed with its
-        # ShardingSpec / LocalMapSpec attached.  ``include_positions=True``
-        # annotates the ``positions`` argument threaded by vLLM.
+        # ShardingSpec / LocalMapSpec attached.
         set_qwen3_sharding_spec(
             self.config,
             self.parallel_dims,
             loss_parallel=False,
             enable_sp=parallelism.enable_sequence_parallel,
-            include_positions=True,
         )
 
         # TODO: Check if it's possible to apply meta init
