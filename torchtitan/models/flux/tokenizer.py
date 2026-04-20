@@ -11,7 +11,7 @@
 from dataclasses import dataclass
 
 import torch
-from transformers import CLIPTokenizer, T5Tokenizer
+from transformers import CLIPTokenizer, T5Tokenizer  # pyrefly: ignore
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 

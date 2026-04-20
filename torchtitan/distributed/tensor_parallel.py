@@ -153,6 +153,7 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
                 device_mesh,
                 input_layouts,
                 run_check=False,
+                # pyrefly: ignore [unexpected-keyword]
                 grad_placements=local_input_grad_placements,
             )
 
