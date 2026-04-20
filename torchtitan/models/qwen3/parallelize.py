@@ -57,7 +57,6 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
         )
 
-    # TP: config-driven, auto-recursive via Module.parallelize()
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         model.parallelize(tp_mesh)
