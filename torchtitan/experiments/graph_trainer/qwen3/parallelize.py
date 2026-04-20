@@ -19,6 +19,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_ac_regions,
+    annotate_module_fqns,
     apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -56,6 +57,7 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
         )
         MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
+    annotate_module_fqns(model)
     annotate_ac_regions(model)
 
 

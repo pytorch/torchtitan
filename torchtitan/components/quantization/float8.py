@@ -16,9 +16,8 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
-from .utils import module_filter_fn
 from .module_utils import inject_module_protocol
-
+from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
@@ -178,7 +177,7 @@ class Float8LinearConverter(QuantizationConverter):
         if not self.enabled:
             return
 
-        from torchao.float8 import Float8Linear
+        from torchao.float8.float8_linear import Float8Linear
 
         torchao_config = self.torchao_config
 
@@ -255,11 +254,12 @@ class Float8GroupedMMConverter(QuantizationConverter):
         self.enabled = True
 
     def convert_config(self, model_config) -> None:
-        """Convert MoE expert layers in the model config to use float8 grouped GEMMs.
+        """Convert MoE expert layers in the model config to use float8 scaled grouped GEMMs.
 
         Walks the model config tree and sets ``_convert_fn`` on modules
-        matching the target FQNs so that ``build()`` applies dynamic
-        float8 rowwise quantization on grouped GEMM operations.
+        matching the target FQNs so that ``build()`` replaces instances of
+        nn.Parameter with ScaledGroupedMMTensor, to perform dynamic float8
+        rowwise quantization + scaled grouped GEMMs.
         """
         from torchao.quantization.quant_api import quantize_
 
@@ -270,18 +270,26 @@ class Float8GroupedMMConverter(QuantizationConverter):
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
             ) from e
 
-        fqns = self.fqns
-
         def convert_fn(mod: nn.Module) -> nn.Module:
             config = Float8TrainingOpConfig()
             quantize_(mod, config=config)
             return mod
 
+        from torchtitan.models.common.token_dispatcher import (
+            AllToAllTokenDispatcher,
+            TorchAOTokenDispatcher,
+        )
         from torchtitan.protocols.module import Module
 
         for fqn, config in model_config.walk(Module.Config):
-            if any(target_fqn in fqn for target_fqn in fqns):
+            if any(target_fqn in fqn for target_fqn in self.fqns):
                 config._convert_fn = convert_fn
+
+        # Swap AllToAllTokenDispatcher -> TorchAOTokenDispatcher for
+        # matching FQNs so grouped GEMMs use padded token dispatch.
+        for fqn, config in model_config.walk(AllToAllTokenDispatcher.Config):
+            if any(target_fqn in fqn for target_fqn in self.fqns):
+                config.__class__ = TorchAOTokenDispatcher.Config
 
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "

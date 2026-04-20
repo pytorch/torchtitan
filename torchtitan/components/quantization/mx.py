@@ -76,11 +76,13 @@ class MXFP8Converter(QuantizationConverter):
         logger.info("MXFP8 MoE training enabled")
 
     def convert_config(self, model_config) -> None:
-        """Convert MoE layers in the model config to use MXFP8 grouped GEMMs.
+        """Convert MoE layers in the model config to use MXFP8 scaled grouped GEMMs.
 
         Walks the model config tree and sets ``_convert_fn`` on modules
-        matching the target FQNs so that ``build()`` applies dynamic
-        MXFP8 quantization on grouped GEMM operations.
+        matching the target FQNs so that ``build()`` replaces instances of
+        nn.Parameter with ScaledGroupedMMTensor. This will use low precision grouped
+        GEMMs with dynamic quantization using the specified MX dtype, rather than
+        the default high precision grouped GEMMs, for the target MoE FQNs.
         """
         if not self.enabled:
             return
@@ -91,26 +93,34 @@ class MXFP8Converter(QuantizationConverter):
         )
         from torchao.quantization.quant_api import quantize_
 
-        pad_token_groups = self.pad_token_groups_for_grouped_mm
-        recipe_name = self.config.recipe_name
-
         def convert_fn(mod: nn.Module) -> nn.Module:
-            recipe = MXFP8TrainingRecipe(recipe_name)
+            recipe = MXFP8TrainingRecipe(self.config.recipe_name)
             mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            mxfp8_op_config.pad_token_groups_for_grouped_mm = pad_token_groups
+            mxfp8_op_config.pad_token_groups_for_grouped_mm = (
+                self.pad_token_groups_for_grouped_mm
+            )
             quantize_(mod, config=mxfp8_op_config)
             return mod
 
+        from torchtitan.models.common.token_dispatcher import (
+            AllToAllTokenDispatcher,
+            TorchAOTokenDispatcher,
+        )
         from torchtitan.protocols.module import Module
 
-        fqns = self.config.fqns
         for fqn, config in model_config.walk(Module.Config):
-            if any(target_fqn in fqn for target_fqn in fqns):
+            if any(target_fqn in fqn for target_fqn in self.config.fqns):
                 config._convert_fn = convert_fn
 
+        # Swap AllToAllTokenDispatcher -> TorchAOTokenDispatcher for
+        # matching FQNs so grouped GEMMs use padded token dispatch.
+        for fqn, config in model_config.walk(AllToAllTokenDispatcher.Config):
+            if any(target_fqn in fqn for target_fqn in self.config.fqns):
+                config.__class__ = TorchAOTokenDispatcher.Config
+
         logger.info(
-            f"Converted layers matching FQNS {fqns} "
-            f"to use dynamic {recipe_name} quantization for grouped_mm and linear ops"
+            f"Converted layers matching FQNS {self.config.fqns} "
+            f"to use dynamic {self.config.recipe_name} quantization for grouped_mm and linear ops"
         )
 
     def convert(self, model: nn.Module):

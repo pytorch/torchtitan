@@ -126,7 +126,7 @@ class FaultTolerantTrainer(Trainer):
         ):
             model = model_config.build()
 
-        # Apply model-level conversions (e.g. MoE quantization)
+        # Apply any remaining model-level conversions
         model_converters.convert(model)
 
         # Verify all submodules satisfy the Module protocol
