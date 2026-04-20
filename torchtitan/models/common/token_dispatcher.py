@@ -359,7 +359,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_starts[seg_ids]
             + torch.arange(
                 total, device=device
-            )  # pyrefly: ignore [no-matching-overload]
+            )
             - output_starts[seg_ids]
         )
 
@@ -492,7 +492,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             num_tokens_per_expert_group,
             ep_size,
             num_local_experts,
-            self.pad_multiple,  # pyrefly: ignore [bad-argument-type]
+            self.pad_multiple,
         )
         return (
             input_shape,
