@@ -23,6 +23,10 @@ class ModelConverter(Protocol):
         - Fused optimized layers (e.g. flash-attention, norms, ...)
     """
 
+    def convert_config(self, model_config) -> None:
+        """Config-level conversion (before model build)."""
+        ...
+
     def convert(self, model: nn.Module):
         """Inplace conversion of the model."""
         ...
@@ -69,6 +73,10 @@ class ModelConvertersContainer(Configurable, ModelConverter):
             for cc in config.converters
         ]
         self.print_after_conversion = config.print_after_conversion
+
+    def convert_config(self, model_config) -> None:
+        for mh in self.converters:
+            mh.convert_config(model_config)
 
     def convert(self, model: nn.Module):
         for mh in self.converters:

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -37,6 +37,11 @@ class Module(nn.Module, Configurable):
     class Config(Configurable.Config):
         param_init: dict | None = None
 
+        _convert_fn: Callable[[nn.Module], nn.Module] | None = field(
+            default=None, repr=False
+        )
+        """Set by quantization converters; not for direct use."""
+
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
             # Assignment is done here rather than in Module.__init__ because
@@ -44,6 +49,11 @@ class Module(nn.Module, Configurable):
             instance = Configurable.Config.build(self, **kwargs)
             if self.param_init is not None:
                 instance._param_init = self.param_init
+            if self._convert_fn is not None:
+                param_init = getattr(instance, "_param_init", None)
+                instance = self._convert_fn(instance)
+                if param_init is not None:
+                    instance._param_init = param_init
             return instance
 
     def init_states(

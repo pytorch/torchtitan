@@ -11,15 +11,8 @@ from typing import ClassVar, Literal
 import torch.nn as nn
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
-
-from .module_utils import (
-    capture_module_attrs,
-    inject_module_protocol,
-    verify_module_protocol,
-)
 
 
 class MXFP8Converter(QuantizationConverter):
@@ -82,11 +75,14 @@ class MXFP8Converter(QuantizationConverter):
         self.enabled = True
         logger.info("MXFP8 MoE training enabled")
 
-    def convert(self, model: nn.Module):
-        """
-        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor.
-        This will use low precision grouped GEMMs with dynamic quantization using the specified MX dtype,
-        rather than the default high precision grouped GEMMs, for the target MoE FQNs.
+    def convert_config(self, model_config) -> None:
+        """Convert MoE layers in the model config to use MXFP8 scaled grouped GEMMs.
+
+        Walks the model config tree and sets ``_convert_fn`` on modules
+        matching the target FQNs so that ``build()`` replaces instances of
+        nn.Parameter with MXFP8TrainingWeightWrapperTensor. This will use low precision grouped
+        GEMMs with dynamic quantization using the specified MX dtype, rather than
+        the default high precision grouped GEMMs, for the target MoE FQNs.
         """
         if not self.enabled:
             return
@@ -97,35 +93,29 @@ class MXFP8Converter(QuantizationConverter):
         )
         from torchao.quantization.quant_api import quantize_
 
-        def module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
-            for target_fqn in self.config.fqns:
-                if target_fqn in cur_fqn:
-                    return True
-            return False
+        def convert_fn(mod: nn.Module) -> nn.Module:
+            recipe = MXFP8TrainingRecipe(self.config.recipe_name)
+            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+            mxfp8_op_config.pad_token_groups_for_grouped_mm = (
+                self.pad_token_groups_for_grouped_mm
+            )
+            quantize_(mod, config=mxfp8_op_config)
+            return mod
 
-        # Capture Module attrs before conversion (MX may swap classes, losing them).
-        # We need to first verify if all nn.Linear have been converted to Linear.
-        verify_module_protocol(model, nn.Linear, Linear)
-        saved_attrs = capture_module_attrs(
-            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
-        )
+        from torchtitan.protocols.module import Module
 
-        recipe = MXFP8TrainingRecipe(self.config.recipe_name)
-        mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-        mxfp8_op_config.pad_token_groups_for_grouped_mm = (
-            self.pad_token_groups_for_grouped_mm
-        )
+        for fqn, config in model_config.walk(Module.Config):
+            if any(target_fqn in fqn for target_fqn in self.config.fqns):
+                config._convert_fn = convert_fn
 
-        quantize_(model, config=mxfp8_op_config, filter_fn=module_filter_fn)
-
-        # Re-inject Linear protocol and re-attach attrs
-        inject_module_protocol(model, Linear, saved_attrs)
-        verify_module_protocol(model, nn.Linear, Linear)
 
         logger.info(
             f"Converted layers matching FQNS {self.config.fqns} "
             f"to use dynamic {self.config.recipe_name} quantization for grouped_mm and linear ops"
         )
+
+    def convert(self, model: nn.Module):
+        pass
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         """

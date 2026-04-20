@@ -199,7 +199,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
-        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -253,12 +252,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
-        with (
-            torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
-        ):
-            model = model_config.build()
-
         # Build the collection of model converters. No-op if converters empty
         model_compile_enabled = (
             config.compile.enable and "model" in config.compile.components
@@ -267,6 +260,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims=parallel_dims,
             model_compile_enabled=model_compile_enabled,
         )
+
+        # Apply config-level conversions before building the model
+        model_converters.convert_config(model_config)
+
+        with (
+            torch.device("meta"),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+        ):
+            model = model_config.build()
+
+        # Apply any remaining model-level conversions
         model_converters.convert(model)
 
         # Verify all submodules satisfy the Module protocol

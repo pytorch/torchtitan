@@ -16,11 +16,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
-from .module_utils import (
-    capture_module_attrs,
-    inject_module_protocol,
-    verify_module_protocol,
-)
+from .module_utils import inject_module_protocol
 from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
@@ -134,6 +130,7 @@ class Float8LinearConverter(QuantizationConverter):
         self.enabled = True
 
     def _init_filter_fn(self, float8_config: Config):
+        """Return a ``(config: Linear.Config, fqn: str) -> bool`` filter."""
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
         use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
@@ -169,39 +166,38 @@ class Float8LinearConverter(QuantizationConverter):
         # use default filter func
         return partial(module_filter_fn, filter_fqns=float8_config.filter_fqns)
 
-    def convert(self, model: nn.Module):
-        """
-        This function converts the linear layers of `model` to `Float8Linear`.
+    def convert_config(self, model_config) -> None:
+        """Convert the linear layers of the model config to ``Float8Linear``.
+
+        Walks the model config tree and sets ``_convert_fn`` on matching
+        ``Linear.Config`` instances so that ``build()`` produces
+        ``Float8Linear`` modules directly.
         Note that today, only dynamic tensor scaling (the default) is supported.
-        This will mutate the model inplace.
         """
         if not self.enabled:
             return
 
-        from torchao.float8 import convert_to_float8_training
+        from torchao.float8.float8_linear import Float8Linear
 
-        # Capture Module attrs before conversion (Float8 creates new instances).
-        # We need to first verify if all nn.Linear have been converted to Linear.
-        verify_module_protocol(model, nn.Linear, Linear)
-        saved_attrs = capture_module_attrs(
-            model, ["_param_init"], nn_module_cls=nn.Linear
-        )
+        torchao_config = self.torchao_config
 
-        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-        convert_to_float8_training(
-            model,
-            config=self.torchao_config,
-            module_filter_fn=self.filter_fn,
-        )
+        def convert_fn(mod: nn.Module) -> nn.Module:
+            converted = Float8Linear.from_float(mod, config=torchao_config)
+            if not isinstance(converted, Linear):
+                inject_module_protocol(converted, Linear)
+            return converted
 
-        # Re-inject Linear protocol and re-attach attrs lost during conversion
-        inject_module_protocol(model, Linear, saved_attrs)
-        verify_module_protocol(model, nn.Linear, Linear)
+        for fqn, linear_config in model_config.walk(Linear.Config):
+            if self.filter_fn(linear_config, fqn):
+                linear_config._convert_fn = convert_fn
 
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.torchao_config.enable_fsdp_float8_all_gather}"
         )
+
+    def convert(self, model: nn.Module):
+        pass
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         if not self.enabled:
@@ -257,10 +253,13 @@ class Float8GroupedMMConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def convert(self, model: nn.Module):
-        """
-        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
-        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+    def convert_config(self, model_config) -> None:
+        """Convert MoE expert layers in the model config to use float8 scaled grouped GEMMs.
+
+        Walks the model config tree and sets ``_convert_fn`` on modules
+        matching the target FQNs so that ``build()`` replaces instances of
+        nn.Parameter with MXFP8TrainingWeightWrapperTensor, to perform dynamic float8
+        rowwise quantization + scaled grouped GEMMs.
         """
         from torchao.quantization.quant_api import quantize_
 
@@ -271,30 +270,24 @@ class Float8GroupedMMConverter(QuantizationConverter):
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
             ) from e
 
-        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
-            for target_fqn in self.fqns:
-                if target_fqn in cur_fqn:
-                    return True
-            return False
+        def convert_fn(mod: nn.Module) -> nn.Module:
+            config = Float8TrainingOpConfig()
+            quantize_(mod, config=config)
+            return mod
 
-        # Capture Module attrs before conversion (Float8 creates new instances).
-        # We need to first verify if all nn.Linear have been converted to Linear.
-        verify_module_protocol(model, nn.Linear, Linear)
-        saved_attrs = capture_module_attrs(
-            model, ["_param_init"], nn_module_cls=nn.Linear
-        )
+        from torchtitan.protocols.module import Module
 
-        config = Float8TrainingOpConfig()
-        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
-
-        # Re-inject Linear protocol and re-attach attrs
-        inject_module_protocol(model, Linear, saved_attrs)
-        verify_module_protocol(model, nn.Linear, Linear)
+        for fqn, config in model_config.walk(Module.Config):
+            if any(target_fqn in fqn for target_fqn in self.fqns):
+                config._convert_fn = convert_fn
 
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
             "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
         )
+
+    def convert(self, model: nn.Module):
+        pass
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         pass
