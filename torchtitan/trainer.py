@@ -47,11 +47,7 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-    ProfilingConfig,
-)
+from torchtitan.tools.profiler import Profiler
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -75,7 +71,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         dump_folder: str = "./outputs"
         """Folder to dump job outputs"""
 
-        profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
+        profiler: Profiler.Config = field(default_factory=Profiler.Config)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
         )
@@ -549,7 +545,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             ntokens_batch = labels.numel()
-            self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -652,6 +647,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
             )
+
+        # Accumulate after CP sharding so labels.numel() reflects the actual
+        # unique tokens this rank processes (not the full pre-split sequence).
+        self.ntokens_seen += labels.numel()
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -832,18 +831,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
-        with (
-            maybe_enable_profiling(
-                config.profiling,
-                global_step=self.step,
-                base_folder=config.dump_folder,
-            ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
-                global_step=self.step,
-                base_folder=config.dump_folder,
-            ) as memory_profiler,
-        ):
+        with config.profiler.build(
+            global_step=self.step,
+            base_folder=config.dump_folder,
+        ) as profiler:
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
@@ -865,10 +856,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
-                if memory_profiler:
-                    memory_profiler.step()
+                profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

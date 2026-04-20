@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
 from torchtitan.config import ActivationCheckpointConfig
@@ -72,7 +72,22 @@ def to_graph_trainer_config(
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
-    d["model_spec"] = model_registry(base_config.model_spec.flavor)
+    graph_spec = model_registry(base_config.model_spec.flavor)
+    # Wrap the base model config in the graph_trainer's model config class
+    # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values
+    # (including moe_comm_backend etc.).
+    graph_model_cls = type(graph_spec.model)
+    graph_model = graph_model_cls(
+        **{
+            f.name: getattr(base_config.model_spec.model, f.name)
+            for f in fields(base_config.model_spec.model)
+        }
+    )
+    d["model_spec"] = replace(
+        base_config.model_spec,
+        parallelize_fn=graph_spec.parallelize_fn,
+        model=graph_model,
+    )
     d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any

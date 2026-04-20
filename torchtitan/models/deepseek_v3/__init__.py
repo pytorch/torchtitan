@@ -14,8 +14,8 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
-from torchtitan.models.common.attention import FlexAttention, ScaledDotProductAttention
 from torchtitan.models.common.config_utils import (
+    get_attention_config,
     make_experts_config,
     make_ffn_config,
     make_moe_config,
@@ -25,7 +25,6 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
-
 from .parallelize import parallelize_deepseekv3
 from .sharding import set_deepseek_v3_sharding_spec
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
@@ -79,8 +78,7 @@ def _make_dsv3_attn_config(
     qk_rope_head_dim: int,
     v_head_dim: int,
     mscale: float = 1.0,
-    inner_attention=None,
-    mask_type: str = "causal",
+    attn_backend: str,
 ) -> Attention.Config:
     """Build a fully-specified DeepSeek V3 MLA Attention.Config.
 
@@ -88,6 +86,7 @@ def _make_dsv3_attn_config(
     When q_lora_rank == 0, sets wq (not wq_a/wq_b).
     When q_lora_rank > 0, sets wq_a/wq_b (not wq).
     """
+    inner_attention, mask_type = get_attention_config(attn_backend)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
@@ -144,11 +143,7 @@ def _make_dsv3_attn_config(
             out_features=dim,
             param_init=_depth_init(layer_id),
         ),
-        inner_attention=(
-            inner_attention
-            if inner_attention is not None
-            else ScaledDotProductAttention.Config()
-        ),
+        inner_attention=inner_attention,
         mask_type=mask_type,
     )
 
@@ -176,8 +171,9 @@ def _build_dsv3_layers(
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
     score_before_experts: bool = False,
-    inner_attention=None,
-    mask_type: str = "causal",
+    attn_backend: str,
+    moe_comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -199,8 +195,7 @@ def _build_dsv3_layers(
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             mscale=mscale,
-            inner_attention=inner_attention,
-            mask_type=mask_type,
+            attn_backend=attn_backend,
         )
 
         if layer_id < n_dense_layers:
@@ -215,7 +210,6 @@ def _build_dsv3_layers(
             ffn_cfg = None
             moe_cfg = make_moe_config(
                 num_experts=num_experts,
-                score_before_experts=score_before_experts,
                 router=make_router_config(
                     dim=dim,
                     num_experts=num_experts,
@@ -231,7 +225,11 @@ def _build_dsv3_layers(
                     dim=dim,
                     hidden_dim=moe_hidden_dim,
                     num_experts=num_experts,
+                    top_k=router_top_k,
                     param_init=_depth_experts_init(layer_id),
+                    score_before_experts=score_before_experts,
+                    comm_backend=moe_comm_backend,
+                    non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
                 shared_experts=make_ffn_config(
                     dim=dim,
@@ -255,7 +253,10 @@ def _build_dsv3_layers(
     return layers
 
 
-def _debugmodel() -> DeepSeekV3Model.Config:
+def _debugmodel(
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str | None = None,
+) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
     vocab_size = 2048
@@ -285,6 +286,8 @@ def _debugmodel() -> DeepSeekV3Model.Config:
         router_top_k=3,
         router_score_func="softmax",
         score_before_experts=False,
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -313,67 +316,10 @@ def _debugmodel() -> DeepSeekV3Model.Config:
     )
 
 
-def _debugmodel_flex_attn() -> DeepSeekV3Model.Config:
-    dim = 256
-    n_layers = 6
-    vocab_size = 2048
-    n_heads = 16
-    moe_hidden_dim = 256
-    num_shared_experts = 2
-    dense_hidden_dim = 1024
-    rope_dim = 64
-    num_experts = 8
-    n_dense_layers = 1
-
-    layers = _build_dsv3_layers(
-        n_layers=n_layers,
-        n_dense_layers=n_dense_layers,
-        dim=dim,
-        n_heads=n_heads,
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=rope_dim,
-        v_head_dim=128,
-        mscale=0.70,
-        dense_hidden_dim=dense_hidden_dim,
-        moe_hidden_dim=moe_hidden_dim,
-        num_experts=num_experts,
-        num_shared_experts=num_shared_experts,
-        router_top_k=3,
-        router_score_func="softmax",
-        score_before_experts=False,
-        inner_attention=FlexAttention.Config(),
-        mask_type="block_causal",
-    )
-    return DeepSeekV3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=rope_dim,
-            max_seq_len=4096 * 4,
-            theta=10000.0,
-            backend="complex",
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
-        ),
-        layers=layers,
-    )
-
-
-def _16b() -> DeepSeekV3Model.Config:
+def _16b(
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
     vocab_size = 102400
@@ -403,8 +349,8 @@ def _16b() -> DeepSeekV3Model.Config:
         router_top_k=6,
         router_score_func="softmax",
         score_before_experts=False,
-        inner_attention=FlexAttention.Config(),
-        mask_type="block_causal",
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -433,7 +379,10 @@ def _16b() -> DeepSeekV3Model.Config:
     )
 
 
-def _236b() -> DeepSeekV3Model.Config:
+def _236b(
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
     vocab_size = 102400
@@ -467,8 +416,8 @@ def _236b() -> DeepSeekV3Model.Config:
         router_num_limited_groups=3,
         router_route_scale=16.0,
         score_before_experts=False,
-        inner_attention=FlexAttention.Config(),
-        mask_type="block_causal",
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -497,7 +446,10 @@ def _236b() -> DeepSeekV3Model.Config:
     )
 
 
-def _671b() -> DeepSeekV3Model.Config:
+def _671b(
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
     vocab_size = 129280
@@ -532,8 +484,8 @@ def _671b() -> DeepSeekV3Model.Config:
         router_route_scale=2.5,
         router_route_norm=True,
         score_before_experts=False,
-        inner_attention=FlexAttention.Config(),
-        mask_type="block_causal",
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -564,15 +516,21 @@ def _671b() -> DeepSeekV3Model.Config:
 
 deepseekv3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_flex_attn": _debugmodel_flex_attn,
     "16B": _16b,
     "236B": _236b,
     "671B": _671b,
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    config = deepseekv3_configs[flavor]()
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str | None = None,
+) -> ModelSpec:
+    config = deepseekv3_configs[flavor](
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
+    )
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,

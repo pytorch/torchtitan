@@ -50,7 +50,6 @@ class FluxTrainer(Trainer):
         latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
         seq_len_img = latent_side_width * latent_side_height
 
-        # pyrefly: ignore [missing-attribute]
         seq_len_txt = config.tokenizer.max_t5_encoding_len
         config.training.seq_len = seq_len_img + seq_len_txt
 
@@ -134,7 +133,6 @@ class FluxTrainer(Trainer):
             input_dict, labels = batch
             bsz = labels.shape[0]
             ntokens_batch = bsz * self.config.training.seq_len
-            self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -236,6 +234,10 @@ class FluxTrainer(Trainer):
                 None,  # No attention masks for Flux
                 load_balancer_type=None,
             )
+
+        # Accumulate after CP sharding so the count reflects the actual
+        # unique tokens this rank processes (not the full pre-split sequence).
+        self.ntokens_seen += bsz * self.config.training.seq_len // self.parallel_dims.cp
 
         with self.train_context():
             latent_noise_pred = model(
