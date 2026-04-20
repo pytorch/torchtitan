@@ -43,7 +43,8 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     - AC region annotation: Tags each transformer block's forward with a unique
       ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
       boundaries for the min-cut partitioner.
-
+    - Module FQN annotation: Tags each submodule's forward with its
+      fully-qualified name for downstream passes.
     """
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher

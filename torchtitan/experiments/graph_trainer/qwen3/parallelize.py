@@ -43,6 +43,8 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
     - AC region annotation: Tags each transformer block's forward with a unique
       ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
       boundaries for the min-cut partitioner.
+    - Module FQN annotation: Tags each submodule's forward with its
+      fully-qualified name for downstream passes.
     """
     # Annotate MoE EP regions if any layer has MoE enabled
     if any(layer.moe is not None for layer in model.config.layers):
