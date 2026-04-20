@@ -64,9 +64,6 @@ def parallelize_llama(
 
     annotate_llama(model)
 
-    # TP: config-driven, auto-recursive via Module.parallelize(). Sharding specs
-    # are populated on the model Config by set_llama3_sharding_spec (wired via
-    # ModelSpec.set_sharding_spec_fn) before build.
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         model.parallelize(tp_mesh)
