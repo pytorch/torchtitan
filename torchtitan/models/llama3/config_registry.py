@@ -50,13 +50,7 @@ def llama3_debugmodel() -> Trainer.Config:
             dataset="c4_test",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=-1,
-            tensor_parallel_degree=2,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=2,
-            pipeline_parallel_schedule="Interleaved1F1B",
-        ),
+        parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
