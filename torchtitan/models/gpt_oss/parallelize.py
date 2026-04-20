@@ -288,9 +288,9 @@ def apply_moe_ep_tp(
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
-                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
                     use_local_input=False,
                     output_layouts=(Partial(),),
+                    desired_output_layouts=(sp_layout,),
                     use_local_output=False,
                 ),
                 # replicate computation for the router
