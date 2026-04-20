@@ -48,7 +48,7 @@ def _dist_reduce(
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs.
         # full_tensor() converts DTensor to plain tensor, performing
-        # any necessary reductions (Partial → all-reduce).
+        # any necessary reductions (Partial -> all-reduce).
         # When DTensor is fully Replicate or Partial, the value is already
         # globally reduced — skip the subsequent mesh all-reduce.
         skip_mesh_reduce = all(p.is_replicate() or p.is_partial() for p in x.placements)
@@ -56,8 +56,9 @@ def _dist_reduce(
 
     if extra_pg is not None:
         assert not skip_mesh_reduce, (
-            "DTensor with Replicate/Partial placements should not be used with "
-            "extra_pg. full_dtensor does not support PP."
+            "DTensor with Replicate/Partial placements cannot be combined with "
+            "extra_pg: the DTensor's full_tensor() already reduces over its mesh, "
+            "and extra_pg (e.g. the FT replica group) is orthogonal to that mesh."
         )
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
