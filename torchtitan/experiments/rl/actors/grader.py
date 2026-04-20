@@ -7,7 +7,6 @@
 import logging
 from collections.abc import Callable
 
-import torch
 from monarch.actor import Actor, endpoint
 from torchtitan.experiments.rl.types import Completion, ScoredCompletion
 
@@ -16,13 +15,15 @@ logger = logging.getLogger(__name__)
 
 class Grader(Actor):
     """
-    Scores generated completions using a reward function.
+    Scores a group of completions sharing a prompt.
 
-    Scores each completion individually. Grouping for advantage
-    computation lives in the controller, not here.
+    One call scores one prompt's completions so ``reward_fn`` sees all
+    n samples at once -- its natural batched shape. The controller
+    loops over prompts and handles advantage grouping.
 
     Args:
-        reward_fn: Callable ``(completions: list[str], expected_answer: str) -> torch.Tensor``
+        reward_fn: Callable
+            ``(completions: list[Completion], expected_answer: str) -> torch.Tensor``
             returning one reward per input completion.
     """
 
@@ -38,30 +39,27 @@ class Grader(Actor):
     async def score(
         self,
         completions: list[Completion],
-        expected_answers: list[str],
+        expected_answer: str,
     ) -> list[ScoredCompletion]:
-        """Score completions and return ScoredCompletions in input order.
+        """Score one prompt's completions.
 
         Args:
-            completions: Flat list of Completions to score.
-            expected_answers: One expected answer per prompt, indexed by
-                ``completion.prompt_idx``.
+            completions: Completions generated for a single prompt.
+            expected_answer: Expected answer for that prompt.
 
         Returns:
-            Flat list of ScoredCompletions in input order.
+            ScoredCompletions in input order.
         """
-        # TODO: batch reward_fn across a prompt's n completions when the
-        # reward function benefits from batching (e.g. a reward model).
-        scored: list[ScoredCompletion] = []
-        for c in completions:
-            rewards = self.reward_fn([c.text], expected_answers[c.prompt_idx])
-            scored.append(ScoredCompletion(completion=c, reward=rewards[0].item()))
+        rewards = self.reward_fn(completions, expected_answer)
+        scored = [
+            ScoredCompletion(completion=c, reward=r.item())
+            for c, r in zip(completions, rewards)
+        ]
 
-        all_rewards = torch.tensor([sc.reward for sc in scored])
+        reward_mean = sum(sc.reward for sc in scored) / len(scored)
         logger.debug(
-            f"Grader finished scoring {len(scored)} completions: "
-            f"reward_mean={all_rewards.mean().item():.4f}, "
-            f"reward_std={all_rewards.std().item():.4f}"
+            f"Grader scored {len(scored)} completions for prompt "
+            f"{completions[0].prompt_idx}: reward_mean={reward_mean:.4f}"
         )
 
         return scored

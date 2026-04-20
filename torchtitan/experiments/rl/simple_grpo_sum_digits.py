@@ -27,7 +27,6 @@ import logging
 import os
 import re
 import time
-from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
@@ -42,7 +41,7 @@ from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Episode, TrainBatch
+from torchtitan.experiments.rl.types import Completion, Episode, TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -516,12 +515,10 @@ class RLTrainer(Configurable):
             # Generate data sample for this step
             train_prompts = []
             train_answers = []
-            train_questions = []
             for _ in range(self.config.num_episodes_per_step):
                 question, answer = self.task.create_question()
                 train_prompts.append(self.system_prompt + "\n\n" + question)
                 train_answers.append(answer)
-                train_questions.append(question)
 
             step_start: float = time.perf_counter()
 
@@ -531,40 +528,38 @@ class RLTrainer(Configurable):
                 self.generator.generate.call(train_prompts).get()
             )
 
-            # 2. Grader assigns a reward per completion.
-            scored = self._get_rank_0_value(
-                self.grader.score.call(completions, train_answers).get(),
-                has_gpus=False,
-            )
+            # 2. Group by prompt_idx; one grader call per prompt.
+            groups: dict[int, list[Completion]] = {}
+            for c in completions:
+                groups.setdefault(c.prompt_idx, []).append(c)
 
-            # 3. Group rewards by prompt_idx to compute mean-baseline
-            #    advantages, then build a flat Episode list in
-            #    scored-iteration order.
-            rewards_by_prompt: dict[int, list[float]] = defaultdict(list)
-            for sc in scored:
-                rewards_by_prompt[sc.completion.prompt_idx].append(sc.reward)
-            group_mean: dict[int, float] = {
-                pidx: sum(rs) / len(rs) for pidx, rs in rewards_by_prompt.items()
-            }
-
-            episodes = [
-                Episode(
-                    policy_version=sc.completion.policy_version,
-                    prompt_idx=sc.completion.prompt_idx,
-                    prompt_token_ids=sc.completion.prompt_token_ids,
-                    text=sc.completion.text,
-                    token_ids=sc.completion.token_ids,
-                    token_logprobs=sc.completion.token_logprobs,
-                    reward=sc.reward,
-                    advantage=sc.reward - group_mean[sc.completion.prompt_idx],
+            # 3. Score each group, apply mean-baseline advantage, collect Episodes.
+            episodes: list[Episode] = []
+            for pidx, group in groups.items():
+                scored = self._get_rank_0_value(
+                    self.grader.score.call(group, train_answers[pidx]).get(),
+                    has_gpus=False,
                 )
-                for sc in scored
-            ]
+                group_mean = sum(sc.reward for sc in scored) / len(scored)
+                for sc in scored:
+                    c = sc.completion
+                    episodes.append(
+                        Episode(
+                            policy_version=c.policy_version,
+                            prompt_idx=c.prompt_idx,
+                            prompt_token_ids=c.prompt_token_ids,
+                            text=c.text,
+                            token_ids=c.token_ids,
+                            token_logprobs=c.token_logprobs,
+                            reward=sc.reward,
+                            advantage=sc.reward - group_mean,
+                        )
+                    )
 
             if self.config.log_samples:
                 _log_samples(episodes, train_answers)
 
-            # 4. Trainer forward + backward
+            # 5. Trainer forward + backward
             maybe_sharded_episodes = self._shard_episodes(episodes)
             batches = [
                 self._collate_episodes(per_rank_episodes)
@@ -574,12 +569,12 @@ class RLTrainer(Configurable):
                 self.trainer.forward_backward.call(batches).get()
             )
 
-            # 5. Optimizer step
+            # 6. Optimizer step
             optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
 
             metrics = {**fwd_bwd_metrics, **optim_metrics}
 
-            # 6. Sync weights
+            # 7. Sync weights
             t0 = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
