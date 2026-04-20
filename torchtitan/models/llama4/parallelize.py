@@ -90,7 +90,6 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    # TP: config-driven, auto-recursive via Module.parallelize()
     tp_mesh = None
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
