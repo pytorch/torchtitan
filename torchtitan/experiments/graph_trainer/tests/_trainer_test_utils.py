@@ -36,6 +36,7 @@ def build_minimal_trainer(
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
+    trainer.ntokens_seen = 0
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
