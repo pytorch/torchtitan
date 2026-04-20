@@ -12,11 +12,13 @@ import torch._inductor.config
 import torch.nn as nn
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.linear import Linear, inject_linear_protocol
+from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
+from .module_utils import inject_module_protocol
+
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
@@ -183,7 +185,7 @@ class Float8LinearConverter(QuantizationConverter):
         def convert_fn(mod: nn.Module) -> nn.Module:
             converted = Float8Linear.from_float(mod, config=torchao_config)
             if not isinstance(converted, Linear):
-                inject_linear_protocol(converted)
+                inject_module_protocol(converted, Linear)
             return converted
 
         for fqn, linear_config in model_config.walk(Linear.Config):

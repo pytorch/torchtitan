@@ -10,9 +10,6 @@ import torch.nn as nn
 
 from torchtitan.protocols.module import Module
 
-# Cache: maps original class -> patched class (with Linear protocol).
-_patched_classes: dict[type, type] = {}
-
 
 class Linear(nn.Linear, Module):
     """Configurable nn.Linear.
@@ -36,21 +33,3 @@ class Linear(nn.Linear, Module):
             config.out_features,
             bias=config.bias,
         )
-
-
-def inject_linear_protocol(mod: nn.Module) -> None:
-    """Patch *mod*'s class to also inherit from ``Linear``."""
-    orig_cls = type(mod)
-    if orig_cls not in _patched_classes:
-
-        def _raise_error(self, *args, **kwargs):
-            raise RuntimeError(
-                f"{type(self).__name__} should not be constructed directly."
-            )
-
-        _patched_classes[orig_cls] = type(
-            f"{orig_cls.__name__}_WithLinear",
-            (orig_cls, Linear),
-            {"__init__": _raise_error},
-        )
-    mod.__class__ = _patched_classes[orig_cls]
