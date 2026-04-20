@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -74,10 +75,6 @@ def parallelize_deepseekv3(
             )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -85,8 +82,7 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     model_compile_enabled = (

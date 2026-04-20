@@ -14,9 +14,7 @@ from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import (
-    FlexAttention,  # pyrefly: ignore [missing-module-attribute]
-)
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
 
@@ -100,9 +98,7 @@ def _compute_learned_pos_embeds(
 
     for (h, w), indices in hw_to_indices.items():
         pos_hw = F.interpolate(
-            # pyrefly: ignore [bad-argument-type]
             pos_grid,
-            # pyrefly: ignore [bad-argument-type]
             size=(h, w),
             mode="bilinear",
             align_corners=True,
@@ -129,7 +125,7 @@ def _compute_learned_pos_embeds(
             else:
                 pos_embeds[i, :seq_len] = pos_hw_block
 
-    return pos_embeds  # pyrefly: ignore [bad-return]
+    return pos_embeds
 
 
 def _compute_2d_rope_cache(
@@ -227,7 +223,7 @@ def _compute_2d_rope_cache(
         2
     )  # (N, L, 1, head_dim*2)
 
-    return rope_cache  # pyrefly: ignore [bad-return]
+    return rope_cache
 
 
 class PatchEmbed(Module):
@@ -279,7 +275,6 @@ class VisionRotaryEmbedding(Module):
         self.dim = dim
         self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        # pyrefly: ignore [bad-argument-type]
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -299,7 +294,6 @@ class VisionRotaryEmbedding(Module):
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         freqs = torch.outer(seq, self.inv_freq)
-        # pyrefly: ignore [bad-return]
         return freqs
 
 
@@ -348,7 +342,6 @@ class PatchMerger(Module):
         """
         batch_size, seq_len, _ = x.shape
         if self.use_postshuffle_norm:
-            # pyrefly: ignore [bad-assignment]
             x = x.view(
                 batch_size,
                 seq_len // (self.spatial_merge_size**2),
@@ -409,7 +402,6 @@ class VisionAttention(Module):
 
         q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
 
-        # pyrefly: ignore [bad-argument-type]
         attn_output = self.flex_attention(q, k, v, attention_masks=attention_mask)
         attn_output = attn_output.reshape(num_vision, max_num_patch, -1)
         return self.proj(attn_output)
@@ -519,7 +511,6 @@ class Qwen3VLVisionEncoder(Module):
         # nn.Parameter (not nn.Embedding) because we interpolate the weight directly
         self.num_position_embeddings = config.num_position_embeddings
         self.pos_embed = nn.Parameter(
-            # pyrefly: ignore [bad-argument-type]
             torch.empty(config.num_position_embeddings, config.dim)
         )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
@@ -644,7 +635,6 @@ class Qwen3VLVisionEncoder(Module):
             head_dim,
         )
 
-        # pyrefly: ignore [bad-return]
         return learned_pos, rope_cache
 
     def forward(
@@ -676,7 +666,6 @@ class Qwen3VLVisionEncoder(Module):
         )
         hidden_states = hidden_states + learned_pos
 
-        # pyrefly: ignore [bad-argument-type]
         mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)
         attention_mask = _compiled_create_block_mask(
             mask_mod,

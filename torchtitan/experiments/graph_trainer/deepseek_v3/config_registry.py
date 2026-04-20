@@ -13,7 +13,9 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_ep,
     deepseek_v3_debugmodel_flex_attn,
+    deepseek_v3_debugmodel_flex_attn_ep,
 )
 
 from . import model_registry
@@ -25,8 +27,22 @@ def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_deepseek_v3_debugmodel_ep() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(deepseek_v3_debugmodel_ep(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
 def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> (GraphTrainer.Config):
     config = to_graph_trainer_config(deepseek_v3_debugmodel_flex_attn(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_flex_attn_ep() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel_flex_attn_ep(), model_registry
+    )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 

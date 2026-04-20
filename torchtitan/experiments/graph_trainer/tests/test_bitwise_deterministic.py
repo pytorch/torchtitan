@@ -71,6 +71,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_registry: Callable
     annotate_model: Callable
     model_flavor: str
+    attn_backend: str = "sdpa"
 
     def setUp(self):
         # Disable max_autotune for FlexAttention to ensure bitwise-identical
@@ -89,7 +90,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
 
         _set_deterministic()
-        model_spec = self.model_registry(self.model_flavor)
+        model_spec = self.model_registry(
+            self.model_flavor, attn_backend=self.attn_backend
+        )
         self.model_config = model_spec.model
         vocab_size = self.model_config.vocab_size
         with torch.device("meta"):
@@ -351,7 +354,8 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(llama3_model_registry)
-    model_flavor = "debugmodel_flex_attn"
+    model_flavor = "debugmodel"
+    attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
 
     @unittest.skipUnless(
@@ -390,7 +394,8 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(dsv3_model_registry)
-    model_flavor = "debugmodel_flex_attn"
+    model_flavor = "debugmodel"
+    attn_backend = "flex"
     annotate_model = staticmethod(annotate_deepseekv3)
 
     @unittest.skipUnless(

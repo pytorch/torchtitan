@@ -228,7 +228,7 @@ class Module(nn.Module, Configurable):
             outputs = fn(*args, **kwargs)
             return self._shard_outputs(mesh, outputs)
 
-        self.forward = with_redistribution  # pyrefly: ignore [missing-attribute]
+        self.forward = with_redistribution
 
     def _shard_inputs(
         self,
