@@ -8,7 +8,7 @@
 Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
-  - ProfilingConfig                 (in tools/profiling.py)
+  - Profiler.Config                 (in tools/profiler.py)
   - OptimizersContainer.Config      (in components/optimizer.py)
   - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
@@ -258,29 +258,6 @@ class ParallelismConfig:
     For HybridEP, SM configuration can be set via environment variables:
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
-    """
-
-    hybridep_non_blocking_expert_capacity_factor: float | None = None
-    """Enable non-blocking HybridEP dispatch with a given capacity factor.
-
-    Setting this to a float in (0, 1] enables CPU-free non-blocking dispatch
-    and controls num_permuted_tokens — the fused-permute output capacity,
-    estimated as: num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-    aligned for MXFP8.  Tokens whose permuted offset exceeds this limit are
-    silently dropped (overflow_flag is set on GPU).
-
-    - None = blocking mode (default).  HybridEP calls cudaStreamSynchronize
-      after dispatch, copies tokens_per_expert to pinned CPU memory, and
-      computes the exact num_permuted_tokens on the host.  No token dropping.
-    - 1.0 = non-blocking, worst-case sizing: every token can reach every local
-      expert, no drops, highest memory.
-    - < 1.0 = non-blocking, reduced memory; safe in practice when forced load
-      balancing (e.g. aux-loss / round-robin) keeps distribution roughly uniform.
-
-    Note: this factor has no lasting effect on the all-to-all communication
-    buffer.  HybridEP's dispatch_with_permute internally passes the actual
-    num_tokens to update_template_config, which auto-grows the buffer to the
-    full token count on the first dispatch regardless of this setting.
     """
 
 
