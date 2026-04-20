@@ -52,22 +52,15 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
 
 
-@dataclass(kw_only=True, slots=True)
-class GraphTrainerConfig(Trainer.Config):
-    compile: GraphTrainerCompileConfig = field(
-        default_factory=GraphTrainerCompileConfig
-    )
-
-
 def to_graph_trainer_config(
     base_config: Trainer.Config,
     model_registry: Callable[[str], ModelSpec],
-) -> GraphTrainerConfig:
-    """Convert a base Trainer.Config to a GraphTrainerConfig.
+) -> "GraphTrainer.Config":
+    """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and replaces the model_spec with one
     from the graph_trainer model_registry. The compile field is removed and
-    left as the GraphTrainerConfig default; callers should explicitly set it.
+    left as the GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
 
