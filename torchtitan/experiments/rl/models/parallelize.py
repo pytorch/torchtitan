@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 # RL-specific parallelize function for the qwen3 model.
-# Applies tensor parallelism via config-based sharding.  The trainer fills
-# the sharding spec via ``ModelSpec.set_sharding_spec_fn`` before build,
-# and the generator (vllm_wrapper) fills it with ``include_positions=True``
-# before build.  This file then just walks the built model and dispatches
+# Applies tensor parallelism via config-based sharding. Sharding specs are
+# filled on the config before build (by ``ModelSpec.set_sharding_spec_fn``
+# in the trainer, and directly in the vllm_wrapper for the generator). This
+# file then just walks the built model and dispatches
 # ``Module.parallelize(tp_mesh)``.
 
 import logging

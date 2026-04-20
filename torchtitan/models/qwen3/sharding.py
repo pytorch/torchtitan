@@ -33,28 +33,23 @@ def set_qwen3_sharding_spec(
     loss_parallel: bool,
     enable_sp: bool,
     full_dtensor: bool = False,
-    include_positions: bool = False,
 ) -> None:
     """Fill ``sharding_spec`` on all Qwen3 sub-configs.
 
-    No-op when TP is not enabled. ``include_positions=True`` is used by the
-    RL vLLM generator path, which passes ``positions`` into attention.
+    No-op when TP is not enabled.
     """
     if not parallel_dims.tp_enabled:
         return
 
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_qwen3_layer_sharding(
-            layer_cfg, enable_sp=enable_sp, include_positions=include_positions
-        )
+        _set_qwen3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
 
 def _set_qwen3_layer_sharding(
     layer_cfg: "Qwen3TransformerBlock.Config",
     *,
     enable_sp: bool,
-    include_positions: bool = False,
 ) -> None:
     """Set sharding on one Qwen3 transformer layer."""
     attention = layer_cfg.attention
@@ -65,9 +60,7 @@ def _set_qwen3_layer_sharding(
     layer_cfg.ffn_norm.sharding_spec = norm_spec
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
-    set_gqa_attention_sharding(
-        attention, enable_sp=enable_sp, include_positions=include_positions
-    )
+    set_gqa_attention_sharding(attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(attention.inner_attention)
 
     # QK norms: shard on head dim (dim=2) — independent of SP.
