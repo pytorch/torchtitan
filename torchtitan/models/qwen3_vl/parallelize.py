@@ -22,6 +22,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -55,17 +56,16 @@ def _apply_non_moe_tp_to_decoder(
 ):
     """Apply tensor parallelism to the decoder without SequenceParallel.
 
-    Unlike Qwen3's apply_non_moe_tp which uses SequenceParallel (hidden states
-    are Shard(1) DTensors between blocks), this keeps hidden states as plain
-    tensors on every rank. This is required because vision scatter and DeepStack
-    use boolean indexing (masked_scatter, tensor[bool_mask]) which DTensor does
-    not support.
+    Hidden states stay as plain tensors between layers because the residual
+    connection (``x = x + self.attention(...)``) requires matching types, and
+    DeepStack uses boolean indexing which DTensor does not support. NoParallel
+    on norms wraps plain tensors as DTensor(Replicate) at each layer boundary.
     """
-    # Parallelize embedding, norm, and output — no SequenceParallel
     top_level_plan = {
         "tok_embeddings": RowwiseParallel(
             input_layouts=Replicate(),
             output_layouts=Replicate(),
+            use_local_output=True,  # needed for _scatter
         ),
         "norm": NoParallel(),
         "output": ColwiseParallel(
@@ -76,12 +76,6 @@ def _apply_non_moe_tp_to_decoder(
     }
     # pyrefly: ignore [bad-argument-type]
     parallelize_module(model, tp_mesh, top_level_plan)
-
-    # Apply TP to every transformer block's linear layers.
-    # NoParallel on norms distributes their params as Replicate DTensors on
-    # tp_mesh (needed for consistent (fsdp, tp) mesh after FSDP). Its input
-    # hook wraps plain tensors as DTensor(Replicate); its output stays as
-    # DTensor (no unwrap) so downstream modules receive DTensors.
 
     # Detect whether fused QKV is used by checking the first layer
     # pyrefly: ignore [not-callable]
@@ -107,31 +101,23 @@ def _apply_non_moe_tp_to_decoder(
         layer_plan = {
             "attention_norm": NoParallel(),
             "ffn_norm": NoParallel(),
-            # Wrap plain tensors (hidden_states, freqs_cis) as DTensor(Replicate)
-            # so they can interact with DTensor outputs from wq/wk/wv in
-            # apply_rotary_emb. Layouts are identity — the wrapping is the point.
-            # NOTE: 4th arg (positions) is None because CP is not supported yet.
             "attention": PrepareModuleInput(
                 input_layouts=(Replicate(), Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             **qkv_plan,
-            # Not actual sequence parallelism — SequenceParallel(sequence_dim=2)
-            # tells DTensor that dim 2 (the head dimension) is the sharded dim,
-            # so the per-head RMSNorm operates on each rank's local heads without
-            # communication, and norm weights become DTensors on tp_mesh for FSDP.
-            "attention.q_norm": SequenceParallel(sequence_dim=2),
-            "attention.k_norm": SequenceParallel(sequence_dim=2),
-            "attention.wo": RowwiseParallel(output_layouts=Replicate()),
+            "attention.q_norm": SequenceParallel(sequence_dim=2, use_local_output=False),
+            "attention.k_norm": SequenceParallel(sequence_dim=2, use_local_output=False),
+            "attention.wo": RowwiseParallel(output_layouts=Replicate()),  # return plain tensor for x + attention(...)
         }
 
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
-                    "feed_forward.w1": ColwiseParallel(),
-                    "feed_forward.w2": RowwiseParallel(output_layouts=Replicate()),
-                    "feed_forward.w3": ColwiseParallel(),
+                    "feed_forward.w1": ColwiseParallel(use_local_output=False),
+                    "feed_forward.w2": RowwiseParallel(output_layouts=Replicate()),  # returns plain tensor for x + feed_forward(...)
+                    "feed_forward.w3": ColwiseParallel(use_local_output=False),
                 }
             )
 
@@ -195,9 +181,9 @@ def _apply_tp_to_vision_encoder(
     layer_plan = {
         "norm1": NoParallel(),
         "norm2": NoParallel(),
-        "attn.qkv": ColwiseParallel(),
+        "attn.qkv": ColwiseParallel(),  # needs plain tensor for reshape after qkv
         "attn.proj": RowwiseParallel(use_local_output=False),
-        "mlp.linear_fc1": ColwiseParallel(),
+        "mlp.linear_fc1": ColwiseParallel(use_local_output=False),
         "mlp.linear_fc2": RowwiseParallel(use_local_output=False),
     }
 
@@ -212,7 +198,7 @@ def _apply_tp_to_vision_encoder(
     # which operate on plain tensors with boolean masks.
     merger_plan = {
         "norm": NoParallel(),
-        "linear_fc1": ColwiseParallel(),
+        "linear_fc1": ColwiseParallel(use_local_output=False),
         "linear_fc2": RowwiseParallel(),
     }
 
@@ -317,6 +303,7 @@ def parallelize_qwen3_vl(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=False,
             pad_multiple=find_pad_multiple(model_converters.converters),
+            use_local_output=True,  # Plain tensors for DeepStack boolean indexing
         )
 
     # Apply activation checkpointing
