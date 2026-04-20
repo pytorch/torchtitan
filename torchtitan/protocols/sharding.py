@@ -15,7 +15,7 @@ self-documenting and support multi-dim meshes.
 from dataclasses import dataclass, field
 from enum import Enum
 
-from torch.distributed.tensor import Placement, Replicate
+from torch.distributed.tensor import Placement
 
 
 class StrEnum(str, Enum):
@@ -121,8 +121,10 @@ def resolve_placements(
 ) -> tuple[Placement, ...]:
     """Convert NamedPlacement to ``tuple[Placement, ...]`` in mesh dim order.
 
-    Unspecified mesh dims default to ``Replicate()``.
+    Unspecified mesh dims default to ``Unconstrained()``. Each caller decides
+    how to resolve ``Unconstrained`` for its context (state distribution
+    needs a concrete placement, input redistribution preserves existing).
     """
     return tuple(
-        named.get(MeshDimName(dim_name), Replicate()) for dim_name in mesh_dim_names
+        named.get(MeshDimName(dim_name), Unconstrained()) for dim_name in mesh_dim_names
     )

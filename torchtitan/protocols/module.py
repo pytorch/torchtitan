@@ -186,12 +186,20 @@ class Module(nn.Module, Configurable):
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named dims"
         mesh_dim_names = mesh.mesh_dim_names
 
-        # Distribute parameters and buffers
+        # Distribute parameters and buffers per state_shardings.
+        # Unconstrained dims default to Replicate for state distribution
+        # (distribute_tensor requires concrete placements).
+        from torch.distributed.tensor import Replicate as _Replicate
+
+        def _resolve_state(named_pl):
+            pl = resolve_placements(named_pl, mesh_dim_names)
+            return tuple(
+                _Replicate() if isinstance(p, Unconstrained) else p for p in pl
+            )
+
         for name, param in self.named_parameters(recurse=False):
             if name in spec.state_shardings:
-                placements = resolve_placements(
-                    spec.state_shardings[name], mesh_dim_names
-                )
+                placements = _resolve_state(spec.state_shardings[name])
                 self.register_parameter(
                     name,
                     nn.Parameter(distribute_tensor(param, mesh, list(placements))),
@@ -199,9 +207,7 @@ class Module(nn.Module, Configurable):
 
         for name, buffer in self.named_buffers(recurse=False):
             if name in spec.state_shardings and buffer is not None:
-                placements = resolve_placements(
-                    spec.state_shardings[name], mesh_dim_names
-                )
+                placements = _resolve_state(spec.state_shardings[name])
                 persistent = name not in self._non_persistent_buffers_set
                 self.register_buffer(
                     name,
@@ -269,14 +275,23 @@ class Module(nn.Module, Configurable):
 
             # Step 1: Annotate plain tensor as DTensor using input_layouts
             if not isinstance(value, DTensor) and name in input_layouts:
+                from torch.distributed.tensor import Replicate as _Replicate
+
                 layout = resolve_placements(input_layouts[name], mesh_dim_names)
+                # Plain tensor needs concrete placements; Unconstrained -> Replicate
+                layout = tuple(
+                    _Replicate() if isinstance(p, Unconstrained) else p for p in layout
+                )
                 value = DTensor.from_local(value, mesh, layout, run_check=False)
 
-            # Step 2: Redistribute to desired placement if needed
+            # Step 2: Redistribute to desired placement if needed.
+            # Unconstrained dims preserve the tensor's existing placement.
             if name in in_shardings and isinstance(value, DTensor):
                 desired = resolve_placements(in_shardings[name], mesh_dim_names)
-                if any(isinstance(p, Unconstrained) for p in desired):
-                    continue
+                desired = tuple(
+                    actual if isinstance(d, Unconstrained) else d
+                    for d, actual in zip(desired, value.placements)
+                )
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 
@@ -305,10 +320,14 @@ class Module(nn.Module, Configurable):
             return outputs
         assert mesh.mesh_dim_names is not None
         desired = resolve_placements(spec.out_shardings, mesh.mesh_dim_names)
-        if any(isinstance(p, Unconstrained) for p in desired):
-            return outputs
-        if isinstance(outputs, DTensor) and outputs.placements != desired:
-            outputs = outputs.redistribute(placements=desired, async_op=True)
+        if isinstance(outputs, DTensor):
+            # Unconstrained dims preserve the tensor's existing placement
+            desired = tuple(
+                actual if isinstance(d, Unconstrained) else d
+                for d, actual in zip(desired, outputs.placements)
+            )
+            if outputs.placements != desired:
+                outputs = outputs.redistribute(placements=desired, async_op=True)
         return outputs
 
     @classmethod
