@@ -545,7 +545,7 @@ class Qwen3VLModel(Qwen3Model):
 
         return inputs_embeds, vision_pos_masks, deepstack_vision_embeds
 
-    def forward(  # pyrefly: ignore [bad-override]
+    def forward(  # pyrefly: ignore [bad-override, bad-param-name-override]
         self,
         tokens: torch.Tensor,
         *,

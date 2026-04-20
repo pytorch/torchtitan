@@ -18,8 +18,8 @@ from torch.distributed import ProcessGroup
 from torch.utils._python_dispatch import _disable_current_modes
 
 try:
-    from deep_ep import Buffer
-    from deep_ep.utils import (
+    from deep_ep import Buffer  # pyrefly: ignore[missing-import]
+    from deep_ep.utils import (  # pyrefly: ignore[missing-import]
         EventHandle,
         EventOverlap,
     )
