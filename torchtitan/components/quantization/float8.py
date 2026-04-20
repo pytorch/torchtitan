@@ -258,7 +258,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
 
         Walks the model config tree and sets ``_convert_fn`` on modules
         matching the target FQNs so that ``build()`` replaces instances of
-        nn.Parameter with ScaledGroupedMMTensor, to perform dynamic float8
+        nn.Parameter with MXFP8TrainingWeightWrapperTensor, to perform dynamic float8
         rowwise quantization + scaled grouped GEMMs.
         """
         from torchao.quantization.quant_api import quantize_
@@ -275,21 +275,11 @@ class Float8GroupedMMConverter(QuantizationConverter):
             quantize_(mod, config=config)
             return mod
 
-        from torchtitan.models.common.token_dispatcher import (
-            AllToAllTokenDispatcher,
-            TorchAOTokenDispatcher,
-        )
         from torchtitan.protocols.module import Module
 
         for fqn, config in model_config.walk(Module.Config):
             if any(target_fqn in fqn for target_fqn in self.fqns):
                 config._convert_fn = convert_fn
-
-        # Swap AllToAllTokenDispatcher -> TorchAOTokenDispatcher for
-        # matching FQNs so grouped GEMMs use padded token dispatch.
-        for fqn, config in model_config.walk(AllToAllTokenDispatcher.Config):
-            if any(target_fqn in fqn for target_fqn in self.fqns):
-                config.__class__ = TorchAOTokenDispatcher.Config
 
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
