@@ -44,14 +44,14 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
       boundaries for the min-cut partitioner.
 
     """
-    from torchtitan.distributed.expert_parallel import ExpertParallel
     from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
-    ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
-        ExpertParallel._token_dispatch
+    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        LocalTokenDispatcher.dispatch
     )
-    ExpertParallel._token_combine = annotate_fn({"EP": "combine"})(
-        ExpertParallel._token_combine
+    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        LocalTokenDispatcher.combine
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
@@ -116,17 +116,12 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            pad_multiple=pad_multiple,
         )
 
     if ac_config.mode != "none":

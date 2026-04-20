@@ -20,8 +20,8 @@ from torchtitan.models.common import (
     RoPE,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import (
+    get_attention_config,
     make_experts_config,
     make_ffn_config,
     make_gqa_config,
@@ -85,14 +85,17 @@ def _build_llama4_layers(
     every_n_layers_nope: int = 4,
     interleave_moe_layer_step: int = 1,
     fixed_attn_block_size: int = 8192,
-    mask_type: str = "block_causal",
+    attn_backend: str,
     shared_experts_hidden_dim: int | None = None,
+    moe_comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for a Llama4 model.
 
     Handles iRoPE (NoPE on every N layers) and MoE interleaving. For each
     layer, depth-scaled inits are computed using the layer index.
     """
+    inner_attention, mask_type = get_attention_config(attn_backend)
     if every_n_layers_nope <= 1:
         raise ValueError("every_n_layers_nope must be greater than 1")
 
@@ -114,7 +117,7 @@ def _build_llama4_layers(
             wqkv_param_init=_LINEAR_INIT,
             wo_param_init=_depth_init(layer_id),
             use_rope=use_rope,
-            inner_attention=FlexAttention.Config(),
+            inner_attention=inner_attention,
             mask_type=mask_type,
             rope_backend="complex",
         )
@@ -125,11 +128,17 @@ def _build_llama4_layers(
                 num_experts=num_experts,
                 gate_param_init=_depth_init(layer_id),
             )
+            # Defaults to LocalTokenDispatcher (EP=1).
+            # Trainer.Config.__post_init__ calls apply_ep() to
+            # replace with the correct dispatcher based on EP settings.
             experts = make_experts_config(
                 dim=dim,
                 hidden_dim=moe_hidden_dim,
                 num_experts=num_experts,
+                top_k=router.top_k,
                 param_init=_depth_experts_init(layer_id),
+                comm_backend=moe_comm_backend,
+                non_blocking_capacity_factor=non_blocking_capacity_factor,
             )
             shared_experts = make_ffn_config(
                 dim=dim,
@@ -172,7 +181,10 @@ def _build_llama4_layers(
     return layers
 
 
-def _debugmodel() -> Llama4Model.Config:
+def _debugmodel(
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> Llama4Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 6
@@ -200,6 +212,8 @@ def _debugmodel() -> Llama4Model.Config:
             every_n_layers_nope=4,
             interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
+            attn_backend=attn_backend,
+            moe_comm_backend="standard",
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -213,7 +227,10 @@ def _debugmodel() -> Llama4Model.Config:
     )
 
 
-def _17bx16e() -> Llama4Model.Config:
+def _17bx16e(
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
     n_kv_heads = 8
@@ -252,6 +269,8 @@ def _17bx16e() -> Llama4Model.Config:
             num_experts=16,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
+            attn_backend=attn_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -265,7 +284,10 @@ def _17bx16e() -> Llama4Model.Config:
     )
 
 
-def _17bx128e() -> Llama4Model.Config:
+def _17bx128e(
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
     n_kv_heads = 8
@@ -304,6 +326,8 @@ def _17bx128e() -> Llama4Model.Config:
             num_experts=128,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
+            attn_backend=attn_backend,
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -322,8 +346,15 @@ llama4_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    config = llama4_configs[flavor]()
+def model_registry(
+    flavor: str,
+    attn_backend: str = "flex",
+    moe_comm_backend: str | None = None,
+) -> ModelSpec:
+    config = llama4_configs[flavor](
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
+    )
     return ModelSpec(
         name="llama4",
         flavor=flavor,

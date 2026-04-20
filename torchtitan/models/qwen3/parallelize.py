@@ -7,6 +7,7 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -63,17 +64,13 @@ def parallelize_qwen3(
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            pad_multiple=pad_multiple,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if ac_config.mode != "none":

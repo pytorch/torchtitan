@@ -98,13 +98,13 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 )
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.q_proj.weight"
-                ] = wq  # pyrefly: ignore [unsupported-operation]
+                ] = wq
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.k_proj.weight"
-                ] = wk  # pyrefly: ignore [unsupported-operation]
+                ] = wk
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.v_proj.weight"
-                ] = wv  # pyrefly: ignore [unsupported-operation]
+                ] = wv
             elif key in to_hf_map:
                 # do direct mapping
                 if key in "layers.{}.moe.experts.w2":
@@ -172,7 +172,6 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 "language_model.model.layers.{}.self_attn.k_proj.weight",
                 "language_model.model.layers.{}.self_attn.v_proj.weight",
             ):
-                # pyrefly: ignore [unsupported-operation]
                 if layer_num not in pending_qkv:
                     # pyrefly: ignore [unsupported-operation]
                     pending_qkv[layer_num] = {}
