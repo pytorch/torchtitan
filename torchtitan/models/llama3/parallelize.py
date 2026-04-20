@@ -67,7 +67,6 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    # TP: config-driven, auto-recursive via Module.parallelize()
     # TODO: We pass tp_mesh here because TP is the only parallelism
     # using DTensor currently. Once we move to full DTensor (e.g.,
     # FSDP via DTensor, CP via DTensor), pass the full SPMD mesh instead.

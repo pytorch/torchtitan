@@ -129,8 +129,8 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).
     """
-    act_sp: Placement = Shard(1) if enable_sp else Replicate()
-    output_loss: Placement = Shard(-1) if loss_parallel else Replicate()
+    activation_sharding: Placement = Shard(1) if enable_sp else Replicate()
+    loss_sharding: Placement = Shard(-1) if loss_parallel else Replicate()
 
     # freqs_cis buffer on the decoder root: Replicate on all dims.
     config.sharding_spec = ShardingSpec(
@@ -140,7 +140,7 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
         state_shardings={"weight": {TP: Shard(0)}},
         input_layouts={"input": {TP: Replicate()}},
         in_shardings={"input": {TP: Replicate()}},
-        out_shardings={TP: act_sp},
+        out_shardings={TP: activation_sharding},
     )
     config.norm.sharding_spec = (
         sequence_parallel_spec() if enable_sp else replicate_norm_spec()
@@ -148,7 +148,7 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
 
     config.output.sharding_spec = ShardingSpec(
         state_shardings={"weight": {TP: Shard(0)}},
-        input_layouts={"input": {TP: act_sp}},
+        input_layouts={"input": {TP: activation_sharding}},
         in_shardings={"input": {TP: Replicate()}},
-        out_shardings={TP: output_loss},
+        out_shardings={TP: loss_sharding},
     )
