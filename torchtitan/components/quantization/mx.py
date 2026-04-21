@@ -100,19 +100,17 @@ class MXFP8Converter(QuantizationConverter):
         )
         from torchtitan.protocols.module import Module
 
-        pad_token_groups = self.pad_token_groups_for_grouped_mm
-        recipe_name = self.config.recipe_name
-
         def convert_fn(mod: nn.Module) -> nn.Module:
-            recipe = MXFP8TrainingRecipe(recipe_name)
+            recipe = MXFP8TrainingRecipe(self.config.recipe_name)
             mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            mxfp8_op_config.pad_token_groups_for_grouped_mm = pad_token_groups
+            mxfp8_op_config.pad_token_groups_for_grouped_mm = (
+                self.pad_token_groups_for_grouped_mm
+            )
             quantize_(mod, config=mxfp8_op_config)
             return mod
 
-        fqns = self.config.fqns
         for fqn, config in model_config.walk(Module.Config):
-            if any(target_fqn in fqn for target_fqn in fqns):
+            if any(target_fqn in fqn for target_fqn in self.config.fqns):
                 config._convert_fn = convert_fn
                 if hasattr(config, "token_dispatcher") and isinstance(
                     config.token_dispatcher, AllToAllTokenDispatcher.Config
