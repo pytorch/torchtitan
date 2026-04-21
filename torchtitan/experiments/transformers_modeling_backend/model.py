@@ -209,9 +209,9 @@ class HFTransformerModel(BaseModel):
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
             # NOTE:(3outeille):This will force create_causal_mask to return None
-            AttentionInterface._global_mapping[
-                attn_implementation
-            ] = sdpa_attention_forward
+            AttentionInterface._global_mapping[attn_implementation] = (
+                sdpa_attention_forward
+            )
 
         def _create_getter_setter_dynamically(self, has_moe: bool):
             """

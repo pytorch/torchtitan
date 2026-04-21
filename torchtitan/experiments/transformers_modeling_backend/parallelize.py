@@ -588,6 +588,7 @@ def apply_non_moe_tp(
                     if isinstance(x, tuple):
                         return tuple(_to_local(v) for v in x)
                     return x
+
                 return tuple(_to_local(a) for a in args)
 
             indexer.register_forward_pre_hook(_indexer_to_local_pre_hook)
