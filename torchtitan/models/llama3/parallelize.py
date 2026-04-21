@@ -28,6 +28,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.full_dtensor import (
+    get_dense_spmd_mesh,
+    resolve_fsdp_mesh,
+)
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -62,11 +66,6 @@ def parallelize_llama(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    from torchtitan.distributed.full_dtensor import (
-        get_dense_spmd_mesh,
-        resolve_fsdp_mesh,
-    )
 
     if training.full_dtensor:
         # Full DTensor: use multi-D SPMD mesh. CP is handled declaratively

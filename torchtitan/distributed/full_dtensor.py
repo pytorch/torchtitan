@@ -144,13 +144,22 @@ def _remove_sdpa_math_backend(model: nn.Module) -> None:
     from torch.nn.attention import SDPBackend
 
     from torchtitan.models.common.attention import ScaledDotProductAttention
+    from torchtitan.tools.logging import logger
 
+    dropped = False
     for module in model.modules():
         if isinstance(module, ScaledDotProductAttention):
             if SDPBackend.MATH in module.sdpa_backends:
                 module.sdpa_backends = [
                     b for b in module.sdpa_backends if b != SDPBackend.MATH
                 ]
+                dropped = True
+    if dropped:
+        logger.warning(
+            "full_dtensor: dropped SDPBackend.MATH from SDPA modules. "
+            "MATH decomposes to primitive ops that mix plain tensors with "
+            "DTensors, which breaks dispatch. Using flash/efficient backends."
+        )
 
 
 def parallelize_inputs(

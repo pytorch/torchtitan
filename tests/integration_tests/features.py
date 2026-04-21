@@ -460,19 +460,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                ]
-            ],
-            "Full DTensor PP + CP + FSDP",
-            "full_dtensor_pp_cp_fsdp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]

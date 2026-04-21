@@ -40,7 +40,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
@@ -251,8 +251,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.model_config = model_config
 
         if config.training.full_dtensor:
-            from torchtitan.distributed import full_dtensor
-
             full_dtensor.validate_config(parallel_dims, model_spec, model_config)
 
         # Fill sharding specs based on parallelism settings (before build)
@@ -425,13 +423,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # TODO: Change this back to init_weights once
                 # autoparallel contains the wrap_init_states
                 cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-            # init_weights may overwrite DTensor buffers with plain tensors
-            # (e.g. freqs_cis). Re-parallelize to convert them back.
-            if config.training.full_dtensor:
-                from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
-
-                spmd_mesh = get_dense_spmd_mesh(parallel_dims)
-                cast(BaseModel, model).parallelize(spmd_mesh)
             model.train()
 
             self.model_parts = [model]
@@ -670,8 +661,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Convert inputs/labels to DTensors on the SPMD mesh
         if self.config.training.full_dtensor:
-            from torchtitan.distributed import full_dtensor
-
             inputs, labels = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )

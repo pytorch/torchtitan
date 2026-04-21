@@ -31,6 +31,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ParallelizeFunction
@@ -165,8 +166,6 @@ def pipeline_llm(
     # that carries those DTensors so the reconstruction can find it.
     pp_dtensor_mesh: DeviceMesh | None = None
     if training.full_dtensor:
-        from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
-
         pp_dtensor_mesh = get_dense_spmd_mesh(parallel_dims)
     elif parallel_dims.tp_enabled:
         pp_dtensor_mesh = parallel_dims.get_mesh("tp")

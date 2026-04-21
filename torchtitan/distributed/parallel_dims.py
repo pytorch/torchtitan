@@ -180,9 +180,12 @@ class ParallelDims:
         )
 
         # Full DTensor dense mesh: separate dp_shard and cp dims.
-        # The non-full-dtensor path uses dense_mesh (fsdp = dp_shard * cp).
-        # The full DTensor path uses this mesh with explicit separation so
-        # FSDP can shard on both dims via DataParallelMeshDims.
+        # The non-full-dtensor path pre-flattens dp_shard*cp into a single
+        # ``fsdp`` dim so FSDP2's 1-D API works directly. The full DTensor
+        # path keeps them separate so ``DataParallelMeshDims(shard=("dp_shard",
+        # "cp"))`` can declare both as data-parallel while CP activations
+        # stay sharded on the distinct ``cp`` dim. The two meshes can't be
+        # unified because the ``fsdp`` flatten loses the CP boundary.
         full_dtensor_dense_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
