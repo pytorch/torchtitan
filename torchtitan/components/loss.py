@@ -272,7 +272,7 @@ class ChunkedCELoss(BaseLoss):
         # autograd graph retains references, preventing memory from being freed.
         # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
         # directly with Shard(1) on CP. Need local_map to operate on local tensors
-        h_chunks: tuple[Tensor, ...] = torch.chunk(h_detached, num_chunks, dim=1)
+        h_chunks = torch.chunk(h_detached, num_chunks, dim=1)
         h_chunks = [c.contiguous().detach().requires_grad_(True) for c in h_chunks]
         label_chunks = torch.chunk(labels, num_chunks, dim=1)
 
