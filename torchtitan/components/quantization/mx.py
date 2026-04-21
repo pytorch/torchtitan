@@ -92,6 +92,13 @@ class MXFP8Converter(QuantizationConverter):
             MXFP8TrainingRecipe,
         )
         from torchao.quantization.quant_api import quantize_
+        from torchtitan.components.quantization import PAD_MULTIPLE_MAP
+        from torchtitan.models.common.token_dispatcher import (
+            AllToAllTokenDispatcher,
+            DeepEPTokenDispatcher,
+            TorchAOTokenDispatcher,
+        )
+        from torchtitan.protocols.module import Module
 
         def convert_fn(mod: nn.Module) -> nn.Module:
             recipe = MXFP8TrainingRecipe(self.config.recipe_name)
@@ -102,12 +109,28 @@ class MXFP8Converter(QuantizationConverter):
             quantize_(mod, config=mxfp8_op_config)
             return mod
 
-        from torchtitan.protocols.module import Module
-
         for fqn, config in model_config.walk(Module.Config):
             if any(target_fqn in fqn for target_fqn in self.config.fqns):
                 config._convert_fn = convert_fn
-
+                if hasattr(config, "token_dispatcher") and isinstance(
+                    config.token_dispatcher, AllToAllTokenDispatcher.Config
+                ):
+                    td = config.token_dispatcher
+                    config.token_dispatcher = TorchAOTokenDispatcher.Config(
+                        num_experts=td.num_experts,
+                        top_k=td.top_k,
+                        score_before_experts=td.score_before_experts,
+                        pad_multiple=PAD_MULTIPLE_MAP["mxfp8"],
+                    )
+                elif hasattr(config, "token_dispatcher") and isinstance(
+                    config.token_dispatcher, DeepEPTokenDispatcher.Config
+                ):
+                    if config.token_dispatcher.comm_backend == "deepep":
+                        raise ValueError(
+                            "DeepEP does not support pad_multiple. "
+                            "Use hybridep or standard comm backend instead."
+                        )
+                    config.token_dispatcher.pad_multiple = PAD_MULTIPLE_MAP["mxfp8"]
 
         logger.info(
             f"Converted layers matching FQNS {self.config.fqns} "
