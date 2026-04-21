@@ -61,6 +61,8 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
 
 def compile_time_passes(
     traced_result: "TracedResult",
+    *,
+    cudagraph_compatible: bool = False,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -76,7 +78,7 @@ def compile_time_passes(
     # )
     from torchtitan.models.common.attention import FlexAttention
 
-    return [
+    passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
@@ -95,17 +97,23 @@ def compile_time_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
-        # TODO: Switch to upstream PyTorch implementation when
-        # https://github.com/pytorch/pytorch/pull/178246 lands.
-        # custom_codegen_pass saves the FX graph to disk for:
-        # 1. Debugging: inspect the generated graph code directly
-        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
-        #    gives fine-grained operator-level attribution in profiler traces
-        # 3. User-editable codegen: users can directly modify the generated
-        #    program on disk for fine-grain scheduling optimizations, with
-        #    hot-reload picking up changes at runtime
-        custom_codegen_pass,
     ]
+    if cudagraph_compatible:
+        # Must run before custom_codegen_pass (last in pre_passes)
+        # which replaces the GraphModule's forward().
+        # Also must run before cudagraph_pass.
+        passes.append(insert_kernel_annotations_pass)
+    # TODO: Switch to upstream PyTorch implementation when
+    # https://github.com/pytorch/pytorch/pull/178246 lands.
+    # custom_codegen_pass saves the FX graph to disk for:
+    # 1. Debugging: inspect the generated graph code directly
+    # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+    #    gives fine-grained operator-level attribution in profiler traces
+    # 3. User-editable codegen: users can directly modify the generated
+    #    program on disk for fine-grain scheduling optimizations, with
+    #    hot-reload picking up changes at runtime
+    passes.append(custom_codegen_pass)
+    return passes
 
 
 def construct_default_graph_passes(
@@ -124,11 +132,16 @@ def construct_default_graph_passes(
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
     passes: list[Callable] = []
-    if not precompiled:
-        passes.extend(compile_time_passes(traced_result))
+    cudagraph_compatible = is_cudagraph_compatible(traced_result.gm)
 
-    # cudagraph should be the last pass.
-    if is_cudagraph_compatible(traced_result.gm):
+    if not precompiled:
+        passes.extend(
+            compile_time_passes(
+                traced_result, cudagraph_compatible=cudagraph_compatible
+            )
+        )
+
+    if cudagraph_compatible:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
@@ -376,6 +389,96 @@ def regional_inductor_pass(
     # regional_inductor may switch to boxed calling convention; reset to
     # default so the graph can be called with positional args as usual.
     gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    gm.recompile()
+    return gm
+
+
+def insert_kernel_annotations_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Insert mark_kernels() calls at module boundaries in the FX graph.
+
+    Reads ``node.meta["custom"]["module_fqn"]`` (set via
+    ``annotate_module_fqns``) and inserts enter/exit calls so that
+    CUDA graph capture records the annotations.
+
+    Requires ``cuda-python`` package and CUDA toolkit/driver >= 13.1
+    (or cuda-compat >= 13.1).  Returns the graph unchanged when unavailable.
+
+    Also enables annotation capture on :class:`CUDAGraphWrapper` so that
+    ``enable_annotations=True`` is passed to ``torch.cuda.graph()``.
+
+    Alternative approaches:
+
+    1. **fx.Interpreter**: During cudagraph capture, run the graph via an
+       ``fx.Interpreter`` subclass that reads ``module_fqn`` metadata and
+       calls ``mark_kernels`` enter/exit around each node — avoids mutating
+       the graph.
+    2. **Custom CodeGen**: Use a custom ``torch.fx.graph.CodeGen`` to emit
+       enter/exit lines (or ``with`` blocks) directly in the generated
+       Python code.
+
+    The current graph-pass approach is the least invasive.
+    """
+    from torch.cuda._graph_annotations import _is_tools_id_unavailable
+
+    from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+    from torchtitan.experiments.graph_trainer.cudagraph import (
+        enable_cudagraph_annotations,
+    )
+
+    def _enter(annotation: dict) -> object:
+        from torch.cuda._graph_annotations import mark_kernels
+
+        ctx = mark_kernels(annotation)
+        ctx.__enter__()
+        return ctx
+
+    def _exit(ctx: object) -> None:
+        ctx.__exit__(None, None, None)  # type: ignore[union-attr]
+
+    if _is_tools_id_unavailable():
+        return gm
+
+    enable_cudagraph_annotations()
+
+    graph = gm.graph
+    current_fqn: str | None = None
+    current_ctx_node = None
+
+    for node in list(graph.nodes):
+        fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+
+        if fqn != current_fqn:
+            # Close previous scope
+            if current_ctx_node is not None:
+                with graph.inserting_before(node):
+                    exit_node = graph.call_function(_exit, (current_ctx_node,))
+                    exit_node.meta["custom"] = {}
+                current_ctx_node = None
+
+            # Open new scope
+            if fqn is not None:
+                with graph.inserting_before(node):
+                    enter_node = graph.call_function(
+                        _enter,
+                        ({_MODULE_FQN: fqn},),
+                    )
+                    enter_node.meta["custom"] = {}
+                current_ctx_node = enter_node
+
+            current_fqn = fqn
+
+    # Close any trailing scope (before output/return)
+    if current_ctx_node is not None:
+        output_nodes = [n for n in graph.nodes if n.op == "output"]
+        if output_nodes:
+            with graph.inserting_before(output_nodes[0]):
+                exit_node = graph.call_function(_exit, (current_ctx_node,))
+                exit_node.meta["custom"] = {}
+
+    graph.lint()
     gm.recompile()
     return gm
 
