@@ -85,7 +85,24 @@ class Module(nn.Module, Configurable):
                 queue.extend(child.children())
 
         self._init_self_parameters()
+
+        # Buffers declared in state_shardings must remain DTensors after
+        # _init_self_buffers reassignment; snapshot placements and restore.
+        dtensor_meta = {
+            name: (buf.device_mesh, buf.placements)
+            for name, buf in self._buffers.items()
+            if isinstance(buf, DTensor)
+        }
         self._init_self_buffers(buffer_device=buffer_device)
+        for name, (mesh, placements) in dtensor_meta.items():
+            buf = self._buffers.get(name)
+            if buf is not None and not isinstance(buf, DTensor):
+                persistent = name not in self._non_persistent_buffers_set
+                self.register_buffer(
+                    name,
+                    distribute_tensor(buf, mesh, list(placements)),
+                    persistent=persistent,
+                )
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own parameters via ``_init_param``.
