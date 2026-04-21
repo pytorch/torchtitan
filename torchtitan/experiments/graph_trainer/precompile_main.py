@@ -35,11 +35,11 @@ Usage (aot_fx_trace mode):
 import contextlib
 import dataclasses
 import functools
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
 
-from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -64,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -343,14 +344,38 @@ def _precompile_aot_fx_trace(
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
     extra_inputs: dict[str, torch.Tensor] = {}
+    extra_kwargs: dict[str, Any] = {}
 
-    extra_kwargs = build_forward_extra_kwargs(
-        model_config,
-        model,
-        dummy_inputs,
-        tokenizer=tokenizer,
-        parallel_dims=parallel_dims,
-    )
+    if isinstance(model_config, Decoder.Config) and model_config.layers:
+        attn_config = model_config.layers[0].attention
+        mask_type = getattr(attn_config, "mask_type", "causal")
+
+        if mask_type == "block_causal" or parallel_dims.cp_enabled:
+            extra_kwargs["positions"] = torch.arange(
+                0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
+            ).expand(dummy_inputs.shape)
+
+        inner_attention = getattr(attn_config, "inner_attention", None)
+        if inner_attention is not None:
+            from torchtitan.models.common.attention import (
+                FlexAttention,
+                VarlenAttention,
+            )
+
+            if isinstance(
+                inner_attention,
+                (FlexAttention.Config, VarlenAttention.Config),
+            ):
+                assert (
+                    tokenizer is not None
+                ), "tokenizer is required for flex/varlen attention"
+                extra_kwargs["attention_masks"] = cast(
+                    Decoder, model
+                ).get_attention_masks(
+                    input_batch=dummy_inputs,
+                    tokenizer=tokenizer,
+                    extra_inputs=extra_inputs or {},
+                )
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
@@ -399,7 +424,7 @@ def _precompile_aot_fx_trace(
         compile_time_passes,
     )
 
-    passes = compile_time_passes(traced_result, config)
+    passes = compile_time_passes(traced_result)
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )

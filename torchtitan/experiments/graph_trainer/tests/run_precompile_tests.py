@@ -124,7 +124,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
                 " --module graph_trainer.deepseek_v3"
-                " --config graph_trainer_deepseek_v3_debugmodel"
+                " --config graph_trainer_deepseek_v3_debugmodel_ep"
                 " --compile.mode aot_fx_trace"
                 f" --compile.precompile_artifact_dir {dsv3_fx_trace_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
@@ -134,7 +134,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             ),
             override_args=[
                 "--module graph_trainer.deepseek_v3",
-                "--config graph_trainer_deepseek_v3_debugmodel",
+                "--config graph_trainer_deepseek_v3_debugmodel_ep",
                 "--compile.mode aot_fx_trace",
                 f"--compile.precompile_artifact_dir {dsv3_fx_trace_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 4",

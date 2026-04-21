@@ -17,7 +17,6 @@ import copy
 import tempfile
 import unittest
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -189,10 +188,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Step 2: Apply compile-time passes (cleanup + regional_inductor)
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
-            config = SimpleNamespace(
-                model_spec=SimpleNamespace(model=self.model_config),
-            )
-            passes = compile_time_passes(traced_result, config)
+            passes = compile_time_passes(traced_result)
             traced_result.gm = apply_graph_passes(
                 traced_result.gm,
                 traced_result.example_inputs,
@@ -208,11 +204,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         # Step 4: Apply load-time passes (cudagraph)
         if enable_passes:
-            load_config = SimpleNamespace(
-                model_spec=SimpleNamespace(model=self.model_config),
-                compile=SimpleNamespace(precompile_artifact_dir="precompiled"),
-            )
-            passes = construct_default_graph_passes(loaded_result, load_config)
+            passes = construct_default_graph_passes(loaded_result, precompiled=True)
             loaded_result.gm = apply_graph_passes(
                 loaded_result.gm,
                 loaded_result.example_inputs,

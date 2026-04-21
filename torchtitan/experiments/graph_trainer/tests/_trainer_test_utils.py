@@ -50,7 +50,6 @@ def build_minimal_trainer(
                 precompile_artifact_dir="",
                 debug_graph_passes=False,
             ),
-            model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode=activation_checkpoint_mode
             ),

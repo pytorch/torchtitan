@@ -273,6 +273,9 @@ class TracedResult:
         num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
         output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
         output_spec: Original output pytree spec used during reconstruction.
+        model: The original nn.Module, cached for downstream passes that need
+            module structure (e.g. transformer block bucketing). Only set when
+            traced via :func:`trace_train_step`.
     """
 
     gm: torch.fx.GraphModule
@@ -284,6 +287,10 @@ class TracedResult:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int] = field(default_factory=list)
+    # TODO: Remove model from TracedResult. TracedResult is becoming a
+    # contract between the trainer and pre-compile, so carrying the original
+    # model is not feasible.
+    model: nn.Module | None = None
 
     @property
     def num_static_inputs(self) -> int:
@@ -494,7 +501,9 @@ def trace_train_step(fn: Callable) -> Callable[..., TracedResult]:
             with stateless._reparametrize_module(module, state):
                 return fn(module, *user_args)
 
-        return minimal_fx_tracer(_stateless_fn)(extract_module_state(module), *args)
+        result = minimal_fx_tracer(_stateless_fn)(extract_module_state(module), *args)
+        result.model = module
+        return result
 
     return _trace_with_module
 

@@ -20,7 +20,6 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -42,6 +41,7 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
@@ -584,15 +584,45 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
 
         positions = extra_inputs.pop("positions", None)
-        extra_kwargs = build_forward_extra_kwargs(
-            self.model_config,
-            self.model_parts[0],
-            inputs,
-            positions=positions,
-            tokenizer=self.tokenizer,
-            parallel_dims=self.parallel_dims,
-            extra_inputs=extra_inputs,
-        )
+        extra_kwargs: dict[str, Any] = {}
+
+        if isinstance(self.model_config, Decoder.Config) and self.model_config.layers:
+            attn_config = self.model_config.layers[0].attention
+            mask_type = getattr(attn_config, "mask_type", "causal")
+
+            if mask_type == "block_causal":
+                if positions is not None:
+                    extra_kwargs["positions"] = positions
+                else:
+                    extra_kwargs["positions"] = torch.arange(
+                        0, inputs.shape[1], dtype=torch.int32, device=inputs.device
+                    ).expand(inputs.shape)
+            elif self.parallel_dims.cp_enabled:
+                extra_kwargs["positions"] = torch.arange(
+                    0, inputs.shape[1], dtype=torch.int32, device=inputs.device
+                ).expand(inputs.shape)
+
+            inner_attention = getattr(attn_config, "inner_attention", None)
+            if inner_attention is not None:
+                from torchtitan.models.common.attention import (
+                    FlexAttention,
+                    VarlenAttention,
+                )
+
+                if isinstance(
+                    inner_attention,
+                    (FlexAttention.Config, VarlenAttention.Config),
+                ):
+                    assert (
+                        self.tokenizer is not None
+                    ), "tokenizer is required for flex/varlen attention"
+                    extra_kwargs["attention_masks"] = cast(
+                        Decoder, self.model_parts[0]
+                    ).get_attention_masks(
+                        input_batch=inputs,
+                        tokenizer=self.tokenizer,
+                        extra_inputs=extra_inputs or {},
+                    )
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
