@@ -13,7 +13,7 @@
 # Note: Performance
 # The quantization modules are intended to be ran under `torch.compile`` for competitive performance
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from importlib.util import find_spec
 

@@ -27,7 +27,6 @@ def parallelize_llama(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: list,
     parallelism: ParallelismConfig,
     compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,

@@ -229,8 +229,11 @@ class PolicyTrainer(Actor, Configurable):
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
+            training=config.training,
             parallelism=config.parallelism,
             compile_config=config.compile,
+            ac_config=config.ac_config,
+            dump_folder=config.dump_folder,
         )
 
         model.to_empty(device=device_type)

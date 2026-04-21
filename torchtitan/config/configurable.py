@@ -85,11 +85,9 @@ class Configurable:
                         item_fqn = f"{fqn}.{i}"
                         if isinstance(item, config_cls):
                             yield item_fqn, item
-                        elif dataclasses.is_dataclass(item) and not isinstance(
-                            item, type
-                        ):
+                        elif hasattr(item, "walk"):
                             yield from item.walk(config_cls, _prefix=item_fqn)
-                elif dataclasses.is_dataclass(val) and not isinstance(val, type):
+                elif hasattr(val, "walk"):
                     yield from val.walk(config_cls, _prefix=fqn)
 
         def build(self, **kwargs):

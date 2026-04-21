@@ -35,7 +35,6 @@ def parallelize_deepseekv3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: list,
     parallelism: ParallelismConfig,
     compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,
