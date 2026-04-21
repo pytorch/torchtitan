@@ -896,6 +896,12 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 0)
 
 
+# Import TestCustomCodegenPass so it's discoverable when running this file
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
+    TestCustomCodegenPass,
+)
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 

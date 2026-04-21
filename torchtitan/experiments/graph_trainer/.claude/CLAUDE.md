@@ -32,15 +32,24 @@ subclassing.
 
 ### Local development (debug models, 8 GPUs)
 
+**Run all commands from the repo root.** Use the root `./run_train.sh` with
+`MODULE=graph_trainer.llama3` (or `.deepseek_v3`). The 8B/16B configs use
+`hf_assets_path` relative to the repo root.
+
+For CooR precompile workflows that need `--virtual-local-rank`, use
+`torchtitan/experiments/graph_trainer/run_train_precompile.sh` instead.
+
 ```bash
 # Llama3 with FSDP + TP
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
+    ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2
 
 # DeepSeek-v3 with FSDP + TP + EP (requires H100)
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
+    ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
@@ -61,6 +70,20 @@ pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py 
 # Integration tests (8 GPUs)
 python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_dir> \
     --test_suite graph_trainer_default --ngpu 8
+```
+
+### Debugging Graph Passes
+
+Add `--compile.debug_graph_passes` to enable per-pass instrumentation:
+timing, before/after tlparse graph dumps, and op-count diff summaries.
+Use with `TORCH_TRACE` and `tlparse` to inspect graphs in the browser.
+
+```bash
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --compile.debug_graph_passes \
+    --dataloader.dataset c4_test \
+    --training.steps 10
 ```
 
 ### Dumping Graph Modules for Debugging
@@ -97,6 +120,82 @@ def my_pass(gm, example_inputs):
 
 ```bash
 diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
+```
+
+### Benchmark
+
+Use `./run_train.sh` with a small number of steps. Disable tensorboard,
+profiling, and flight recorder for cleaner timing. Always use
+`--dataloader.dataset c4_test` for local runs to avoid downloading the
+full C4 dataset from HuggingFace:
+
+```bash
+# Llama3 8B aot_fx_trace (8×H100, FSDP+TP, 20 steps)
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --dataloader.dataset c4_test \
+    --metrics.no-enable_tensorboard \
+    --profiler.no-enable_profiling \
+    --comm.trace_buf_size=0 \
+    --training.steps 20
+
+# DeepSeek-v3 16B aot_fx_trace (8×H100, FSDP+TP+EP, 20 steps)
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --parallelism.expert_parallel_degree=2 \
+    --dataloader.dataset c4_test \
+    --metrics.no-enable_tensorboard \
+    --profiler.no-enable_profiling \
+    --comm.trace_buf_size=0 \
+    --training.steps 20
+```
+
+Look at the **last logged step** for steady-state metrics (the first few
+steps include compilation overhead):
+
+```
+step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,376  tflops: 253.41  mfu: 25.62%
+```
+
+### Profiling
+
+Add `--profiler.enable_profiling` to any `./run_train.sh` command.
+Set `--profiler.profile_freq` to control which step is captured
+(default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
+
+```bash
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --dataloader.dataset c4_test \
+    --profiler.enable_profiling \
+    --profiler.profile_freq 10
+```
+
+### Memory Snapshot
+
+Add `--profiler.enable_memory_snapshot` to capture a memory snapshot.
+The snapshot fires at every `profile_freq`-th step and is saved to
+`{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
+Each rank produces its own file:
+`iteration_{step}/rank{N}_memory_snapshot.pickle`.
+
+Open the `.pickle` files with the
+[PyTorch Memory Viz](https://pytorch.org/memory_viz) tool.
+
+```bash
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --dataloader.dataset c4_test \
+    --profiler.enable_memory_snapshot \
+    --profiler.profile_freq 10
 ```
 
 ### Bitwise Deterministic Guardrail

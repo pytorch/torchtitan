@@ -3,8 +3,6 @@ name: GraphTrainer 8 GPU Integration Tests
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
@@ -78,7 +76,8 @@ jobs:
         # Run precompile unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
 
-        # Run bitwise deterministic guardrail test
+        # Run bitwise deterministic and SAC peak-memory guardrail tests
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_sac_peak_memory.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

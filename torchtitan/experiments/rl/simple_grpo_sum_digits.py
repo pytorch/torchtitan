@@ -29,7 +29,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 import torchstore as ts
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class GRPOLoss(Configurable):
-    """Clipped GRPO loss with an optional KL penalty.
+    """Clipped GRPO surrogate loss.
 
     Takes per-sample response logprobs (already extracted from whatever
     packing or padding format the trainer uses).
@@ -57,37 +57,22 @@ class GRPOLoss(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        kl_coef: float = 0.0
-        """KL divergence penalty coefficient against the reference model."""
         clip_eps: float = 0.2
         """PPO clipping epsilon for the probability ratio."""
 
     def __init__(self, config: Config):
-        self.kl_coef = config.kl_coef
         self.clip_eps = config.clip_eps
 
     def __call__(
         self,
         policy_logprobs: list[torch.Tensor],
         advantages: torch.Tensor,
-        ref_logprobs: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        per_sample_mean_log_ratio = []
-        per_sample_mean_kl = []
+        per_sample_mean_lps = []
+        for policy_lps in policy_logprobs:
+            per_sample_mean_lps.append(policy_lps.mean())
 
-        if ref_logprobs is not None:
-            for policy_lps, ref_lps in zip(policy_logprobs, ref_logprobs):
-                token_log_ratio = policy_lps - ref_lps.detach()
-                per_sample_mean_log_ratio.append(token_log_ratio.mean())
-
-                token_ratio = torch.exp(token_log_ratio)
-                token_kl = token_ratio - 1 - token_log_ratio
-                per_sample_mean_kl.append(token_kl.mean())
-        else:
-            for policy_lps in policy_logprobs:
-                per_sample_mean_log_ratio.append(policy_lps.mean())
-
-        mean_log_ratio = torch.stack(per_sample_mean_log_ratio)
+        mean_log_ratio = torch.stack(per_sample_mean_lps)
         ratio = torch.exp(mean_log_ratio)
 
         unclipped_loss = ratio * advantages
@@ -95,21 +80,15 @@ class GRPOLoss(Configurable):
         clipped_loss = clipped_ratio * advantages
         pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
 
-        kl_div = torch.tensor(0.0)
-        if per_sample_mean_kl:
-            kl_div = torch.stack(per_sample_mean_kl).mean()
-
-        loss = pg_loss + self.kl_coef * kl_div
         metrics = {
             "pg_loss": pg_loss.item(),
-            "kl_div": kl_div.item(),
             "ratio_mean": ratio.mean().item(),
             "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
             .float()
             .mean()
             .item(),
         }
-        return loss, metrics
+        return pg_loss, metrics
 
 
 class Provisioner:
@@ -194,7 +173,7 @@ class RLTrainer(Configurable):
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
         )
-        """PolicyTrainer config. Controls optimizer, training, parallelism"""
+        """PolicyTrainer config. Controls optimizer, training, parallelism."""
 
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
@@ -224,13 +203,6 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-
-        # Patch model_spec to use the RL-specific parallelize function.
-        # TODO: Switch to canonical Qwen3 parallel plan
-        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-
-        config.model_spec.parallelize_fn = parallelize_qwen3
-
         self.task = SumDigitsTask(seed=42)
         self._proc_meshes = []
 
@@ -423,13 +395,18 @@ class RLTrainer(Configurable):
             config.trainer,
             model_spec=config.model_spec,
             hf_assets_path=config.hf_assets_path,
-            transfer_dtype=config.generator.model_dtype,
+            generator_dtype=config.generator.model_dtype,
         )
+
+        # Generator uses RL-specific parallelize (TP-only, no FSDP, vLLM-compatible)
+        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+
+        gen_model_spec = replace(config.model_spec, parallelize_fn=parallelize_qwen3)
         self.generator = generator_mesh.spawn(
             "generator",
             VLLMGenerator,
             config.generator,
-            model_spec=config.model_spec,
+            model_spec=gen_model_spec,
             model_path=config.hf_assets_path,
         )
         self.grader = grader_mesh.spawn(
@@ -558,19 +535,28 @@ class RLTrainer(Configurable):
             if self.config.log_samples:
                 _log_samples(episodes)
 
-            # 4. Trainer updates policy using pre-collated batches
+            # 4. Trainer forward + backward
             maybe_sharded_episodes = self._shard_episodes(episodes)
             batches = [
                 self._collate_episodes(per_rank_episodes)
                 for per_rank_episodes in maybe_sharded_episodes
             ]
-            metrics = self._get_rank_0_value(self.trainer.step.call(batches).get())
+            fwd_bwd_metrics = self._get_rank_0_value(
+                self.trainer.forward_backward.call(batches).get()
+            )
 
-            # 5. Sync weights
+            # 5. Optimizer step
+            optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
+
+            metrics = {**fwd_bwd_metrics, **optim_metrics}
+
+            # 6. Sync weights
             t0 = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            self.generator.pull_model_state_dict.call(
+                optim_metrics["policy_version"]
+            ).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
