@@ -38,6 +38,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
+    ParallelStyle,
     parallelize_module,
     PrepareModuleInput,
     PrepareModuleInputOutput,
@@ -57,7 +58,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.expert_parallel import BaseExpertParallel
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.experiments.transformers_modeling_backend.compile import (
@@ -73,7 +73,7 @@ from torchtitan.tools.logging import logger
 # ---------------------------------------------------------------------------
 
 
-class HFExpertParallel(BaseExpertParallel):
+class HFExpertParallel(ParallelStyle):
     """Expert Parallelism for HF Transformers MoE models.
 
     Adapts torchtitan's ``ExpertParallel`` for the HF experts interface.

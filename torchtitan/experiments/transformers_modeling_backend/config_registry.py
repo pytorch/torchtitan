@@ -61,7 +61,7 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("debugmodel_moe"),
-        profiling=ProfilingConfig(profile_freq=5),
+        profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -92,7 +92,7 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("full_moe"),
-        profiling=ProfilingConfig(profile_freq=5),
+        profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=200,
