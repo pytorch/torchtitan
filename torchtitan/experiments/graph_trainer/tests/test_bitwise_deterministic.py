@@ -210,7 +210,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
         if enable_passes:
             load_config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
-                compile=SimpleNamespace(precompile_artifact_dir="precompiled"),
+                compile=SimpleNamespace(
+                    precompile_artifact_dir="precompiled",
+                    enable_cudagraph=True,
+                ),
             )
             passes = construct_default_graph_passes(loaded_result, load_config)
             loaded_result.gm = apply_graph_passes(

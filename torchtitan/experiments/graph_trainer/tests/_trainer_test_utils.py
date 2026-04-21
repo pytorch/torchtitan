@@ -48,6 +48,7 @@ def build_minimal_trainer(
                 if compile_joint_passes is None
                 else list(compile_joint_passes),
                 precompile_artifact_dir="",
+                enable_cudagraph=True,
                 debug_graph_passes=False,
             ),
             model_spec=SimpleNamespace(model=model_config),
