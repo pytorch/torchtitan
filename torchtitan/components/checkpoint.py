@@ -78,8 +78,10 @@ class StateDictMode(str, enum.Enum):
     FULL: Complete state dict for interval saves and resume.
     BASE: Base model keys only (excludes converter-owned keys).
         Used for building HF containers during load.
-    EXPORT: Apply converter transforms (e.g. QAT dequant, LoRA merge)
-        for last-step / model-only export saves.
+    EXPORT: Apply converter transform for saving.  Behavior depends on
+        ``last_step``: interval saves apply the interval transform
+        (e.g. LoRA filters to adapter keys), last-step saves apply the
+        export transform (e.g. LoRA merges into base, QAT dequantizes).
     """
 
     FULL = "full"
@@ -90,14 +92,18 @@ class StateDictMode(str, enum.Enum):
 class ModelWrapper(Stateful):
     """Wraps model parts into a :class:`Stateful` for checkpoint integration.
 
+    Provides three modes via ``state_dict(mode=)``:
+
+    - **FULL**: all keys (load containers, full checkpoint)
+    - **BASE**: exclude converter-owned keys (HF load containers)
+    - **EXPORT**: apply converter transform (interval or last-step)
+
     Args:
         model: A single model or list of model parts (e.g. pipeline stages).
-        key_filter: Optional callable that returns True for converter-owned
-            keys. Used by ``state_dict(StateDictMode.BASE)`` to exclude
-            these keys when creating HF containers.
-        state_dict_transform: An optional pure function that transforms the
-            model state dict for export saves (last-step / model-only).
-            Applied only for ``state_dict(StateDictMode.EXPORT)``.
+        key_filter: Identifies converter-owned keys.
+        state_dict_transform: Converter transform taking ``(sd, last_step)``
+            and returning the transformed state dict.
+        sd_transforms: For dtype conversion and HF format on last-step export.
     """
 
     def __init__(
@@ -105,36 +111,48 @@ class ModelWrapper(Stateful):
         model: nn.Module | list[nn.Module],
         *,
         key_filter: Callable[[str], bool] | None = None,
-        state_dict_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        state_dict_transform: (
+            Callable[[dict[str, Any], bool], dict[str, Any]] | None
+        ) = None,
+        sd_transforms: StateDictTransforms | None = None,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self._key_filter = key_filter
         self._state_dict_transform = state_dict_transform
+        self._sd_transforms = sd_transforms
 
-    def _get_state_dict(self) -> dict[str, Any]:
-        state_dict = {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
-        }
-        return state_dict
-
-    @property
-    def has_key_filter(self) -> bool:
-        """Whether a converter key filter is configured."""
-        return self._key_filter is not None
-
-    def state_dict(self, mode: StateDictMode = StateDictMode.FULL) -> dict[str, Any]:
+    def state_dict(
+        self,
+        mode: StateDictMode = StateDictMode.FULL,
+        *,
+        last_step: bool = False,
+        to_hf: bool = False,
+    ) -> dict[str, Any]:
         """Return the model state dict in the requested mode.
 
         Note: We intentionally do not cache the state dict.
         ``set_model_state_dict()`` mutates keys of the input state dict,
         so a cached copy would go stale after ``load_state_dict()``.
         """
-        sd = self._get_state_dict()
+        sd = {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
         if mode == StateDictMode.BASE and self._key_filter is not None:
             return {k: v for k, v in sd.items() if not self._key_filter(k)}
-        elif mode == StateDictMode.EXPORT and self._state_dict_transform is not None:
-            return self._state_dict_transform(sd)
+        if mode == StateDictMode.EXPORT:
+            if self._state_dict_transform is not None:
+                sd = self._state_dict_transform(sd, last_step)
+            if last_step and self._sd_transforms is not None:
+                sd = self._sd_transforms.apply_dtype_convert(sd)
+                if to_hf:
+                    sd = self._sd_transforms.apply_to_hf(sd)
+            return sd
         return sd
+
+    @property
+    def has_frozen_params(self) -> bool:
+        """Whether any model parameters are frozen (requires_grad=False)."""
+        return any(not p.requires_grad for m in self.model for p in m.parameters())
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -381,6 +399,7 @@ class CheckpointManager(Configurable):
         self.enable = config.enable
         self.load_only = config.load_only
 
+        self.sd_transforms = sd_transforms or StateDictTransforms()
         self.states = states
         self.states.update(
             {
@@ -394,6 +413,7 @@ class CheckpointManager(Configurable):
                         if model_converters
                         else None
                     ),
+                    sd_transforms=self.sd_transforms,
                 ),
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
@@ -414,9 +434,6 @@ class CheckpointManager(Configurable):
         self.pg: dist.ProcessGroup | None = None
 
         self.folder = os.path.join(base_folder, config.folder)
-
-        # Checkpoint policy related fields.
-        self.sd_transforms = sd_transforms or StateDictTransforms()
         self.initial_load_model_only = config.initial_load_model_only
         self.initial_load_in_hf = config.initial_load_in_hf
         self.initial_load_path = config.initial_load_path
@@ -495,17 +512,20 @@ class CheckpointManager(Configurable):
         self,
         state_dict: dict[str, Any],
         checkpoint_id: str,
-        async_mode: AsyncMode,
+        async_mode: str,
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
     ) -> Future | AsyncSaveResponse | None:
         """Save the checkpoint with dcp.
+
         Args:
-            state_dict (dict): The state dict to save.
+            state_dict (dict): The state dict to save.  When ``to_hf`` is
+                True the state dict must already be in HF format (converted
+                by the caller via ``StateDictTransforms``).
             checkpoint_id (str): The checkpoint id to save.
-            async_mode (AsyncMode): Whether the checkpoint is async.
+            async_mode (str): Which async checkpoint mode to use.
             enable_garbage_collection (bool): Whether to enable garbage collection after save.
-            to_hf (bool): Whether to save in HF model definition and safetensors format.
+            to_hf (bool): Whether to save in HF safetensors format.
 
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
@@ -517,11 +537,6 @@ class CheckpointManager(Configurable):
         checkpoint_save_id: str | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
         if to_hf:
-            if self.sd_transforms.sd_adapter is None:
-                raise ValueError(
-                    "Trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
-                )
-            state_dict = self.sd_transforms.sd_adapter.to_hf(state_dict)
             fqn_to_index_mapping = self.sd_transforms.fqn_to_index_mapping
             if fqn_to_index_mapping:
                 storage_writer = HuggingFaceStorageWriter(
@@ -531,10 +546,9 @@ class CheckpointManager(Configurable):
                     enable_consolidation=False,
                 )
             else:
-                # the reason for only enabling consolidation if there is
-                # no mapping is because no mapping implies that we save all fqns
-                # to one file. This means we only need one rank to consolidate.
-                # Otherwise we should use consolidate_safetensors_files_on_every_rank
+                # No mapping implies all fqns go to one file, so one rank
+                # can consolidate.  Otherwise use
+                # consolidate_safetensors_files_on_every_rank.
                 storage_writer = HuggingFaceStorageWriter(
                     path=checkpoint_id,
                     save_distributed=True,
@@ -622,8 +636,8 @@ class CheckpointManager(Configurable):
         loads via HuggingFaceStorageReader, then reverse-transforms back to
         torchtitan FQNs via ``adapter.from_hf``.
 
-        Uses BASE mode to exclude converter-owned keys from the HF container,
-        since base HF checkpoints don't contain converter keys (e.g. LoRA).
+        Uses BASE mode to exclude converter-owned keys from the HF
+        container, since base HF checkpoints don't contain them.
         """
         adapter = self.sd_transforms.sd_adapter
         if adapter is None:
@@ -631,9 +645,8 @@ class CheckpointManager(Configurable):
                 "_load_with_adapter requires sd_transforms.sd_adapter to be configured."
             )
 
-        hf_state_dict = adapter.to_hf(
-            self.states[MODEL].state_dict(mode=StateDictMode.BASE)
-        )
+        sd = self.states[MODEL].state_dict(mode=StateDictMode.BASE)
+        hf_state_dict = adapter.to_hf(sd)
         hf_storage_reader = adapter.get_hf_storage_reader(checkpoint_id, from_quantized)
         dcp.load(
             hf_state_dict,
@@ -889,12 +902,16 @@ class CheckpointManager(Configurable):
     ) -> dict[str, Any]:
         """Flatten the model states into a single dictionary.
 
+        Uses EXPORT mode for the model state dict so that converters can
+        filter to their own keys (e.g. LoRA saves only adapter weights).
+        When no converter transform is configured, returns the full state dict.
+
         Note that other states, such as optimizer states, are not flattened.
         """
         states = state_dict if state_dict is not None else self.states
         sd = {k: v for k, v in states.items() if k != MODEL}
         if MODEL in states:
-            sd.update(states[MODEL].state_dict())
+            sd.update(states[MODEL].state_dict(mode=StateDictMode.EXPORT))
         return sd
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
@@ -926,15 +943,17 @@ class CheckpointManager(Configurable):
         return states_to_load
 
     def _save_last_step(self, curr_step: int) -> None:
-        # We only consider saving model only at the end of the training. So
-        # this won't affect preemption and training resume.
-        # EXPORT mode applies any converter transform (e.g. QAT dequant,
-        # LoRA merge) — converters are expected to handle/remove their own
-        # keys so the result is compatible with the model's HF adapter.
+        if self.last_save_in_hf and not self.last_save_model_only:
+            raise ValueError(
+                "Only model can be saved when saving in HF safetensors format."
+            )
 
         if self.last_save_model_only:
-            states = self.states[MODEL].state_dict(mode=StateDictMode.EXPORT)
-            states = self.sd_transforms.apply_dtype_convert(states)
+            states = self.states[MODEL].state_dict(
+                mode=StateDictMode.EXPORT,
+                last_step=True,
+                to_hf=self.last_save_in_hf,
+            )
             logger.info(
                 f"Saving a model only checkpoint in "
                 f"{self.sd_transforms.export_dtype} "
@@ -943,11 +962,6 @@ class CheckpointManager(Configurable):
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
             states = self._flattened_model_states_sd()
-
-        if self.last_save_in_hf and not self.last_save_model_only:
-            raise ValueError(
-                "Only model can be saved when saving in HF safetensors format."
-            )
 
         self.dcp_save(
             states,

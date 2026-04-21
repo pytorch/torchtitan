@@ -13,12 +13,12 @@ import torch
 
 logger = logging.getLogger()
 
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import Llama4Model
 
 
-class Llama4StateDictAdapter(BaseStateDictAdapter):
+class Llama4StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Llama4Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
 
