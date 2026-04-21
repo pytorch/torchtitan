@@ -6,9 +6,9 @@
 
 """State dict content transform pipeline.
 
-Cleanly separates state dict content transforms (dtype conversion, FQN
-renaming, value permutations, etc.) from checkpoint orchestration
-(save/load/resume/purge/async staging) in ``checkpoint.py``.
+Owns dtype conversion and HF format conversion (to_hf / from_hf),
+cleanly separated from checkpoint orchestration in ``checkpoint.py``
+and converter transforms in ``ModelWrapper``.
 """
 
 from __future__ import annotations
@@ -25,19 +25,11 @@ if TYPE_CHECKING:
 
 
 class StateDictTransforms:
-    """Ordered pipeline of state dict content transforms for save and load.
+    """Dtype conversion and HF format conversion for checkpoint saves/loads.
 
-    Save-side (export / last-step):
-        converter transform (via ModelWrapper.state_dict(mode="export")) ->
-        dtype_convert -> to_hf (if requested)
-
-    Load-side (import / initial load):
-        from_hf (if loading HF) -> state dict ready for set_model_state_dict
-
-    The converter transform (Float8, etc.) is *not* owned by this
-    class — it lives on ``ModelWrapper.state_dict(mode="export")`` because it
-    needs access to the model's internal state dict machinery.  This pipeline
-    handles everything *after* the state dict has been extracted.
+    Converter-specific transforms (key filtering, interval/export transforms)
+    live on ``ModelWrapper`` via the ``ModelConverter`` protocol.  This class
+    handles the format-level transforms that are independent of converters.
 
     Experiments can subclass to inject additional transforms.
     """
@@ -69,7 +61,7 @@ class StateDictTransforms:
             ),
         )
 
-    # -- Properties for checkpoint.py to access adapter capabilities --
+    # -- Properties --
 
     @property
     def sd_adapter(self) -> BaseStateDictAdapter | None:
@@ -91,16 +83,25 @@ class StateDictTransforms:
             return None
         return self._sd_adapter.hf_assets_path
 
-    # -- Save-side transforms --
+    # -- Transforms --
 
     def apply_dtype_convert(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Cast all tensors to the export dtype.
+        """Cast tensors to the export dtype.
 
-        No-op when export_dtype is float32 (the training default) — float32
-        is the native training dtype, so no conversion is needed.
-        Assumes all values are tensors — this is guaranteed when called
-        after ``ModelWrapper.state_dict()``, which only returns tensors.
+        No-op when export_dtype is float32 (the training default).
         """
-        if self._export_dtype != torch.float32:
-            state_dict = {k: v.to(self._export_dtype) for k, v in state_dict.items()}
-        return state_dict
+        if self._export_dtype == torch.float32:
+            return state_dict
+        return {k: v.to(self._export_dtype) for k, v in state_dict.items()}
+
+    def apply_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert torchtitan state dict to HF format via sd_adapter."""
+        if not self._sd_adapter:
+            raise ValueError("apply_to_hf requires sd_adapter")
+        return self._sd_adapter.to_hf(state_dict)
+
+    def apply_from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert HF state dict to torchtitan format."""
+        if not self._sd_adapter:
+            raise ValueError("apply_from_hf requires sd_adapter")
+        return self._sd_adapter.from_hf(hf_state_dict)

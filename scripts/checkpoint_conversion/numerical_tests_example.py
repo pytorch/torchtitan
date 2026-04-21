@@ -79,7 +79,7 @@ def forward_tt(model_name, config_name, checkpoint_path, test_set):
     model.eval()
 
     modelWrapper = ModelWrapper(model)
-    state_dict = modelWrapper._get_state_dict()
+    state_dict = modelWrapper.state_dict()
 
     # Checkpoint Loading
     logger.info(f"Loading checkpoint at: {checkpoint_path}")
