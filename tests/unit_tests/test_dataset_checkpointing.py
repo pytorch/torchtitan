@@ -163,9 +163,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
                 for _ in range(500):
                     expected_input_ids, expected_labels = next(it)
                     input_ids, labels = next(it_resumed)
-                    assert torch.equal(
-                        input_ids["input"], expected_input_ids["input"]
-                    )
+                    assert torch.equal(input_ids["input"], expected_input_ids["input"])
                     assert torch.equal(
                         input_ids["positions"], expected_input_ids["positions"]
                     )
@@ -176,7 +174,9 @@ class TestDatasetCheckpointing(unittest.TestCase):
         batch_size = 1
         seq_len = 512
 
-        dl = self._build_interleaved_dataloader(batch_size, seq_len, world_size=1, rank=0)
+        dl = self._build_interleaved_dataloader(
+            batch_size, seq_len, world_size=1, rank=0
+        )
         it = iter(dl)
 
         # Consume a small number of batches — well within a single epoch
@@ -194,9 +194,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
             expected_input_ids, expected_labels = next(it)
             input_ids, labels = next(it_resumed)
             assert torch.equal(input_ids["input"], expected_input_ids["input"])
-            assert torch.equal(
-                input_ids["positions"], expected_input_ids["positions"]
-            )
+            assert torch.equal(input_ids["positions"], expected_input_ids["positions"])
             assert torch.equal(labels, expected_labels)
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):

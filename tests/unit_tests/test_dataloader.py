@@ -185,7 +185,6 @@ class TestParallelAwareDataloader(unittest.TestCase):
 
 
 class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
-
     def _make_config(self, **kwargs) -> InterleavedHuggingFaceTextDataLoader.Config:
         defaults = dict(
             sources=[
@@ -242,7 +241,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
         batch_input, batch_label = next(iter(dataloader))
         self.assertIn("input", batch_input)
         self.assertIn("positions", batch_input)
-        self.assertEqual(batch_input["input"].shape[0], 2)    # batch size
+        self.assertEqual(batch_input["input"].shape[0], 2)  # batch size
         self.assertEqual(batch_input["input"].shape[1], 512)  # seq_len
 
     def test_single_source_equivalent_to_huggingfacetextdataloader(self):

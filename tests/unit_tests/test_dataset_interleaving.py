@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Unit tests for InterleavedDataset."""
 import unittest
 from copy import deepcopy
@@ -6,10 +12,6 @@ from torch.utils.data import IterableDataset as TorchIterableDataset
 
 from torchtitan.hf_datasets.interleave import InterleavedDataset
 
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
 
 class _MockDataset(TorchIterableDataset):
     """Minimal stateful iterable dataset for testing."""
@@ -39,12 +41,7 @@ class _NoCheckpointDataset:
         yield from range(5)
 
 
-# ---------------------------------------------------------------------------
-# __init__ validation
-# ---------------------------------------------------------------------------
-
 class TestInterleavedDatasetInit(unittest.TestCase):
-
     def test_rejects_missing_state_dict(self):
         with self.assertRaises(TypeError):
             InterleavedDataset([_NoCheckpointDataset()], [1.0])
@@ -74,12 +71,7 @@ class TestInterleavedDatasetInit(unittest.TestCase):
         self.assertAlmostEqual(interleaved._probs[1], 0.8)
 
 
-# ---------------------------------------------------------------------------
-# Iteration behaviour
-# ---------------------------------------------------------------------------
-
 class TestInterleavedDatasetIteration(unittest.TestCase):
-
     def test_single_source_yields_all_samples(self):
         ds = _MockDataset(list(range(10)))
         interleaved = InterleavedDataset([ds], [1.0], seed=0)
@@ -88,8 +80,8 @@ class TestInterleavedDatasetIteration(unittest.TestCase):
     def test_stops_on_first_source_exhaustion(self):
         """When one source runs out, iteration stops immediately even if
         others still have data."""
-        ds_short = _MockDataset([99])              # 1 item
-        ds_long  = _MockDataset(list(range(50)))   # 50 items
+        ds_short = _MockDataset([99])  # 1 item
+        ds_long = _MockDataset(list(range(50)))  # 50 items
         samples = list(InterleavedDataset([ds_short, ds_long], [1.0, 1.0], seed=0))
 
         self.assertIn(99, samples)
@@ -101,8 +93,8 @@ class TestInterleavedDatasetIteration(unittest.TestCase):
     def test_sampling_respects_weight_ratio(self):
         """Higher-weighted source is drawn proportionally more often."""
         # Use distinct value ranges to identify source without source_idx
-        ds_a = _MockDataset(list(range(1000)))           # values 0–999
-        ds_b = _MockDataset(list(range(1000, 2000)))     # values 1000–1999
+        ds_a = _MockDataset(list(range(1000)))  # values 0–999
+        ds_b = _MockDataset(list(range(1000, 2000)))  # values 1000–1999
         samples = list(InterleavedDataset([ds_a, ds_b], [1.0, 9.0], seed=7))
 
         count_a = sum(1 for v in samples if v < 1000)
@@ -120,12 +112,7 @@ class TestInterleavedDatasetIteration(unittest.TestCase):
         self.assertNotEqual(run(42), run(99))
 
 
-# ---------------------------------------------------------------------------
-# Checkpointing
-# ---------------------------------------------------------------------------
-
 class TestInterleavedDatasetCheckpointing(unittest.TestCase):
-
     def test_state_dict_keys(self):
         ds = _MockDataset(list(range(5)))
         sd = InterleavedDataset([ds], [1.0], seed=0).state_dict()

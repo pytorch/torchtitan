@@ -15,7 +15,6 @@ from datasets import Dataset
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
     ChatDataset,
     ChatDataSource,
     InterleavedChatDataLoader,
@@ -471,7 +470,9 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
         defaults.update(kwargs)
         return InterleavedChatDataLoader.Config(**defaults)
 
-    def _build_dataloader(self, config, batch_size=1, seq_len=256, world_size=1, rank=0):
+    def _build_dataloader(
+        self, config, batch_size=1, seq_len=256, world_size=1, rank=0
+    ):
         tokenizer_config = HuggingFaceTokenizer.Config()
         return config.build(
             dp_world_size=world_size,
@@ -480,7 +481,6 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
             seq_len=seq_len,
             local_batch_size=batch_size,
         )
-
 
     def test_rejects_empty_sources(self):
         with self.assertRaises(ValueError) as ctx:
@@ -493,14 +493,20 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
                 sources=[
                     ChatDataSource(
                         dataset_path="json",
-                        load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
+                        load_dataset_kwargs={
+                            "data_files": _DATA_PATH,
+                            "split": "train",
+                        },
                         sample_processor=_process_sample,
                         weight=1.0,
                         infinite=True,
                     ),
                     ChatDataSource(
                         dataset_path="json",
-                        load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
+                        load_dataset_kwargs={
+                            "data_files": _DATA_PATH,
+                            "split": "train",
+                        },
                         sample_processor=_process_sample,
                         weight=1.0,
                         infinite=False,
@@ -509,7 +515,6 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
                 seed=42,
             )
         self.assertIn("infinite", str(ctx.exception))
-
 
     def test_construction_batch_size_and_num_workers(self):
         config = self._make_config(num_workers=2)
@@ -529,7 +534,6 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
         self.assertEqual(batch_input["positions"].shape, (2, seq_len))
         self.assertEqual(batch_label.shape, (2, seq_len))
 
-
     def test_resumption_mid_epoch(self):
         """Checkpoint taken before any source exhausts resumes correctly."""
         config = self._make_config()
@@ -548,7 +552,9 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
             expected_input, expected_labels = next(it)
             input_ids, labels = next(it_resumed)
             self.assertTrue(torch.equal(input_ids["input"], expected_input["input"]))
-            self.assertTrue(torch.equal(input_ids["positions"], expected_input["positions"]))
+            self.assertTrue(
+                torch.equal(input_ids["positions"], expected_input["positions"])
+            )
             self.assertTrue(torch.equal(labels, expected_labels))
 
     def test_resumption_across_reloop(self):
@@ -570,7 +576,9 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
             expected_input, expected_labels = next(it)
             input_ids, labels = next(it_resumed)
             self.assertTrue(torch.equal(input_ids["input"], expected_input["input"]))
-            self.assertTrue(torch.equal(input_ids["positions"], expected_input["positions"]))
+            self.assertTrue(
+                torch.equal(input_ids["positions"], expected_input["positions"])
+            )
             self.assertTrue(torch.equal(labels, expected_labels))
 
 

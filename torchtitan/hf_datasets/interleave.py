@@ -18,7 +18,8 @@ are each source's responsibility.
 from __future__ import annotations
 
 import random
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from torch.utils.data import IterableDataset
 
@@ -41,14 +42,6 @@ class InterleavedDataset(IterableDataset):
         weights: list[float],
         seed: int | None = None,
     ) -> None:
-        """
-        Args:
-            datasets: Source datasets. Each must implement ``state_dict()``
-                and ``load_state_dict()``.
-            weights: Sampling weights (normalised internally). The relative
-                likelihood of drawing from each source at each step.
-            seed: Seed for the interleaver RNG.
-        """
         if not datasets:
             raise ValueError("At least one dataset must be provided.")
         if len(datasets) != len(weights):

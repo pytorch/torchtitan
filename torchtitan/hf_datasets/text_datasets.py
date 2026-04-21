@@ -20,8 +20,8 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.tools.logging import logger
 from torchtitan.hf_datasets.interleave import InterleavedDataset
+from torchtitan.tools.logging import logger
 
 
 def _load_c4_dataset(dataset_path: str, split: str):
@@ -287,13 +287,14 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 @dataclass(kw_only=True, slots=True)
 class HFDataSource(HuggingFaceTextDataLoader.Config):
     """Represent one dataset source and its sampling weight"""
+
     weight: float = 1
     """Data Source sampling weight"""
 
 
 class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
-    """Configurable text dataloader that wraps multiple HuggingFaceTextDataset.
-    """
+    """Configurable text dataloader that wraps multiple HuggingFaceTextDataset."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
         sources: list[HFDataSource] = field(default_factory=lambda: [HFDataSource()])
@@ -304,9 +305,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
 
         def __post_init__(self) -> None:
             if not self.sources:
-                raise ValueError(
-                    f"At least one source should be defined."
-                )
+                raise ValueError("At least one source should be defined.")
             infinite_values = [source.infinite for source in self.sources]
             if len(set(infinite_values)) > 1:
                 raise ValueError(
@@ -326,7 +325,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         **kwargs,
     ):
         ds = InterleavedDataset(
-            datasets = [
+            datasets=[
                 HuggingFaceTextDataset(
                     dataset_name=source.dataset,
                     dataset_path=source.dataset_path,
@@ -338,7 +337,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
                 )
                 for source in config.sources
             ],
-            weights= [source.weight for source in config.sources],
+            weights=[source.weight for source in config.sources],
             seed=config.seed,
         )
 
@@ -650,7 +649,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         **kwargs,
     ):
-        dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)
+        dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)  # type: ignore[arg-type]
 
         chat_ds = ChatDataset(
             dataset=dataset,
@@ -681,13 +680,14 @@ class ChatDataLoader(ParallelAwareDataloader):
 @dataclass(kw_only=True, slots=True)
 class ChatDataSource(ChatDataLoader.Config):
     """Represent one chat dataset source and its sampling weight"""
+
     weight: float = 1
     """Data Source sampling weight"""
 
 
 class InterleavedChatDataLoader(ParallelAwareDataloader):
-    """Configurable chat dataloader that wraps multiple ChatDataset.
-    """
+    """Configurable chat dataloader that wraps multiple ChatDataset."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
         sources: list[ChatDataSource] = field(default_factory=list)
@@ -698,16 +698,13 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
 
         def __post_init__(self) -> None:
             if not self.sources:
-                raise ValueError(
-                    f"At least one source should be defined."
-                )
+                raise ValueError("At least one source should be defined.")
             infinite_values = [source.infinite for source in self.sources]
             if len(set(infinite_values)) > 1:
                 raise ValueError(
                     f"All data sources must have the same 'infinite' setting, "
                     f"got: {[(s.dataset_path, s.infinite) for s in self.sources]}"
                 )
-
 
     def __init__(
         self,
@@ -721,9 +718,11 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         **kwargs,
     ):
         ds = InterleavedDataset(
-            datasets = [
+            datasets=[
                 ChatDataset(
-                    dataset=load_dataset(source.dataset_path, **source.load_dataset_kwargs),
+                    dataset=load_dataset(  # type: ignore[arg-type]
+                        source.dataset_path, **source.load_dataset_kwargs
+                    ),
                     tokenizer=tokenizer,
                     sample_processor=source.sample_processor,
                     seq_len=seq_len,
@@ -733,7 +732,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
                 )
                 for source in config.sources
             ],
-            weights= [source.weight for source in config.sources],
+            weights=[source.weight for source in config.sources],
             seed=config.seed,
         )
 
