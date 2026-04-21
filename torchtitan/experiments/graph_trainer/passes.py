@@ -117,24 +117,6 @@ def compile_time_passes(
     return passes
 
 
-def runtime_passes(traced_result: "TracedResult") -> list[Callable]:
-    """Passes that must run at load time (not baked into precompile artifacts)."""
-    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
-
-    passes: list[Callable] = []
-    if is_cudagraph_compatible(traced_result.gm):
-        static_input_indices = list(range(traced_result.num_static_inputs))
-        passes.append(
-            functools.partial(
-                cudagraph_pass,
-                is_forward=True,
-                static_input_indices=static_input_indices,
-                tensor_input_indices=traced_result.tensor_input_indices,
-            )
-        )
-    return passes
-
-
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -160,7 +142,16 @@ def construct_default_graph_passes(
         )
 
     # cudagraph should be the last pass.
-    passes.extend(runtime_passes(traced_result))
+    if cudagraph_compatible:
+        static_input_indices = list(range(traced_result.num_static_inputs))
+        passes.append(
+            functools.partial(
+                cudagraph_pass,
+                is_forward=True,
+                static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
+            )
+        )
     return passes
 
 

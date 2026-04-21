@@ -157,7 +157,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
             compile_time_passes,
-            runtime_passes,
+            construct_default_graph_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             precompile_fx_trace_load,
@@ -208,7 +208,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         # Step 4: Apply load-time passes (cudagraph)
         if enable_passes:
-            passes = runtime_passes(loaded_result)
+            load_config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(precompile_artifact_dir="precompiled"),
+            )
+            passes = construct_default_graph_passes(loaded_result, load_config)
             loaded_result.gm = apply_graph_passes(
                 loaded_result.gm,
                 loaded_result.example_inputs,
