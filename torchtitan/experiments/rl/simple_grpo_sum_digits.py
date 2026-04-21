@@ -131,9 +131,7 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         if item.prompt_idx in seen_prompts:
             continue
         seen_prompts.add(item.prompt_idx)
-        reward_str = (
-            f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
-        )
+        reward_str = f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
         logger.info(f"  [prompt {item.prompt_idx}]{reward_str}")
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 

@@ -253,7 +253,9 @@ class VLLMGenerator(Actor, Configurable):
                 default SamplingConfig. ``seed`` always comes from
                 ``config.debug.seed`` (not part of SamplingConfig).
         """
-        _sampling_config = sampling_config if sampling_config is not None else self.config.sampling
+        _sampling_config = (
+            sampling_config if sampling_config is not None else self.config.sampling
+        )
 
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
