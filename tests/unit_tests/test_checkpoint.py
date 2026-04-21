@@ -730,7 +730,28 @@ class TestCheckpointManager(unittest.TestCase):
 
 
 class TestModelWrapper(unittest.TestCase):
-    """Tests for ModelWrapper state dict modes (full / base / export)."""
+    """Tests for ModelWrapper state_dict."""
+
+    @mock.patch(
+        "torchtitan.components.checkpoint.get_model_state_dict",
+        side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
+    )
+    def test_state_dict_and_has_frozen_params(self, mock_get_sd):
+        """state_dict() returns full dict; has_frozen_params tracks requires_grad."""
+        from torchtitan.components.checkpoint import ModelWrapper
+
+        model = nn.Linear(2, 2)
+        wrapper = ModelWrapper(model)
+
+        self.assertEqual(set(wrapper.state_dict().keys()), {"weight", "bias"})
+        self.assertFalse(wrapper.has_frozen_params)
+
+        model.weight.requires_grad = False
+        self.assertTrue(wrapper.has_frozen_params)
+
+
+class TestModelWrapperModes(unittest.TestCase):
+    """Tests for ModelWrapper BASE and EXPORT modes."""
 
     LORA_SD = {
         "weight": torch.tensor([1.0, 2.0]),
@@ -741,96 +762,59 @@ class TestModelWrapper(unittest.TestCase):
 
     @mock.patch(
         "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
+        side_effect=lambda m: dict(TestModelWrapperModes.LORA_SD),
     )
-    def test_state_dict_returns_full_dict(self, mock_get_sd):
-        """state_dict() returns the full model state dict without converter."""
-        from torchtitan.components.checkpoint import ModelWrapper
-
-        model = nn.Linear(2, 2)
-        wrapper = ModelWrapper(model)
-        sd = wrapper.state_dict()
-        self.assertIn("weight", sd)
-        self.assertIn("bias", sd)
-
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
-    )
-    def test_export_without_transform_returns_full_dict(self, mock_get_sd):
-        """state_dict(mode=EXPORT) returns full dict when no transform is set."""
+    def test_base_and_export_modes(self, mock_get_sd):
+        """BASE excludes converter keys; EXPORT applies transform."""
         from torchtitan.components.checkpoint import ModelWrapper, StateDictMode
 
-        model = nn.Linear(2, 2)
-        wrapper = ModelWrapper(model)
-        exported = wrapper.state_dict(mode=StateDictMode.EXPORT)
-        self.assertIn("weight", exported)
-        self.assertIn("bias", exported)
-
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: dict(TestModelWrapper.LORA_SD),
-    )
-    def test_lora_full_state_dict(self, mock_get_sd):
-        """full mode: returns all keys including LoRA (for DCP checkpoint)."""
-        from torchtitan.components.checkpoint import ModelWrapper
-
-        model = nn.Linear(2, 2)
-        wrapper = ModelWrapper(model, key_filter=lambda k: "lora" in k)
-        sd = wrapper.state_dict()
-        self.assertEqual(
-            set(sd.keys()),
-            {"weight", "bias", "linear.lora_a.weight", "linear.lora_b.weight"},
-        )
-
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: dict(TestModelWrapper.LORA_SD),
-    )
-    def test_lora_base_state_dict(self, mock_get_sd):
-        """base mode: excludes LoRA keys (for saving base model only)."""
-        from torchtitan.components.checkpoint import ModelWrapper, StateDictMode
-
-        model = nn.Linear(2, 2)
-        wrapper = ModelWrapper(model, key_filter=lambda k: "lora" in k)
-        sd = wrapper.state_dict(mode=StateDictMode.BASE)
-        self.assertEqual(set(sd.keys()), {"weight", "bias"})
-
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: dict(TestModelWrapper.LORA_SD),
-    )
-    def test_lora_export_state_dict(self, mock_get_sd):
-        """export mode: merges LoRA into base weights, drops LoRA keys."""
-        from torchtitan.components.checkpoint import ModelWrapper, StateDictMode
-
-        def lora_merge(sd):
-            merged = dict(sd)
-            merged["weight"] = (
-                sd["weight"]
-                + (sd["linear.lora_b.weight"] @ sd["linear.lora_a.weight"]).squeeze()
-            )
-            return {k: v for k, v in merged.items() if "lora" not in k}
+        def lora_transform(sd, last_step=False):
+            if last_step:
+                merged = dict(sd)
+                merged["weight"] = (
+                    sd["weight"]
+                    + (
+                        sd["linear.lora_b.weight"] @ sd["linear.lora_a.weight"]
+                    ).squeeze()
+                )
+                return {k: v for k, v in merged.items() if "lora" not in k}
+            return {k: v for k, v in sd.items() if "lora" in k}
 
         model = nn.Linear(2, 2)
         wrapper = ModelWrapper(
-            model, key_filter=lambda k: "lora" in k, state_dict_transform=lora_merge
+            model,
+            key_filter=lambda k: "lora" in k,
+            state_dict_transform=lora_transform,
         )
-        sd = wrapper.state_dict(mode=StateDictMode.EXPORT)
-        self.assertEqual(set(sd.keys()), {"weight", "bias"})
 
+        # BASE: excludes converter keys
+        base_sd = wrapper.state_dict(mode=StateDictMode.BASE)
+        self.assertEqual(set(base_sd.keys()), {"weight", "bias"})
+
+        # EXPORT interval: adapter keys only
+        interval_sd = wrapper.state_dict(mode=StateDictMode.EXPORT)
+        self.assertEqual(
+            set(interval_sd.keys()),
+            {"linear.lora_a.weight", "linear.lora_b.weight"},
+        )
+
+        # EXPORT last_step: merged
+        export_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
+        self.assertEqual(set(export_sd.keys()), {"weight", "bias"})
         lora_a = torch.tensor([[0.1, 0.2]])
         lora_b = torch.tensor([[0.3], [0.4]])
         expected = torch.tensor([1.0, 2.0]) + (lora_b @ lora_a).squeeze()
-        torch.testing.assert_close(sd["weight"], expected)
+        torch.testing.assert_close(export_sd["weight"], expected)
 
 
 class TestMultiSourceLoading(unittest.TestCase):
-    """Tests that additional_load_path triggers a second dcp.load."""
+    """Tests that initial_load_path + additional_load_path loads two sources."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
+        self.base_dir = os.path.join(self.temp_dir, "base")
         self.adapter_dir = os.path.join(self.temp_dir, "adapter")
+        os.makedirs(self.base_dir)
         os.makedirs(self.adapter_dir)
 
     def tearDown(self):
@@ -838,80 +822,41 @@ class TestMultiSourceLoading(unittest.TestCase):
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    def test_additional_load_path(self, mock_save, mock_load, mock_rank):
-        """Primary + additional_load_path triggers two dcp.load calls (DCP and HF)."""
+    def test_initial_plus_additional(self, mock_load, mock_rank):
+        """initial_load_path (base) + additional_load_path (adapter) = two loads."""
         from torchtitan.components.state_dict_transforms import StateDictTransforms
 
-        cases = [
-            ("dcp", None),  # no converter adapter → DCP fallback
-            ("hf", True),  # with converter adapter → HF via adapter
-        ]
-        for fmt, use_adapter in cases:
-            with self.subTest(format=fmt):
-                mock_save.reset_mock()
-                mock_load.reset_mock()
+        mock_load.side_effect = lambda *a, **kw: None
 
-                mock_save.side_effect = lambda *a, **kw: os.makedirs(
-                    kw.get("checkpoint_id", a[1] if len(a) > 1 else ""),
-                    exist_ok=True,
-                )
-                mock_load.side_effect = lambda *a, **kw: None
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="disabled",
+            folder="nonexistent",
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=self.base_dir,
+            initial_load_model_only=True,
+            additional_load_path=self.adapter_dir,
+        )
+        with mock.patch("torch.distributed.new_group", return_value="pg"):
+            manager = CheckpointManager(
+                dataloader=FakeDataLoader(),
+                model_parts=[nn.Linear(2, 2)],
+                optimizers=FakeOptimizersContainer(),
+                lr_schedulers=FakeLRSchedulersContainer(),
+                states={},
+                config=cfg,
+                sd_transforms=StateDictTransforms(),
+                base_folder=self.temp_dir,
+            )
 
-                lora_filter = lambda k: "lora" in k  # noqa: E731
-                converter_adapter = None
-                model_converters = None
+        manager.load(step=-1)
 
-                if use_adapter:
-                    converter_adapter = mock.Mock()
-                    converter_adapter.to_hf.return_value = {
-                        "peft_key": torch.tensor([1.0])
-                    }
-                    converter_adapter.from_hf.return_value = {
-                        "lora_a.weight": torch.tensor([1.0])
-                    }
-                    converter_adapter.get_hf_storage_reader.return_value = mock.Mock()
-                    model_converters = mock.Mock()
-                    model_converters.key_filter.return_value = lora_filter
-                    model_converters.state_dict_transform.return_value = None
-                    model_converters.converter_sd_adapters.return_value = [
-                        (converter_adapter, lora_filter)
-                    ]
-
-                cfg = CheckpointManager.Config(
-                    enable=True,
-                    async_mode="disabled",
-                    folder="",
-                    interval=1,
-                    keep_latest_k=0,
-                    last_save_model_only=False,
-                    export_dtype="float32",
-                    exclude_from_loading=[],
-                    initial_load_path=None,
-                    initial_load_model_only=False,
-                    additional_load_path=self.adapter_dir,
-                )
-                with mock.patch("torch.distributed.new_group", return_value="pg"):
-                    manager = CheckpointManager(
-                        dataloader=FakeDataLoader(),
-                        model_parts=[nn.Linear(2, 2)],
-                        optimizers=FakeOptimizersContainer(),
-                        lr_schedulers=FakeLRSchedulersContainer(),
-                        states={},
-                        config=cfg,
-                        sd_transforms=StateDictTransforms(),
-                        base_folder=self.temp_dir,
-                        model_converters=model_converters,
-                    )
-
-                manager.save(curr_step=1)
-                manager.load(step=1)
-
-                # Both formats trigger two dcp.load calls
-                self.assertEqual(mock_load.call_count, 2)
-
-                if use_adapter:
-                    converter_adapter.from_hf.assert_called_once()
+        # Source 1 (initial) + Source 2 (additional overlay) = two dcp.load calls
+        self.assertEqual(mock_load.call_count, 2)
 
 
 if __name__ == "__main__":

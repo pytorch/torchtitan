@@ -11,12 +11,12 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from torchtitan.tools.logging import logger
 
 
-class MoEStateDictAdapter(BaseStateDictAdapter):
+class MoEStateDictAdapter(StateDictAdapter):
     """
     StateDictAdapter for MoE models.
     HF MoE models store experts as a module list each with 2D weights. In torchtitan, we

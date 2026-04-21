@@ -10,12 +10,12 @@ from typing import Any
 
 logger = logging.getLogger()
 
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import Llama3Model
 
 
-class Llama3StateDictAdapter(BaseStateDictAdapter):
+class Llama3StateDictAdapter(StateDictAdapter):
     def __init__(
         self,
         model_config: Llama3Model.Config,

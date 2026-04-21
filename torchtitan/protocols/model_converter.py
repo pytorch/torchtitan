@@ -40,22 +40,25 @@ class ModelConverter(Protocol):
         key belongs to this converter.  Return ``None`` if the converter
         doesn't introduce new keys.
 
-        Used by ``ModelWrapper`` to split state dicts:
-        - ``StateDictMode.BASE`` excludes all converter-owned keys (for HF containers)
+        Used by ``ModelWrapper`` to exclude converter keys in BASE mode
+        (for HF container building).
         """
         return None
 
     def state_dict_transform(
         self,
-    ) -> Callable[[dict[str, Any]], dict[str, Any]] | None:
-        """Return a transform applied to the model state dict for export saves.
+    ) -> Callable[[dict[str, Any], bool], dict[str, Any]] | None:
+        """Return a transform for the model state dict during saves.
 
-        The returned callable takes a full state dict and returns a
-        (possibly filtered or modified) state dict.  Return ``None`` to
-        indicate no transform (the full state dict is used as-is).
+        The returned callable takes ``(state_dict, last_step)`` and returns
+        the transformed state dict.  Behavior depends on ``last_step``:
 
-        This is only called for last-step / model-only saves, not for
-        interval resume checkpoints.
+        - ``last_step=False`` (interval save): e.g. LoRA filters to adapter
+          keys only, QAT returns as-is.
+        - ``last_step=True`` (export save): e.g. LoRA merges adapter into
+          base weights, QAT dequantizes.
+
+        Return ``None`` if the converter doesn't need any transform.
         """
         return None
 
@@ -124,7 +127,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 
     def state_dict_transform(
         self,
-    ) -> Callable[[dict[str, Any]], dict[str, Any]] | None:
+    ) -> Callable[[dict[str, Any], bool], dict[str, Any]] | None:
         """Compose state_dict_transform from all converters."""
         transforms = [
             t for c in self.converters if (t := c.state_dict_transform()) is not None
@@ -134,11 +137,11 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         if len(transforms) == 1:
             return transforms[0]
 
-        def composed(sd: dict[str, Any]) -> dict[str, Any]:
+        def composed(sd: dict[str, Any], last_step: bool = False) -> dict[str, Any]:
             # Reverse order: undo transforms in the opposite order they were
             # applied during model construction (last converter undone first).
             for t in reversed(transforms):
-                sd = t(sd)
+                sd = t(sd, last_step)
             return sd
 
         return composed

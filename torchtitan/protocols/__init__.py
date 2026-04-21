@@ -10,15 +10,16 @@ from .model import BaseModel
 from .model_converter import ModelConverter, ModelConvertersContainer
 from .model_spec import FaultTolerantModelSpec, ModelSpec
 from .module import Module
-from .state_dict_adapter import BaseStateDictAdapter
+from .state_dict_adapter import BaseStateDictAdapter, StateDictAdapter
 
 __all__ = [
     "BaseModel",
-    "BaseStateDictAdapter",
     "Configurable",
     "FaultTolerantModelSpec",
     "ModelConverter",
     "ModelConvertersContainer",
     "ModelSpec",
     "Module",
+    "StateDictAdapter",
+    "BaseStateDictAdapter",
 ]
