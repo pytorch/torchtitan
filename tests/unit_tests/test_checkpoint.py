@@ -807,5 +807,57 @@ class TestModelWrapperModes(unittest.TestCase):
         torch.testing.assert_close(export_sd["weight"], expected)
 
 
+class TestMultiSourceLoading(unittest.TestCase):
+    """Tests that initial_load_path + additional_load_path loads two sources."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.base_dir = os.path.join(self.temp_dir, "base")
+        self.adapter_dir = os.path.join(self.temp_dir, "adapter")
+        os.makedirs(self.base_dir)
+        os.makedirs(self.adapter_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_plus_additional(self, mock_load, mock_rank):
+        """initial_load_path (base) + additional_load_path (adapter) = two loads."""
+        from torchtitan.components.state_dict_transforms import StateDictTransforms
+
+        mock_load.side_effect = lambda *a, **kw: None
+
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="disabled",
+            folder="nonexistent",
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=self.base_dir,
+            initial_load_model_only=True,
+            additional_load_path=self.adapter_dir,
+        )
+        with mock.patch("torch.distributed.new_group", return_value="pg"):
+            manager = CheckpointManager(
+                dataloader=FakeDataLoader(),
+                model_parts=[nn.Linear(2, 2)],
+                optimizers=FakeOptimizersContainer(),
+                lr_schedulers=FakeLRSchedulersContainer(),
+                states={},
+                config=cfg,
+                sd_transforms=StateDictTransforms(),
+                base_folder=self.temp_dir,
+            )
+
+        manager.load(step=-1)
+
+        # Source 1 (initial) + Source 2 (additional overlay) = two dcp.load calls
+        self.assertEqual(mock_load.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

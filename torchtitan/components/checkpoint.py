@@ -27,6 +27,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -360,6 +361,13 @@ class CheckpointManager(Configurable):
         This will load the model only, excluding the specified keys.
         """
 
+        additional_load_path: str = ""
+        """
+        Additional checkpoint path to load from after the primary checkpoint.
+        Useful for loading converter-specific weights (e.g. LoRA adapter)
+        from a separate source. Must be a valid DCP or HF safetensors checkpoint.
+        """
+
         enable_first_step_checkpoint: bool = False
         """
         Enable the checkpoint save at first step. This will save a checkpoint immediately
@@ -420,7 +428,6 @@ class CheckpointManager(Configurable):
                 LR_SCHEDULER: lr_schedulers,
             }
         )
-
         async_mode = config.async_mode.lower()
         self.enable_staging = (
             self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
@@ -434,6 +441,7 @@ class CheckpointManager(Configurable):
         self.pg: dist.ProcessGroup | None = None
 
         self.folder = os.path.join(base_folder, config.folder)
+
         self.initial_load_model_only = config.initial_load_model_only
         self.initial_load_in_hf = config.initial_load_in_hf
         self.initial_load_path = config.initial_load_path
@@ -446,6 +454,7 @@ class CheckpointManager(Configurable):
                     "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
                 )
         self.exclude_from_loading = config.exclude_from_loading
+        self.additional_load_path = config.additional_load_path
         self.interval = config.interval
         self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
@@ -515,6 +524,7 @@ class CheckpointManager(Configurable):
         async_mode: str,
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
+        fqn_to_index_mapping: dict[Any, int] | None = None,
     ) -> Future | AsyncSaveResponse | None:
         """Save the checkpoint with dcp.
 
@@ -599,27 +609,33 @@ class CheckpointManager(Configurable):
         checkpoint_id: str,
         from_hf: bool,
         from_quantized: bool,
+        allow_partial: bool = False,
     ) -> None:
-        """Load the checkpoint with dcp.
+        """Load a single checkpoint source.
 
         Args:
-            state_dict (dict): The state dict to load.
+            state_dict (dict): The state dict to load into.
             checkpoint_id (str): The checkpoint id to load.
             from_hf (bool): Whether to load from HuggingFace safetensors format.
             from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
+            allow_partial (bool): Whether to allow partial loading (missing keys
+                are silently skipped).
         """
+        planner = DefaultLoadPlanner(allow_partial_load=allow_partial)
+
         if from_hf:
-            self._load_with_adapter(checkpoint_id, from_quantized)
+            self._load_with_adapter(checkpoint_id, from_quantized, planner=planner)
         else:
-            self._load_from_dcp(state_dict, checkpoint_id)
+            self._load_from_dcp(state_dict, checkpoint_id, planner=planner)
 
     def _load_from_dcp(
         self,
         state_dict: dict[str, Any],
         checkpoint_id: str,
+        planner: DefaultLoadPlanner | None = None,
     ) -> None:
         """Load a DCP checkpoint and set model state."""
-        dcp.load(state_dict, checkpoint_id=checkpoint_id)
+        dcp.load(state_dict, checkpoint_id=checkpoint_id, planner=planner)
         # TODO: Since we flatten the model states in state_dict, we need to
         # manually call load_state_dict() for the model. Need to fix this.
         if MODEL in self.states:
@@ -629,6 +645,7 @@ class CheckpointManager(Configurable):
         self,
         checkpoint_id: str,
         from_quantized: bool,
+        planner: DefaultLoadPlanner | None = None,
     ) -> None:
         """Load a safetensors checkpoint using a state dict adapter.
 
@@ -651,6 +668,7 @@ class CheckpointManager(Configurable):
         dcp.load(
             hf_state_dict,
             storage_reader=hf_storage_reader,
+            planner=planner,
         )
         converted_sd = adapter.from_hf(hf_state_dict)
         if MODEL in self.states:
@@ -730,9 +748,17 @@ class CheckpointManager(Configurable):
     def load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.
 
-        This function will load the checkpoint for the given step. If ``step`` is -1, it
-        will load the latest checkpoint. If the checkpoint does not exist, it will return
-        False and load nothing.
+        Loads up to two sources in order:
+
+          1. **Initial model** (from ``initial_load_path`` or HF assets) —
+             loads the model weights. This is the same code path whether
+             it is the only source (first run, full training) or the
+             primary source that provides frozen/base weights before an
+             overlay is applied on top.
+          2. **Overlay** — either a resume checkpoint (from the checkpoint
+             folder) or additional weights (from ``additional_load_path``).
+             Overlays on top of source 1.  Uses ``allow_partial_load``
+             so missing keys are silently skipped.
 
         Args:
             step (int, optional): The step to load the checkpoint for. Defaults to -1.
@@ -743,62 +769,73 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
-        spec = self._resolve_checkpoint_path(step)
-        if spec is None:
+        if self.additional_load_path and not os.path.isdir(self.additional_load_path):
+            raise ValueError(
+                f"checkpoint.additional_load_path is invalid: {self.additional_load_path}"
+            )
+
+        begin = time.monotonic()
+        has_frozen = self.states[MODEL].has_frozen_params
+
+        # Source 1: initial model (single-source or primary for finetuning).
+        # Source 2: overlay — resume checkpoint or additional weights.
+        initial_spec = self._resolve_initial_load()
+        overlay_spec = self._resolve_overlay(step)
+
+        if initial_spec is None and overlay_spec is None:
             return False
 
-        logger.info(f"Loading the checkpoint from {spec.checkpoint_id}.")
-        begin = time.monotonic()
-        states = self._states_to_load(spec.model_only)
-        self.dcp_load(
-            states,
-            checkpoint_id=spec.checkpoint_id,
-            from_hf=spec.from_hf,
-            from_quantized=spec.from_quantized,
-        )
+        for spec, allow_partial in [
+            (initial_spec, False),
+            (overlay_spec, has_frozen),
+        ]:
+            if spec is not None:
+                self._load_from_spec(spec, allow_partial=allow_partial)
+
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
         return True
 
-    def _resolve_checkpoint_path(self, step: int) -> _CheckpointLoadSpec | None:
-        """Resolve which checkpoint to load.
-
-        Returns:
-            A ``_CheckpointLoadSpec`` describing the checkpoint, or ``None``
-            if there is no checkpoint to load.
-        """
-        if not os.path.exists(self.folder):
-            return self._resolve_initial_load()
-
-        # Checkpoint folder exists — resume from it.
-        if self.initial_load_path:
-            logger.warning(
-                "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
-                f"Checkpointer will use the checkpoints from the checkpoint.folder {self.folder}."
-            )
-        if self.initial_load_in_hf:
-            logger.warning(
-                "checkpoint.initial_load_in_hf is True but the checkpoint.folder exists. "
-                "Checkpointer will not load from HF safetensors"
-            )
-
-        step = self._find_load_step() if step == -1 else step
-        if step == -1:
-            return None
-        checkpoint_id = self._create_checkpoint_id(step)
-
-        if not os.path.isdir(checkpoint_id):
-            raise FileNotFoundError(
-                f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
-            )
-        return _CheckpointLoadSpec(
-            checkpoint_id, model_only=step == 0, from_hf=False, from_quantized=False
+    def _load_from_spec(
+        self, spec: _CheckpointLoadSpec, allow_partial: bool = False
+    ) -> None:
+        """Load a single checkpoint source described by a spec."""
+        logger.info(f"Loading checkpoint from {spec.checkpoint_id}.")
+        states = self._states_to_load(spec.model_only)
+        self.dcp_load(
+            states,
+            checkpoint_id=spec.checkpoint_id,
+            from_hf=spec.from_hf,
+            from_quantized=spec.from_quantized,
+            allow_partial=allow_partial,
         )
 
     def _resolve_initial_load(self) -> _CheckpointLoadSpec | None:
-        """Resolve the checkpoint path for initial loading (no checkpoint folder yet)."""
+        """Resolve the initial model checkpoint to load.
+
+        This is the same code path for both single-source (first run,
+        loads the full model) and multi-source (finetuning resume, loads
+        the frozen/base weights before the resume checkpoint overlays
+        trainable params on top).
+
+        Returns ``None`` when a resume checkpoint exists and all params
+        are trainable — the resume checkpoint already has everything.
+        """
+        has_resume = os.path.exists(self.folder)
+        has_frozen = self.states[MODEL].has_frozen_params
+
+        # When a resume checkpoint exists and all params are trainable,
+        # skip initial load — the resume checkpoint has everything.
+        if has_resume and not has_frozen:
+            if self.initial_load_path:
+                logger.warning(
+                    "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
+                    f"Checkpointer will use the checkpoints from the checkpoint.folder {self.folder}."
+                )
+            return None
+
         model_only = self.initial_load_model_only
         from_hf = self.initial_load_in_hf
         from_quantized = self.initial_load_in_hf_quantized
@@ -813,8 +850,7 @@ class CheckpointManager(Configurable):
             )
 
         if self.initial_load_path:
-            checkpoint_id = self.initial_load_path
-            if not os.path.isdir(checkpoint_id):
+            if not os.path.isdir(self.initial_load_path):
                 raise ValueError(
                     "checkpoint.initial_load_path is specified but the path is not valid."
                 )
@@ -823,21 +859,18 @@ class CheckpointManager(Configurable):
                     f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
                 )
             return _CheckpointLoadSpec(
-                checkpoint_id, model_only, from_hf, from_quantized
-            )
-
-        # Reached only when initial_load_path is not set (returned above).
-        if from_hf and (
-            self.sd_transforms.sd_adapter is None
-            or self.sd_transforms.hf_assets_path is None
-        ):
-            raise ValueError(
-                "from_hf is True but sd_adapter or hf_assets_path is not provided."
+                self.initial_load_path, model_only, from_hf, from_quantized
             )
 
         if from_hf:
+            if (
+                self.sd_transforms.sd_adapter is None
+                or self.sd_transforms.hf_assets_path is None
+            ):
+                raise ValueError(
+                    "from_hf is True but sd_adapter or hf_assets_path is not provided."
+                )
             checkpoint_id = self.sd_transforms.hf_assets_path
-            assert checkpoint_id is not None  # guarded above
             if not os.path.isdir(checkpoint_id):
                 raise ValueError(
                     "model.hf_assets_path is being used to load HF weights but the path is not valid. "
@@ -848,6 +881,39 @@ class CheckpointManager(Configurable):
             )
             return _CheckpointLoadSpec(
                 checkpoint_id, model_only, from_hf, from_quantized
+            )
+
+        return None
+
+    def _resolve_overlay(self, step: int) -> _CheckpointLoadSpec | None:
+        """Resolve the overlay checkpoint to load on top of the initial model.
+
+        Returns the resume checkpoint (from the checkpoint folder) if it
+        exists, otherwise falls back to ``additional_load_path`` for
+        first-run extra weights (e.g. pre-trained adapter).
+        """
+        if os.path.exists(self.folder):
+            step = self._find_load_step() if step == -1 else step
+            if step == -1:
+                return None
+            checkpoint_id = self._create_checkpoint_id(step)
+            if not os.path.isdir(checkpoint_id):
+                raise FileNotFoundError(
+                    f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
+                )
+            return _CheckpointLoadSpec(
+                checkpoint_id,
+                model_only=step == 0,
+                from_hf=False,
+                from_quantized=False,
+            )
+
+        if self.additional_load_path:
+            return _CheckpointLoadSpec(
+                self.additional_load_path,
+                model_only=True,
+                from_hf=False,
+                from_quantized=False,
             )
 
         return None
