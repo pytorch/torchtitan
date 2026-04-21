@@ -196,11 +196,26 @@ def _common_setup(config):
 
     tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
-    return model, model_config, model_spec, compile_config, parallel_dims, device, tokenizer
+    return (
+        model,
+        model_config,
+        model_spec,
+        compile_config,
+        parallel_dims,
+        device,
+        tokenizer,
+    )
 
 
 def _precompile_aot(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device, tokenizer
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+    tokenizer,
 ):
     """AOT mode precompilation: joint graph export + Inductor."""
     # Only one pass in the pipeline needs to produce serializable OutputCode.
@@ -285,7 +300,14 @@ def _precompile_aot(
 
 
 def _precompile_aot_fx_trace(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device, tokenizer
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+    tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
@@ -330,6 +352,15 @@ def _precompile_aot_fx_trace(
         parallel_dims=parallel_dims,
     )
 
+    # TODO: Add CP support — call prepare_context_parallel_input here
+    # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
+    # dimension, matching the trainer's post_dataloading_process.
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError(
+            "CooR precompile does not yet support context parallelism. "
+            "Set --parallelism.context_parallel_degree 1."
+        )
+
     # Enable loss_parallel when TP is active and loss_parallel is not
     # disabled. This matches the training path which wraps tracing +
     # execution inside train_context() → loss_parallel(). Without it,
@@ -368,7 +399,7 @@ def _precompile_aot_fx_trace(
         compile_time_passes,
     )
 
-    passes = compile_time_passes(traced_result)
+    passes = compile_time_passes(traced_result, config)
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )

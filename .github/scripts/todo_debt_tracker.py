@@ -138,39 +138,53 @@ def get_github_data(
     """
 
     endpoint = f"repos/{owner}/{repo}/{api_type}/{number}"
-    cmd = [
-        "gh",
-        "api",
-        endpoint,
-        "--jq",
-        "{state: .state, merged: .merged, merged_at: .merged_at, closed_at: .closed_at, created_at: .created_at}",
-    ]
+    jq_filter = (
+        "{"
+        "state: .state, "
+        "merged: .merged, "
+        "merged_at: .merged_at, "
+        "closed_at: .closed_at, "
+        "created_at: .created_at, "
+        "reason: .state_reason"
+        "}"
+    )
+    cmd = ["gh", "api", endpoint, "--jq", jq_filter]
 
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
         data = json.loads(res.stdout)
 
         status = data.get("state", "unknown")
-        # PRs can be 'closed' but 'merged'; prioritize 'merged' as a distinct state
+
+        # 1. Check Pull Request status first
         if api_type == "pulls" and data.get("merged"):
             status = "merged"
+        # 2. Refine "closed" status for Issues
+        elif api_type == "issues" and status == "closed":
+            # GitHub API returns 'completed' or 'not_planned' for state_reason
+            reason = data.get("reason")
+            if reason == "completed":
+                status = "completed"
+            else:
+                # This covers 'not_planned' or cases where reason is null
+                status = "closed"
 
         # Determine which timestamp to use
+        created_iso = data.get("created_at")
         event_iso = (
             data.get("merged_at") if data.get("merged") else data.get("closed_at")
         )
-        created_iso = data.get("created_at")
 
         return {
             "status": status,
-            "event_timestamp": event_iso,
             "created_timestamp": created_iso,
+            "event_timestamp": event_iso,
         }
     except Exception:
         return {
             "status": "unknown",
-            "event_timestamp": "",
             "created_timestamp": "",
+            "event_timestamp": "",
         }
 
 
@@ -233,34 +247,59 @@ def scan_file_for_todos(file_path: str) -> list[dict[str, str]]:
     found = []
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            current_block, block_start = [], 0
+            current_block = []
+            block_start = 0
+            in_todo_block = False
 
-            for i, line in enumerate(lines, start=1):
+            for i, line in enumerate(f, start=1):
                 stripped = line.lstrip()
                 is_comment = stripped.startswith("#")
-                is_new_todo = "TODO" in stripped
+                has_todo = "TODO" in stripped
 
-                # Logic: End current block if we hit code OR a brand new todo line
-                if not is_comment or (is_new_todo and current_block):
+                # Rule 1: Start a new block on a todo line
+                if is_comment and has_todo:
+                    # If we were already in a block, process it before starting new one
                     if current_block:
                         item = parse_comment_block(
                             current_block, block_start, file_path
                         )
                         if item:
                             found.append(item)
-                    current_block = []
 
-                if is_comment:
-                    if not current_block:
-                        block_start = i
+                    current_block = [line.rstrip()]
+                    block_start = i
+                    in_todo_block = True
+                    continue
+
+                # Rule 2: While in a block, keep adding comment lines
+                if in_todo_block and is_comment:
                     current_block.append(line.rstrip())
 
-            # Catch trailing blocks at the end of the file
+                    # Rule 3: If we found a link, this specific todo is "complete"
+                    # We look for the link in the current line specifically
+                    if LINK_REGEX.search(line):
+                        item = parse_comment_block(
+                            current_block, block_start, file_path
+                        )
+                        if item:
+                            found.append(item)
+                        current_block = []
+                        in_todo_block = False
+
+                # Rule 4: If we hit code, the block is over
+                elif not is_comment and in_todo_block:
+                    item = parse_comment_block(current_block, block_start, file_path)
+                    if item:
+                        found.append(item)
+                    current_block = []
+                    in_todo_block = False
+
+            # Catch trailing blocks
             if current_block:
                 item = parse_comment_block(current_block, block_start, file_path)
                 if item:
                     found.append(item)
+
     except Exception as e:
         print(f"Error reading {file_path}: {e}", file=sys.stderr)
     return found
@@ -316,14 +355,19 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
         "to be addressed.\n\n"
     )
 
-    groups = {"merged": [], "closed": [], "open": [], "unknown": []}
+    groups = {"merged": [], "completed": [], "closed": [], "open": [], "unknown": []}
     for item in all_items:
         groups.get(item["blocker_status"], groups["unknown"]).append(item)
 
-    emojis = {"merged": "💜 Merged", "closed": "🔴 Closed", "open": "🟢 Open"}
+    emojis = {
+        "merged": "💜 Merged (PR)",
+        "completed": "✅ Completed (Issue)",
+        "closed": "🔴 Closed / Not Planned",
+        "open": "🟢 Open",
+    }
     has_any = False
 
-    for status in ("merged", "closed", "open"):
+    for status in ("merged", "completed", "closed", "open"):
         if groups[status]:
             has_any = True
             output += f"### {emojis[status]}\n"
@@ -334,11 +378,16 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
             sorting_timestamp_key = (
                 "blocker_created_at" if status == "open" else "blocker_event_at"
             )
+            FALLBACK = datetime(2000, 1, 1, tzinfo=timezone.utc)
             sorted_items = sorted(
                 groups[status],
                 key=lambda x: (
-                    x[sorting_timestamp_key] or "2001-01-01",
-                    int(x["blocker_github_number"]),
+                    datetime.fromisoformat(
+                        x[sorting_timestamp_key].replace("Z", "+00:00")
+                    )
+                    if x[sorting_timestamp_key]
+                    else FALLBACK,
+                    int(x.get("blocker_github_number", 0)),
                 ),
             )
 
@@ -382,7 +431,7 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
     # 4. Footer with UTC timestamp
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     output += "---\n</br>"
-    output += f"*Generated by **TODO Debt Tracker** action at {now_utc}*"
+    output += f"*Generated by **TODO Debt Tracker** action on {now_utc}*"
 
     return output
 
