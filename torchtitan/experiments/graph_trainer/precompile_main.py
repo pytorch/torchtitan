@@ -352,13 +352,18 @@ def _precompile_aot_fx_trace(
         parallel_dims=parallel_dims,
     )
 
-    # TODO: Add CP support — call prepare_context_parallel_input here
-    # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
-    # dimension, matching the trainer's post_dataloading_process.
     if parallel_dims.cp_enabled:
-        raise NotImplementedError(
-            "CooR precompile does not yet support context parallelism. "
-            "Set --parallelism.context_parallel_degree 1."
+        from torchtitan.distributed.context_parallel import (
+            prepare_context_parallel_input,
+        )
+
+        dummy_inputs, dummy_labels, extra_kwargs = prepare_context_parallel_input(
+            dummy_inputs,
+            dummy_labels,
+            extra_kwargs,
+            parallel_dims.get_mesh("cp"),
+            device,
+            config.parallelism.context_parallel_load_balancer,
         )
 
     # Enable loss_parallel when TP is active and loss_parallel is not

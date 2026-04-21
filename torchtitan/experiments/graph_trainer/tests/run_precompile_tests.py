@@ -47,6 +47,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     regional_precompile_dir = tempfile.mkdtemp(prefix="precompile_regional_")
     fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     dsv3_fx_trace_precompile_dir = tempfile.mkdtemp(prefix="dsv3_fx_trace_precompile_")
+    cp_fx_trace_precompile_dir = tempfile.mkdtemp(prefix="cp_fx_trace_precompile_")
     return [
         PrecompileTestDefinition(
             precompile_command=(
@@ -144,6 +145,30 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             ],
             test_descr="aot_fx_trace deepseek_v3 precompile FSDP+TP+EP",
             test_name="aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep",
+            ngpu=8,
+        ),
+        PrecompileTestDefinition(
+            precompile_command=(
+                "python -m torchtitan.experiments.graph_trainer.precompile_main"
+                " --module graph_trainer.llama3"
+                " --config graph_trainer_llama3_debugmodel"
+                " --compile.mode aot_fx_trace"
+                f" --compile.precompile_artifact_dir {cp_fx_trace_precompile_dir}"
+                " --parallelism.data_parallel_shard_degree 2"
+                " --parallelism.tensor_parallel_degree 2"
+                " --parallelism.context_parallel_degree 2"
+            ),
+            override_args=[
+                "--module graph_trainer.llama3",
+                "--config graph_trainer_llama3_debugmodel",
+                "--compile.mode aot_fx_trace",
+                f"--compile.precompile_artifact_dir {cp_fx_trace_precompile_dir}",
+                "--parallelism.data_parallel_shard_degree 2",
+                "--parallelism.tensor_parallel_degree 2",
+                "--parallelism.context_parallel_degree 2",
+            ],
+            test_descr="aot_fx_trace llama3 precompile FSDP+TP+CP",
+            test_name="aot_fx_trace_llama3_precompile_fsdp_tp_cp",
             ngpu=8,
         ),
     ]
