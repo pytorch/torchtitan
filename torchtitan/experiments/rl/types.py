@@ -49,10 +49,6 @@ class Episode:
     token_logprobs: list[float]
     reward: float
     advantage: float
-    # TODO: remove once logging/eval have a task-aware path that can
-    # look up the expected answer separately. Keeping it here for now
-    # simplifies `_log_samples` and eval-time scoring.
-    expected_answer: str = ""
 
 
 @dataclass

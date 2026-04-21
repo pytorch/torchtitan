@@ -124,36 +124,17 @@ class Provisioner:
         return _bootstrap
 
 
-def _log_samples(
-    items: list[Episode] | list[Completion],
-    expected_answers: list[str] | None = None,
-) -> None:
-    """Log the first sample per prompt for debugging.
-
-    Accepts either Episodes (which carry ``expected_answer`` and
-    ``reward``) or Completions (pass ``expected_answers`` indexed by
-    ``prompt_idx``).
-    """
+def _log_samples(items: list[Episode] | list[Completion]) -> None:
+    """Log the first sample per prompt for debugging."""
     seen_prompts: set[int] = set()
     for item in items:
         if item.prompt_idx in seen_prompts:
             continue
         seen_prompts.add(item.prompt_idx)
-        extracted = extract_answer(item.text)
-        expected = getattr(item, "expected_answer", None)
-        if expected is None:
-            assert expected_answers is not None, (
-                "expected_answers is required when items lack expected_answer"
-            )
-            expected = expected_answers[item.prompt_idx]
-        is_correct = extracted == int(expected) if expected else None
-        mark = "+" if is_correct else "-"
         reward_str = (
             f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
         )
-        logger.info(
-            f"  [{mark}] expected={expected} extracted={extracted}{reward_str}"
-        )
+        logger.info(f"  [prompt {item.prompt_idx}]{reward_str}")
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
@@ -483,7 +464,7 @@ class RLTrainer(Configurable):
             format_ok += int(bool(re.search(r"\[ANSWER\]", c.text)))
 
         if self.config.log_samples:
-            _log_samples(completions, expected_answers=eval_answers)
+            _log_samples(completions)
 
         result = {
             "accuracy": correct / num_samples,
@@ -555,7 +536,6 @@ class RLTrainer(Configurable):
                             token_logprobs=c.token_logprobs,
                             reward=sc.reward,
                             advantage=sc.reward - group_mean,
-                            expected_answer=train_answers[pidx],
                         )
                     )
 
