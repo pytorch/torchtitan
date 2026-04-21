@@ -13,11 +13,52 @@ fields set at config creation time.
 from collections.abc import Callable
 from typing import Literal
 
-from torchtitan.models.common.attention import GQAttention, LocalMapInnerAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    FusedQKVLinear,
+    GQAttention,
+    LocalMapInnerAttention,
+    QKVLinear,
+    ScaledDotProductAttention,
+    VarlenAttention,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+    LocalTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
+
+
+def get_attention_config(
+    backend: str,
+) -> tuple[LocalMapInnerAttention.Config, str]:
+    """Map backend string to (inner_attention config, mask_type)."""
+    if backend == "sdpa":
+        return ScaledDotProductAttention.Config(), "causal"
+    elif backend == "flex":
+        return FlexAttention.Config(), "block_causal"
+    elif backend == "flex_flash":
+        from torchtitan.tools.utils import has_cuda_capability
+
+        if not has_cuda_capability(9, 0):
+            raise ValueError(
+                "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+            )
+        return (
+            FlexAttention.Config(
+                block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
+            ),
+            "block_causal",
+        )
+    elif backend == "varlen":
+        return VarlenAttention.Config(), "block_causal"
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
 
 
 def make_gqa_config(
@@ -29,6 +70,7 @@ def make_gqa_config(
     inner_attention: LocalMapInnerAttention.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
+    fuse_qkv: bool = False,
     use_rope: bool = True,
     mask_type: str = "causal",
     rope_backend: str = "complex",
@@ -36,20 +78,44 @@ def make_gqa_config(
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
-    hd = head_dim if head_dim is not None else dim // n_heads
+    per_head_dim = head_dim if head_dim is not None else dim // n_heads
+
+    if fuse_qkv:
+        qkv = FusedQKVLinear.Config(
+            head_dim=per_head_dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv,
+            wqkv=Linear.Config(
+                in_features=dim,
+                out_features=(n_heads + 2 * n_kv) * per_head_dim,
+                param_init=wqkv_param_init,
+            ),
+        )
+    else:
+        qkv = QKVLinear.Config(
+            head_dim=per_head_dim,
+            wq=Linear.Config(
+                in_features=dim,
+                out_features=n_heads * per_head_dim,
+                param_init=wqkv_param_init,
+            ),
+            wkv=Linear.Config(
+                in_features=dim,
+                out_features=n_kv * per_head_dim,
+                param_init=wqkv_param_init,
+            ),
+        )
+
     return GQAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        wq=Linear.Config(
-            in_features=dim, out_features=n_heads * hd, param_init=wqkv_param_init
-        ),
-        wkv=Linear.Config(
-            in_features=dim, out_features=n_kv * hd, param_init=wqkv_param_init
-        ),
+        qkv_linear=qkv,
         wo=Linear.Config(
-            in_features=n_heads * hd, out_features=dim, param_init=wo_param_init
+            in_features=n_heads * per_head_dim,
+            out_features=dim,
+            param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
         use_rope=use_rope,
@@ -86,13 +152,11 @@ def make_moe_config(
     router: TokenChoiceTopKRouter.Config,
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
-    score_before_experts: bool = True,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
     return MoE.Config(
         num_experts=num_experts,
-        score_before_experts=score_before_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
         experts=experts,
@@ -131,13 +195,66 @@ def make_router_config(
     )
 
 
+def make_token_dispatcher_config(
+    *,
+    num_experts: int,
+    top_k: int,
+    score_before_experts: bool = True,
+    comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
+) -> LocalTokenDispatcher.Config:
+    """Build the appropriate token dispatcher config.
+
+    Returns the right Config subclass based on comm_backend:
+    - None: LocalTokenDispatcher.Config (no EP communication)
+    - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
+    - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
+    - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
+    """
+    if comm_backend is None:
+        return LocalTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    elif comm_backend in ("deepep", "hybridep"):
+        return DeepEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            comm_backend=comm_backend,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
+        )
+    elif comm_backend == "torchao":
+        return TorchAOTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    elif comm_backend == "standard":
+        return AllToAllTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
+    else:
+        raise ValueError(
+            f"Unknown comm_backend: '{comm_backend}'. "
+            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
+        )
+
+
 def make_experts_config(
     *,
     dim: int,
     hidden_dim: int,
     num_experts: int,
+    top_k: int,
     param_init: dict[str, Callable],
+    score_before_experts: bool = True,
     use_grouped_mm: bool = True,
+    comm_backend: str | None = None,
+    non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -146,4 +263,11 @@ def make_experts_config(
         num_experts=num_experts,
         use_grouped_mm=use_grouped_mm,
         param_init=param_init,
+        token_dispatcher=make_token_dispatcher_config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            comm_backend=comm_backend,
+            non_blocking_capacity_factor=non_blocking_capacity_factor,
+        ),
     )

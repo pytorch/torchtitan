@@ -3,8 +3,6 @@ name: GraphTrainer 8 GPU Integration Tests
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
@@ -71,6 +69,10 @@ jobs:
         # Run the graph passes unit tests
         torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestReassignToPgPass -v
         pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestApplySACPass -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestAnnotateModuleFqns -v
+
+        # Run kernel annotation profiler tests (skips if cuda-compat < 13.1)
+        pytest torchtitan/experiments/graph_trainer/tests/test_profiler.py -v
 
         # Run the make_fx tracer unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation"
@@ -78,7 +80,8 @@ jobs:
         # Run precompile unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v
 
-        # Run bitwise deterministic guardrail test
+        # Run bitwise deterministic and SAC peak-memory guardrail tests
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_sac_peak_memory.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

@@ -3,8 +3,6 @@ name: Transformers Modeling Backend 8 GPU Integration Tests
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/transformers_modeling_backend/**'
       - '.github/workflows/integration_test_8gpu_transformers_modeling_backend.yaml'

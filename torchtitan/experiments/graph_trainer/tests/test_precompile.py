@@ -462,5 +462,145 @@ class TestConfigFingerprint(unittest.TestCase):
         self.assertNotEqual(fp_ab, fp_ba)
 
 
+class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    def test_artifact_pickle_roundtrip(self):
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import SubclassLayout
+        from torchtitan.experiments.graph_trainer.precompile import (
+            PrecompiledFxTraceArtifact,
+        )
+
+        flat_vals, spec = torch.utils._pytree.tree_flatten({"a": torch.zeros(2)})
+        artifact = PrecompiledFxTraceArtifact(
+            serialized_gm=b"fake_serialized_data",
+            state_fqns=["w1", "w2"],
+            num_flat_inputs=4,
+            input_subclass_layouts={
+                0: SubclassLayout(1, None),
+                1: SubclassLayout(1, None),
+            },
+            num_flat_outputs=2,
+            output_subclass_layouts={0: SubclassLayout(1, None)},
+            output_spec=spec,
+            tensor_input_indices=[0, 1, 2, 3],
+            config_fingerprint="test_fp_123",
+        )
+
+        data = pickle.dumps(artifact)
+        loaded = pickle.loads(data)
+
+        self.assertEqual(loaded.serialized_gm, artifact.serialized_gm)
+        self.assertEqual(len(loaded.state_fqns), 2)
+        self.assertEqual(loaded.num_flat_inputs, 4)
+        self.assertEqual(len(loaded.input_subclass_layouts), 2)
+        self.assertEqual(loaded.num_flat_outputs, 2)
+        self.assertEqual(loaded.config_fingerprint, "test_fp_123")
+
+    def test_fx_trace_save_load_fingerprint_mismatch(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _FX_TRACE_ARTIFACT_KEY,
+            precompile_fx_trace_load,
+            PrecompiledFxTraceArtifact,
+        )
+
+        flat_vals, spec = torch.utils._pytree.tree_flatten({"a": torch.zeros(2)})
+        artifact = PrecompiledFxTraceArtifact(
+            serialized_gm=b"fake",
+            state_fqns=["w"],
+            num_flat_inputs=2,
+            input_subclass_layouts={},
+            num_flat_outputs=1,
+            output_subclass_layouts={},
+            output_spec=spec,
+            tensor_input_indices=[0, 1],
+            config_fingerprint="old_fp",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save(_FX_TRACE_ARTIFACT_KEY, pickle.dumps(artifact))
+
+            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                precompile_fx_trace_load(
+                    storage,
+                    expected_fingerprint="new_fp",
+                )
+
+
+class TestCudagraphPass(unittest.TestCase):
+    """Test cudagraph_pass behavior."""
+
+    def test_non_graphmodule_raises(self):
+        """cudagraph_pass rejects non-GraphModule callables (e.g.
+        OutputCode from full_inductor_compilation)."""
+        from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
+
+        def plain_fn(*args):
+            return args
+
+        with self.assertRaisesRegex(TypeError, "requires a GraphModule"):
+            cudagraph_pass(
+                plain_fn, (torch.zeros(4),), is_forward=True, static_input_indices=[0]
+            )
+
+    def test_graphmodule_wraps_forward(self):
+        """cudagraph_pass wraps gm.forward with CUDAGraphWrapper."""
+        from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
+        example_inputs = (torch.zeros(4),)
+
+        with patch(
+            "torchtitan.experiments.graph_trainer.cudagraph.CUDAGraphWrapper"
+        ) as MockWrapper:
+            mock_instance = MagicMock()
+            MockWrapper.return_value = mock_instance
+            result = cudagraph_pass(
+                gm, example_inputs, is_forward=True, static_input_indices=[0]
+            )
+            self.assertIs(result, gm)
+            self.assertIs(gm.forward, mock_instance)
+
+
+class TestCudagraphFingerprintConsistency(unittest.TestCase):
+    """Test that save and load paths produce the same fingerprint.
+
+    Both paths compute the fingerprint from the original (unmodified)
+    compile_config — cudagraph stripping in precompile_main happens
+    AFTER fingerprint computation, so no manual filtering is needed.
+    """
+
+    def test_cudagraph_included_in_fingerprint(self):
+        """Cudagraph in passes should produce a different fingerprint
+        than without cudagraph — no filtering is applied."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+
+        cfg_with = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
+        cfg_without = _StubCompileConfig(passes=["full_inductor_compilation"])
+
+        fp_with = compute_config_fingerprint(_make_stub_model(), cfg_with, dims)
+        fp_without = compute_config_fingerprint(_make_stub_model(), cfg_without, dims)
+
+        self.assertNotEqual(fp_with, fp_without)
+
+    def test_same_config_produces_same_fingerprint(self):
+        """Both save and load paths use the same unmodified config,
+        so the fingerprint is identical."""
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+
+        cfg = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
+
+        fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
+        fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
+
+        self.assertEqual(fp1, fp2)
+
+
 if __name__ == "__main__":
     unittest.main()

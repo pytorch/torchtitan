@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import operator
+import time
 from collections import defaultdict
 from collections.abc import Callable
 
@@ -36,7 +37,12 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID, _MODULE_FQN
+from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
+from torchtitan.experiments.graph_trainer.debug_utils import (
+    log_graph_diff,
+    snapshot_graph,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
@@ -49,28 +55,39 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 from torchtitan.tools.logging import logger
 
 
-def construct_default_graph_passes(
+def _is_backward_node(node: torch.fx.Node) -> bool:
+    return node.meta.get("autograd_backward", False)
+
+
+def compile_time_passes(
     traced_result: "TracedResult",
+    *,
+    cudagraph_compatible: bool = False,
 ) -> list[Callable]:
-    """Build the default pass list for the aot_fx_trace compile path.
+    """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
-    Per-pass configuration (e.g. ``static_input_indices`` for cudagraph) is
-    bound here via ``functools.partial`` so that ``apply_graph_passes``
-    stays a generic pass runner with no pass-specific parameters.
+    If precompile is enabled, these are applied before serialization so
+    that compiled Triton kernels are baked into the artifact. Otherwise
+    they run at trace time via ``construct_default_graph_passes``.
 
-    Args:
-        traced_result: The traced graph and metadata from ``trace_train_step``.
-
-    Returns:
-        An ordered list of graph passes ready to apply.
+    cudagraph is excluded because it needs to re-capture the graph into
+    an in-memory CUDA graph at runtime
     """
+    # from torchtitan.experiments.graph_trainer.common_utils import (
+    #     get_transformer_block_buckets,
+    # )
     from torchtitan.models.common.attention import FlexAttention
 
     passes: list[Callable] = [
-        functools.partial(tlparse_log_graph_pass, graph_name="make_fx_graph_traced"),
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        # TODO: turn on after debugging composability with SAC pass
+        # functools.partial(
+        #     joint_transformer_block_bucketing_reordering_pass,
+        #     fsdp_manual_buckets=get_transformer_block_buckets(traced_result.model),
+        # ),
+        selective_activation_remat_pass,
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
@@ -81,20 +98,59 @@ def construct_default_graph_passes(
         ),
         regional_inductor_pass,
     ]
+    if cudagraph_compatible:
+        # Must run before custom_codegen_pass (last in pre_passes)
+        # which replaces the GraphModule's forward().
+        # Also must run before cudagraph_pass.
+        passes.append(insert_kernel_annotations_pass)
+    # TODO: Switch to upstream PyTorch implementation when
+    # https://github.com/pytorch/pytorch/pull/178246 lands.
+    # custom_codegen_pass saves the FX graph to disk for:
+    # 1. Debugging: inspect the generated graph code directly
+    # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+    #    gives fine-grained operator-level attribution in profiler traces
+    # 3. User-editable codegen: users can directly modify the generated
+    #    program on disk for fine-grain scheduling optimizations, with
+    #    hot-reload picking up changes at runtime
+    passes.append(custom_codegen_pass)
+    return passes
 
-    # cudagraph should be the last pass.
+
+def construct_default_graph_passes(
+    traced_result: "TracedResult",
+    *,
+    precompiled: bool = False,
+) -> list[Callable]:
+    """Build the pass list for the aot_fx_trace path.
+
+    When ``precompiled=False`` (default), returns the full list: cleanup,
+    FlexAttention annotation, regional_inductor, and cudagraph.
+
+    When ``precompiled=True``, the artifact already has cleanup and
+    regional_inductor baked in, so only cudagraph is returned.
+    """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    if is_cudagraph_compatible(traced_result.gm):
+    passes: list[Callable] = []
+    cudagraph_compatible = is_cudagraph_compatible(traced_result.gm)
+
+    if not precompiled:
+        passes.extend(
+            compile_time_passes(
+                traced_result, cudagraph_compatible=cudagraph_compatible
+            )
+        )
+
+    if cudagraph_compatible:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
                 cudagraph_pass,
                 is_forward=True,
                 static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
-
     return passes
 
 
@@ -102,6 +158,8 @@ def apply_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
     passes: list[Callable],
+    *,
+    compile_config: "GraphTrainerCompileConfig | None" = None,
 ) -> torch.fx.GraphModule:
     """Apply graph passes to the traced fwd+bwd graph.
 
@@ -110,9 +168,32 @@ def apply_graph_passes(
         example_inputs: Example (fake) inputs matching the graph signature.
         passes: Ordered list of pass callables, each with signature
             ``(gm, example_inputs, **kwargs) -> gm``.
+        compile_config: Optional compile config. When provided and
+            ``debug_graph_passes`` is True, logs timing, op-count diffs,
+            and before/after graphs to tlparse for each pass.
     """
+    debug = compile_config is not None and compile_config.debug_graph_passes
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
     for pass_fn in passes:
+        pass_name = (
+            pass_fn.func.__name__
+            if isinstance(pass_fn, functools.partial)
+            else pass_fn.__name__
+        )
+        if debug:
+            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+            before_snapshot = snapshot_graph(gm)
+            start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
+        assert isinstance(
+            gm, torch.fx.GraphModule
+        ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
+        if debug:
+            elapsed = time.perf_counter() - start
+            logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
+            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+            after_snapshot = snapshot_graph(gm)
+            log_graph_diff(before_snapshot, after_snapshot, pass_name)
     return gm
 
 
@@ -142,6 +223,58 @@ def transformer_block_bucketing_reordering_pass(
     manual_overlap_bucketing(
         gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
     )
+    gm.recompile()
+    return gm
+
+
+def joint_transformer_block_bucketing_reordering_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    fsdp_manual_buckets,
+) -> torch.fx.GraphModule:
+    """Apply manual bucketing and reordering on a joint fwd+bwd graph.
+
+    The joint graph is processed in two passes to ensure each direction's
+    collectives are bucketed independently and reordering uses the correct
+    execution order (forward order for fwd, reversed order for bwd).
+
+    Used by the aot_fx_trace mode where forward and backward are in a
+    single graph.
+    """
+
+    def _make_module_fqn_stack_fn(
+        *, bwd: bool
+    ) -> Callable[[torch.fx.Node], list[tuple[str, type]]]:
+        """Create a module_stack_fn that filters nodes by forward/backward direction."""
+
+        def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
+            is_bwd = node.meta.get("autograd_backward", False)
+            if is_bwd != bwd:
+                return []
+            fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+            if not fqn:
+                return []
+            return [(fqn, torch.nn.Module)]
+
+        return _stack_fn
+
+    # Forward graph pass: bucket and reorder forward collectives
+    manual_overlap_bucketing(
+        gm,
+        module_bucket_plans=fsdp_manual_buckets,
+        insert_overlap_deps=False,
+        module_stack_fn=_make_module_fqn_stack_fn(bwd=False),
+    )
+
+    # Backward backward pass: bucket and reorder backward collectives
+    manual_overlap_bucketing(
+        gm,
+        module_bucket_plans=fsdp_manual_buckets,
+        insert_overlap_deps=False,
+        module_stack_fn=_make_module_fqn_stack_fn(bwd=True),
+    )
+
     gm.recompile()
     return gm
 
@@ -260,12 +393,103 @@ def regional_inductor_pass(
     return gm
 
 
+def insert_kernel_annotations_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Insert mark_kernels() calls at module boundaries in the FX graph.
+
+    Reads ``node.meta["custom"]["module_fqn"]`` (set via
+    ``annotate_module_fqns``) and inserts enter/exit calls so that
+    CUDA graph capture records the annotations.
+
+    Requires ``cuda-python`` package and CUDA toolkit/driver >= 13.1
+    (or cuda-compat >= 13.1).  Returns the graph unchanged when unavailable.
+
+    Also enables annotation capture on :class:`CUDAGraphWrapper` so that
+    ``enable_annotations=True`` is passed to ``torch.cuda.graph()``.
+
+    Alternative approaches:
+
+    1. **fx.Interpreter**: During cudagraph capture, run the graph via an
+       ``fx.Interpreter`` subclass that reads ``module_fqn`` metadata and
+       calls ``mark_kernels`` enter/exit around each node — avoids mutating
+       the graph.
+    2. **Custom CodeGen**: Use a custom ``torch.fx.graph.CodeGen`` to emit
+       enter/exit lines (or ``with`` blocks) directly in the generated
+       Python code.
+
+    The current graph-pass approach is the least invasive.
+    """
+    from torch.cuda._graph_annotations import _is_tools_id_unavailable
+
+    from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+    from torchtitan.experiments.graph_trainer.cudagraph import (
+        enable_cudagraph_annotations,
+    )
+
+    def _enter(annotation: dict) -> object:
+        from torch.cuda._graph_annotations import mark_kernels
+
+        ctx = mark_kernels(annotation)
+        ctx.__enter__()
+        return ctx
+
+    def _exit(ctx: object) -> None:
+        ctx.__exit__(None, None, None)  # type: ignore[union-attr]
+
+    if _is_tools_id_unavailable():
+        return gm
+
+    enable_cudagraph_annotations()
+
+    graph = gm.graph
+    current_fqn: str | None = None
+    current_ctx_node = None
+
+    for node in list(graph.nodes):
+        fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+
+        if fqn != current_fqn:
+            # Close previous scope
+            if current_ctx_node is not None:
+                with graph.inserting_before(node):
+                    exit_node = graph.call_function(_exit, (current_ctx_node,))
+                    exit_node.meta["custom"] = {}
+                current_ctx_node = None
+
+            # Open new scope
+            if fqn is not None:
+                with graph.inserting_before(node):
+                    enter_node = graph.call_function(
+                        _enter,
+                        ({_MODULE_FQN: fqn},),
+                    )
+                    enter_node.meta["custom"] = {}
+                current_ctx_node = enter_node
+
+            current_fqn = fqn
+
+    # Close any trailing scope (before output/return)
+    if current_ctx_node is not None:
+        output_nodes = [n for n in graph.nodes if n.op == "output"]
+        if output_nodes:
+            with graph.inserting_before(output_nodes[0]):
+                exit_node = graph.call_function(_exit, (current_ctx_node,))
+                exit_node.meta["custom"] = {}
+
+    graph.lint()
+    gm.recompile()
+    return gm
+
+
 def cudagraph_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
     *,
     is_forward: bool,
     static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -284,7 +508,18 @@ def cudagraph_pass(
             when ``static_input_indices`` is not provided.
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors (as
+            opposed to opaque values like DeviceMesh). Used to compute which
+            inputs need copying for cudagraph replay. When not provided, this
+            is inferred from ``example_inputs``.
     """
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure cudagraph is not combined with passes that replace the "
+            f"GraphModule (e.g. full_inductor_compilation)."
+        )
+
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
     from torchtitan.experiments.graph_trainer.cudagraph import (
@@ -294,7 +529,12 @@ def cudagraph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
-    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    gm.forward = CUDAGraphWrapper(
+        gm.forward,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
+    )
     return gm
 
 
@@ -409,6 +649,11 @@ def apply_sac_pass(
         if node.op != "call_function":
             continue
 
+        # Skip backward nodes — they must not carry recompute tags,
+        # otherwise the remat pass would try to duplicate backward ops.
+        if _is_backward_node(node):
+            continue
+
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -426,7 +671,6 @@ def apply_sac_pass(
                 node.meta["recompute"] = parent.meta["recompute"]
                 node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
-
         custom_meta = node.meta.get("custom", {})
         ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
         node.meta["ac_graph_id"] = ac_region_id
@@ -459,6 +703,27 @@ def apply_sac_pass(
             f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
         )
     return gm
+
+
+def selective_activation_remat_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """Apply graph-based SAC to a traced fwd+loss+bwd graph.
+
+    Tags forward nodes with recompute policy via apply_sac_pass (backward
+    nodes are skipped automatically via ``node.meta["autograd_backward"]``), then
+    applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
+    PREFER_RECOMPUTE forward ops before backward and DCE originals.
+
+    The model must have been annotated with annotate_ac_regions before
+    tracing so that nodes have custom["ac_region_id"] metadata.
+    """
+    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
+        remat_using_tags_for_fwd_loss_bwd_graph,
+    )
+
+    apply_sac_pass(gm)
+    return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
 # Apply activation checkpointing on joint graph before partitioner
@@ -561,7 +826,7 @@ def inductor_decomposition_pass(
             f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
         )
 
-    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders, strict=True):
         # Copy all metadata from original to decomposed
         for key, value in orig.meta.items():
             if key not in decomp.meta:
@@ -668,6 +933,7 @@ def tlparse_log_graph_pass(
             include_stride=True,
             include_device=True,
             expanded_def=True,
+            additional_meta=["autograd_backward"],
         ),
         expect_trace_id=False,
     )
@@ -680,6 +946,7 @@ AVAILABLE_COMPILER_PASSES = {
     "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "custom_codegen": custom_codegen_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
