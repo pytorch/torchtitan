@@ -32,11 +32,13 @@ from torchtitan.components.checkpoint import (
     OPTIMIZER,
     TRAIN_STATE,
 )
+
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.state_dict_transforms import StateDictTransforms
 from torchtitan.experiments.ft.manager import FTManager
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -78,9 +80,10 @@ class FTCheckpointManager(CheckpointManager):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        sd_adapter: BaseStateDictAdapter | None,
+        sd_transforms: StateDictTransforms | None = None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
+        model_converters: ModelConvertersContainer | None = None,
     ) -> None:
         # Initialize the base checkpoint manager (without FT)
         super().__init__(
@@ -90,8 +93,9 @@ class FTCheckpointManager(CheckpointManager):
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
             states=states,
-            sd_adapter=sd_adapter,
+            sd_transforms=sd_transforms,
             base_folder=base_folder,
+            model_converters=model_converters,
         )
 
         self.ft_manager = (
@@ -107,9 +111,6 @@ class FTCheckpointManager(CheckpointManager):
                 "is False. This means replicas can retrain over the same data "
                 "multiple times, which can result in overfitting."
             )
-
-        if not self.enable:
-            return
 
         if self.ft_manager:
             optimizers.init_cache_state_dict()
@@ -134,11 +135,12 @@ class FTCheckpointManager(CheckpointManager):
         # FT may need staging even without async_with_pinned_mem
         if self.enable_ft_dataloader_checkpoints:
             self.enable_staging = True
-            self.ft_states = {DATALOADER: dataloader}
 
-            # FT needs gloo pg for async dataloader checkpoints
-            if self.pg is None:
-                self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
+        self.ft_states = {DATALOADER: dataloader}
+
+        # FT needs gloo pg for async dataloader checkpoints
+        if self.enable_ft_dataloader_checkpoints and self.pg is None:
+            self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -147,12 +149,15 @@ class FTCheckpointManager(CheckpointManager):
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 
+        if not self._should_save(curr_step, last_step):
+            return
+
         if not self.enable_ft_dataloader_checkpoints or (
             self.ft_manager
             # pyrefly: ignore [missing-attribute]
             and self.ft_manager.participating_rank() == 0
         ):
-            super().save(curr_step, last_step)
+            self._do_save(curr_step, last_step)
         elif self.enable_ft_dataloader_checkpoints:
             assert self.ft_manager is not None
             logger.info(
@@ -174,9 +179,9 @@ class FTCheckpointManager(CheckpointManager):
         return states
 
     def _async_wait(self) -> None:
-        # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
-        # so save_future can exist even when self.async_mode is DISABLED. The base
-        # class would incorrectly raise in that case, so we override to handle it.
+        # FT dataloader checkpoints use ASYNC mode regardless of self.async_mode,
+        # so the base class would incorrectly raise when async_mode is DISABLED
+        # but save_future exists from _ft_save.
         if self.save_future is None:
             return
         self.save_future.result()

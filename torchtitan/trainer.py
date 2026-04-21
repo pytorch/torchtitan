@@ -450,18 +450,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        from torchtitan.components.state_dict_transforms import StateDictTransforms
+
+        sd_transforms = StateDictTransforms.from_model_spec(
+            model_spec,
+            model_config,
+            export_dtype=config.checkpoint.export_dtype,
+            hf_assets_path=config.hf_assets_path,
+        )
+
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            sd_transforms=sd_transforms,
             base_folder=config.dump_folder,
+            model_converters=model_converters,
         )
 
         loss_parallel_enabled = (

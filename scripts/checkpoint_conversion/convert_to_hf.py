@@ -40,7 +40,7 @@ def convert_to_hf(
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
 
     # allocate state dict memory with empty weights to load checkpoint
-    state_dict = model._get_state_dict()
+    state_dict = model.state_dict()
     dcp.load(
         state_dict,
         checkpoint_id=input_dir,

@@ -133,7 +133,6 @@ class TestFTCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=self.ft_manager,
         )
