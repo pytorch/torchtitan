@@ -11,7 +11,7 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
-from torchtitan.config import CompileConfig, Function
+from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -37,16 +37,19 @@ def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     )
 
 
-class BaseLoss(Function):
+class BaseLoss(Configurable):
     """Base class for all loss functions.
 
     Provides compile support and a unified ``__call__`` signature:
     ``(pred, labels, global_valid_tokens) -> scaled_loss``.
-    Subclasses set ``Config.fn`` to their raw loss function.
+    Subclasses set ``self.fn`` to their raw loss function in ``__init__``.
     """
 
-    def __init__(self, config, *, compile_config: CompileConfig | None = None):
-        super().__init__(config)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
         if (
             compile_config is not None
             and compile_config.enable
@@ -68,16 +71,24 @@ class CrossEntropyLoss(BaseLoss):
     """Cross-entropy loss with sum reduction for token-based normalization."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
-        fn: LossFunction = cross_entropy_loss
+    class Config(BaseLoss.Config):
+        pass
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        self.fn: LossFunction = cross_entropy_loss
+        self._maybe_compile(compile_config)
 
 
 class MSELoss(BaseLoss):
     """MSE loss with sum reduction for Transformer models training (e.g. Flux)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
-        fn: LossFunction = mse_loss
+    class Config(BaseLoss.Config):
+        pass
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        self.fn: LossFunction = mse_loss
+        self._maybe_compile(compile_config)
 
 
 class GradAccumulator:
@@ -136,9 +147,7 @@ class GradAccumulator:
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
-        # Extract local tensor if DTensor (e.g. when TP is enabled)
-        from torch.distributed.tensor import DTensor
-
+        # Extract local tensor if DTensor
         if isinstance(chunk_grad, DTensor):
             chunk_grad = chunk_grad.to_local()
 
@@ -207,8 +216,7 @@ class ChunkedCELoss(BaseLoss):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
-        fn: LossFunction = cross_entropy_loss
+    class Config(BaseLoss.Config):
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
 
@@ -218,7 +226,8 @@ class ChunkedCELoss(BaseLoss):
         *,
         compile_config: CompileConfig | None = None,
     ):
-        super().__init__(config, compile_config=compile_config)
+        self.fn: LossFunction = cross_entropy_loss
+        self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
 
@@ -322,14 +331,16 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # Return a differentiable loss via _DeferredBackward. When
+        # Return a differentiable loss via DecoderOutputGradientBackProp. When
         # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DeferredBackward.backward which returns accumulated_grad
+        # calls DecoderOutputGradientBackProp.backward which returns accumulated_grad
         # as the gradient for hidden_states, propagating through the decoder.
-        return _DeferredBackward.apply(hidden_states, accumulated_grad, total_loss)
+        return DecoderOutputGradientBackProp.apply(
+            hidden_states, accumulated_grad, total_loss
+        )
 
 
-class _DeferredBackward(torch.autograd.Function):
+class DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
     Forward takes hidden_states (connected to decoder graph), the accumulated

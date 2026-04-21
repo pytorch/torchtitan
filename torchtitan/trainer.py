@@ -20,7 +20,12 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import ChunkedCELoss, IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import (
+    BaseLoss,
+    ChunkedCELoss,
+    IGNORE_INDEX,
+    LossFunction,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -96,15 +101,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         activation_checkpoint: ActivationCheckpointConfig = field(
             default_factory=ActivationCheckpointConfig
         )
-        # loss is excluded from tyro CLI parsing (init=False) because
-        # Function.Config contains a Callable field that tyro can't serialize.
-        loss: ChunkedCELoss.Config = field(
-            init=False, default_factory=ChunkedCELoss.Config
-        )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
             if self.debug.batch_invariant:

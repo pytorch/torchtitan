@@ -39,7 +39,7 @@ class FluxTrainer(Trainer):
         )
         # Overwrite parent class loss (CE → MSE for diffusion)
         loss: MSELoss.Config = field(  # pyrefly: ignore [bad-override]
-            init=False, default_factory=MSELoss.Config
+            default_factory=MSELoss.Config
         )
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""

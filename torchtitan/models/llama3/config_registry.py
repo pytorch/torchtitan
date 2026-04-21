@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -32,6 +33,7 @@ from . import model_registry
 
 def llama3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
@@ -127,6 +129,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
 
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -158,6 +161,7 @@ def llama3_8b() -> Trainer.Config:
 
 def llama3_70b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -190,6 +194,7 @@ def llama3_70b() -> Trainer.Config:
 
 def llama3_405b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-405B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -244,6 +249,7 @@ def sft_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel", attn_backend="flex")
 
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_spec,
         optimizer=OptimizersContainer.Config(lr=8e-4),
