@@ -7,12 +7,13 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -20,7 +21,6 @@ from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -171,42 +171,18 @@ class Validator(BaseValidator):
         """
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_kwargs are.
-        extra_kwargs: dict[str, Any] = {}
-
-        # TODO: deduplicate with Trainer.post_dataloading_process which has
-        # the same logic; extract a shared function to prevent further drift.
-        # Resolve positions once: per-document positions for block_causal,
-        # sequential positions when CP needs them for shard indexing,
-        # or None (model uses sequential RoPE slice by default).
-        model_config = getattr(model_parts[0], "config", None)
-        layer = getattr(model_config, "layer", None)
-        attn_config = getattr(layer, "attention", None) if layer else None
-        attn_mask_type = getattr(attn_config, "mask_type", "causal")
 
         positions = extra_inputs.pop("positions", None)
-        if attn_mask_type == "block_causal":
-            # Per-document positions from the dataloader
-            extra_kwargs["positions"] = positions
-        elif self.parallel_dims.cp_enabled:
-            # Sequential positions needed for correct RoPE after CP sharding
-            extra_kwargs["positions"] = torch.arange(
-                0, inputs.shape[1], dtype=torch.int32, device=inputs.device
-            ).expand(inputs.shape)
-
-        try:
-            # pyrefly: ignore [not-callable]
-            extra_kwargs["attention_masks"] = cast(
-                BaseModel, model_parts[0]
-            ).get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
-            )
-        except TypeError:
-            pass
+        model_config = getattr(model_parts[0], "config", None)
+        extra_kwargs = build_forward_extra_kwargs(
+            model_config,
+            model_parts[0],
+            inputs,
+            positions=positions,
+            tokenizer=self.tokenizer,
+            parallel_dims=self.parallel_dims,
+            extra_inputs=extra_inputs,
+        )
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

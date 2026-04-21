@@ -20,6 +20,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -41,7 +42,6 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
@@ -582,50 +582,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         """
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # extra_kwargs are forwarded to all PP stages; extra_inputs are only
-        # available to the first stage.  Positions go into extra_kwargs so
-        # every stage can apply RoPE correctly.
-        extra_kwargs: dict[str, Any] = {}
-
-        # Resolve positions once: per-document positions for block_causal,
-        # sequential positions when CP needs them for shard indexing,
-        # or None (model uses sequential RoPE slice by default).
-        if isinstance(self.model_config, Decoder.Config):
-            layer = self.model_config.layers[0]
-            attn_config = layer.attention
-        else:
-            attn_config = None
-        mask_type = getattr(attn_config, "mask_type", "causal")
 
         positions = extra_inputs.pop("positions", None)
-        if mask_type == "block_causal":
-            # Per-document positions from the dataloader
-            extra_kwargs["positions"] = positions
-        elif self.parallel_dims.cp_enabled:
-            # Sequential positions needed for correct RoPE after CP sharding
-            extra_kwargs["positions"] = torch.arange(
-                0, inputs.shape[1], dtype=torch.int32, device=self.device
-            ).expand(inputs.shape)
-
-        inner_attention = getattr(attn_config, "inner_attention", None)
-        if inner_attention is not None:
-            from torchtitan.models.common.attention import (
-                FlexAttention,
-                VarlenAttention,
-            )
-
-            if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
-            ):
-                assert (
-                    self.tokenizer is not None
-                ), "tokenizer is required for flex/varlen attention"
-                model = cast(Decoder, self.model_parts[0])
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    input_batch=inputs,
-                    tokenizer=self.tokenizer,
-                    extra_inputs=extra_inputs,
-                )
+        extra_kwargs = build_forward_extra_kwargs(
+            self.model_config,
+            self.model_parts[0],
+            inputs,
+            positions=positions,
+            tokenizer=self.tokenizer,
+            parallel_dims=self.parallel_dims,
+            extra_inputs=extra_inputs,
+        )
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

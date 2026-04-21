@@ -39,6 +39,7 @@ import functools
 import torch
 import torch.distributed as dist
 
+from torchtitan.components.forward_utils import build_forward_extra_kwargs
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -193,11 +194,28 @@ def _common_setup(config):
 
     logger.info("Model parallelized and materialized")
 
-    return model, model_config, model_spec, compile_config, parallel_dims, device
+    tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+    return (
+        model,
+        model_config,
+        model_spec,
+        compile_config,
+        parallel_dims,
+        device,
+        tokenizer,
+    )
 
 
 def _precompile_aot(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+    tokenizer,
 ):
     """AOT mode precompilation: joint graph export + Inductor."""
     # Only one pass in the pipeline needs to produce serializable OutputCode.
@@ -282,7 +300,14 @@ def _precompile_aot(
 
 
 def _precompile_aot_fx_trace(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+    tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
@@ -318,7 +343,23 @@ def _precompile_aot_fx_trace(
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
     extra_inputs: dict[str, torch.Tensor] = {}
-    extra_kwargs: dict[str, torch.Tensor] = {}
+
+    extra_kwargs = build_forward_extra_kwargs(
+        model_config,
+        model,
+        dummy_inputs,
+        tokenizer=tokenizer,
+        parallel_dims=parallel_dims,
+    )
+
+    # TODO: Add CP support — call prepare_context_parallel_input here
+    # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
+    # dimension, matching the trainer's post_dataloading_process.
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError(
+            "CooR precompile does not yet support context parallelism. "
+            "Set --parallelism.context_parallel_degree 1."
+        )
 
     # Enable loss_parallel when TP is active and loss_parallel is not
     # disabled. This matches the training path which wraps tracing +
@@ -402,6 +443,7 @@ def main():
         compile_config,
         parallel_dims,
         device,
+        tokenizer,
     ) = _common_setup(config)
 
     if mode == "aot":
@@ -413,6 +455,7 @@ def main():
             compile_config,
             parallel_dims,
             device,
+            tokenizer,
         )
     elif mode == "aot_fx_trace":
         _precompile_aot_fx_trace(
@@ -423,6 +466,7 @@ def main():
             compile_config,
             parallel_dims,
             device,
+            tokenizer,
         )
 
     dist.destroy_process_group()
