@@ -74,12 +74,7 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime
     """
-    from torchtitan.experiments.graph_trainer.common_utils import (
-        get_default_transformer_block_buckets,
-    )
     from torchtitan.models.common.attention import FlexAttention
-
-    n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
