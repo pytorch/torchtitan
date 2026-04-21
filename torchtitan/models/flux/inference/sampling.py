@@ -147,7 +147,10 @@ def generate_image(
             else None
         ),
         empty_clip_encodings=(
-            empty_batch["clip_encodings"] if enable_classifier_free_guidance else None
+            # pyrefly: ignore [unbound-name]
+            empty_batch["clip_encodings"]
+            if enable_classifier_free_guidance
+            else None
         ),
         classifier_free_guidance_scale=classifier_free_guidance_scale,
     )

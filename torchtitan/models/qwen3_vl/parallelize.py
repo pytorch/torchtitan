@@ -14,6 +14,7 @@ This module applies PT-D parallelisms and various training techniques
 import torch
 import torch._inductor.config
 import torch.nn as nn
+
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
@@ -25,6 +26,8 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
+
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -32,6 +35,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
+
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
@@ -312,6 +316,7 @@ def parallelize_qwen3_vl(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=False,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     # Apply activation checkpointing
