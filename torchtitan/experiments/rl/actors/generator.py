@@ -238,7 +238,8 @@ class VLLMGenerator(Actor, Configurable):
     async def generate(
         self,
         prompts: list[str],
-        sampling: SamplingConfig | None = None,
+        *,
+        sampling_config: SamplingConfig | None = None,
     ) -> list[Completion]:
         """Generate completions for the given prompts.
 
@@ -248,11 +249,11 @@ class VLLMGenerator(Actor, Configurable):
 
         Args:
             prompts: List of prompt strings.
-            sampling: Optional per-call override for the generator's
+            sampling_config: Optional per-call override for the generator's
                 default SamplingConfig. ``seed`` always comes from
                 ``config.debug.seed`` (not part of SamplingConfig).
         """
-        effective = sampling if sampling is not None else self.config.sampling
+        _sampling_config = sampling_config if sampling_config is not None else self.config.sampling
 
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -260,10 +261,10 @@ class VLLMGenerator(Actor, Configurable):
 
         with torch.no_grad():
             sampling_params = SamplingParams(
-                temperature=effective.temperature,
-                top_p=effective.top_p,
-                max_tokens=effective.max_tokens,
-                n=effective.n,
+                temperature=_sampling_config.temperature,
+                top_p=_sampling_config.top_p,
+                max_tokens=_sampling_config.max_tokens,
+                n=_sampling_config.n,
                 seed=self.config.debug.seed,
                 logprobs=1,
                 output_kind=RequestOutputKind.FINAL_ONLY,
