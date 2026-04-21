@@ -137,7 +137,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
-    --profiling.no-enable_profiling \
+    --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --training.steps 20
 
@@ -149,7 +149,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
     --parallelism.expert_parallel_degree=2 \
     --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
-    --profiling.no-enable_profiling \
+    --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --training.steps 20
 ```
@@ -163,8 +163,8 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 ### Profiling
 
-Add `--profiling.enable_profiling` to any `./run_train.sh` command.
-Set `--profiling.profile_freq` to control which step is captured
+Add `--profiler.enable_profiling` to any `./run_train.sh` command.
+Set `--profiler.profile_freq` to control which step is captured
 (default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
 
 ```bash
@@ -173,13 +173,13 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --profiling.enable_profiling \
-    --profiling.profile_freq 10
+    --profiler.enable_profiling \
+    --profiler.profile_freq 10
 ```
 
 ### Memory Snapshot
 
-Add `--profiling.enable_memory_snapshot` to capture a memory snapshot.
+Add `--profiler.enable_memory_snapshot` to capture a memory snapshot.
 The snapshot fires at every `profile_freq`-th step and is saved to
 `{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
 Each rank produces its own file:
@@ -194,8 +194,8 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --profiling.enable_memory_snapshot \
-    --profiling.profile_freq 10
+    --profiler.enable_memory_snapshot \
+    --profiler.profile_freq 10
 ```
 
 ### Bitwise Deterministic Guardrail
@@ -208,3 +208,19 @@ This verifies that the aot_fx_trace path produces bitwise identical losses
 and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
+
+### CUDA Graph Kernel Annotations
+
+The `insert_kernel_annotations_pass` labels CUDA graph kernels with their
+originating `nn.Module` path in profiler traces. It runs automatically in the
+`aot_fx_trace` path (bundled with the cudagraph pass). The post-processor
+is attached via ``Profiler.Config.trace_post_processors`` (see
+``cudagraph_annotate_trace_post_processor``) so exported traces are
+annotated automatically — no manual post-processing is needed.
+
+Requirements: `cuda-python` package and CUDA toolkit/driver >= 13.1
+(or `cuda-compat >= 13.1` on `LD_LIBRARY_PATH`). The pass is a no-op when
+these are unavailable.
+
+To view annotated traces, open the exported JSON in https://ui.perfetto.dev.
+Kernel events will have `module_fqn` fields like `layers.0.attention.wq`.

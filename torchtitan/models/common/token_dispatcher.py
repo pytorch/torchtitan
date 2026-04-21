@@ -357,9 +357,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         output_starts = segment_lens.cumsum(0) - segment_lens
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(
-                total, device=device
-            )  # pyrefly: ignore [no-matching-overload]
+            + torch.arange(total, device=device)
             - output_starts[seg_ids]
         )
 
@@ -492,7 +490,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             num_tokens_per_expert_group,
             ep_size,
             num_local_experts,
-            self.pad_multiple,  # pyrefly: ignore [bad-argument-type]
+            self.pad_multiple,
         )
         return (
             input_shape,

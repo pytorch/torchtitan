@@ -97,7 +97,7 @@ Batch-invariant mode guarantees that a model's output for a given input is **ide
 
 When enabled, batch-invariant mode will:
 - Replaces `mm`, `addmm`, `log_softmax`, and `mean.dim` with Triton kernels that use a fixed tile iteration order (via [batch_invariant_ops](https://github.com/thinking-machines-lab/batch_invariant_ops))
-- Forces NCCL to use Ring all-reduce with a single channel for deterministic inter-GPU collectives
+- Forces deterministic NCCL collectives (single channel, simple protocol, tree allreduce) matching vLLM's settings
 - Disables reduced-precision reductions and TF32 to prevent batch-size-dependent rounding
 - Forces `num_splits=1` in flash attention to prevent non-deterministic split-k reductions
 

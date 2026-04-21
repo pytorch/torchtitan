@@ -18,6 +18,21 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 _AC_REGION_ID = "ac_region_id"
+_MODULE_FQN = "module_fqn"
+
+
+def annotate_module_fqns(model: nn.Module) -> None:
+    """Annotate all modules' forward with their fully-qualified names.
+
+    Every named submodule (excluding the root) gets its forward method wrapped
+    with ``annotate_fn`` so that FX nodes carry ``module_fqn`` in
+    ``node.meta["custom"]``.
+
+    Call once after model construction, before tracing/compilation.
+    """
+    for fqn, submodule in model.named_modules():
+        if fqn:  # skip root module
+            submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
 
 
 def annotate_ac_regions(model: nn.Module) -> None:

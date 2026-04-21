@@ -52,23 +52,17 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
 
 
-@dataclass(kw_only=True, slots=True)
-class GraphTrainerConfig(Trainer.Config):
-    compile: GraphTrainerCompileConfig = field(
-        default_factory=GraphTrainerCompileConfig
-    )
-
-
 def to_graph_trainer_config(
     base_config: Trainer.Config,
     model_registry: Callable[[str], ModelSpec],
-) -> GraphTrainerConfig:
-    """Convert a base Trainer.Config to a GraphTrainerConfig.
+) -> "GraphTrainer.Config":
+    """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and replaces the model_spec with one
     from the graph_trainer model_registry. The compile field is removed and
-    left as the GraphTrainerConfig default; callers should explicitly set it.
+    left as the GraphTrainer.Config default; callers should explicitly set it.
     """
+    from .cudagraph import cudagraph_annotate_trace_post_processor
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
@@ -95,5 +89,12 @@ def to_graph_trainer_config(
     ac = d.get("activation_checkpoint")
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+
+    # Merge CUDA graph kernel annotations into profiler traces when profiling
+    # is active.  No-op otherwise (and no-op when requirements aren't met).
+    # It's also a no-op if there is CUDA graph is not enabled.
+    profiler = d.get("profiler")
+    if profiler is not None:
+        profiler.trace_post_processor = cudagraph_annotate_trace_post_processor()
 
     return GraphTrainer.Config(**d)
