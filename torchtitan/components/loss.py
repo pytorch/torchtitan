@@ -288,13 +288,19 @@ class ChunkedCELoss(BaseLoss):
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
         # Disable FSDP reshard on lm_head to keep weight unsharded across
-        # all chunks, avoiding repeated all-gathers. Reduce-scatter fires
-        # per-chunk, and FSDP2 accumulates the sharded gradients correctly.
+        # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
+        # grad sync into a single reduce-scatter at the last chunk by
+        # disabling gradient sync for chunks 0..N-2.
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(False)
             lm_head.set_reshard_after_backward(False)
+            lm_head.set_requires_gradient_sync(False, recurse=False)
 
-        for h_chunk, label_chunk in zip(h_chunks, label_chunks):
+        last_idx = len(h_chunks) - 1
+        for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
+            if fsdp_enabled and i == last_idx:
+                lm_head.set_requires_gradient_sync(True, recurse=False)
+
             logits = lm_head(h_chunk)
 
             chunk_loss_sum = self.fn(logits, label_chunk)
@@ -311,6 +317,7 @@ class ChunkedCELoss(BaseLoss):
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)
             lm_head.set_reshard_after_backward(True)
+            lm_head.set_requires_gradient_sync(True, recurse=False)
             lm_head.reshard()
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
