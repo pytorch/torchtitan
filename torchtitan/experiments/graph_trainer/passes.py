@@ -61,6 +61,7 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
 
 def compile_time_passes(
     traced_result: "TracedResult",
+    config: "GraphTrainer.Config",
     *,
     cudagraph_compatible: bool = False,
 ) -> list[Callable]:
@@ -73,21 +74,21 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime
     """
-    # from torchtitan.experiments.graph_trainer.common_utils import (
-    #     get_transformer_block_buckets,
-    # )
+    from torchtitan.experiments.graph_trainer.common_utils import (
+        get_default_transformer_block_buckets,
+    )
     from torchtitan.models.common.attention import FlexAttention
 
+    n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        # TODO: turn on after debugging composability with SAC pass
-        # functools.partial(
-        #     joint_transformer_block_bucketing_reordering_pass,
-        #     fsdp_manual_buckets=get_transformer_block_buckets(traced_result.model),
-        # ),
         selective_activation_remat_pass,
+        functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
+        ),
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
@@ -118,29 +119,31 @@ def compile_time_passes(
 
 def construct_default_graph_passes(
     traced_result: "TracedResult",
-    *,
-    precompiled: bool = False,
+    config: "GraphTrainer.Config",
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
-    When ``precompiled=False`` (default), returns the full list: cleanup,
+    When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
     FlexAttention annotation, regional_inductor, and cudagraph.
 
-    When ``precompiled=True``, the artifact already has cleanup and
-    regional_inductor baked in, so only cudagraph is returned.
+    When ``precompile_artifact_dir`` is set, the artifact has graph
+    transformed during precompile phase, so only cudagraph is returned.
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    passes: list[Callable] = []
     cudagraph_compatible = is_cudagraph_compatible(traced_result.gm)
 
-    if not precompiled:
+    has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
+
+    passes: list[Callable] = []
+    if not has_precompile_artifact:
         passes.extend(
             compile_time_passes(
-                traced_result, cudagraph_compatible=cudagraph_compatible
+                traced_result, config, cudagraph_compatible=cudagraph_compatible
             )
         )
 
+    # cudagraph should be the last pass.
     if cudagraph_compatible:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
