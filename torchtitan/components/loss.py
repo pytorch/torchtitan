@@ -286,10 +286,10 @@ class ChunkedCELoss(BaseLoss):
         label_chunks = torch.chunk(labels, num_chunks, dim=1)
 
         # Pre-allocate gradient accumulator in fp32 for numerical stability.
-        # Pass hidden_states as reference so GradAccumulator tracks DTensor
+        # Pass h_detached as reference so GradAccumulator tracks DTensor
         # metadata and returns a DTensor from result() if needed.
         grad_accumulator = GradAccumulator(
-            h_detached.shape,
+            h_detached,
             num_chunks=num_chunks,
             dtype=torch.float32,
         )

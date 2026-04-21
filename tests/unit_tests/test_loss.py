@@ -154,11 +154,10 @@ class TestGradAccumulator(unittest.TestCase):
         chunks = torch.chunk(reference, num_chunks, dim=1)
 
         acc = GradAccumulator(
-            (B, L, D),
-            device="cpu",
-            dtype=reference.dtype,
+            reference,
             num_chunks=num_chunks,
             seq_dim=1,
+            dtype=reference.dtype,
         )
         for chunk in chunks:
             acc.add(chunk)
@@ -174,9 +173,7 @@ class TestGradAccumulator(unittest.TestCase):
         reference = torch.randn(B, L, D)
         bf16_chunks = [c.bfloat16() for c in torch.chunk(reference, num_chunks, dim=1)]
 
-        acc = GradAccumulator(
-            (B, L, D), device="cpu", dtype=torch.float32, num_chunks=num_chunks
-        )
+        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
         for chunk in bf16_chunks:
             acc.add(chunk)
 
@@ -188,9 +185,7 @@ class TestGradAccumulator(unittest.TestCase):
 
     def test_too_many_adds_raises(self):
         """Verify error when adding more chunks than expected."""
-        acc = GradAccumulator(
-            (2, 8, 16), device="cpu", dtype=torch.float32, num_chunks=2
-        )
+        acc = GradAccumulator(torch.randn(2, 8, 16), num_chunks=2, dtype=torch.float32)
         acc.add(torch.randn(2, 4, 16))
         acc.add(torch.randn(2, 4, 16))
         with self.assertRaises(ValueError):

@@ -20,12 +20,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import (
-    BaseLoss,
-    ChunkedCELoss,
-    IGNORE_INDEX,
-    LossFunction,
-)
+from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -174,7 +169,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # TODO: we should make this list[BaseModel / Decoder] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
-    loss_fn: LossFunction
+    loss_fn: BaseLoss
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
