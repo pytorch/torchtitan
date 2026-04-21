@@ -91,7 +91,18 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        # Run E2E RL integration tests (TP=2 on 4 GPUs)
+        # Run default E2E RL integration tests (TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
           --hf_assets_path "$MODEL_PATH"
+
+        # Run bitwise parity tests (TP=2, batch-invariant mode)
+        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+
+        # Run batch-invariant E2E RL integration test (TP=2 on 4 GPUs)
+        python -m torchtitan.experiments.rl.tests.integration_tests \
+          $RUNNER_TEMP/artifacts-to-be-uploaded --test_suite h100 --ngpu 4 \
+          --hf_assets_path "$MODEL_PATH"
+
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
