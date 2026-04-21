@@ -139,8 +139,8 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
