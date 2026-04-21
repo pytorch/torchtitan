@@ -84,11 +84,11 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        selective_activation_remat_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
         ),
-        selective_activation_remat_pass,
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
@@ -126,15 +126,17 @@ def construct_default_graph_passes(
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
     FlexAttention annotation, regional_inductor, and cudagraph.
 
-    When ``precompile_artifact_dir`` is set, the artifact already has cleanup
-    and regional_inductor baked in, so only cudagraph is returned.
+    When ``precompile_artifact_dir`` is set, the artifact has graph
+    transformed during precompile phase, so only cudagraph is returned.
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
     cudagraph_compatible = is_cudagraph_compatible(traced_result.gm)
 
+    has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
+
     passes: list[Callable] = []
-    if not config.compile.precompile_artifact_dir:
+    if not has_precompile_artifact:
         passes.extend(
             compile_time_passes(
                 traced_result, config, cudagraph_compatible=cudagraph_compatible
