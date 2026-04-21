@@ -7,7 +7,7 @@
 import copy
 import importlib
 import math
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass, fields, MISSING
 
 import torch
 from torch import nn

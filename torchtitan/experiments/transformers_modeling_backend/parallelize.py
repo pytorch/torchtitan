@@ -38,8 +38,8 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    ParallelStyle,
     parallelize_module,
+    ParallelStyle,
     PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
@@ -54,7 +54,6 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
@@ -66,7 +65,6 @@ from torchtitan.experiments.transformers_modeling_backend.compile import (
 from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
 
 # ---------------------------------------------------------------------------
 # ParallelStyle classes for HF MoE
@@ -339,9 +337,7 @@ def parallelize_hf_transformers(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """

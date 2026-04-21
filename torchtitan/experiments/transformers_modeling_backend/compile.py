@@ -6,7 +6,6 @@
 
 import torch
 import torch.nn as nn
-
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )

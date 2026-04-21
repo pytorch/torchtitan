@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import HFTransformerModel
-
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
 
