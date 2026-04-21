@@ -11,8 +11,9 @@ IMPORT_SNIPPET = """import sys
 from pathlib import Path
 
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+for _helper_dir in (_THIS_DIR.parent / "candidate_models", _THIS_DIR):
+    if str(_helper_dir) not in sys.path:
+        sys.path.insert(0, str(_helper_dir))
 
 from rope_extension import rope_backward_pair, rope_forward_pair
 """
