@@ -560,11 +560,17 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
+    model_converters: list | None = None,
 ) -> ModelSpec:
     kwargs = {}
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_vl_configs[flavor](**kwargs)
+    if model_converters is not None:
+        config.model_converters = model_converters
+        for cc in model_converters:
+            converter = cc.build(model_compile_enabled=False)
+            converter.convert_config(config)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,

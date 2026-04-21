@@ -525,11 +525,26 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
+    float8_recipe: str | None = None,
+    float8_filter_fqns: list[str] | None = None,
+    float8_moe_fqns: list[str] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
+    if float8_recipe is not None:
+        from torchtitan.components.quantization.float8 import convert_to_float8
+
+        convert_to_float8(
+            config,
+            recipe_name=float8_recipe,
+            filter_fqns=float8_filter_fqns,
+        )
+    if float8_moe_fqns is not None:
+        from torchtitan.components.quantization.float8 import convert_moe_to_float8
+
+        convert_moe_to_float8(config, fqns=float8_moe_fqns)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,

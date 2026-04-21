@@ -349,11 +349,16 @@ def model_registry(
     flavor: str,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
+    float8_moe_fqns: list[str] | None = None,
 ) -> ModelSpec:
     config = llama4_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
+    if float8_moe_fqns is not None:
+        from torchtitan.components.quantization.float8 import convert_moe_to_float8
+
+        convert_moe_to_float8(config, fqns=float8_moe_fqns)
     return ModelSpec(
         name="llama4",
         flavor=flavor,

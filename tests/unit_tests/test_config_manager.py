@@ -128,7 +128,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert config.model_converters.converters == []
+        assert config.model_spec.model.model_converters == []
 
     # TODO: remove this test when we remove the merge functionality
     def test_extend_trainer_config_directly(self):

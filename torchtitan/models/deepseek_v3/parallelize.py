@@ -15,8 +15,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.components.quantization import find_pad_multiple
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -31,7 +29,6 @@ from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
-from torchtitan.protocols import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -41,11 +38,11 @@ def parallelize_deepseekv3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
+    pad_multiple: int | None = None,
 ):
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
@@ -58,20 +55,6 @@ def parallelize_deepseekv3(
         """
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-        if enable_float8_tensorwise_tp:
-            # TODO(jianiw): This branch needs to be tested and enabled
-            raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not tested for deepseekv3"
-            )
-
         enable_sp = parallelism.enable_sequence_parallel
 
         tp_mesh = parallel_dims.get_mesh("tp")
@@ -79,7 +62,6 @@ def parallelize_deepseekv3(
             model,
             tp_mesh,
             enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=False,
             enable_cp=parallel_dims.cp_enabled,
             enable_sp=enable_sp,
         )
@@ -107,7 +89,7 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            pad_multiple=find_pad_multiple(model_converters.converters),
+            pad_multiple=pad_multiple,
         )
 
     if parallel_dims.cp_enabled:
@@ -170,7 +152,6 @@ def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     enable_loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
     enable_cp: bool,
     enable_sp: bool = True,
 ):
@@ -200,13 +181,7 @@ def apply_non_moe_tp(
         },
     )
 
-    rowwise_parallel, colwise_parallel, prepare_module_input = (
-        RowwiseParallel,
-        ColwiseParallel,
-        PrepareModuleInput,
-    )
-
-    attention_kernel_plan = prepare_module_input(
+    attention_kernel_plan = PrepareModuleInput(
         input_layouts=(Shard(1), Shard(1), Shard(1)),
         desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
         use_local_output=True,
@@ -217,7 +192,7 @@ def apply_non_moe_tp(
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     positions_sharding = Replicate() if enable_cp else None
     norm_plan = SequenceParallel() if enable_sp else NoParallel()
-    rowwise_output_plan = rowwise_parallel(
+    rowwise_output_plan = RowwiseParallel(
         output_layouts=sp_layout, use_local_output=enable_sp
     )
 
@@ -225,7 +200,7 @@ def apply_non_moe_tp(
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": norm_plan,
-            "attention": prepare_module_input(
+            "attention": PrepareModuleInput(
                 input_layouts=(sp_layout, Replicate(), None, positions_sharding),
                 desired_input_layouts=(
                     Replicate(),
@@ -238,7 +213,7 @@ def apply_non_moe_tp(
             # DTensor so that the intermediate results k is generated as a DTensor and its
             # gradient is correctly handled by the autograd engine.
             "attention.wkv_a": NoParallel(),
-            "attention.wkv_b": colwise_parallel(use_local_output=False),
+            "attention.wkv_b": ColwiseParallel(use_local_output=False),
             "attention.kv_norm": NoParallel(),
             # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
             "attention.inner_attention": attention_kernel_plan,
@@ -248,14 +223,14 @@ def apply_non_moe_tp(
 
         # pyrefly: ignore [missing-attribute]
         if transformer_block.attention.q_lora_rank == 0:
-            layer_plan["attention.wq"] = colwise_parallel(
+            layer_plan["attention.wq"] = ColwiseParallel(
                 use_local_output=False
             )  # This is only used when q_lora_rank==0
         else:
             layer_plan.update(
                 {
                     "attention.wq_a": NoParallel(),
-                    "attention.wq_b": colwise_parallel(use_local_output=False),
+                    "attention.wq_b": ColwiseParallel(use_local_output=False),
                     "attention.q_norm": NoParallel(),
                 }
             )
@@ -264,13 +239,13 @@ def apply_non_moe_tp(
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
-                    "feed_forward": prepare_module_input(
+                    "feed_forward": PrepareModuleInput(
                         input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w1": ColwiseParallel(),
                     "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w3": ColwiseParallel(),
                 }
             )
 
@@ -282,7 +257,4 @@ def apply_non_moe_tp(
             parallelize_plan=layer_plan,
         )
 
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
+    logger.info("Applied Tensor Parallelism to the model")

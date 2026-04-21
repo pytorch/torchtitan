@@ -348,10 +348,16 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
+    model_converters: list | None = None,
 ) -> ModelSpec:
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
     )
+    if model_converters is not None:
+        config.model_converters = model_converters
+        for cc in model_converters:
+            converter = cc.build(model_compile_enabled=False)
+            converter.convert_config(config)
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,

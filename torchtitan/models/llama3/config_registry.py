@@ -11,7 +11,6 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -23,7 +22,6 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
@@ -91,27 +89,14 @@ def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
 
 def llama3_debugmodel_float8() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
-            Float8LinearConverter.Config(
-                enable_fsdp_float8_all_gather=True,
-                precompute_float8_dynamic_scale_for_fsdp=True,
-            ),
-        ],
-    )
+    config.model_spec = model_registry("debugmodel", float8_recipe="rowwise")
     return config
 
 
 def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
-            Float8LinearConverter.Config(
-                enable_fsdp_float8_all_gather=True,
-                precompute_float8_dynamic_scale_for_fsdp=True,
-                emulate=True,
-            ),
-        ],
+    config.model_spec = model_registry(
+        "debugmodel", float8_recipe="rowwise", float8_emulate=True
     )
     return config
 
@@ -189,15 +174,10 @@ def llama3_405b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_registry("405B"),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[
-                Float8LinearConverter.Config(
-                    enable_fsdp_float8_all_gather=True,
-                    precompute_float8_dynamic_scale_for_fsdp=True,
-                    filter_fqns=["output"],
-                ),
-            ],
+        model_spec=model_registry(
+            "405B",
+            float8_recipe="rowwise",
+            float8_filter_fqns=["output"],
         ),
         optimizer=OptimizersContainer.Config(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),

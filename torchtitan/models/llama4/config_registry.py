@@ -8,7 +8,6 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.float8 import Float8GroupedMMConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -16,7 +15,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -66,7 +64,11 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", moe_comm_backend="torchao"),
+        model_spec=model_registry(
+            "debugmodel",
+            moe_comm_backend="torchao",
+            float8_moe_fqns=["experts"],
+        ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -94,9 +96,6 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
             mode="selective",
         ),
         compile=CompileConfig(enable=True, components=["model", "loss"]),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[Float8GroupedMMConverter.Config(fqns=["experts"])]
-        ),
     )
 
 

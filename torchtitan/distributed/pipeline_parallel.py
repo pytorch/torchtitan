@@ -31,7 +31,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
@@ -49,7 +48,6 @@ def pipeline_llm(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -58,6 +56,7 @@ def pipeline_llm(
     model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
+    **kwargs,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
@@ -147,11 +146,11 @@ def pipeline_llm(
             m,
             parallel_dims=parallel_dims,
             training=training,
-            model_converters=model_converters,
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
+            **kwargs,
         )
         model_parts[i] = m
         # NOTE: this is to update the model in the stage

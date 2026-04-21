@@ -20,7 +20,6 @@ from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from . import model_registry
 
@@ -194,8 +193,9 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_schnell()
     config.compile = CompileConfig(enable=True)
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
+    config.model_spec = model_registry(
+        "flux-schnell",
+        model_converters=[
             MXFP8Converter.Config(
                 fqns=[
                     "double_blocks",
@@ -217,8 +217,9 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_dev()
     config.compile = CompileConfig(enable=True)
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
+    config.model_spec = model_registry(
+        "flux-dev",
+        model_converters=[
             MXFP8Converter.Config(
                 fqns=[
                     "double_blocks",

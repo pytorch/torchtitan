@@ -18,8 +18,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.components.quantization import find_pad_multiple
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -40,7 +38,6 @@ from torchtitan.models.common.token_dispatcher import (
 )
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
@@ -52,11 +49,11 @@ def parallelize_gptoss(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
+    pad_multiple: int | None = None,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -73,25 +70,12 @@ def parallelize_gptoss(
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         enable_sp = parallelism.enable_sequence_parallel
 
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
             enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=False,
             enable_sp=enable_sp,
         )
@@ -104,7 +88,7 @@ def parallelize_gptoss(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             enable_sp=True,
-            pad_multiple=find_pad_multiple(model_converters.converters),
+            pad_multiple=pad_multiple,
         )
 
     if parallel_dims.cp_enabled:
@@ -166,7 +150,6 @@ def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     enable_loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
     enable_sp: bool = True,
 ):
@@ -253,7 +236,7 @@ def apply_non_moe_tp(
         torch._inductor.config._micro_pipeline_tp = True
 
     logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        f"Applied {'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
     )
 

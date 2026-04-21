@@ -543,8 +543,16 @@ flux_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(
+    flavor: str,
+    model_converters: list | None = None,
+) -> ModelSpec:
     config = flux_configs[flavor]()
+    if model_converters is not None:
+        config.model_converters = model_converters
+        for cc in model_converters:
+            converter = cc.build(model_compile_enabled=False)
+            converter.convert_config(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,

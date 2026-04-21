@@ -8,10 +8,6 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.float8 import (
-    Float8GroupedMMConverter,
-    Float8LinearConverter,
-)
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -19,7 +15,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -114,7 +109,12 @@ def deepseek_v3_671b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_registry(
-            "671B", attn_backend="flex", moe_comm_backend="torchao"
+            "671B",
+            attn_backend="flex",
+            moe_comm_backend="torchao",
+            float8_recipe="rowwise",
+            float8_filter_fqns=["output", "router.gate"],
+            float8_moe_fqns=["experts"],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -141,10 +141,4 @@ def deepseek_v3_671b() -> Trainer.Config:
             mode="selective",
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[
-                Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
-                Float8GroupedMMConverter.Config(fqns=["experts"]),
-            ]
-        ),
     )

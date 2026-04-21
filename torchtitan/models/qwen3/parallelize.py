@@ -20,8 +20,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.components.quantization import find_pad_multiple
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -37,7 +35,6 @@ from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -46,11 +43,11 @@ def parallelize_qwen3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
+    pad_multiple: int | None = None,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -66,18 +63,6 @@ def parallelize_qwen3(
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         enable_sp = parallelism.enable_sequence_parallel
 
         tp_mesh = parallel_dims.get_mesh("tp")
@@ -85,7 +70,6 @@ def parallelize_qwen3(
             model,
             tp_mesh,
             enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
             enable_cp=parallel_dims.cp_enabled,
             enable_sp=enable_sp,
@@ -98,7 +82,7 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            pad_multiple=find_pad_multiple(model_converters.converters),
+            pad_multiple=pad_multiple,
         )
 
     if parallel_dims.cp_enabled:
@@ -158,7 +142,6 @@ def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     enable_loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
     enable_cp: bool,
     enable_sp: bool = True,
@@ -189,28 +172,6 @@ def apply_non_moe_tp(
         },
     )
 
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears with tensorwise scaling.
-    if enable_float8_tensorwise_tp:
-        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
-        from torchao.float8.float8_tensor_parallel import (
-            Float8ColwiseParallel,
-            Float8RowwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            Float8RowwiseParallel,
-            Float8ColwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-    else:
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
-            PrepareModuleInput,
-        )
-
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
@@ -218,7 +179,7 @@ def apply_non_moe_tp(
     positions_sharding = Replicate() if enable_cp else None
     norm_plan = SequenceParallel() if enable_sp else NoParallel()
     qk_norm_plan = SequenceParallel(sequence_dim=2)
-    rowwise_output_plan = rowwise_parallel(
+    rowwise_output_plan = RowwiseParallel(
         output_layouts=sp_layout, use_local_output=enable_sp
     )
 
@@ -234,21 +195,21 @@ def apply_non_moe_tp(
     for transformer_block in model.layers.values():
         if use_fused_qkv:
             qkv_plan = {
-                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wqkv": ColwiseParallel(use_local_output=False),
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }
         else:
             qkv_plan = {
-                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
-                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
-                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wq": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wk": ColwiseParallel(use_local_output=False),
+                "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
                 "attention.q_norm": qk_norm_plan,
                 "attention.k_norm": qk_norm_plan,
             }
         layer_plan = {
             "attention_norm": norm_plan,
-            "attention": prepare_module_input(
+            "attention": PrepareModuleInput(
                 input_layouts=(sp_layout, Replicate(), None, positions_sharding),
                 desired_input_layouts=(
                     Replicate(),
@@ -266,13 +227,13 @@ def apply_non_moe_tp(
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
-                    "feed_forward": prepare_module_input(
+                    "feed_forward": PrepareModuleInput(
                         input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w1": ColwiseParallel(),
                     "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w3": ColwiseParallel(),
                 }
             )
 
@@ -287,6 +248,6 @@ def apply_non_moe_tp(
         torch._inductor.config._micro_pipeline_tp = True
 
     logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        f"Applied {'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
     )

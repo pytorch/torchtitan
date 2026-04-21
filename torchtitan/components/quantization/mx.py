@@ -10,7 +10,6 @@ from typing import ClassVar, Literal
 
 import torch.nn as nn
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -41,11 +40,15 @@ class MXFP8Converter(QuantizationConverter):
         This is a prototype feature that requires the torchao nightly build.
         """
 
+        pad_token_groups_for_grouped_mm: bool = True
+        """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
+        Set to False when EP is enabled (TorchTitan handles padding instead,
+        except for DeepEP backend)."""
+
     def __init__(
         self,
         config: Config,
         *,
-        parallel_dims: ParallelDims,
         model_compile_enabled: bool,
     ):
         self.enabled = False
@@ -65,11 +68,6 @@ class MXFP8Converter(QuantizationConverter):
             logger.warning(
                 "torch.compile enablement is required for highest performance of MXFP8 dynamic quantization."
             )
-
-        # If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
-        # as part of the EP implementation (except for DeepEP backend).
-        # Otherwise, if EP is not enabled, we need TorchAO to pad the token groups.
-        self.pad_token_groups_for_grouped_mm = not parallel_dims.ep_enabled
 
         self.config = config
         self.enabled = True
@@ -97,7 +95,7 @@ class MXFP8Converter(QuantizationConverter):
             recipe = MXFP8TrainingRecipe(self.config.recipe_name)
             mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
             mxfp8_op_config.pad_token_groups_for_grouped_mm = (
-                self.pad_token_groups_for_grouped_mm
+                self.config.pad_token_groups_for_grouped_mm
             )
             quantize_(mod, config=mxfp8_op_config)
             return mod
@@ -114,11 +112,3 @@ class MXFP8Converter(QuantizationConverter):
             f"to use dynamic {self.config.recipe_name} quantization for grouped_mm and linear ops"
         )
 
-    def convert(self, model: nn.Module):
-        pass
-
-    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
-        """
-        MXFP8 training doesn't require any post-optimizer hooks at the moment
-        """
-        return

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .module import Module
 
@@ -59,6 +59,10 @@ class BaseModel(Module):
         Subclasses define model-specific hyperparameters.
         """
 
+        model_converters: list = field(default_factory=list)
+        """List of converter Config objects (e.g. Float8LinearConverter.Config).
+        Set by model_registry(); the trainer builds and applies them."""
+
         # TODO: This function violates encapsulation;
         # maybe replace it with config passes from outside.
         @abstractmethod
@@ -69,6 +73,7 @@ class BaseModel(Module):
             **kwargs,
         ) -> None:
             pass
+
 
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:

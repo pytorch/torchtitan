@@ -377,8 +377,20 @@ llama3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
+    float8_recipe: str | None = None,
+    float8_filter_fqns: list[str] | None = None,
+    float8_emulate: bool = False,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
+    if float8_recipe is not None:
+        from torchtitan.components.quantization.float8 import convert_to_float8
+
+        convert_to_float8(
+            config,
+            recipe_name=float8_recipe,
+            filter_fqns=float8_filter_fqns,
+            emulate=float8_emulate,
+        )
     return ModelSpec(
         name="llama3",
         flavor=flavor,
