@@ -41,6 +41,9 @@ dev = [
     "expecttest", # test_tokenizer
     "pyrefly==0.45.1",
 ]
+spmd-types = [
+    "spmd_types>=0.1.1",
+]
 
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
@@ -64,5 +67,5 @@ testpaths = ["tests"]
 
 [tool.pyrefly]
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
-ignore-missing-imports = ["torchao.*", "torchft"]  # optional dependencies
+ignore-missing-imports = ["torchao.*", "torchft", "spmd_types.*"]  # optional dependencies
 search-path = ["../pytorch"]  # local built pytorch
