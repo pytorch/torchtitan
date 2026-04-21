@@ -47,7 +47,7 @@ def parallelize_qwen3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config, d
+    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,

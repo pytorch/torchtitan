@@ -83,6 +83,7 @@ def _build_qwen3_layers(
     head_dim: int,
     hidden_dim: int,
     fuse_qkv: bool = False,
+    fuse_mlp: bool = False,
     attn_backend: str = "sdpa",
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
@@ -111,6 +112,7 @@ def _build_qwen3_layers(
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
+                    fuse_mlp=fuse_mlp,
                 ),
             )
         )
@@ -215,7 +217,7 @@ def _debugmodel(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _debugmodel_fused(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     n_layers = 8
@@ -249,6 +251,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=3072,
             fuse_qkv=True,
+            fuse_mlp=True,
             attn_backend=attn_backend,
         ),
     )
@@ -601,7 +604,7 @@ def _235b_a22b(
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
+    "debugmodel_fused": _debugmodel_fused,
     "0.6B": _0_6b,
     "1.7B": _1_7b,
     "4B": _4b,

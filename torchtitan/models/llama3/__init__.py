@@ -70,6 +70,7 @@ def _build_llama3_layers(
     hidden_dim: int,
     n_kv_heads: int | None = None,
     fuse_qkv: bool = False,
+    fuse_mlp: bool = False,
     attn_backend: str = "sdpa",
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
@@ -98,6 +99,7 @@ def _build_llama3_layers(
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
+                    fuse_mlp=fuse_mlp,
                 ),
             )
         )
@@ -135,7 +137,7 @@ def _debugmodel(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _debugmodel_fused(attn_backend: str = "sdpa") -> Llama3Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 6
@@ -162,6 +164,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=True,
+            fuse_mlp=True,
             attn_backend=attn_backend,
         ),
     )
@@ -365,7 +368,7 @@ def _405b(attn_backend: str = "sdpa") -> Llama3Model.Config:
 
 llama3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
+    "debugmodel_fused": _debugmodel_fused,
     "1B": _1b,
     "3B": _3b,
     "8B": _8b,
