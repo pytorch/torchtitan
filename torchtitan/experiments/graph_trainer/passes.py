@@ -85,10 +85,12 @@ def compile_time_passes(
         remove_identity_view_pass,
         remove_identity_slice_pass,
         selective_activation_remat_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
-        ),
+        # TODO: bucketing is failing for DSv3, allgather prefetching
+        # for Llama3 is not working.
+        # functools.partial(
+        #     joint_transformer_block_bucketing_reordering_pass,
+        #     fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
+        # ),
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
