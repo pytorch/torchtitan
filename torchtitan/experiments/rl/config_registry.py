@@ -208,6 +208,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
