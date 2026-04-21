@@ -213,15 +213,8 @@ class VarlenAttention(LocalMapInnerAttention):
                 # Only needed for FA3; FA2 is automatically batch-invariant.
                 varlen_kwargs["num_splits"] = 1
 
-        # Forward enable_gqa from GQAttention when Q and KV head counts differ.
-        # Guard with inspect.signature: enable_gqa was added to varlen_attn in
-        # a recent PyTorch build and may not exist in all nightlies.
         if kwargs.get("enable_gqa", False):
-            import inspect
-
-            sig = inspect.signature(varlen_attn)
-            if "enable_gqa" in sig.parameters:
-                varlen_kwargs["enable_gqa"] = True
+            varlen_kwargs["enable_gqa"] = True
 
         out_packed = varlen_attn(
             xq_packed,
