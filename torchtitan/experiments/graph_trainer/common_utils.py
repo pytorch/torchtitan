@@ -18,6 +18,21 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 _AC_REGION_ID = "ac_region_id"
+_MODULE_FQN = "module_fqn"
+
+
+def annotate_module_fqns(model: nn.Module) -> None:
+    """Annotate all modules' forward with their fully-qualified names.
+
+    Every named submodule (excluding the root) gets its forward method wrapped
+    with ``annotate_fn`` so that FX nodes carry ``module_fqn`` in
+    ``node.meta["custom"]``.
+
+    Call once after model construction, before tracing/compilation.
+    """
+    for fqn, submodule in model.named_modules():
+        if fqn:  # skip root module
+            submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
 
 
 def annotate_ac_regions(model: nn.Module) -> None:
@@ -122,6 +137,21 @@ def create_extra_fsdp_pg(parallel_dims: ParallelDims) -> None:
 def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
     """Look up the extra PG name for a given original FSDP PG name."""
     return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
+
+
+def get_default_transformer_block_buckets(
+    n_layers: int,
+) -> list[list[str] | str]:
+    """Get default transformer block buckets for manual bucketing passes.
+
+    Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
+    norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
+    """
+    return [
+        "tok_embeddings",
+        *[f"layers.{i}" for i in range(n_layers)],
+        ["norm", "output"],
+    ]
 
 
 def get_transformer_block_buckets(model) -> list[list[str] | str]:
