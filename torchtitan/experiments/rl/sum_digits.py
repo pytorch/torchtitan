@@ -94,16 +94,15 @@ class SumDigitsTask:
         expected = int(expected_answer) if expected_answer else 0
         rewards = []
         for c in completions:
-            text = c.text
-            extracted = extract_answer(text)
+            extracted = extract_answer(c.text)
             is_correct = extracted == expected
             reward = 1.0 if is_correct else -1.0
             # Format bonus: only if correct, exactly one [ANSWER] tag, and generation stops after it
-            answer_tags = re.findall(r"\[ANSWER\]", text)
+            answer_tags = re.findall(r"\[ANSWER\]", c.text)
             if (
                 is_correct
                 and len(answer_tags) == 1
-                and re.search(r"\[ANSWER\]\s*-?\d+\s*$", text)
+                and re.search(r"\[ANSWER\]\s*-?\d+\s*$", c.text)
             ):
                 reward += 0.2
             rewards.append(reward)

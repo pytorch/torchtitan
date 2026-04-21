@@ -124,25 +124,37 @@ class Provisioner:
         return _bootstrap
 
 
-def _log_samples(episodes: list[Episode], expected_answers: list[str]) -> None:
-    """Log the first completion per prompt for debugging.
+def _log_samples(
+    items: list[Episode] | list[Completion],
+    expected_answers: list[str] | None = None,
+) -> None:
+    """Log the first sample per prompt for debugging.
 
-    ``expected_answers`` is one entry per prompt, indexed by ``prompt_idx``.
+    Accepts either Episodes (which carry ``expected_answer`` and
+    ``reward``) or Completions (pass ``expected_answers`` indexed by
+    ``prompt_idx``).
     """
     seen_prompts: set[int] = set()
-    for ep in episodes:
-        if ep.prompt_idx in seen_prompts:
+    for item in items:
+        if item.prompt_idx in seen_prompts:
             continue
-        seen_prompts.add(ep.prompt_idx)
-        extracted = extract_answer(ep.text)
-        expected = expected_answers[ep.prompt_idx]
+        seen_prompts.add(item.prompt_idx)
+        extracted = extract_answer(item.text)
+        expected = getattr(item, "expected_answer", None)
+        if expected is None:
+            assert expected_answers is not None, (
+                "expected_answers is required when items lack expected_answer"
+            )
+            expected = expected_answers[item.prompt_idx]
         is_correct = extracted == int(expected) if expected else None
         mark = "+" if is_correct else "-"
-        logger.info(
-            f"  [{mark}] expected={expected} extracted={extracted} "
-            f"reward={ep.reward:+.1f}"
+        reward_str = (
+            f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
         )
-        logger.info(f"       A: {ep.text[:300].replace(chr(10), ' ').strip()}")
+        logger.info(
+            f"  [{mark}] expected={expected} extracted={extracted}{reward_str}"
+        )
+        logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
 class RLTrainer(Configurable):
@@ -471,17 +483,7 @@ class RLTrainer(Configurable):
             format_ok += int(bool(re.search(r"\[ANSWER\]", c.text)))
 
         if self.config.log_samples:
-            seen: set[int] = set()
-            for c in completions:
-                if c.prompt_idx in seen:
-                    continue
-                seen.add(c.prompt_idx)
-                extracted = extract_answer(c.text)
-                expected = eval_answers[c.prompt_idx]
-                is_correct = extracted == int(expected)
-                mark = "+" if is_correct else "-"
-                logger.info(f"  [{mark}] expected={expected} extracted={extracted}")
-                logger.info(f"       A: {c.text[:300].replace(chr(10), ' ').strip()}")
+            _log_samples(completions, expected_answers=eval_answers)
 
         result = {
             "accuracy": correct / num_samples,
@@ -553,11 +555,12 @@ class RLTrainer(Configurable):
                             token_logprobs=c.token_logprobs,
                             reward=sc.reward,
                             advantage=sc.reward - group_mean,
+                            expected_answer=train_answers[pidx],
                         )
                     )
 
             if self.config.log_samples:
-                _log_samples(episodes, train_answers)
+                _log_samples(episodes)
 
             # 5. Trainer forward + backward
             maybe_sharded_episodes = self._shard_episodes(episodes)
