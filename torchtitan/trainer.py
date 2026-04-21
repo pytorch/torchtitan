@@ -27,7 +27,6 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -262,11 +261,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
 
-        # Check if any converter uses quantization (FP8, MX, etc.)
-        has_quantization = any(
-            isinstance(cc, QuantizationConverter.Config)
-            for cc in model_config.model_converters
-        )
+        has_quantization = model_config.quantization is not None
 
         # metrics logging
         self.metrics_processor = config.metrics.build(

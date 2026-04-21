@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.mx import MXFP8Converter
+from torchtitan.components.quantization import QuantizationConfig
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -195,19 +195,17 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     config.compile = CompileConfig(enable=True)
     config.model_spec = model_registry(
         "flux-schnell",
-        model_converters=[
-            MXFP8Converter.Config(
-                fqns=[
-                    "double_blocks",
-                    "single_blocks",
-                    "img_in",
-                    "txt_in",
-                    "time_in",
-                    "vector_in",
-                    "final_layer",
-                ],
-            ),
-        ],
+        quantization=QuantizationConfig(
+            mxfp8_fqns=[
+                "double_blocks",
+                "single_blocks",
+                "img_in",
+                "txt_in",
+                "time_in",
+                "vector_in",
+                "final_layer",
+            ],
+        ),
     )
     return config
 
@@ -219,18 +217,16 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     config.compile = CompileConfig(enable=True)
     config.model_spec = model_registry(
         "flux-dev",
-        model_converters=[
-            MXFP8Converter.Config(
-                fqns=[
-                    "double_blocks",
-                    "single_blocks",
-                    "img_in",
-                    "txt_in",
-                    "time_in",
-                    "vector_in",
-                    "final_layer",
-                ],
-            ),
-        ],
+        quantization=QuantizationConfig(
+            mxfp8_fqns=[
+                "double_blocks",
+                "single_blocks",
+                "img_in",
+                "txt_in",
+                "time_in",
+                "vector_in",
+                "final_layer",
+            ],
+        ),
     )
     return config

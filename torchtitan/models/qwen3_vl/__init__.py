@@ -10,6 +10,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.components.quantization import QuantizationConfig
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import (
@@ -560,17 +561,15 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    model_converters: list | None = None,
+    quantization: QuantizationConfig | None = None,
 ) -> ModelSpec:
     kwargs = {}
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_vl_configs[flavor](**kwargs)
-    if model_converters is not None:
-        config.model_converters = model_converters
-        for cc in model_converters:
-            converter = cc.build(model_compile_enabled=False)
-            converter.convert_config(config)
+    if quantization is not None:
+        config.quantization = quantization
+        quantization.apply(config)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,

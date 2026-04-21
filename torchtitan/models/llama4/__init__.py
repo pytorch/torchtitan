@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.components.quantization import QuantizationConfig
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -349,16 +350,15 @@ def model_registry(
     flavor: str,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
-    float8_moe_fqns: list[str] | None = None,
+    quantization: QuantizationConfig | None = None,
 ) -> ModelSpec:
     config = llama4_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
-    if float8_moe_fqns is not None:
-        from torchtitan.components.quantization.float8 import convert_moe_to_float8
-
-        convert_moe_to_float8(config, fqns=float8_moe_fqns)
+    if quantization is not None:
+        config.quantization = quantization
+        quantization.apply(config)
     return ModelSpec(
         name="llama4",
         flavor=flavor,

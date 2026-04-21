@@ -10,6 +10,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.loss import build_mse_loss
+from torchtitan.components.quantization import QuantizationConfig
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -545,14 +546,12 @@ flux_configs = {
 
 def model_registry(
     flavor: str,
-    model_converters: list | None = None,
+    quantization: QuantizationConfig | None = None,
 ) -> ModelSpec:
     config = flux_configs[flavor]()
-    if model_converters is not None:
-        config.model_converters = model_converters
-        for cc in model_converters:
-            converter = cc.build(model_compile_enabled=False)
-            converter.convert_config(config)
+    if quantization is not None:
+        config.quantization = quantization
+        quantization.apply(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,

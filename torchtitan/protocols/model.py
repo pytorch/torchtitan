@@ -59,9 +59,9 @@ class BaseModel(Module):
         Subclasses define model-specific hyperparameters.
         """
 
-        model_converters: list = field(default_factory=list)
-        """List of converter Config objects (e.g. Float8LinearConverter.Config).
-        Set by model_registry(); the trainer builds and applies them."""
+        quantization: object | None = None
+        """QuantizationConfig set by model_registry(). Used by the trainer
+        to check has_quantization for metrics."""
 
         # TODO: This function violates encapsulation;
         # maybe replace it with config passes from outside.
