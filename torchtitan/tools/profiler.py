@@ -8,7 +8,9 @@ import os
 import pickle
 import time
 from dataclasses import dataclass
+from typing import Annotated
 
+import tyro
 import torch
 
 from torchtitan.config import Configurable
@@ -169,10 +171,13 @@ class Profiler(Configurable):
         save_memory_snapshot_folder: str = "memory_snapshot"
         """Memory snapshot files location."""
 
-        trace_post_processor: Function.Config | None = None
+        trace_post_processor: Annotated[
+            Function.Config | None, tyro.conf.Suppress
+        ] = None
         """Optional hook invoked with the trace path after each export.
 
         Wraps ``fn(trace_path: str) -> None``.
+        Set programmatically (not via CLI) — tyro cannot parse Callable types.
         """
 
     def __init__(
