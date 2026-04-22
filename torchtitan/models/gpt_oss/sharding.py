@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.sharding import (
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    dense_param_placement,
     replicate_norm_spec,
     rowwise_spec,
     sequence_parallel_spec,
@@ -17,9 +18,7 @@ from torchtitan.distributed.sharding import (
     set_qkv_linear_sharding,
 )
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
-
-TP = MeshDimName.TP
+from torchtitan.protocols.sharding import ShardingSpec
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
 
 def set_gpt_oss_sharding_spec(
     config: "GptOssModel.Config",
-    parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
     enable_sp: bool,
@@ -36,8 +34,6 @@ def set_gpt_oss_sharding_spec(
 
     No-op when TP is not enabled.
     """
-    if not parallel_dims.tp_enabled:
-        return
 
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
@@ -63,14 +59,14 @@ def _set_gpt_oss_layer_sharding(
     # Attention: input x gathered to Replicate, freqs_cis always Replicate.
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_spec = ShardingSpec(
-        state_shardings={"sinks": {TP: Shard(0)}},
-        input_layouts={
-            "x": {TP: attn_x_placement},
-            "freqs_cis": {TP: Replicate()},
+        state_shardings={"sinks": dense_param_placement(tp=Shard(0))},
+        in_src_shardings={
+            "x": dense_activation_placement(tp=attn_x_placement),
+            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
-        in_shardings={
-            "x": {TP: Replicate()},
-            "freqs_cis": {TP: Replicate()},
+        in_dst_shardings={
+            "x": dense_activation_placement(tp=Replicate()),
+            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
     )
     set_qkv_linear_sharding(attention.qkv_linear)

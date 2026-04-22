@@ -10,41 +10,45 @@ import torch
 
 
 @dataclass
-class Episode:
-    """
-    A single prompt + completion pair with reward and advantage.
+class Completion:
+    """A single generated sequence from the generator.
 
-    The generator creates Episodes (with group_id, no reward yet).
-    The grader fills in the reward.
-    The controller computes advantages across episodes sharing a group_id.
-    The trainer consumes the final Episodes with advantages set.
-
-    Attributes:
-        policy_version: Version of policy that produced this episode.
-        prompt_token_ids: Token IDs for the prompt.
-        text: Decoded completion text.
-        token_ids: Completion token IDs.
-        token_log_probs: Per-token log probabilities from the generator.
-        expected_answer: Expected answer for reward computation.
-            Passed to Episode by the generator — the generator
-            does not read this field.
-        reward: Scalar reward assigned by the grader.
-        group_id: Identifies which group this episode belongs to.
-            Episodes with the same group_id share a prompt and have
-            their advantages normalized together.
-        advantage: Advantage value computed by the controller (GRPO:
-            reward minus group mean reward).
+    Pure generation artifact - no reward, no advantage. ``prompt_idx``
+    is the position of the source prompt in the input ``prompts`` list.
     """
 
     policy_version: int
+    prompt_idx: int
     prompt_token_ids: list[int]
     text: str
     token_ids: list[int]
-    token_log_probs: list[float]
-    expected_answer: str = ""
-    reward: float = 0.0
-    group_id: str = ""
-    advantage: float = 0.0
+    token_logprobs: list[float]
+
+
+@dataclass
+class ScoredCompletion:
+    """A Completion with a scalar reward attached by the grader."""
+
+    completion: Completion
+    reward: float
+
+
+@dataclass
+class Episode:
+    """Training sample: flattened scored completion + GRPO advantage.
+
+    Flat shape (rather than composition) because the trainer collate
+    path and logging read these fields directly.
+    """
+
+    policy_version: int
+    prompt_idx: int
+    prompt_token_ids: list[int]
+    text: str
+    token_ids: list[int]
+    token_logprobs: list[float]
+    reward: float
+    advantage: float
 
 
 @dataclass

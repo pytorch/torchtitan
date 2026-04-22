@@ -353,6 +353,7 @@ def model_registry(
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
     )
+    set_gpt_oss_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,

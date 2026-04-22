@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-vLLM plugin for TorchTitan models.
+Registers TorchTitan models with vLLM's ModelRegistry.
 
 Usage:
-    from torchtitan.experiments.rl.plugin import register_model_to_vllm_model_registry
+    from torchtitan.experiments.rl.models.vllm_registry import register_model_to_vllm_model_registry
     register_model_to_vllm_model_registry(model_spec)
 """
 
@@ -30,10 +30,9 @@ def register_model_to_vllm_model_registry(
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components
     """
+    from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
-
-    from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
 
     logger = init_logger(__name__)
 

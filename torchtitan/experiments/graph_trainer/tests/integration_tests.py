@@ -430,6 +430,11 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_deepseekv3_inductor_decomposition",
             ngpu=8,
         ),
+        # TODO: DSv3 + cudagraph AOT tests are not included because MoE
+        # routing copies tensors to CPU (int64 _to_copy to device='cpu' via
+        # histc, argsort, and tolist in moe.py), which is fundamentally
+        # incompatible with CUDA graph capture. See run_precompile_tests.py
+        # for the same limitation on precompile tests.
         # === aot_fx_trace mode tests ===
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
         # introduces CUDA→CPU transfers incompatible with CUDA graph capture.

@@ -116,6 +116,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
 
+            # Populate sharding spec on the model config now that
+            # parallelism-driven flags (loss_parallel, enable_sp) are known.
+            if (
+                self.model_spec is not None
+                and self.model_spec.set_sharding_spec_fn is not None
+            ):
+                self.model_spec.set_sharding_spec_fn(
+                    self.model_spec.model,
+                    loss_parallel=not self.parallelism.disable_loss_parallel,
+                    enable_sp=self.parallelism.enable_sequence_parallel,
+                )
+
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
@@ -248,20 +260,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             trainer_config=config,
         )
         self.model_config = model_config
+        # Sharding specs are already populated on ``model_config`` by
+        # ``Trainer.Config.__post_init__`` (via ``set_sharding_spec_fn``),
+        # which runs before ``Trainer.__init__``.
 
-        # Fill sharding specs based on parallelism settings (before build)
-        if model_spec.set_sharding_spec_fn is not None:
-            model_spec.set_sharding_spec_fn(
-                model_config,
-                parallel_dims,
-                loss_parallel=not config.parallelism.disable_loss_parallel,
-                enable_sp=config.parallelism.enable_sequence_parallel,
-            )
+        logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
-        logger.info(
-            f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
-        )
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),

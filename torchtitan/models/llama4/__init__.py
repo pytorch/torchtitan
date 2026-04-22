@@ -355,6 +355,7 @@ def model_registry(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
+    set_llama4_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="llama4",
         flavor=flavor,

@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.sharding import (
+from torchtitan.models.common.decoder_sharding import (
     colwise_spec,
+    dense_activation_placement,
+    dense_param_placement,
     replicate_norm_spec,
     rowwise_spec,
     sequence_parallel_spec,
@@ -18,9 +19,7 @@ from torchtitan.distributed.sharding import (
     set_dense_ffn_sharding,
 )
 from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
-
-TP = MeshDimName.TP
+from torchtitan.protocols.sharding import ShardingSpec
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
@@ -31,7 +30,6 @@ if TYPE_CHECKING:
 
 def set_deepseek_v3_sharding_spec(
     config: "DeepSeekV3Model.Config",
-    parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
     enable_sp: bool,
@@ -40,8 +38,6 @@ def set_deepseek_v3_sharding_spec(
 
     No-op when TP is not enabled.
     """
-    if not parallel_dims.tp_enabled:
-        return
 
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
@@ -66,20 +62,20 @@ def _set_deepseek_v3_layer_sharding(
 
     # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
     attention.sharding_spec = ShardingSpec(
-        input_layouts={
-            "x": {TP: attn_x_placement},
-            "freqs_cis": {TP: Replicate()},
+        in_src_shardings={
+            "x": dense_activation_placement(tp=attn_x_placement),
+            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
-        in_shardings={
-            "x": {TP: Replicate()},
-            "freqs_cis": {TP: Replicate()},
+        in_dst_shardings={
+            "x": dense_activation_placement(tp=Replicate()),
+            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through
     # without mixing plain Tensor + DTensor in the matmul.
     replicate_weight = ShardingSpec(
-        state_shardings={"weight": {TP: Replicate()}},
+        state_shardings={"weight": dense_param_placement(tp=Replicate())},
     )
     attention.wkv_a.sharding_spec = replicate_weight
     attention.kv_norm.sharding_spec = replicate_weight
