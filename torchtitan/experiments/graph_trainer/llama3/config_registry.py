@@ -48,3 +48,28 @@ def graph_trainer_llama3_405b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_405b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
+
+
+def graph_trainer_llama3_8b_lc() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(llama3_8b(), model_registry)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        mode="jit",
+        backend="inductor",
+        passes=["auto_bucketing"],
+        low_contention_collectives=True,
+    )
+    return config
+
+
+def graph_trainer_llama3_8b_lc_force() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(llama3_8b(), model_registry)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        mode="jit",
+        backend="inductor",
+        passes=["auto_bucketing"],
+        low_contention_collectives=True,
+        low_contention_allow_nvlink_contention=True,
+    )
+    return config

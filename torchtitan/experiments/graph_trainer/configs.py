@@ -37,6 +37,15 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Joint graph pass names to apply on the joint forward-backward
     graph before partitioning. Only used in AOT mode."""
 
+    low_contention_collectives: bool = False
+    """Enable low-contention (Copy Engine) collective replacement.
+    Requires overlap scheduling (auto_bucketing pass with inductor backend)."""
+
+    low_contention_allow_nvlink_contention: bool = False
+    """Allow LC replacement on collectives overlapping other-group (e.g. TP)
+    collectives. When False (default), the LC pass skips these to avoid
+    CE/NCCL NVLink bandwidth contention."""
+
     precompile: bool = False
     """
     Enable serializable compilation. On first run, compiles with

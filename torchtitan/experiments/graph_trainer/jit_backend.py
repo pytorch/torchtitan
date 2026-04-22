@@ -87,6 +87,14 @@ def get_compile_backend_with_passes(
             torch._inductor.config.post_grad_custom_post_pass = (
                 inductor_autobucketing_reordering_pass
             )
+
+            if compile_config.low_contention_collectives:
+                dist_opts.enable_overlap_scheduling = True
+                dist_opts.enable_low_contention_collectives = True
+                dist_opts.low_contention_min_bytes_per_rank = 0
+                dist_opts.low_contention_allow_nvlink_contention = (
+                    compile_config.low_contention_allow_nvlink_contention
+                )
         else:
             raise ValueError(
                 f"Unsupported backend {compile_config.backend} for auto_bucketing pass"
