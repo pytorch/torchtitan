@@ -36,6 +36,7 @@ def build_minimal_trainer(
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
+    trainer.ntokens_seen = 0
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
@@ -47,8 +48,10 @@ def build_minimal_trainer(
                 if compile_joint_passes is None
                 else list(compile_joint_passes),
                 precompile_artifact_dir="",
+                enable_cudagraph=True,
                 debug_graph_passes=False,
             ),
+            model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode=activation_checkpoint_mode
             ),

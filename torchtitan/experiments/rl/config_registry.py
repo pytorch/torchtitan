@@ -44,6 +44,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -58,8 +59,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -83,6 +84,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -97,8 +99,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -109,9 +111,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
-    model_spec = model_registry("14B", attn_backend="varlen")
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
         trainer=PolicyTrainer.Config(
@@ -123,8 +124,10 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=8,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -136,8 +139,8 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -174,8 +177,8 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=4,
             sampling=SamplingConfig(
+                n=4,
                 temperature=1.0,
                 top_p=0.95,
                 max_tokens=50,
@@ -205,6 +208,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             debug=batch_invariant_config,
@@ -220,8 +225,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
-            num_samples_per_prompt=8,
             sampling=SamplingConfig(
+                n=8,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,

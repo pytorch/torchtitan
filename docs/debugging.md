@@ -2,12 +2,12 @@
 
 Launch training job with the following command (or alternatively set configs in your config_registry function)
 ```
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
+MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiler.enable_memory_snapshot --profiler.save_memory_snapshot_folder memory_snapshot
 ```
-* `--profiling.enable_memory_snapshot`: to enable memory profiling
-* `--profiling.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
+* `--profiler.enable_memory_snapshot`: to enable memory profiling
+* `--profiler.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
 	+ In case of OOMs, the snapshots will be in `./outputs/memory_snapshot/iteration_x_exit`.
-	+ Regular snapshots (taken every `profiling.profile_freq` iterations) will be in `memory_snapshot/iteration_x`.
+	+ Regular snapshots (taken every `profiler.profile_freq` iterations) will be in `memory_snapshot/iteration_x`.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
@@ -21,15 +21,15 @@ For example, given the following in your config_registry function:
 ```python
 def my_config() -> Trainer.Config:
     return Trainer.Config(
-        profiling=ProfilingConfig(enable_memory_snapshot=True),
+        profiler=Profiler.Config(enable_memory_snapshot=True),
         # ...
     )
 ```
 You can override it at runtime via CLI with:
 
 ```bash
---profiling.no_enable_memory_snapshot
---profiling.no-enable-memory-snapshot  # Equivalent
+--profiler.no_enable_memory_snapshot
+--profiler.no-enable-memory-snapshot  # Equivalent
 ```
 
 > Note: `--enable_memory_snapshot=False` will **not** work. Use `--no_enable_memory_snapshot` instead.
@@ -45,7 +45,7 @@ python -m torchtitan.config.manager --module llama3 --config llama3_8b [your cli
 For example,
 
 ```bash
-python -m torchtitan.config.manager --module llama3 --config llama3_8b --profiling.enable_memory_snapshot
+python -m torchtitan.config.manager --module llama3 --config llama3_8b --profiler.enable_memory_snapshot
 ```
 
 To list all available CLI flags and usage:
