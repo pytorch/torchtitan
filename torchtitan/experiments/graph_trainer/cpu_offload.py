@@ -316,9 +316,9 @@ def apply_cpu_offload_pass(
 
     for node, bwd_users in offloadable:
         val = node.meta.get("val")
-        assert val is not None, (
-            f"Node {node.name} tagged for offload has no 'val' metadata"
-        )
+        assert (
+            val is not None
+        ), f"Node {node.name} tagged for offload has no 'val' metadata"
 
         # Infer reload device from the original tensor's device before offload
         device = val.device

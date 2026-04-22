@@ -193,9 +193,9 @@ def apply_graph_passes(
             before_snapshot = snapshot_graph(gm)
             start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
-        assert isinstance(gm, torch.fx.GraphModule), (
-            f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
-        )
+        assert isinstance(
+            gm, torch.fx.GraphModule
+        ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
         if debug:
             elapsed = time.perf_counter() - start
             logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
@@ -590,24 +590,24 @@ def annotate_flex_attention_for_regional_inductor_pass(
             torch.ops.higher_order.flex_attention_backward,
         }:
             continue
-        node.meta.setdefault("custom", {})["compile_with_inductor"] = (
-            flex_compile_annotation
-        )
+        node.meta.setdefault("custom", {})[
+            "compile_with_inductor"
+        ] = flex_compile_annotation
         for inp in node.all_input_nodes:
             if inp.op != "get_attr":
                 continue
             submod = getattr(gm, inp.target, None)
             if not isinstance(submod, torch.fx.GraphModule):
                 continue
-            inp.meta.setdefault("custom", {})["compile_with_inductor"] = (
-                flex_compile_annotation
-            )
+            inp.meta.setdefault("custom", {})[
+                "compile_with_inductor"
+            ] = flex_compile_annotation
 
             # Following are the nodes in mask_mod subgraph
             for sub_node in submod.graph.nodes:
-                sub_node.meta.setdefault("custom", {})["compile_with_inductor"] = (
-                    mask_compile_annotation
-                )
+                sub_node.meta.setdefault("custom", {})[
+                    "compile_with_inductor"
+                ] = mask_compile_annotation
     return gm
 
 
