@@ -17,6 +17,7 @@ import copy
 import tempfile
 import unittest
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -71,6 +72,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_registry: Callable
     annotate_model: Callable
     model_flavor: str
+    attn_backend: str = "sdpa"
 
     def setUp(self):
         # Disable max_autotune for FlexAttention to ensure bitwise-identical
@@ -89,7 +91,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
 
         _set_deterministic()
-        model_spec = self.model_registry(self.model_flavor)
+        model_spec = self.model_registry(
+            self.model_flavor, attn_backend=self.attn_backend
+        )
         self.model_config = model_spec.model
         vocab_size = self.model_config.vocab_size
         with torch.device("meta"):
@@ -185,7 +189,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Step 2: Apply compile-time passes (cleanup + regional_inductor)
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
-            passes = compile_time_passes(traced_result)
+            config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+            )
+            passes = compile_time_passes(traced_result, config)
             traced_result.gm = apply_graph_passes(
                 traced_result.gm,
                 traced_result.example_inputs,
@@ -201,7 +208,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         # Step 4: Apply load-time passes (cudagraph)
         if enable_passes:
-            passes = construct_default_graph_passes(loaded_result, precompiled=True)
+            load_config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(
+                    precompile_artifact_dir="precompiled",
+                    enable_cudagraph=True,
+                ),
+            )
+            passes = construct_default_graph_passes(loaded_result, load_config)
             loaded_result.gm = apply_graph_passes(
                 loaded_result.gm,
                 loaded_result.example_inputs,
@@ -274,11 +288,11 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """15134607def7232e128240d553c8ee7021a7edbc2ed44d86e927ba61e490b865""",
+            """22b2fc47c014ae4ff5e51da4d32868f869c08fe847772a54ba9931f6a8f7c198""",
         )
         assert_expected_inline(
             grad_hash,
-            """66bbbbc98b4c1635e42a133ac1fbd499a2b8633ca879f4121cf206708c21dbdf""",
+            """a40e4a743e8b631f713fa1b0e8008c548b8723a5a9be43e94de8ba3e09d0b689""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -351,7 +365,8 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(llama3_model_registry)
-    model_flavor = "debugmodel_flex_attn"
+    model_flavor = "debugmodel"
+    attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
 
     @unittest.skipUnless(
@@ -368,11 +383,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """714c6b36b72327f2f11da003a219b6ff84f83e785464133f729e4f82c1913232""",
+            """ebf72718629a5feccaf49bce350f954cc791d8f186b42068b6ce7487db6444bb""",
         )
         assert_expected_inline(
             grad_hash,
-            """2eb6e999ebe213e69f8e85ecabea46ab59be81f0981847c7c8e69765be0d6678""",
+            """b24229db4f090d65088fd3fe9159f82258cfecc17d412eab8662334a3da7c74c""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -390,7 +405,8 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(dsv3_model_registry)
-    model_flavor = "debugmodel_flex_attn"
+    model_flavor = "debugmodel"
+    attn_backend = "flex"
     annotate_model = staticmethod(annotate_deepseekv3)
 
     @unittest.skipUnless(

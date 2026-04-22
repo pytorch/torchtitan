@@ -22,8 +22,8 @@ Reload pattern (backward):
     ... backward consumers use gpu ...
 
 This module works with the make_fx traced joint fwd+bwd graph, using
-``meta["custom"]["ac_region_id"]`` as layer boundaries and ``seq_nr``
-to distinguish forward from backward nodes.
+``meta["custom"]["ac_region_id"]`` as layer boundaries and
+``meta["autograd_backward"]`` to distinguish forward from backward nodes.
 """
 
 import operator
@@ -124,6 +124,18 @@ def _tensor_bytes(val: torch.Tensor) -> int:
         return _MIN_OFFLOAD_BYTES
 
 
+def _has_offloadable_tensor(node: Node) -> bool:
+    """Check if a node produces a tensor worth offloading (large, contiguous)."""
+    val = node.meta.get("val")
+    if not isinstance(val, torch.Tensor):
+        return False
+    if not _tensor_is_contiguous(val):
+        return False
+    if _tensor_bytes(val) < _MIN_OFFLOAD_BYTES:
+        return False
+    return True
+
+
 def _can_offload_node(node: Node) -> bool:
     """Check if a node's output can be profitably offloaded to CPU.
 
@@ -135,29 +147,13 @@ def _can_offload_node(node: Node) -> bool:
     """
     if node.op != "call_function":
         return False
-    # getitem unpacks tuples from multi-output ops; the result tensor has its
-    # own allocation. Allow offloading.
     if node.target is operator.getitem:
-        val = node.meta.get("val")
-        if not isinstance(val, torch.Tensor):
-            return False
-        if not _tensor_is_contiguous(val):
-            return False
-        if _tensor_bytes(val) < _MIN_OFFLOAD_BYTES:
-            return False
-        return True
+        return _has_offloadable_tensor(node)
     if _is_view(node):
         return False
     if _is_collective_or_wait(node):
         return False
-    val = node.meta.get("val")
-    if not isinstance(val, torch.Tensor):
-        return False
-    if not _tensor_is_contiguous(val):
-        return False
-    if _tensor_bytes(val) < _MIN_OFFLOAD_BYTES:
-        return False
-    return True
+    return _has_offloadable_tensor(node)
 
 
 # ============================================================
@@ -165,36 +161,31 @@ def _can_offload_node(node: Node) -> bool:
 # ============================================================
 
 
-# TODO: There should be a standard way to distinguish forward nodes from
-# backward nodes. The backward tag should come from upstream pytorch
-# autograd engine. (cc @tugsbayasgalan)
 def _classify_forward_backward(
     gm: torch.fx.GraphModule,
 ) -> tuple[set[Node], set[Node]]:
     """Classify nodes in a make_fx traced joint graph as forward or backward.
 
-    Uses ``seq_nr`` metadata: for each unique seq_nr, the first node seen is
-    treated as forward, and subsequent nodes with the same seq_nr are backward.
-    Nodes without seq_nr (placeholders, output, etc.) are excluded from both sets.
+    Uses ``autograd_backward`` metadata set by PyTorch's autograd engine during
+    make_fx tracing. This is the same classification used by the SAC remat pass,
+    ensuring consistent forward/backward boundaries across graph passes.
+
+    Nodes without ``autograd_backward`` metadata (placeholders, output, newly
+    inserted nodes) are excluded from both sets.
 
     Returns:
         Tuple of (forward_nodes, backward_nodes).
     """
-    seq_nr_to_first: dict[int, Node] = {}
     forward_nodes: set[Node] = set()
     backward_nodes: set[Node] = set()
 
     for node in gm.graph.nodes:
         if node.op not in ("call_function", "get_attr"):
             continue
-        seq_nr = node.meta.get("seq_nr")
-        if seq_nr is None:
-            continue
-        if seq_nr not in seq_nr_to_first:
-            seq_nr_to_first[seq_nr] = node
-            forward_nodes.add(node)
-        else:
+        if node.meta.get("autograd_backward", False):
             backward_nodes.add(node)
+        else:
+            forward_nodes.add(node)
 
     return forward_nodes, backward_nodes
 
@@ -302,29 +293,29 @@ def apply_cpu_offload_pass(
 
     tlparse_log_graph_pass(gm, graph_name="cpu_offload_before")
 
-    forward_nodes, backward_nodes = _classify_forward_backward(gm)
+    _, backward_nodes = _classify_forward_backward(gm)
 
     # 1. Collect nodes tagged for offload, with their backward consumers
-    offloadable: list[tuple[Node, list[Node], int]] = []
+    offloadable: list[tuple[Node, list[Node]]] = []
     for node in gm.graph.nodes:
         if node.meta.get("recompute") is not CheckpointPolicy.MUST_CPU_OFFLOAD:
             continue
         bwd_users = [u for u in node.users if u in backward_nodes]
         if not bwd_users:
             continue
-        layer_idx = node.meta.get("custom", {}).get(_AC_REGION_ID, 0)
-        offloadable.append((node, bwd_users, layer_idx))
+        offloadable.append((node, bwd_users))
 
     if not offloadable:
         return gm
 
-    # 2. Build position index for ordering queries
+    # 2. Build position index for ordering queries (only used for pre-existing
+    # nodes; newly inserted nodes never appear in bwd_users).
     node_to_index: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
 
     # 3. Insert offload/reload/wait_tensor ops
     total_bytes = 0
 
-    for node, bwd_users, layer_idx in offloadable:
+    for node, bwd_users in offloadable:
         val = node.meta.get("val")
         if val is None:
             continue
@@ -357,6 +348,7 @@ def apply_cpu_offload_pass(
                 args=(wait_offload_node, device),
             )
             reload_node.meta["val"] = val
+            reload_node.meta["autograd_backward"] = True
 
         with gm.graph.inserting_before(first_consumer):
             wait_node = gm.graph.call_function(
@@ -364,6 +356,7 @@ def apply_cpu_offload_pass(
                 args=(reload_node,),
             )
             wait_node.meta["val"] = val
+            wait_node.meta["autograd_backward"] = True
 
         # Redirect backward consumers to the reloaded tensor
         for user in bwd_users:

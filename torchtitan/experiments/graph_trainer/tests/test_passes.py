@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+from unittest.mock import patch
 
 import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -12,21 +13,36 @@ from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
+from torch.cuda._graph_annotations import _is_tools_id_unavailable
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.traceback import preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _AC_REGION_ID,
+    _MODULE_FQN,
+    annotate_module_fqns,
+)
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
+from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    minimal_fx_tracer,
+    trace_train_step,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
+    insert_kernel_annotations_pass,
     reassign_to_pg_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
+    TestCustomCodegenPass,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
@@ -253,8 +269,10 @@ class TestApplySACPass(TestCase):
                 # If the next op is getitem, wrap in a tuple so getitem has
                 # a proper tuple/list input.
                 if i + 1 < len(op_targets) and op_targets[i + 1] is operator.getitem:
+
                     def _make_tuple(x):
                         return (x, x)
+
                     last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -897,11 +915,6 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 0)
 
 
-# Import TestCustomCodegenPass so it's discoverable when running this file
-from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
-    TestCustomCodegenPass,
-)
-
 
 class TestCpuOffloadPass(TestCase):
     """Unit tests for the CPU offload pass on synthetic FX graphs.
@@ -1216,6 +1229,235 @@ class TestCpuOffloadPass(TestCase):
         self.assertGreater(
             len(tagged), 0, "Single layer nodes can be tagged (last_layer_id=None)"
         )
+
+
+class TestAnnotateModuleFqns(TestCase):
+    """Unit tests for annotate_module_fqns and insert_kernel_annotations_pass."""
+
+    def _trace_and_get_fqns(self, model, *args):
+        """Trace fwd+bwd with trace_train_step and return module_fqn annotations."""
+
+        def fwd_step(model, *inputs):
+            pred = model(inputs[0])
+            loss = pred.sum()
+            params = [p for p in model.parameters() if p.requires_grad]
+            grads = torch.autograd.grad(loss, params)
+            return [loss] + list(grads)
+
+        traced = trace_train_step(fwd_step)(model, *args)
+        fqns = set()
+        for node in traced.gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+        return fqns
+
+    def test_annotate_transformer_like_model(self):
+        """Module FQNs survive trace_train_step for a transformer-like model
+        with distinct submodule classes (norm, attention, ffn)."""
+
+        class Norm(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(dim)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        class Attention(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.wq = torch.nn.Linear(dim, dim, bias=False)
+                self.wo = torch.nn.Linear(dim, dim, bias=False)
+
+            def forward(self, x):
+                return self.wo(torch.relu(self.wq(x)))
+
+        class FFN(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.w1 = torch.nn.Linear(dim, dim * 2, bias=False)
+                self.w2 = torch.nn.Linear(dim * 2, dim, bias=False)
+
+            def forward(self, x):
+                return self.w2(torch.relu(self.w1(x)))
+
+        class TransformerBlock(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.attention_norm = Norm(dim)
+                self.attention = Attention(dim)
+                self.ffn_norm = Norm(dim)
+                self.feed_forward = FFN(dim)
+
+            def forward(self, x):
+                h = x + self.attention(self.attention_norm(x))
+                return h + self.feed_forward(self.ffn_norm(h))
+
+        class Model(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.layer = TransformerBlock(dim)
+
+            def forward(self, x):
+                return self.layer(x)
+
+        dim = 16
+        model = Model(dim)
+        annotate_module_fqns(model)
+        fqns = self._trace_and_get_fqns(model, torch.randn(4, dim))
+
+        # Verify key module paths are present.  The Norm wrapper has no
+        # ops of its own, so its inner LayerNorm gets the deepest path.
+        self.assertIn("layer.attention_norm.norm", fqns)
+        self.assertIn("layer.attention", fqns)
+        self.assertIn("layer.attention.wq", fqns)
+        self.assertIn("layer.attention.wo", fqns)
+        self.assertIn("layer.ffn_norm.norm", fqns)
+        self.assertIn("layer.feed_forward", fqns)
+        self.assertIn("layer.feed_forward.w1", fqns)
+        self.assertIn("layer.feed_forward.w2", fqns)
+
+    def test_same_class_instances_get_distinct_fqns(self):
+        """Two parameterless instances of the same class get distinct fqns.
+
+        Uses minimal_fx_tracer directly (not trace_train_step) because
+        parameterless models cannot produce gradients via autograd.grad.
+        """
+
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = Block()
+                self.b = Block()
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+
+        def fwd_only(state, x):
+            return model(x)
+
+        traced = minimal_fx_tracer(fwd_only)({}, torch.randn(4))
+        fqns = set()
+        for node in traced.gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def test_same_class_parameterless_works_with_make_fx(self):
+        """Same-class parameterless instances get distinct fqns with plain make_fx."""
+
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = Block()
+                self.b = Block()
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+
+        with preserve_node_meta():
+            gm = make_fx(model)(torch.randn(4))
+
+        fqns = set()
+        for node in gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def test_same_class_instances_with_params_get_distinct_fqns(self):
+        """Two instances of the same class with parameters get distinct fqns."""
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.nn.Linear(4, 4)
+                self.b = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+        fqns = self._trace_and_get_fqns(model, torch.randn(2, 4))
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def _build_annotated_gm(self):
+        """Build a GraphModule with module_fqn annotations on its nodes."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        n1.meta["custom"] = {_MODULE_FQN: "attn"}
+        n2 = graph.call_function(torch.sigmoid, (n1,))
+        n2.meta["custom"] = {_MODULE_FQN: "attn"}
+        n3 = graph.call_function(torch.tanh, (n2,))
+        n3.meta["custom"] = {_MODULE_FQN: "ffn"}
+        graph.output(n3)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def test_insert_kernel_annotations_pass_inserts_calls(self):
+        """When tools ID is available, the pass inserts enter/exit calls."""
+        if _is_tools_id_unavailable():
+            self.skipTest("cudaGraphNodeGetToolsId not available")
+
+        gm = self._build_annotated_gm()
+        num_before = sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+        insert_kernel_annotations_pass(gm)
+
+        num_after = sum(1 for n in gm.graph.nodes if n.op == "call_function")
+        # 2 scopes (attn, ffn) = 2 enters + 2 exits = 4 new nodes
+        self.assertEqual(num_after - num_before, 4)
+
+    def test_insert_kernel_annotations_pass_noop_when_unavailable(self):
+        """When tools ID is unavailable, the pass leaves the graph unchanged."""
+        gm = self._build_annotated_gm()
+        num_before = len(list(gm.graph.nodes))
+
+        with patch(
+            "torch.cuda._graph_annotations._is_tools_id_unavailable",
+            return_value=True,
+        ):
+            insert_kernel_annotations_pass(gm)
+
+        num_after = len(list(gm.graph.nodes))
+        self.assertEqual(num_before, num_after)
+
+    def test_insert_kernel_annotations_pass_noop_without_metadata(self):
+        """The pass should not insert anything when no custom metadata exists."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        graph.output(n1)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        num_before = len(list(gm.graph.nodes))
+        insert_kernel_annotations_pass(gm)
+        num_after = len(list(gm.graph.nodes))
+
+        self.assertEqual(num_before, num_after)
 
 
 if __name__ == "__main__":

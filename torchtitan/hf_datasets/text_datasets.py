@@ -525,7 +525,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)
 
         chat_ds = ChatDataset(
-            dataset=dataset,  # pyrefly: ignore [bad-argument-type]
+            dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
             seq_len=seq_len,

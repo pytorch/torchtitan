@@ -15,7 +15,7 @@ from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import DebugConfig, ParallelismConfig
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.plugin import (
+from torchtitan.experiments.rl.models.vllm_registry import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )

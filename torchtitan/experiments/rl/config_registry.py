@@ -31,9 +31,8 @@ from torchtitan.models.qwen3 import model_registry
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
-    model_spec = model_registry("0.6B_varlen")
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         trainer=PolicyTrainer.Config(
@@ -45,6 +44,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -71,9 +71,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
-    model_spec = model_registry("1.7B_varlen")
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
         trainer=PolicyTrainer.Config(
@@ -85,6 +84,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -111,9 +111,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
-    model_spec = model_registry("14B_varlen")
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
         trainer=PolicyTrainer.Config(
@@ -125,8 +124,10 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=8,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -150,9 +151,8 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
-    model_spec = model_registry("debugmodel_varlen")
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("debugmodel", attn_backend="varlen"),
         num_steps=5,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=8e-4),
@@ -192,10 +192,9 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
-    model_spec = model_registry("0.6B_varlen")
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     return RLTrainer.Config(
-        model_spec=model_spec,
+        model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         trainer=PolicyTrainer.Config(
@@ -209,6 +208,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             debug=batch_invariant_config,
