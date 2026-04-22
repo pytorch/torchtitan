@@ -9,7 +9,6 @@ The integration consists of the following components:
 
 1. **vLLM Model Wrapper** (`models/vllm_wrapper.py`): Adapts TorchTitan models for vLLM's inference engine
 2. **RL Training Loop** (`simple_grpo_sum_digits.py`): GRPO-based RL training with Monarch actors
-3. **Inference Script** (`inference_example.py`): Standalone inference using the vLLM engine
 
 
 ## Key features available
@@ -71,14 +70,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torch
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
-7. Run inference with torchtitan model definition:
-```bash
-torchrun --nproc_per_node=4 torchtitan/experiments/rl/inference_example.py
-```
-
-**NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
-
-8. Run simple GRPO RL loop to learn sum digits task
+7. Run simple GRPO RL loop to learn sum digits task. This also serves as an end-to-end smoke test that your environment is set up correctly.
 ```bash
 python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config rl_grpo_qwen3_0_6b
 ```

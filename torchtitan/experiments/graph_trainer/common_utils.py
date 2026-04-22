@@ -139,6 +139,21 @@ def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
     return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
 
 
+def get_default_transformer_block_buckets(
+    n_layers: int,
+) -> list[list[str] | str]:
+    """Get default transformer block buckets for manual bucketing passes.
+
+    Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
+    norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
+    """
+    return [
+        "tok_embeddings",
+        *[f"layers.{i}" for i in range(n_layers)],
+        ["norm", "output"],
+    ]
+
+
 def get_transformer_block_buckets(model) -> list[list[str] | str]:
     """Get transformer block buckets for manual bucketing passes.
 
