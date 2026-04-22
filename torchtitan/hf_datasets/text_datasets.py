@@ -181,9 +181,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     self._data = cast(
                         Dataset, self._original_data.shuffle(seed=42 + self._epoch)
                     )
-                elif hasattr(self._data, "set_epoch") and hasattr(
-                    self._data, "epoch"
-                ):
+                elif hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
                     self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
