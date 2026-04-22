@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.quantization import QuantizationConfig
+from torchtitan.components.quantization import Float8LinearQuant
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -92,7 +92,7 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=QuantizationConfig(float8_recipe="rowwise"),
+        quantization=[Float8LinearQuant()],
     )
     return config
 
@@ -101,9 +101,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=QuantizationConfig(
-            float8_recipe="rowwise", float8_emulate=True
-        ),
+        quantization=[Float8LinearQuant(emulate=True)],
     )
     return config
 
@@ -183,10 +181,7 @@ def llama3_405b() -> Trainer.Config:
         ),
         model_spec=model_registry(
             "405B",
-            quantization=QuantizationConfig(
-                float8_recipe="rowwise",
-                float8_filter_fqns=["output"],
-            ),
+            quantization=[Float8LinearQuant(filter_fqns=["output"])],
         ),
         optimizer=OptimizersContainer.Config(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),

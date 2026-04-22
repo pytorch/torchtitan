@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 import pytest
 
+from torchtitan.components.quantization import Float8LinearConfig, has_quantization
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.linear import Linear
 
@@ -15,9 +16,10 @@ def test_no_float8_by_default():
         ["--module", "llama3", "--config", "llama3_debugmodel"]
     )
     model_config = config.model_spec.model
-    # No _convert_fn set on Linear.Config instances
-    for _fqn, lc in model_config.walk(Linear.Config):
-        assert lc._convert_fn is None
+    assert not has_quantization(model_config)
+    # All Linear.Config instances should remain Linear.Config
+    for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config):
+        assert not isinstance(lc, Float8LinearConfig)
 
 
 def test_float8_applied_by_model_registry():
@@ -27,10 +29,11 @@ def test_float8_applied_by_model_registry():
         ["--module", "llama3", "--config", "llama3_debugmodel_float8"]
     )
     model_config = config.model_spec.model
-    # _convert_fn should be set on Linear.Config instances (dims divisible by 16)
+    assert has_quantization(model_config)
+    # Some Linear.Config instances should be swapped to Float8LinearConfig
     converted = [
         fqn
-        for fqn, lc in model_config.walk(Linear.Config)
-        if lc._convert_fn is not None
+        for fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
+        if isinstance(lc, Float8LinearConfig)
     ]
     assert len(converted) > 0

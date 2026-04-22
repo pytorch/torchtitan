@@ -124,11 +124,13 @@ class TestConfigManager(unittest.TestCase):
         ]
 
     def test_trainer_config_quantization_default(self):
+        from torchtitan.components.quantization import has_quantization
+
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert config.model_spec.model.quantization is None
+        assert not has_quantization(config.model_spec.model)
 
     # TODO: remove this test when we remove the merge functionality
     def test_extend_trainer_config_directly(self):

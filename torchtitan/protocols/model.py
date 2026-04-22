@@ -59,10 +59,6 @@ class BaseModel(Module):
         Subclasses define model-specific hyperparameters.
         """
 
-        quantization: object | None = None
-        """QuantizationConfig set by model_registry(). Used by the trainer
-        to check has_quantization for metrics."""
-
         # TODO: This function violates encapsulation;
         # maybe replace it with config passes from outside.
         @abstractmethod

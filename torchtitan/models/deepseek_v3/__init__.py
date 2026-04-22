@@ -526,15 +526,15 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: QuantizationConfig | None = None,
+    quantization: list[QuantizationConfig] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
     if quantization is not None:
-        config.quantization = quantization
-        quantization.apply(config)
+        for q in quantization:
+            q.apply(config)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,

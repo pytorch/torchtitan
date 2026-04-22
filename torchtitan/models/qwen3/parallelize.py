@@ -47,7 +47,6 @@ def parallelize_qwen3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    pad_multiple: int | None = None,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -82,7 +81,6 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            pad_multiple=pad_multiple,
         )
 
     if parallel_dims.cp_enabled:

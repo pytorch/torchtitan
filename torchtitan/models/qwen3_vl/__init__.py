@@ -561,15 +561,15 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: QuantizationConfig | None = None,
+    quantization: list[QuantizationConfig] | None = None,
 ) -> ModelSpec:
     kwargs = {}
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_vl_configs[flavor](**kwargs)
     if quantization is not None:
-        config.quantization = quantization
-        quantization.apply(config)
+        for q in quantization:
+            q.apply(config)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,

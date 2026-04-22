@@ -546,12 +546,12 @@ flux_configs = {
 
 def model_registry(
     flavor: str,
-    quantization: QuantizationConfig | None = None,
+    quantization: list[QuantizationConfig] | None = None,
 ) -> ModelSpec:
     config = flux_configs[flavor]()
     if quantization is not None:
-        config.quantization = quantization
-        quantization.apply(config)
+        for q in quantization:
+            q.apply(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,

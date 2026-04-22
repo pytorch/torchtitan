@@ -48,4 +48,4 @@ class ModelSpec:
 
 @dataclass
 class FaultTolerantModelSpec(ModelSpec):
-    fragment_fn: Callable | None
+    fragment_fn: Callable | None = None

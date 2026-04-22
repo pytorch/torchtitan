@@ -265,7 +265,6 @@ def parallelize_qwen3_vl(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    pad_multiple: int | None = None,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -313,7 +312,6 @@ def parallelize_qwen3_vl(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=False,
-            pad_multiple=pad_multiple,
         )
 
     # Apply activation checkpointing

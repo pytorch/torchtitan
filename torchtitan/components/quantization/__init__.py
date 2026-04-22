@@ -21,6 +21,8 @@ import torch
 import torch._inductor.config
 import torch.nn as nn
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -38,64 +40,104 @@ PAD_MULTIPLE_MAP: dict[str, int] = {
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
+@dataclass(kw_only=True, slots=True)
+class Float8LinearConfig(Linear.Config):
+    """Drop-in replacement for Linear.Config that builds Float8Linear directly."""
+
+    _torchao_config: object = None
+
+    def build(self, **kwargs):
+        from torchao.float8.float8_linear import Float8Linear
+
+        instance = Float8Linear(
+            self.in_features,
+            self.out_features,
+            bias=self.bias,
+            config=self._torchao_config,
+        )
+        if not isinstance(instance, Linear):
+            inject_module_protocol(instance, Linear)
+        if self.param_init is not None:
+            instance._param_init = self.param_init
+        return instance
+
+
 @dataclass
 class QuantizationConfig:
-    """Encapsulates all quantization settings for a model.
+    """Base class for quantization config passes.
 
-    Pass to ``model_registry(quantization=...)`` to apply quantization
-    at config construction time.
+    Subclasses implement ``apply()`` to transform the model config tree.
+    Pass a list of these to ``model_registry(quantization=[...])``.
     """
 
-    float8_recipe: str | None = None
-    """Float8 recipe for linear layers ("rowwise", "tensorwise", "rowwise_with_gw_hp")."""
+    def apply(self, model_config) -> None:
+        raise NotImplementedError
 
-    float8_filter_fqns: list[str] | None = None
-    """FQNs of linear modules to skip float8 conversion."""
 
-    float8_emulate: bool = False
-    """Use software emulation for float8 (test only, no SM89 required)."""
+@dataclass
+class Float8LinearQuant(QuantizationConfig):
+    """Replace matching Linear.Config with Float8LinearConfig."""
 
-    float8_moe_fqns: list[str] | None = None
-    """FQNs of MoE modules to apply FP8 grouped GEMMs (e.g. ["experts"])."""
-
-    mxfp8_fqns: list[str] | None = None
-    """FQNs of MoE modules to apply MXFP8 grouped GEMMs (e.g. ["experts"])."""
-
-    mxfp8_recipe: str = "mxfp8_rceil"
-    """MXFP8 recipe name."""
-
-    mxfp8_pad_token_groups: bool = True
-    """If True, TorchAO pads token groups for MXFP8. False when EP handles padding."""
+    recipe_name: str = "rowwise"
+    filter_fqns: list[str] | None = None
+    emulate: bool = False
 
     def apply(self, model_config) -> None:
-        """Apply all configured quantization to the model config."""
-        if self.float8_recipe is not None:
-            convert_to_float8(
-                model_config,
-                recipe_name=self.float8_recipe,
-                filter_fqns=self.float8_filter_fqns,
-                emulate=self.float8_emulate,
-            )
-        if self.float8_moe_fqns is not None:
-            convert_moe_to_float8(
-                model_config,
-                fqns=self.float8_moe_fqns,
-            )
-        if self.mxfp8_fqns is not None:
-            convert_moe_to_mxfp8(
-                model_config,
-                fqns=self.mxfp8_fqns,
-                recipe_name=self.mxfp8_recipe,
-                pad_token_groups_for_grouped_mm=self.mxfp8_pad_token_groups,
-            )
-
-    @property
-    def has_quantization(self) -> bool:
-        return (
-            self.float8_recipe is not None
-            or self.float8_moe_fqns is not None
-            or self.mxfp8_fqns is not None
+        convert_to_float8(
+            model_config,
+            recipe_name=self.recipe_name,
+            filter_fqns=self.filter_fqns,
+            emulate=self.emulate,
         )
+
+
+@dataclass
+class Float8MoEQuant(QuantizationConfig):
+    """Apply FP8 quantization to MoE expert grouped GEMMs."""
+
+    def apply(self, model_config) -> None:
+        convert_moe_to_float8(model_config)
+
+
+@dataclass
+class MXFP8MoEQuant(QuantizationConfig):
+    """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
+
+    recipe_name: str = "mxfp8_rceil"
+    pad_token_groups: bool = True
+
+    def apply(self, model_config) -> None:
+        convert_moe_to_mxfp8(
+            model_config,
+            recipe_name=self.recipe_name,
+            pad_token_groups_for_grouped_mm=self.pad_token_groups,
+        )
+
+
+@dataclass
+class MXFP8Quant(QuantizationConfig):
+    """Apply MXFP8 quantization to modules matching FQNs (e.g. Flux blocks)."""
+
+    fqns: list[str] | None = None
+    recipe_name: str = "mxfp8_rceil"
+    pad_token_groups: bool = True
+
+    def apply(self, model_config) -> None:
+        convert_to_mxfp8(
+            model_config,
+            fqns=self.fqns,
+            recipe_name=self.recipe_name,
+            pad_token_groups_for_grouped_mm=self.pad_token_groups,
+        )
+
+
+
+def has_quantization(model_config) -> bool:
+    """Check if any Linear in the model config uses float8 quantization."""
+    return any(
+        isinstance(lc, Float8LinearConfig)
+        for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
+    )
 
 
 def convert_to_float8(
@@ -105,11 +147,7 @@ def convert_to_float8(
     filter_fqns: list[str] | None = None,
     emulate: bool = False,
 ) -> None:
-    """Convert Linear.Config instances in the model config to produce Float8Linear.
-
-    Walks the model config tree and sets ``_convert_fn`` on matching
-    ``Linear.Config`` instances so that ``build()`` produces
-    ``Float8Linear`` modules directly.
+    """Replace matching Linear.Config with Float8LinearConfig in the model config tree.
 
     Args:
         model_config: The model config to walk.
@@ -127,20 +165,20 @@ def convert_to_float8(
         )
 
     try:
-        from torchao.float8 import Float8LinearConfig
+        from torchao.float8 import Float8LinearConfig as TorchAOFloat8LinearConfig
     except ImportError as e:
         raise ImportError(
             "torchao is not installed. Please install it to use float8 linear layers."
         ) from e
 
-    if not hasattr(Float8LinearConfig, "from_recipe_name"):
+    if not hasattr(TorchAOFloat8LinearConfig, "from_recipe_name"):
         logger.warning(
             "Failed to use Float8 with recipe lookup because the torchao version "
             "is too old, please install torchao v0.9.0 or later and try again",
         )
         return
 
-    torchao_config = Float8LinearConfig.from_recipe_name(recipe_name)
+    torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(recipe_name)
     logger.info(f"Float8 training active with recipe {recipe_name}")
 
     # short-term solution for https://github.com/pytorch/pytorch/issues/150859
@@ -171,36 +209,31 @@ def convert_to_float8(
     else:
         filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
 
-    # Walk config tree and set _convert_fn
-    from torchao.float8.float8_linear import Float8Linear
-
-    def convert_fn(mod: nn.Module) -> nn.Module:
-        converted = Float8Linear.from_float(mod, config=torchao_config)
-        if not isinstance(converted, Linear):
-            inject_module_protocol(converted, Linear)
-        return converted
-
-    for fqn, linear_config in model_config.walk(Linear.Config):
+    # Walk config tree and swap Linear.Config → Float8LinearConfig
+    for fqn, linear_config, parent, attr in model_config.walk(Linear.Config):
         if filter_fn(linear_config, fqn):
-            linear_config._convert_fn = convert_fn
+            new_config = Float8LinearConfig(
+                in_features=linear_config.in_features,
+                out_features=linear_config.out_features,
+                bias=linear_config.bias,
+                param_init=linear_config.param_init,
+                _torchao_config=torchao_config,
+            )
+            if isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
 
     logger.info("Swapped to Float8Linear layers")
 
 
-def convert_moe_to_float8(
-    model_config,
-    *,
-    fqns: list[str],
-) -> None:
+def convert_moe_to_float8(model_config) -> None:
     """Convert MoE expert layers in the model config to use float8 scaled grouped GEMMs.
 
-    Walks the model config tree and sets ``_convert_fn`` on modules
-    matching the target FQNs so that ``build()`` applies dynamic float8
-    rowwise quantization + scaled grouped GEMMs.
-
-    Args:
-        model_config: The model config to walk.
-        fqns: FQNs of MoE modules to convert (e.g. ["experts"]).
+    Walks the model config tree for GroupedExperts.Config instances and sets
+    ``_convert_fn`` so that ``build()`` applies dynamic float8 rowwise
+    quantization + scaled grouped GEMMs. Also swaps token dispatcher configs
+    to set the appropriate pad_multiple for FP8 grouped GEMMs.
     """
     if not has_cuda_capability(8, 9):
         raise ValueError("Float8 MoE training only supported on SM89 or later.")
@@ -214,58 +247,59 @@ def convert_moe_to_float8(
             "torchao installation does not have MoE training support. Please install torchao nightly build."
         ) from e
 
-    from torchtitan.protocols.module import Module
+    from torchtitan.models.common.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        DeepEPTokenDispatcher,
+        TorchAOTokenDispatcher,
+    )
+
+    pad_multiple = PAD_MULTIPLE_MAP["float8"]
 
     def convert_fn(mod: nn.Module) -> nn.Module:
         config = Float8TrainingOpConfig()
         quantize_(mod, config=config)
         return mod
 
-    for fqn, config in model_config.walk(Module.Config):
-        if any(target_fqn in fqn for target_fqn in fqns):
-            config._convert_fn = convert_fn
+    for fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config):
+        config._convert_fn = convert_fn
+        td = config.token_dispatcher
+        if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
+            td, TorchAOTokenDispatcher.Config
+        ):
+            config.token_dispatcher = TorchAOTokenDispatcher.Config(
+                num_experts=td.num_experts,
+                top_k=td.top_k,
+                score_before_experts=td.score_before_experts,
+                pad_multiple=pad_multiple,
+            )
+        elif isinstance(td, DeepEPTokenDispatcher.Config):
+            if td.comm_backend == "deepep":
+                raise ValueError(
+                    "DeepEP does not support pad_multiple. "
+                    "Use hybridep or standard comm backend instead."
+                )
+            config.token_dispatcher = DeepEPTokenDispatcher.Config(
+                num_experts=td.num_experts,
+                top_k=td.top_k,
+                score_before_experts=td.score_before_experts,
+                comm_backend=td.comm_backend,
+                non_blocking_capacity_factor=td.non_blocking_capacity_factor,
+                pad_multiple=pad_multiple,
+            )
 
     logger.info(
-        f"Converted MoE layers matching FQNS {fqns} "
-        "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
+        "Converted GroupedExperts to use dynamic float8 rowwise quantization "
+        "with scaled grouped GEMMs"
     )
 
 
-def convert_moe_to_mxfp8(
-    model_config,
-    *,
-    fqns: list[str],
-    recipe_name: str = "mxfp8_rceil",
-    pad_token_groups_for_grouped_mm: bool = True,
-) -> None:
-    """Convert MoE layers in the model config to use MXFP8 scaled grouped GEMMs.
-
-    Walks the model config tree and sets ``_convert_fn`` on modules
-    matching the target FQNs so that ``build()`` applies dynamic MXFP8
-    quantization for grouped GEMMs.
-
-    Args:
-        model_config: The model config to walk.
-        fqns: FQNs of MoE modules to convert (e.g. ["experts"]).
-        recipe_name: MXFP8 recipe name (default "mxfp8_rceil").
-        pad_token_groups_for_grouped_mm: If True, TorchAO pads token groups.
-            Set to False when EP is enabled (TorchTitan handles padding instead).
-    """
-    if find_spec("torchao") is None:
-        raise ImportError(
-            "torchao is not installed. Please install it to use MXFP8 linear layers."
-        )
-
-    assert has_cuda_capability(
-        10, 0
-    ), "MXFP8 is only supported on SM100 or architectures"
-
+def _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm):
+    """Create a _convert_fn closure for MXFP8 quantization."""
     from torchao.prototype.moe_training.config import (
         MXFP8TrainingOpConfig,
         MXFP8TrainingRecipe,
     )
     from torchao.quantization.quant_api import quantize_
-    from torchtitan.protocols.module import Module
 
     def convert_fn(mod: nn.Module) -> nn.Module:
         recipe = MXFP8TrainingRecipe(recipe_name)
@@ -276,11 +310,90 @@ def convert_moe_to_mxfp8(
         quantize_(mod, config=mxfp8_op_config)
         return mod
 
-    for fqn, config in model_config.walk(Module.Config):
-        if any(target_fqn in fqn for target_fqn in fqns):
+    return convert_fn
+
+
+def _validate_mxfp8():
+    if find_spec("torchao") is None:
+        raise ImportError(
+            "torchao is not installed. Please install it to use MXFP8 linear layers."
+        )
+    assert has_cuda_capability(
+        10, 0
+    ), "MXFP8 is only supported on SM100 or architectures"
+
+
+def convert_moe_to_mxfp8(
+    model_config,
+    *,
+    recipe_name: str = "mxfp8_rceil",
+    pad_token_groups_for_grouped_mm: bool = True,
+) -> None:
+    """Convert GroupedExperts in the model config to use MXFP8 scaled grouped GEMMs.
+
+    Also swaps token dispatcher configs to set the appropriate pad_multiple
+    for MXFP8 grouped GEMMs.
+    """
+    _validate_mxfp8()
+    convert_fn = _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm)
+
+    from torchtitan.models.common.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        DeepEPTokenDispatcher,
+        TorchAOTokenDispatcher,
+    )
+
+    pad_multiple = PAD_MULTIPLE_MAP["mxfp8"]
+
+    for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config):
+        config._convert_fn = convert_fn
+        td = config.token_dispatcher
+        if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
+            td, TorchAOTokenDispatcher.Config
+        ):
+            config.token_dispatcher = TorchAOTokenDispatcher.Config(
+                num_experts=td.num_experts,
+                top_k=td.top_k,
+                score_before_experts=td.score_before_experts,
+                pad_multiple=pad_multiple,
+            )
+        elif isinstance(td, DeepEPTokenDispatcher.Config):
+            if td.comm_backend == "deepep":
+                raise ValueError(
+                    "DeepEP does not support pad_multiple. "
+                    "Use hybridep or standard comm backend instead."
+                )
+            config.token_dispatcher = DeepEPTokenDispatcher.Config(
+                num_experts=td.num_experts,
+                top_k=td.top_k,
+                score_before_experts=td.score_before_experts,
+                comm_backend=td.comm_backend,
+                non_blocking_capacity_factor=td.non_blocking_capacity_factor,
+                pad_multiple=pad_multiple,
+            )
+
+    logger.info(
+        f"Converted GroupedExperts to use dynamic {recipe_name} quantization "
+        "for grouped_mm and linear ops"
+    )
+
+
+def convert_to_mxfp8(
+    model_config,
+    *,
+    fqns: list[str] | None = None,
+    recipe_name: str = "mxfp8_rceil",
+    pad_token_groups_for_grouped_mm: bool = True,
+) -> None:
+    """Convert modules matching FQNs to use MXFP8 quantization (e.g. Flux blocks)."""
+    _validate_mxfp8()
+    convert_fn = _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm)
+
+    for fqn, config, _parent, _attr in model_config.walk(Module.Config):
+        if fqns is None or any(target_fqn in fqn for target_fqn in fqns):
             config._convert_fn = convert_fn
 
     logger.info(
-        f"Converted layers matching FQNS {fqns} "
-        f"to use dynamic {recipe_name} quantization for grouped_mm and linear ops"
+        f"Converted modules to use dynamic {recipe_name} quantization "
+        "for grouped_mm and linear ops"
     )

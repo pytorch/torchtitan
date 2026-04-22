@@ -68,23 +68,28 @@ class Configurable:
 
         def walk(
             self, config_cls: type, *, _prefix: str = ""
-        ) -> Iterator[tuple[str, "Configurable.Config"]]:
-            """Yield ``(fqn, config)`` for every nested config of *config_cls*.
+        ) -> Iterator[tuple[str, "Configurable.Config", object, str]]:
+            """Yield ``(fqn, config, parent, field_name)`` for every nested config of *config_cls*.
 
             Recursively walks dataclass fields, including items inside lists.
             The *fqn* mirrors the module FQN that ``build()`` would produce
             (e.g. ``"layers.0.feed_forward.w1"``).
+
+            *parent* and *field_name* allow replacing the config in the tree::
+
+                for fqn, cfg, parent, attr in model_config.walk(Linear.Config):
+                    setattr(parent, attr, NewConfig(...))
             """
             for f in fields(self):
                 val = getattr(self, f.name)
                 fqn = f"{_prefix}.{f.name}" if _prefix else f.name
                 if isinstance(val, config_cls):
-                    yield fqn, val
+                    yield fqn, val, self, f.name
                 elif isinstance(val, list):
                     for i, item in enumerate(val):
                         item_fqn = f"{fqn}.{i}"
                         if isinstance(item, config_cls):
-                            yield item_fqn, item
+                            yield item_fqn, item, val, i
                         elif hasattr(item, "walk"):
                             yield from item.walk(config_cls, _prefix=item_fqn)
                 elif hasattr(val, "walk"):

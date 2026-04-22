@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import QuantizationConfig
+from torchtitan.components.quantization import Float8LinearQuant, Float8MoEQuant
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -113,11 +113,10 @@ def deepseek_v3_671b() -> Trainer.Config:
             "671B",
             attn_backend="flex",
             moe_comm_backend="torchao",
-            quantization=QuantizationConfig(
-                float8_recipe="rowwise",
-                float8_filter_fqns=["output", "router.gate"],
-                float8_moe_fqns=["experts"],
-            ),
+            quantization=[
+                Float8LinearQuant(filter_fqns=["output", "router.gate"]),
+                Float8MoEQuant(),
+            ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
