@@ -259,6 +259,8 @@ class PrecompileFakeTrainer:
             self._precompile_aot()
         elif self.compile_config.mode == "aot_fx_trace":
             self._precompile_aot_fx_trace()
+        else:
+            raise AssertionError(f"unexpected mode: {self.compile_config.mode}")
 
     def _precompile_aot(self):
         """AOT mode precompilation: joint graph export + Inductor."""
@@ -352,8 +354,13 @@ class PrecompileFakeTrainer:
         )
         from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
+        config = self.config
+        compile_config = self.compile_config
+        model = self.model
+        parallel_dims = self.parallel_dims
+
         loss_fn = self.model_spec.build_loss_fn(
-            self.compile_config, parallel_dims=self.parallel_dims
+            compile_config, parallel_dims=parallel_dims
         )
         fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
 
@@ -364,14 +371,12 @@ class PrecompileFakeTrainer:
         # same type here so make_fx bakes it as a graph constant — not a
         # graph input — identical to the non-precompile runtime trace.
         global_batch_size = (
-            self.config.training.local_batch_size
-            * self.parallel_dims.dp_shard
-            * self.parallel_dims.dp_replicate
-            * self.parallel_dims.cp
+            config.training.local_batch_size
+            * parallel_dims.dp_shard
+            * parallel_dims.dp_replicate
+            * parallel_dims.cp
         )
-        dummy_global_valid_tokens = float(
-            global_batch_size * self.config.training.seq_len
-        )
+        dummy_global_valid_tokens = float(global_batch_size * config.training.seq_len)
         extra_inputs: dict[str, torch.Tensor] = {}
         extra_kwargs: dict[str, Any] = {}
 
@@ -379,7 +384,7 @@ class PrecompileFakeTrainer:
             attn_config = self.model_config.layers[0].attention
             mask_type = getattr(attn_config, "mask_type", "causal")
 
-            if mask_type == "block_causal" or self.parallel_dims.cp_enabled:
+            if mask_type == "block_causal" or parallel_dims.cp_enabled:
                 extra_kwargs["positions"] = torch.arange(
                     0,
                     dummy_inputs.shape[1],
@@ -399,20 +404,25 @@ class PrecompileFakeTrainer:
                     (FlexAttention.Config, VarlenAttention.Config),
                 ):
                     extra_kwargs["attention_masks"] = cast(
-                        Decoder, self.model
+                        Decoder, model
                     ).get_attention_masks(
                         input_batch=dummy_inputs,
                         tokenizer=self.tokenizer,
-                        extra_inputs=extra_inputs or {},
+                        extra_inputs=extra_inputs,
                     )
 
-        # TODO: Add CP support — call prepare_context_parallel_input here
-        # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
-        # dimension, matching the trainer's post_dataloading_process.
-        if self.parallel_dims.cp_enabled:
-            raise NotImplementedError(
-                "CooR precompile does not yet support context parallelism. "
-                "Set --parallelism.context_parallel_degree 1."
+        if parallel_dims.cp_enabled:
+            from torchtitan.distributed.context_parallel import (
+                prepare_context_parallel_input,
+            )
+
+            dummy_inputs, dummy_labels, extra_kwargs = prepare_context_parallel_input(
+                dummy_inputs,
+                dummy_labels,
+                extra_kwargs,
+                parallel_dims.get_mesh("cp"),
+                self.device,
+                config.parallelism.context_parallel_load_balancer,
             )
 
         # Enable loss_parallel when TP is active and loss_parallel is not
@@ -422,8 +432,7 @@ class PrecompileFakeTrainer:
         # the TP-parallelized model outputs Shard'd DTensors but labels
         # remain plain tensors.
         loss_parallel_enabled = (
-            self.parallel_dims.tp_enabled
-            and not self.config.parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         loss_parallel_ctx = (
             torch.distributed.tensor.parallel.loss_parallel()
@@ -434,7 +443,7 @@ class PrecompileFakeTrainer:
         logger.info("Tracing fwd+loss+bwd via make_fx...")
         with loss_parallel_ctx:
             traced_result = trace_train_step(fwd_bwd_fn)(
-                self.model,
+                model,
                 dummy_inputs,
                 dummy_labels,
                 dummy_global_valid_tokens,
@@ -454,7 +463,7 @@ class PrecompileFakeTrainer:
             compile_time_passes,
         )
 
-        passes = compile_time_passes(traced_result, self.config)
+        passes = compile_time_passes(traced_result, config)
         traced_result.gm = apply_graph_passes(
             traced_result.gm, traced_result.example_inputs, passes
         )
@@ -463,9 +472,9 @@ class PrecompileFakeTrainer:
             f"graph now has {len(list(traced_result.gm.graph.nodes))} nodes"
         )
 
-        storage = DiskStorageAdapter(self.compile_config.precompile_artifact_dir)
+        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
         config_fingerprint = compute_config_fingerprint(
-            self.model, self.compile_config, self.parallel_dims
+            model, compile_config, parallel_dims
         )
 
         precompile_fx_trace_save(
@@ -476,7 +485,7 @@ class PrecompileFakeTrainer:
 
         logger.info(
             f"Precompile complete. Artifact saved to "
-            f"{self.compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}.bin"
+            f"{compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}.bin"
         )
 
     def __enter__(self):
