@@ -68,7 +68,6 @@ def parallelize_deepseekv3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    **kwargs,
 ):
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.

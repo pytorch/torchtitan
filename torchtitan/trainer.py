@@ -348,7 +348,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model_config=model_config,
                 parallelize_fn=model_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
-                pad_multiple=model_spec.pad_multiple,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead

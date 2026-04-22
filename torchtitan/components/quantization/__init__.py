@@ -151,7 +151,7 @@ def convert_to_float8(
 
     Args:
         model_config: The model config to walk.
-        recipe_name: Float8 recipe name ("tensorwise", "rowwise", "rowwise_with_gw_hp").
+        recipe_name: Float8 recipe name ("rowwise", "rowwise_with_gw_hp").
         filter_fqns: FQNs of modules to skip. Dims not divisible by 16 are always skipped.
         emulate: If True, use software emulation instead of hardware float8.
     """

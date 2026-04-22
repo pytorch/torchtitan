@@ -35,7 +35,6 @@ def parallelize_vlm(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    **kwargs,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data

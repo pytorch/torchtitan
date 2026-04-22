@@ -68,7 +68,6 @@ def parallelize_qwen3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    **kwargs,
 ):
     """
     Apply annotation, parallelization, activation checkpointing, and full graph

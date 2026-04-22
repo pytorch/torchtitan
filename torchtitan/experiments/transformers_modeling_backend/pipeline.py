@@ -299,7 +299,6 @@ def pipeline_hf_transformers(
     model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-    **kwargs,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
@@ -393,7 +392,6 @@ def pipeline_hf_transformers(
             compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            **kwargs,
         )
         model_parts[i] = m
         # NOTE: this is to update the model in the stage

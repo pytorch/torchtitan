@@ -42,7 +42,6 @@ def parallelize_hf_transformers(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    **kwargs,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
