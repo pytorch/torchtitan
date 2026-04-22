@@ -870,6 +870,48 @@ class TestModelWrapperModes(unittest.TestCase):
         self.assertIn("hf_lora_b", sd)
         self.assertNotIn("hf_weight", sd)
 
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_export_two_modes_produce_disjoint_key_spaces(self, mock_gsd):
+        """Same converter_transform produces different keys for interval vs final save.
+
+        Interval (last_step=False): adapter keys only (e.g. LoRA weights).
+        Final (last_step=True): merged base keys only (adapters folded in).
+        The two key spaces must be disjoint — to_hf should only be applied
+        to the base keys (final save), not adapter keys (interval save).
+        """
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        def merge_transform(sd, last_step):
+            if last_step:
+                return {k: v for k, v in sd.items() if not k.startswith("lora_")}
+            return {k: v for k, v in sd.items() if k.startswith("lora_")}
+
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(
+            self.model,
+            key_filter=lambda k: k.startswith("lora_"),
+            converter_transform=merge_transform,
+            to_hf=fake_to_hf,
+        )
+
+        # Interval save: adapter keys only, native format
+        interval_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
+        self.assertEqual(set(interval_sd.keys()), {"lora_a", "lora_b"})
+
+        # Final save: merged base keys, apply to_hf
+        final_sd = wrapper.to_hf(
+            wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
+        )
+        self.assertEqual(set(final_sd.keys()), {"hf_weight", "hf_bias"})
+
+        # Key spaces are disjoint
+        self.assertTrue(set(interval_sd.keys()).isdisjoint(set(final_sd.keys())))
+
 
 if __name__ == "__main__":
     unittest.main()
