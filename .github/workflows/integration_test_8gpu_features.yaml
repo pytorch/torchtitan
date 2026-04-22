@@ -105,7 +105,7 @@ jobs:
           # But this is more an unknown issue that AMD people may want to
           # figure out the root cause or confirm that this is an expected
           # behavior.
-          LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
+          LOSS_FILE="tests/assets/losses/llama3_rocm_mi350x.txt"
           STEPS=1
         else
           echo "Error: Unknown GPU architecture type: ${{ matrix.gpu-arch-type }}"
