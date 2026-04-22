@@ -424,7 +424,7 @@ def _precompile_aot_fx_trace(
         compile_time_passes,
     )
 
-    passes = compile_time_passes(traced_result)
+    passes = compile_time_passes(traced_result, config)
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
