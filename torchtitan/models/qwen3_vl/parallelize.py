@@ -59,7 +59,7 @@ def _apply_non_moe_tp_to_decoder(
     Hidden states flow as DTensor(Replicate) between layers. The embedding
     output is plain tensor (needed for vision scatter before the decoder loop),
     but each transformer block wraps its input as DTensor via PrepareModuleInput.
-    DeepStack boolean indexing handles DTensor via to_local in the 
+    DeepStack boolean indexing handles DTensor via to_local in the
     """
     top_level_plan = {
         "tok_embeddings": RowwiseParallel(
@@ -330,7 +330,6 @@ def parallelize_qwen3_vl(
             enable_sp=False,
             pad_multiple=find_pad_multiple(model_converters.converters),
         )
-
 
     # Apply activation checkpointing
     if ac_config.mode != "none":
