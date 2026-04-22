@@ -411,12 +411,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.model_parts = [model]
 
         # Set lm_head reference for ChunkedCELoss after model construction.
-        # - Non-PP: single model part always has lm_head.
-        # - PP: only the last stage has lm_head; other stages have None
-        #   so ChunkedCELoss.set_lm_head is never called for non-last stage.
+        # Non-PP: single model part always has lm_head.
+        # PP: only the last stage has lm_head; non-last stages skip this.
         if isinstance(self.loss_fn, ChunkedCELoss):
-            lm_head = self.model_parts[-1].lm_head
-            if lm_head is not None:
+            if parallel_dims.pp_enabled:
+                if self.pp_has_last_stage:
+                    lm_head = self.model_parts[-1].lm_head
+                    assert (
+                        lm_head is not None
+                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    self.loss_fn.set_lm_head(lm_head)
+            else:
+                lm_head = self.model_parts[-1].lm_head
+                assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
                 self.loss_fn.set_lm_head(lm_head)
 
         # initialize device memory monitor and get peak flops for MFU calculation
@@ -672,9 +679,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            self.pp_schedule._loss_kwargs = {
-                "global_valid_tokens": global_valid_tokens,
-            }
+            loss_kwargs = {"global_valid_tokens": global_valid_tokens}
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
@@ -686,6 +691,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        loss_kwargs=loss_kwargs,
                         return_outputs=False,
                     )
                 else:
@@ -693,6 +699,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        loss_kwargs=loss_kwargs,
                         return_outputs=False,
                     )
 

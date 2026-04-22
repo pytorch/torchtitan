@@ -63,8 +63,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.tensor_parallel_degree 2",
                 ],
+                [
+                    "--module llama3 --config llama3_debugmodel_ce_loss",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
             ],
-            "2D eager",
+            "2D eager (ChunkedCELoss + standard CE loss with TP+loss_parallel)",
             "2d_eager",
         ),
         OverrideDefinitions(
@@ -628,17 +632,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "seed_checkpoint",
             ngpu=1,
             timeout=30,
-        ),
-        # Test standard (non-chunked) CE loss (default is ChunkedCELoss)
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_ce_loss",
-                ],
-            ],
-            "Standard CE loss with FSDP",
-            "ce_loss",
-            ngpu=4,
         ),
     ]
 

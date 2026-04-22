@@ -62,9 +62,12 @@ class BaseLoss(Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fn(pred, labels) / global_valid_tokens
+        loss = self.fn(pred, labels)
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss
 
 
 class CrossEntropyLoss(BaseLoss):
@@ -239,7 +242,7 @@ class ChunkedCELoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute chunked cross-entropy loss.
 
@@ -261,8 +264,7 @@ class ChunkedCELoss(BaseLoss):
 
         # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
         # Redistribute only the TP dim to Replicate before chunking so that
-        # the lm_head receives Replicate input on TP. Other mesh dims (e.g.
-        # CP) are left unchanged.
+        # the lm_head receives Replicate input on TP.
         if isinstance(hidden_states, DTensor):
             mesh = hidden_states.device_mesh
             if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
@@ -277,8 +279,6 @@ class ChunkedCELoss(BaseLoss):
 
         # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk(),
-        # otherwise all chunks share the same underlying memory and the
-        # autograd graph retains references, preventing memory from being freed.
         # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
         # directly with Shard(1) on CP. Need local_map to operate on local tensors
         h_chunks = torch.chunk(h_detached, num_chunks, dim=1)
@@ -286,8 +286,6 @@ class ChunkedCELoss(BaseLoss):
         label_chunks = torch.chunk(labels, num_chunks, dim=1)
 
         # Pre-allocate gradient accumulator in fp32 for numerical stability.
-        # Pass h_detached as reference so GradAccumulator tracks DTensor
-        # metadata and returns a DTensor from result() if needed.
         grad_accumulator = GradAccumulator(
             h_detached,
             num_chunks=num_chunks,
@@ -312,8 +310,9 @@ class ChunkedCELoss(BaseLoss):
 
             logits = lm_head(h_chunk)
 
-            chunk_loss_sum = self.fn(logits, label_chunk)
-            chunk_loss = chunk_loss_sum / global_valid_tokens
+            chunk_loss = self.fn(logits, label_chunk)
+            if global_valid_tokens is not None:
+                chunk_loss = chunk_loss / global_valid_tokens
             total_loss = total_loss + chunk_loss.detach()
 
             chunk_loss.backward()
@@ -331,16 +330,16 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # Return a differentiable loss via DecoderOutputGradientBackProp. When
+        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
         # .backward() is called (by the trainer or PP schedule), autograd
-        # calls DecoderOutputGradientBackProp.backward which returns accumulated_grad
+        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
         # as the gradient for hidden_states, propagating through the decoder.
-        return DecoderOutputGradientBackProp.apply(
+        return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
         )
 
 
-class DecoderOutputGradientBackProp(torch.autograd.Function):
+class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
     Forward takes hidden_states (connected to decoder graph), the accumulated
