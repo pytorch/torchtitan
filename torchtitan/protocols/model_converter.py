@@ -3,8 +3,9 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch.nn as nn
 
@@ -17,10 +18,18 @@ from torchtitan.tools.logging import logger
 class ModelConverter(Protocol):
     """General model converter interface.
 
-    A model converter is applying a modification to PyTorch model.
-    Typical use cases are:
-        - Quantization: using QAT, FP8, ... specialized linear layers;
-        - Fused optimized layers (e.g. flash-attention, norms, ...)
+    A model converter applies an inplace modification to a PyTorch model
+    and optionally defines how its state dict keys are handled during
+    checkpoint save/load.
+
+    Typical use cases:
+        - Quantization: QAT, FP8, MX — specialized linear layers
+        - LoRA: low-rank adapter layers
+        - Fused optimized layers (e.g. flash-attention, norms)
+
+    The trainer extracts ``key_filter()`` and ``state_dict_transform()``
+    and passes them to ``ModelWrapper``, which applies them during saves.
+    ``CheckpointManager`` never sees the converter directly.
     """
 
     def convert(self, model: nn.Module):
@@ -31,12 +40,49 @@ class ModelConverter(Protocol):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
         ...
 
+    def key_filter(self) -> Callable[[str], bool] | None:
+        """Identify state dict keys owned by this converter.
+
+        Returns a callable that takes a key name and returns True if the
+        key belongs to this converter. Used by ModelWrapper's
+        ``filter_base_keys()`` to exclude converter-owned keys.
+
+        Return None if the converter doesn't introduce new keys.
+        """
+        return None
+
+    def state_dict_transform(
+        self,
+    ) -> Callable[[dict[str, Any], bool], dict[str, Any]] | None:
+        """Return a transform for the model state dict during saves.
+
+        The returned callable takes ``(state_dict, last_step)`` and returns
+        the transformed state dict.  The converter's own config determines
+        the exact behavior for each case (interval vs export).
+
+        Return None if the converter doesn't need any transform.
+        """
+        return None
+
+    def format_adapter(self) -> type | None:
+        """Adapter class for this converter's external checkpoint format.
+
+        Returns a ``BaseStateDictAdapter`` subclass that provides key mapping
+        (to_hf/from_hf) for the converter's keys in an external format
+        (e.g. PEFT safetensors for LoRA). The user config decides when
+        HF format is used — the converter just provides the capability.
+
+        Return None if no external format support needed.
+        """
+        return None
+
 
 class ModelConvertersContainer(Configurable, ModelConverter):
     """Model converters sequential container.
 
     Builds converters from their Config objects and applies them
-    to the model sequentially.
+    to the model sequentially. Composes ``key_filter`` (union/OR) and
+    ``state_dict_transform`` (reverse order) from all converters.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -79,6 +125,48 @@ class ModelConvertersContainer(Configurable, ModelConverter):
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
+
+    def key_filter(self) -> Callable[[str], bool] | None:
+        """Compose key_filter from all converters (union / OR)."""
+        filters = [f for c in self.converters if (f := c.key_filter()) is not None]
+        if not filters:
+            return None
+        if len(filters) == 1:
+            return filters[0]
+
+        def composed(key: str) -> bool:
+            return any(f(key) for f in filters)
+
+        return composed
+
+    def state_dict_transform(
+        self,
+    ) -> Callable[[dict[str, Any], bool], dict[str, Any]] | None:
+        """Compose state_dict_transform from all converters."""
+        transforms = [
+            t for c in self.converters if (t := c.state_dict_transform()) is not None
+        ]
+        if not transforms:
+            return None
+        if len(transforms) == 1:
+            return transforms[0]
+
+        def composed(sd: dict[str, Any], last_step: bool) -> dict[str, Any]:
+            # Reverse order: undo transforms opposite to how they were
+            # applied during convert() (last converter undone first).
+            for t in reversed(transforms):
+                sd = t(sd, last_step)
+            return sd
+
+        return composed
+
+    def format_adapter(self) -> type | None:
+        """Return the format adapter from the first converter that provides one."""
+        for c in self.converters:
+            fa = c.format_adapter()
+            if fa is not None:
+                return fa
+        return None
 
 
 def _validate_quantization(converters: list[Configurable.Config]):

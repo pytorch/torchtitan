@@ -13,6 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -261,15 +262,31 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             training_steps=config.training.steps,
         )
 
+        sd_adapter = (
+            self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
+            if self.train_spec.state_dict_adapter
+            else None
+        )
+
+        from torchtitan.components.checkpoint import HFStorageConfig
+
         self.checkpointer = config.checkpoint.build(
             dataloader=None,
-            model_parts=self.model_parts,
+            model_wrapper=ModelWrapper(
+                self.model_parts,
+                to_hf=sd_adapter.to_hf if sd_adapter else None,
+                from_hf=sd_adapter.from_hf if sd_adapter else None,
+            ),
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if self.train_spec.state_dict_adapter
+            hf_storage_config=(
+                HFStorageConfig(
+                    fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
+                    hf_assets_path=sd_adapter.hf_assets_path,
+                    get_storage_reader=sd_adapter.get_hf_storage_reader,
+                )
+                if sd_adapter
                 else None
             ),
             base_folder=config.dump_folder,

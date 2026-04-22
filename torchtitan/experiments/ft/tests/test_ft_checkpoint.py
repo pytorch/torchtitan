@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
 
 
@@ -84,6 +85,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
         os.makedirs(self.test_folder, exist_ok=True)
         self.model_parts = [nn.Linear(2, 2)]
+        self.model_wrapper = ModelWrapper(self.model_parts)
         self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
@@ -129,11 +131,10 @@ class TestFTCheckpointManager(unittest.TestCase):
         manager = FTCheckpointManager(
             config,
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=self.ft_manager,
         )

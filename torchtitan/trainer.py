@@ -19,6 +19,7 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -450,15 +451,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        sd_adapter = (
+            model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+            if model_spec.state_dict_adapter
+            else None
+        )
+
+        model_wrapper = ModelWrapper(
+            self.model_parts,
+            key_filter=model_converters.key_filter(),
+            converter_transform=model_converters.state_dict_transform(),
+            to_hf=sd_adapter.to_hf if sd_adapter else None,
+            from_hf=sd_adapter.from_hf if sd_adapter else None,
+        )
+
+        from torchtitan.components.checkpoint import HFStorageConfig
+
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
-            model_parts=self.model_parts,
+            model_wrapper=model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
+            hf_storage_config=(
+                HFStorageConfig(
+                    fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
+                    hf_assets_path=sd_adapter.hf_assets_path,
+                    get_storage_reader=sd_adapter.get_hf_storage_reader,
+                )
+                if sd_adapter
                 else None
             ),
             base_folder=config.dump_folder,

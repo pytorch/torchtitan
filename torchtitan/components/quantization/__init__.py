@@ -13,8 +13,9 @@
 # Note: Performance
 # The quantization modules are intended to be ran under `torch.compile`` for competitive performance
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from torchtitan.config import Configurable
 
@@ -23,12 +24,26 @@ class QuantizationConverter(Configurable):
     """Base class for quantization converters (FP8, MX, etc.).
 
     All quantization converter classes should inherit from this so they can be
-    identified via isinstance checks.
+    identified via isinstance checks. Provides default ``key_filter()`` and
+    ``state_dict_transform()`` returning None (no converter-owned keys, no
+    save transform). Subclasses override when they introduce new state dict
+    keys or need custom save behavior.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         _quantization_type: ClassVar[str]
+
+    def key_filter(self) -> Callable[[str], bool] | None:
+        return None
+
+    def state_dict_transform(
+        self,
+    ) -> Callable[[dict[str, Any], bool], dict[str, Any]] | None:
+        return None
+
+    def format_adapter(self) -> type | None:
+        return None
 
 
 # Mapping from quantization type to the pad_multiple needed for grouped GEMMs.

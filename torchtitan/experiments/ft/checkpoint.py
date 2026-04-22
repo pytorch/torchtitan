@@ -21,12 +21,12 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
 from torchtitan.components.checkpoint import (
     AsyncMode,
     CheckpointManager,
     DATALOADER,
+    HFStorageConfig,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
@@ -34,9 +34,9 @@ from torchtitan.components.checkpoint import (
 )
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.experiments.ft.manager import FTManager
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -74,11 +74,11 @@ class FTCheckpointManager(CheckpointManager):
         config: Config,
         *,
         dataloader: BaseDataLoader | None,
-        model_parts: list[nn.Module],
+        model_wrapper: ModelWrapper,
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        sd_adapter: BaseStateDictAdapter | None,
+        hf_storage_config: HFStorageConfig | None = None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
@@ -86,11 +86,11 @@ class FTCheckpointManager(CheckpointManager):
         super().__init__(
             config,
             dataloader=dataloader,
-            model_parts=model_parts,
+            model_wrapper=model_wrapper,
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
             states=states,
-            sd_adapter=sd_adapter,
+            hf_storage_config=hf_storage_config,
             base_folder=base_folder,
         )
 
