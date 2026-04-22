@@ -220,9 +220,6 @@ def apply_non_moe_tp(
     positions_sharding = Replicate() if enable_cp else None
     norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
     qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=False)
-    rowwise_output_plan = rowwise_parallel(
-        output_layouts=sp_layout, use_local_output=False
-    )
 
     # Detect whether fused QKV is used by checking the first layer
     # pyrefly: ignore [not-callable]
@@ -260,7 +257,9 @@ def apply_non_moe_tp(
                 ),
             ),
             **qkv_plan,
-            "attention.wo": rowwise_output_plan,
+            "attention.wo": rowwise_parallel(
+                output_layouts=sp_layout, use_local_output=False
+            ),
             "ffn_norm": norm_plan,
         }
 
@@ -273,7 +272,9 @@ def apply_non_moe_tp(
                         desired_input_layouts=(Replicate(),),
                     ),
                     "feed_forward.w1": colwise_parallel(use_local_output=False),
-                    "feed_forward.w2": rowwise_output_plan,
+                    "feed_forward.w2": rowwise_parallel(
+                        output_layouts=sp_layout, use_local_output=False
+                    ),
                     "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )

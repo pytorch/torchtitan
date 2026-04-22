@@ -251,9 +251,6 @@ def apply_non_moe_tp(
 
     # Apply tensor + sequence parallelism to every transformer block
     norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
-    rowwise_output_plan = rowwise_parallel(
-        output_layouts=sp_layout, use_local_output=False
-    )
 
     # Detect whether fused QKV is used by checking the first layer
     # pyrefly: ignore [not-callable]
@@ -282,7 +279,9 @@ def apply_non_moe_tp(
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             **qkv_plan,
-            "attention.wo": rowwise_output_plan,
+            "attention.wo": rowwise_parallel(
+                output_layouts=sp_layout, use_local_output=False
+            ),
             "ffn_norm": norm_plan,
         }
         # pyrefly: ignore [missing-attribute]
@@ -294,7 +293,9 @@ def apply_non_moe_tp(
                         desired_input_layouts=(Replicate(),),
                     ),
                     "feed_forward.w1": colwise_parallel(use_local_output=False),
-                    "feed_forward.w2": rowwise_output_plan,
+                    "feed_forward.w2": rowwise_parallel(
+                        output_layouts=sp_layout, use_local_output=False
+                    ),
                     "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )

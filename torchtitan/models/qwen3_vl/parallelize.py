@@ -103,7 +103,7 @@ def _apply_non_moe_tp_to_decoder(
         # inside each block (for TP/EP) while returning plain tensors
         # between blocks for DeepStack boolean indexing.
         parallelize_module(
-            transformer_block,
+            transformer_block,  # pyrefly: ignore [bad-argument-type]
             tp_mesh,
             PrepareModuleInputOutput(
                 input_layouts=(Replicate(), Replicate(), None, None),
