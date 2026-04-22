@@ -13,8 +13,8 @@ class TestCpuOffloadPass(TestCase):
     """Unit tests for the CPU offload pass on synthetic FX graphs.
 
     Tests use hand-built graphs that simulate the joint fwd+bwd structure
-    produced by make_fx, with ``seq_nr`` for forward/backward classification
-    and ``ac_region_id`` for layer boundaries.
+    produced by make_fx, with ``autograd_backward`` for forward/backward
+    classification and ``module_fqn`` for layer boundaries.
     """
 
     def _make_fake_val(self, shape=(64, 64), dtype=torch.float32, device="cuda:0"):
@@ -29,11 +29,11 @@ class TestCpuOffloadPass(TestCase):
         """Build a synthetic joint fwd+bwd graph with layer annotations.
 
         Structure per layer:
-          Forward: mm -> relu (seq_nr = layer_id * ops_per_layer + op_idx)
-          Backward: mm_bwd -> relu_bwd (same seq_nr as their fwd counterparts)
+          Forward: mm -> relu
+          Backward: mm_bwd -> relu_bwd
 
-        All forward nodes get ``ac_region_id = layer_id`` in their custom metadata.
-        Backward nodes also get ``ac_region_id`` (simulating _copy_fwd_metadata_to_bw_nodes).
+        All nodes get ``module_fqn = "layers.<layer_id>.block"`` in their custom
+        metadata. Backward nodes have ``autograd_backward = True``.
 
         Forward mm nodes have backward consumers (relu_bwd uses fwd mm output),
         making them eligible for offloading.
@@ -52,7 +52,6 @@ class TestCpuOffloadPass(TestCase):
         # Forward pass: layer 0 -> layer N-1
         for layer_id in range(num_layers):
             for op_idx in range(ops_per_layer):
-                seq_nr = layer_id * ops_per_layer + op_idx
                 if op_idx == 0:
                     node = graph.call_function(
                         torch.ops.aten.mm.default, args=(last_fwd, last_fwd)
@@ -61,8 +60,8 @@ class TestCpuOffloadPass(TestCase):
                     node = graph.call_function(
                         torch.ops.aten.relu.default, args=(last_fwd,)
                     )
-                node.meta["seq_nr"] = seq_nr
-                node.meta["custom"] = {"ac_region_id": layer_id}
+                node.meta["autograd_backward"] = False
+                node.meta["custom"] = {"module_fqn": f"layers.{layer_id}.block"}
                 node.meta["val"] = self._make_fake_val()
                 fwd_nodes.append(node)
                 last_fwd = node
@@ -71,15 +70,14 @@ class TestCpuOffloadPass(TestCase):
         last_bwd = last_fwd
         for layer_id in reversed(range(num_layers)):
             for op_idx in reversed(range(ops_per_layer)):
-                seq_nr = layer_id * ops_per_layer + op_idx
                 # Backward node: uses the corresponding forward node's output
                 fwd_idx = layer_id * ops_per_layer + op_idx
                 fwd_node = fwd_nodes[fwd_idx]
                 node = graph.call_function(
                     torch.ops.aten.mm.default, args=(last_bwd, fwd_node)
                 )
-                node.meta["seq_nr"] = seq_nr
-                node.meta["custom"] = {"ac_region_id": layer_id}
+                node.meta["autograd_backward"] = True
+                node.meta["custom"] = {"module_fqn": f"layers.{layer_id}.block"}
                 node.meta["val"] = self._make_fake_val()
                 bwd_nodes.append(node)
                 last_bwd = node
@@ -108,9 +106,9 @@ class TestCpuOffloadPass(TestCase):
 
         # Verify no last-layer nodes are tagged
         for node in tagged_nodes:
-            layer_id = node.meta.get("custom", {}).get("ac_region_id")
-            self.assertNotEqual(
-                layer_id, 2, "Last layer nodes should not be tagged for offload"
+            fqn = node.meta.get("custom", {}).get("module_fqn", "")
+            self.assertNotIn(
+                "layers.2", fqn, "Last layer nodes should not be tagged for offload"
             )
 
     def test_tag_no_backward_consumers(self):
@@ -125,13 +123,13 @@ class TestCpuOffloadPass(TestCase):
         x.meta["val"] = self._make_fake_val()
 
         node1 = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
-        node1.meta["seq_nr"] = 0
-        node1.meta["custom"] = {"ac_region_id": 0}
+        node1.meta["autograd_backward"] = False
+        node1.meta["custom"] = {"module_fqn": "layers.0.block"}
         node1.meta["val"] = self._make_fake_val()
 
         node2 = graph.call_function(torch.ops.aten.relu.default, args=(node1,))
-        node2.meta["seq_nr"] = 1
-        node2.meta["custom"] = {"ac_region_id": 0}
+        node2.meta["autograd_backward"] = False
+        node2.meta["custom"] = {"module_fqn": "layers.0.block"}
         node2.meta["val"] = self._make_fake_val()
 
         graph.output(node2)
@@ -156,7 +154,6 @@ class TestCpuOffloadPass(TestCase):
         x = graph.placeholder("x")
         x.meta["val"] = self._make_fake_val()
         node = graph.call_function(torch.ops.aten.relu.default, args=(x,))
-        node.meta["seq_nr"] = 0
         node.meta["val"] = self._make_fake_val()
         graph.output(node)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -227,25 +224,25 @@ class TestCpuOffloadPass(TestCase):
 
         # Forward: mm -> view (layer 0)
         mm = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
-        mm.meta["seq_nr"] = 0
-        mm.meta["custom"] = {"ac_region_id": 0}
+        mm.meta["autograd_backward"] = False
+        mm.meta["custom"] = {"module_fqn": "layers.0.block"}
         mm.meta["val"] = self._make_fake_val()
 
         view = graph.call_function(torch.ops.aten.view.default, args=(mm, [64, 64]))
-        view.meta["seq_nr"] = 1
-        view.meta["custom"] = {"ac_region_id": 0}
+        view.meta["autograd_backward"] = False
+        view.meta["custom"] = {"module_fqn": "layers.0.block"}
         view.meta["val"] = self._make_fake_val()
 
         # Forward layer 1 to avoid single-layer skip
         mm2 = graph.call_function(torch.ops.aten.mm.default, args=(view, view))
-        mm2.meta["seq_nr"] = 2
-        mm2.meta["custom"] = {"ac_region_id": 1}
+        mm2.meta["autograd_backward"] = False
+        mm2.meta["custom"] = {"module_fqn": "layers.1.block"}
         mm2.meta["val"] = self._make_fake_val()
 
         # Backward: uses view output
         bwd = graph.call_function(torch.ops.aten.mm.default, args=(mm2, view))
-        bwd.meta["seq_nr"] = 1  # same seq_nr as view -> backward
-        bwd.meta["custom"] = {"ac_region_id": 0}
+        bwd.meta["autograd_backward"] = True
+        bwd.meta["custom"] = {"module_fqn": "layers.0.block"}
         bwd.meta["val"] = self._make_fake_val()
 
         graph.output(bwd)
@@ -279,18 +276,18 @@ class TestCpuOffloadPass(TestCase):
         x.meta["val"] = small_val
 
         mm = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
-        mm.meta["seq_nr"] = 0
-        mm.meta["custom"] = {"ac_region_id": 0}
+        mm.meta["autograd_backward"] = False
+        mm.meta["custom"] = {"module_fqn": "layers.0.block"}
         mm.meta["val"] = small_val
 
         mm2 = graph.call_function(torch.ops.aten.mm.default, args=(mm, mm))
-        mm2.meta["seq_nr"] = 1
-        mm2.meta["custom"] = {"ac_region_id": 1}
+        mm2.meta["autograd_backward"] = False
+        mm2.meta["custom"] = {"module_fqn": "layers.1.block"}
         mm2.meta["val"] = small_val
 
         bwd = graph.call_function(torch.ops.aten.mm.default, args=(mm2, mm))
-        bwd.meta["seq_nr"] = 0
-        bwd.meta["custom"] = {"ac_region_id": 0}
+        bwd.meta["autograd_backward"] = True
+        bwd.meta["custom"] = {"module_fqn": "layers.0.block"}
         bwd.meta["val"] = small_val
 
         graph.output(bwd)

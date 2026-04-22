@@ -22,11 +22,12 @@ Reload pattern (backward):
     ... backward consumers use gpu ...
 
 This module works with the make_fx traced joint fwd+bwd graph, using
-``meta["custom"]["ac_region_id"]`` as layer boundaries and
+``meta["custom"]["module_fqn"]`` for layer boundaries and
 ``meta["autograd_backward"]`` to distinguish forward from backward nodes.
 """
 
 import operator
+import re
 
 import torch
 
@@ -37,14 +38,30 @@ import torch.fx
 from torch.fx import Node
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
 
+# Pattern to extract the layer index from a module FQN like "layers.0.attention.wq"
+_LAYER_INDEX_RE = re.compile(r"layers\.(\d+)")
+
 
 def _is_backward_node(node: Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def _get_layer_id(node: Node) -> int | None:
+    """Extract the transformer block layer index from a node's module FQN.
+
+    Looks for the pattern ``layers.<N>`` in the FQN and returns N.
+    Returns None if the node has no module_fqn or no layer index.
+    """
+    fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+    if fqn is None:
+        return None
+    m = _LAYER_INDEX_RE.search(fqn)
+    return int(m.group(1)) if m else None
 
 
 # ============================================================
@@ -72,17 +89,6 @@ _VIEW_OPS = frozenset(
     }
 )
 
-# Collective/wait ops whose outputs should not be offloaded
-_COLLECTIVE_OPS = frozenset(
-    {
-        torch.ops._c10d_functional.all_reduce,
-        torch.ops._c10d_functional.all_gather_into_tensor,
-        torch.ops._c10d_functional.reduce_scatter_tensor,
-        torch.ops._c10d_functional.all_to_all_single,
-        torch.ops._c10d_functional.wait_tensor,
-    }
-)
-
 _MIN_OFFLOAD_BYTES = 4096  # 4 KB minimum to justify offload overhead
 
 
@@ -102,9 +108,8 @@ def _is_view(node: Node) -> bool:
 def _is_collective_or_wait(node: Node) -> bool:
     """Check if a node is a distributed collective or wait op."""
     target = node.target
-    if hasattr(target, "overloadpacket"):
-        return target.overloadpacket in _COLLECTIVE_OPS
-    return target in _COLLECTIVE_OPS
+    ns = getattr(target, "namespace", None)
+    return ns == "_c10d_functional"
 
 
 def _tensor_is_contiguous(val: torch.Tensor) -> bool:
@@ -209,8 +214,8 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
 
     Sets ``node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD`` on
     eligible nodes. Eligibility requires:
-      1. Node is a forward node (determined via seq_nr)
-      2. Node has ``meta["custom"]["ac_region_id"]`` (layer boundary marker)
+      1. Node is a forward node (not ``autograd_backward``)
+      2. Node has a layer index derivable from ``meta["custom"]["module_fqn"]``
       3. Passes ``_can_offload_node`` (not a view, not tiny, etc.)
       4. Has at least one backward consumer
 
@@ -226,7 +231,7 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
     # Find all layer IDs to determine the last layer
     all_layer_ids: set[int] = set()
     for node in gm.graph.nodes:
-        lid = node.meta.get("custom", {}).get(_AC_REGION_ID)
+        lid = _get_layer_id(node)
         if lid is not None:
             all_layer_ids.add(lid)
     last_layer_id = max(all_layer_ids) if len(all_layer_ids) > 1 else None
@@ -237,7 +242,7 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
     for node in gm.graph.nodes:
         if node not in forward_nodes:
             continue
-        layer_id = node.meta.get("custom", {}).get(_AC_REGION_ID)
+        layer_id = _get_layer_id(node)
         # Skip the last layer: its activations are consumed immediately in
         # backward, so offloading adds overhead with no memory benefit.
         if layer_id is None or layer_id == last_layer_id:
@@ -246,7 +251,7 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
             continue
 
         # Check for backward consumers
-        has_backward_users = any(u in backward_nodes for u in node.users)
+        has_backward_users = any(_is_backward_node(u) for u in node.users)
         if not has_backward_users:
             continue
 
@@ -284,9 +289,6 @@ def apply_cpu_offload_pass(
     The reload device is inferred from the original tensor's device
     (from ``node.meta["val"].device``) before offloading.
 
-    Uses ``meta["custom"]["ac_region_id"]`` and seq_nr-based forward/backward
-    classification to determine layer boundaries.
-
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
         example_inputs: Example inputs (unused, required by graph pass interface).
@@ -320,7 +322,6 @@ def apply_cpu_offload_pass(
             val is not None
         ), f"Node {node.name} tagged for offload has no 'val' metadata"
 
-        # Infer reload device from the original tensor's device before offload
         device = val.device
 
         # --- Forward: async GPU->CPU offload right after production ---
@@ -367,15 +368,6 @@ def apply_cpu_offload_pass(
             f"({_tensor_bytes(val) / 1024:.1f} KB, {val.shape})"
         )
         total_bytes += _tensor_bytes(val)
-
-    # TODO: Add scheduling optimizations (defer offload waits, prefetch reloads)
-    # for D2H/H2D overlap with compute. The make_fx traced joint graph
-    # interleaves forward and backward nodes (unlike manually built graphs
-    # where they are cleanly separated), so the simple "defer to next layer's
-    # forward" / "prefetch to preceding layer's backward" strategy from the
-    # reference implementation needs adaptation. For now, offload/reload ops
-    # are placed right next to their producers/consumers, which still saves
-    # memory but without async transfer overlap.
 
     gm.graph.lint()
     gm.recompile()
