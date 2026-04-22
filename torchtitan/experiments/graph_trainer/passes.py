@@ -63,7 +63,7 @@ def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
     *,
-    cudagraph_compatible: bool = False,
+    use_cudagraph: bool = False,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -101,7 +101,7 @@ def compile_time_passes(
         ),
         regional_inductor_pass,
     ]
-    if cudagraph_compatible:
+    if use_cudagraph:
         # Must run before custom_codegen_pass (last in pre_passes)
         # which replaces the GraphModule's forward().
         # Also must run before cudagraph_pass.
@@ -133,20 +133,20 @@ def construct_default_graph_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    cudagraph_compatible = is_cudagraph_compatible(traced_result.gm)
+    use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
+        traced_result.gm
+    )
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes(
-                traced_result, config, cudagraph_compatible=cudagraph_compatible
-            )
+            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
         )
 
     # cudagraph should be the last pass.
-    if cudagraph_compatible:
+    if use_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
