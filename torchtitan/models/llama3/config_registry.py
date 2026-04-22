@@ -101,7 +101,14 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=[Float8LinearQuant(emulate=True)],
+        quantization=[
+            Float8LinearQuant(
+                emulate=True,
+                model_compile_enabled=(
+                    config.compile.enable and "model" in config.compile.components
+                ),
+            ),
+        ],
     )
     return config
 

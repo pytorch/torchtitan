@@ -64,7 +64,11 @@ class Configurable:
                     )
                     return repr(val)
 
-            return {f.name: _convert(getattr(self, f.name)) for f in fields(self)}
+            return {
+                f.name: _convert(getattr(self, f.name))
+                for f in fields(self)
+                if not f.name.startswith("_")
+            }
 
         def walk(
             self, config_cls: type, *, _prefix: str = ""

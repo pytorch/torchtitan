@@ -70,6 +70,9 @@ class QuantizationConfig:
     Pass a list of these to ``model_registry(quantization=[...])``.
     """
 
+    model_compile_enabled: bool = False
+    """Whether torch.compile is enabled for the model."""
+
     def apply(self, model_config) -> None:
         raise NotImplementedError
 
@@ -79,8 +82,21 @@ class Float8LinearQuant(QuantizationConfig):
     """Replace matching Linear.Config with Float8LinearConfig."""
 
     recipe_name: str = "rowwise"
+    """Float8 recipe name ("rowwise", "rowwise_with_gw_hp")."""
+
     filter_fqns: list[str] | None = None
+    """
+    List of fully qualified names of modules to skip applying float8 training to.
+    nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
+    Example: filter_fqns=["attention.qkv_linear.wq", "attention.qkv_linear.wk", "attention.qkv_linear.wv", "output"]
+    """
+
     emulate: bool = False
+    """
+    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
+    as the current CI does not have sm_89 capability, required by Float8.
+    Not compatible with torch.compile.
+    """
 
     def apply(self, model_config) -> None:
         convert_to_float8(
@@ -88,6 +104,7 @@ class Float8LinearQuant(QuantizationConfig):
             recipe_name=self.recipe_name,
             filter_fqns=self.filter_fqns,
             emulate=self.emulate,
+            model_compile_enabled=self.model_compile_enabled,
         )
 
 
@@ -96,7 +113,10 @@ class Float8MoEQuant(QuantizationConfig):
     """Apply FP8 quantization to MoE expert grouped GEMMs."""
 
     def apply(self, model_config) -> None:
-        convert_moe_to_float8(model_config)
+        convert_moe_to_float8(
+            model_config,
+            model_compile_enabled=self.model_compile_enabled,
+        )
 
 
 @dataclass
@@ -104,13 +124,23 @@ class MXFP8MoEQuant(QuantizationConfig):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
     recipe_name: str = "mxfp8_rceil"
+    """
+    Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
+
+    - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
+    """
+
     pad_token_groups: bool = True
+    """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
+    Set to False when EP is enabled (TorchTitan handles padding instead,
+    except for DeepEP backend)."""
 
     def apply(self, model_config) -> None:
         convert_moe_to_mxfp8(
             model_config,
             recipe_name=self.recipe_name,
             pad_token_groups_for_grouped_mm=self.pad_token_groups,
+            model_compile_enabled=self.model_compile_enabled,
         )
 
 
@@ -119,8 +149,20 @@ class MXFP8Quant(QuantizationConfig):
     """Apply MXFP8 quantization to modules matching FQNs (e.g. Flux blocks)."""
 
     fqns: list[str] | None = None
+    """List of fully qualified names of modules to apply MXFP8 dynamic quantization
+    on grouped GEMM operations."""
+
     recipe_name: str = "mxfp8_rceil"
+    """
+    Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
+
+    - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
+    """
+
     pad_token_groups: bool = True
+    """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
+    Set to False when EP is enabled (TorchTitan handles padding instead,
+    except for DeepEP backend)."""
 
     def apply(self, model_config) -> None:
         convert_to_mxfp8(
@@ -128,6 +170,7 @@ class MXFP8Quant(QuantizationConfig):
             fqns=self.fqns,
             recipe_name=self.recipe_name,
             pad_token_groups_for_grouped_mm=self.pad_token_groups,
+            model_compile_enabled=self.model_compile_enabled,
         )
 
 
@@ -146,6 +189,7 @@ def convert_to_float8(
     recipe_name: str = "rowwise",
     filter_fqns: list[str] | None = None,
     emulate: bool = False,
+    model_compile_enabled: bool = False,
 ) -> None:
     """Replace matching Linear.Config with Float8LinearConfig in the model config tree.
 
@@ -154,14 +198,17 @@ def convert_to_float8(
         recipe_name: Float8 recipe name ("rowwise", "rowwise_with_gw_hp").
         filter_fqns: FQNs of modules to skip. Dims not divisible by 16 are always skipped.
         emulate: If True, use software emulation instead of hardware float8.
+        model_compile_enabled: Whether torch.compile is enabled for the model.
     """
     if filter_fqns is None:
         filter_fqns = []
 
-    if not has_cuda_capability(8, 9) and not emulate:
+    if has_cuda_capability(8, 9) or (emulate and not model_compile_enabled):
+        pass
+    else:
         raise ValueError(
-            "Float8 is only supported on SM89 or later. "
-            "To enable testing on older hardware, set emulate=True."
+            "Failed to swap to Float8Linear because float8 is only supported on SM89 or later."
+            "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
         )
 
     try:
@@ -227,7 +274,11 @@ def convert_to_float8(
     logger.info("Swapped to Float8Linear layers")
 
 
-def convert_moe_to_float8(model_config) -> None:
+def convert_moe_to_float8(
+    model_config,
+    *,
+    model_compile_enabled: bool = False,
+) -> None:
     """Convert MoE expert layers in the model config to use float8 scaled grouped GEMMs.
 
     Walks the model config tree for GroupedExperts.Config instances and sets
@@ -237,6 +288,12 @@ def convert_moe_to_float8(model_config) -> None:
     """
     if not has_cuda_capability(8, 9):
         raise ValueError("Float8 MoE training only supported on SM89 or later.")
+
+    if not model_compile_enabled:
+        logger.warning(
+            "Compile is required for high performance float8 MoE training; "
+            "enable it with --compile.enable"
+        )
 
     from torchao.quantization.quant_api import quantize_
 
@@ -313,7 +370,18 @@ def _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm):
     return convert_fn
 
 
-def _validate_mxfp8():
+def convert_moe_to_mxfp8(
+    model_config,
+    *,
+    recipe_name: str = "mxfp8_rceil",
+    pad_token_groups_for_grouped_mm: bool = True,
+    model_compile_enabled: bool = False,
+) -> None:
+    """Convert GroupedExperts in the model config to use MXFP8 scaled grouped GEMMs.
+
+    Also swaps token dispatcher configs to set the appropriate pad_multiple
+    for MXFP8 grouped GEMMs.
+    """
     if find_spec("torchao") is None:
         raise ImportError(
             "torchao is not installed. Please install it to use MXFP8 linear layers."
@@ -322,19 +390,11 @@ def _validate_mxfp8():
         10, 0
     ), "MXFP8 is only supported on SM100 or architectures"
 
-
-def convert_moe_to_mxfp8(
-    model_config,
-    *,
-    recipe_name: str = "mxfp8_rceil",
-    pad_token_groups_for_grouped_mm: bool = True,
-) -> None:
-    """Convert GroupedExperts in the model config to use MXFP8 scaled grouped GEMMs.
-
-    Also swaps token dispatcher configs to set the appropriate pad_multiple
-    for MXFP8 grouped GEMMs.
-    """
-    _validate_mxfp8()
+    if not model_compile_enabled:
+        logger.warning(
+            "torch.compile enablement is required for highest performance "
+            "of MXFP8 dynamic quantization."
+        )
     convert_fn = _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm)
 
     from torchtitan.models.common.token_dispatcher import (
@@ -384,9 +444,22 @@ def convert_to_mxfp8(
     fqns: list[str] | None = None,
     recipe_name: str = "mxfp8_rceil",
     pad_token_groups_for_grouped_mm: bool = True,
+    model_compile_enabled: bool = False,
 ) -> None:
     """Convert modules matching FQNs to use MXFP8 quantization (e.g. Flux blocks)."""
-    _validate_mxfp8()
+    if find_spec("torchao") is None:
+        raise ImportError(
+            "torchao is not installed. Please install it to use MXFP8 linear layers."
+        )
+    assert has_cuda_capability(
+        10, 0
+    ), "MXFP8 is only supported on SM100 or architectures"
+
+    if not model_compile_enabled:
+        logger.warning(
+            "torch.compile enablement is required for highest performance "
+            "of MXFP8 dynamic quantization."
+        )
     convert_fn = _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm)
 
     for fqn, config, _parent, _attr in model_config.walk(Module.Config):

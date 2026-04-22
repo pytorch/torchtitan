@@ -62,13 +62,21 @@ def llama4_debugmodel_ep() -> Trainer.Config:
 
 
 def llama4_debugmodel_fp8() -> Trainer.Config:
+    compile_config = CompileConfig(enable=True, components=["model", "loss"])
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry(
             "debugmodel",
             moe_comm_backend="torchao",
-            quantization=[Float8MoEQuant()],
+            quantization=[
+                Float8MoEQuant(
+                    model_compile_enabled=(
+                        compile_config.enable
+                        and "model" in compile_config.components
+                    ),
+                ),
+            ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
@@ -96,7 +104,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
         ),
-        compile=CompileConfig(enable=True, components=["model", "loss"]),
+        compile=compile_config,
     )
 
 

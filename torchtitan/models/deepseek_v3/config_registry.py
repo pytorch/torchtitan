@@ -107,6 +107,10 @@ def deepseek_v3_16b() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
+    compile_config = CompileConfig(enable=True, components=["loss"])
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
     return Trainer.Config(
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_registry(
@@ -115,7 +119,7 @@ def deepseek_v3_671b() -> Trainer.Config:
             moe_comm_backend="torchao",
             quantization=[
                 Float8LinearQuant(filter_fqns=["output", "router.gate"]),
-                Float8MoEQuant(),
+                Float8MoEQuant(model_compile_enabled=model_compile_enabled),
             ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -142,5 +146,5 @@ def deepseek_v3_671b() -> Trainer.Config:
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
         ),
-        compile=CompileConfig(enable=True, components=["loss"]),
+        compile=compile_config,
     )
