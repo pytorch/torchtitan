@@ -98,14 +98,19 @@ def _apply_non_moe_tp_to_decoder(
                 "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
             }
 
-        # Wrap hidden_states as DTensor(Replicate) at block entry.
-        # Becuase no SP applied, the input placement is Replicate().
+        # Wrap hidden_states as DTensor(Replicate) at block entry, and
+        # convert back to plain tensor at block exit. This keeps DTensor
+        # inside each block (for TP/EP) while returning plain tensors
+        # between blocks for DeepStack boolean indexing.
         parallelize_module(
             transformer_block,
             tp_mesh,
-            PrepareModuleInput(
+            PrepareModuleInputOutput(
                 input_layouts=(Replicate(), Replicate(), None, None),
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
+                output_layouts=(Replicate(),),
+                desired_output_layouts=(Replicate(),),
+                use_local_output=True,
             ),
         )
 
