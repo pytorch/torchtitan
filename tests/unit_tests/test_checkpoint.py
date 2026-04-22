@@ -705,19 +705,20 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
     @mock.patch(
         "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
+        side_effect=lambda m: dict(m.named_parameters()),
     )
-    def test_hf_save_calls_adapter_to_hf_with_all_model_keys(
+    def test_hf_save_adapter_receives_all_model_keys(
         self, mock_get_sd, mock_save, mock_rank
     ):
-        """HF save must pass all model keys to sd_adapter.to_hf().
+        """to_hf must receive all model keys when saving in HF format."""
+        received_keys = []
 
-        Catches: adapter receiving incomplete state dict → incomplete HF checkpoint.
-        """
+        def fake_to_hf(sd):
+            received_keys.extend(sd.keys())
+            return {f"hf_{k}": v for k, v in sd.items()}
+
         mock_adapter = mock.Mock()
-        mock_adapter.to_hf.side_effect = lambda sd: {
-            f"hf_{k}": v for k, v in sd.items()
-        }
+        mock_adapter.to_hf.side_effect = fake_to_hf
         mock_adapter.fqn_to_index_mapping = None
         mock_adapter.hf_assets_path = None
 
@@ -738,56 +739,55 @@ class TestCheckpointManager(unittest.TestCase):
         )
         manager.save(curr_step=10, last_step=True)
 
-        # Verify to_hf was called with all model keys
         mock_adapter.to_hf.assert_called_once()
-        to_hf_arg = mock_adapter.to_hf.call_args[0][0]
-        self.assertIn("weight", to_hf_arg)
-        self.assertIn("bias", to_hf_arg)
+        self.assertIn("weight", received_keys)
+        self.assertIn("bias", received_keys)
 
-        # Verify dcp.save was called (with HF storage writer, not checkpoint_id)
         mock_save.assert_called_once()
-        _, kw = mock_save.call_args
-        self.assertIsNotNone(kw.get("storage_writer"))
-        self.assertIsNone(kw.get("checkpoint_id"))
+        saved_sd = mock_save.call_args[0][0]
+        self.assertIn("hf_weight", saved_sd)
+        self.assertIn("hf_bias", saved_sd)
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch(
+        "torchtitan.components.checkpoint.set_model_state_dict",
+    )
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
     @mock.patch(
         "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=lambda m: {"weight": m.weight, "bias": m.bias},
+        side_effect=lambda m: dict(m.named_parameters()),
     )
-    def test_hf_load_passes_all_model_keys_to_adapter(
-        self, mock_get_sd, mock_load, mock_rank
+    def test_hf_load_roundtrip_to_hf_then_from_hf(
+        self, mock_get_sd, mock_load, mock_set_sd, mock_rank
     ):
-        """HF load must pass all model keys to sd_adapter.to_hf() for container creation.
+        """HF load must: to_hf (container) → dcp.load → from_hf → load_state_dict."""
+        call_order = []
 
-        Catches: adapter receiving incomplete state dict → missing keys not loaded
-        from HF checkpoint, or FQN mismatch causing silent param loss.
-        """
+        def fake_to_hf(sd):
+            call_order.append("to_hf")
+            return {f"hf_{k}": v for k, v in sd.items()}
+
+        def fake_from_hf(sd):
+            call_order.append("from_hf")
+            return {k.removeprefix("hf_"): v for k, v in sd.items()}
+
+        def fake_dcp_load(*args, **kwargs):
+            call_order.append("dcp_load")
+
         mock_adapter = mock.Mock()
-        # to_hf: record keys received, return HF-shaped containers
-        mock_adapter.to_hf.side_effect = lambda sd: {
-            f"hf_{k}": v for k, v in sd.items()
-        }
-        # from_hf: simulate reverse mapping
-        mock_adapter.from_hf.side_effect = lambda sd: {
-            k.removeprefix("hf_"): v for k, v in sd.items()
-        }
+        mock_adapter.to_hf.side_effect = fake_to_hf
+        mock_adapter.from_hf.side_effect = fake_from_hf
         mock_adapter.get_hf_storage_reader.return_value = mock.Mock()
         mock_adapter.fqn_to_index_mapping = None
         mock_adapter.hf_assets_path = self.test_folder
-
-        # dcp.load is a no-op (just accept the containers)
-        mock_load.side_effect = lambda *a, **kw: None
+        mock_load.side_effect = fake_dcp_load
 
         cfg = self.trainer_config.checkpoint
         cfg.initial_load_in_hf = True
         cfg.initial_load_model_only = True
         cfg.initial_load_path = self.test_folder
-        # Use a non-existent folder so load() takes the initial_load_path branch
-        # instead of trying to resume from an existing checkpoint folder.
-        cfg.folder = "nonexistent_ckpt"
+        cfg.folder = os.path.join(self.base_temp_dir, "nonexistent_ckpt")
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
@@ -801,15 +801,19 @@ class TestCheckpointManager(unittest.TestCase):
         )
         manager.load(step=-1)
 
-        # Verify to_hf received all model keys for container creation
-        mock_adapter.to_hf.assert_called_once()
-        to_hf_arg = mock_adapter.to_hf.call_args[0][0]
-        self.assertIn("weight", to_hf_arg)
-        self.assertIn("bias", to_hf_arg)
+        self.assertEqual(call_order, ["to_hf", "dcp_load", "from_hf"])
 
-        # Verify from_hf was called and result passed to load_state_dict
+        mock_adapter.to_hf.assert_called_once()
+        to_hf_keys = set(mock_adapter.to_hf.call_args[0][0].keys())
+        self.assertEqual(to_hf_keys, {"weight", "bias"})
+
         mock_adapter.from_hf.assert_called_once()
-        mock_adapter.get_hf_storage_reader.assert_called_once()
+        from_hf_keys = set(mock_adapter.from_hf.call_args[0][0].keys())
+        self.assertEqual(from_hf_keys, {"hf_weight", "hf_bias"})
+
+        mock_set_sd.assert_called_once()
+        loaded_sd = mock_set_sd.call_args[1]["model_state_dict"]
+        self.assertEqual(set(loaded_sd.keys()), {"weight", "bias"})
         manager.close()
 
 
