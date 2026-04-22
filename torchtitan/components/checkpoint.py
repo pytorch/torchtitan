@@ -13,8 +13,8 @@ import re
 import shutil
 import threading
 import time
-from concurrent.futures import Future
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, cast, Literal
 
@@ -166,14 +166,15 @@ class CheckpointManager(Configurable):
 
         initial_load_path: str | None = None
         """
-        This option specifies the path to the initial checkpoint to load, which is
-        particularly useful for resuming training from a previous run with a
-        different output path or when loading a checkpoint from a pre-trained model.
-        If the checkpoint folder for the current run is not empty,
-        located at {--dump_folder}/{--checkpoint.folder}, this option will be ignored.
-        This feature allows users to load an initial checkpoint from a different folder and
-        continue training, saving new checkpoints to the specified folder without affecting
-        the existing ones.
+        Path to the initial checkpoint to load. Always loaded when set,
+        even if the checkpoint folder for the current run already exists.
+        This is useful for:
+        - Loading a pre-trained model for the first training run.
+        - Providing base/frozen weights on resume when interval checkpoints
+          are partial (e.g. LoRA saves only adapter keys).
+
+        When the checkpoint folder exists, the initial checkpoint is loaded
+        first (phase 1), then the resume checkpoint is loaded on top (phase 2).
 
         Note that the path should contain the full path to the checkpoint folder,
         including the step number, if any; for example,
@@ -203,9 +204,27 @@ class CheckpointManager(Configurable):
         initial_load_in_hf_quantized: bool = False
         """
         Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
-        is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
+        is only used when `initial_load_path` and `initial_load_in_hf` is specified. This will load
         checkpoints in HF's model definition and dequantize on model weights if necessary. To support
         this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
+        """
+
+        additional_load_path: str | None = None
+        """
+        Path to an additional checkpoint to load on top of the initial checkpoint.
+        This is useful for loading pre-trained adapter weights (e.g. LoRA adapters)
+        alongside the base model from `initial_load_path`.
+
+        On initial load (no checkpoint folder): loads after `initial_load_path`.
+        On resume (checkpoint folder exists): ignored — the checkpoint folder
+        serves as the overlay.
+
+        The loaded checkpoint is always model-only in DCP format and uses
+        `strict=False` so missing keys are silently skipped.
+        HF/safetensors format is not yet supported for additional loads.
+
+        Note that the path should contain the full path to the checkpoint folder,
+        including the step number, if any.
         """
 
         last_save_model_only: bool = True
@@ -322,6 +341,7 @@ class CheckpointManager(Configurable):
         )
 
         if not self.enable:
+            self.folder = ""
             return
 
         self.staging = False
@@ -338,6 +358,7 @@ class CheckpointManager(Configurable):
         self.initial_load_in_hf = config.initial_load_in_hf
         self.initial_load_path = config.initial_load_path
         self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
+        self.additional_load_path = config.additional_load_path
         self.last_save_model_only = config.last_save_model_only
         self.last_save_in_hf = config.last_save_in_hf
         if self.last_save_in_hf:
@@ -604,75 +625,128 @@ class CheckpointManager(Configurable):
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
-        """Load the checkpoint for the given step.
+        """Load the checkpoint, potentially from multiple sources.
 
-        This function will load the checkpoint for the given step. If ``step`` is -1, it
-        will load the latest checkpoint. If the checkpoint does not exist, it will return
-        False and load nothing.
+        Two-phase loading:
+
+        1. **Initial load**: If ``initial_load_path`` is set, always load it
+           first (model weights only). This provides base/pretrained weights.
+        2. **Overlay load**: Either the checkpoint folder (resume) or
+           ``additional_load_path`` (pretrained adapter). The checkpoint
+           folder takes priority.
+
+        When both phases run, Phase 2 builds a FULL-mode load container via
+        ``get_model_state_dict()``, which reflects Phase 1's loaded weights.
+        DCP only overwrites keys present in the overlay checkpoint (e.g.
+        adapter keys), leaving Phase 1's base weights intact. This relies
+        on ``get_model_state_dict()`` returning current model state.
 
         Args:
             step (int, optional): The step to load the checkpoint for. Defaults to -1.
 
         Returns:
-            bool: Whether the checkpoint was loaded successfully.
+            bool: Whether any checkpoint was loaded successfully.
         """
         if not self.enable:
             return False
 
-        model_only = False
-        from_hf = False
-        from_quantized = False
-        if not os.path.exists(self.folder):
-            model_only = self.initial_load_model_only
-            from_hf = self.initial_load_in_hf
-            from_quantized = self.initial_load_in_hf_quantized
-            if from_hf:
-                assert (
-                    model_only
-                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
+        loaded = False
 
-            if from_quantized:
-                assert (
-                    from_hf
-                ), "Quantized checkpoint can only be loaded from HuggingFace format."
+        # Phase 1: Load initial checkpoint (base/pretrained weights).
+        # Always loaded when set, even if checkpoint folder exists.
+        loaded |= self._load_initial()
 
-            if self.initial_load_path:
-                checkpoint_id = self.initial_load_path
-                if not os.path.isdir(checkpoint_id):
-                    raise ValueError(
-                        "checkpoint.initial_load_path is specified but the path is not valid."
-                    )
-                if from_hf:
-                    logger.info(
-                        f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
-                    )
-            elif from_hf:
-                assert (
-                    self.hf_storage_config is not None
-                    and self.hf_storage_config.hf_assets_path is not None
-                ), "from_hf is True but hf_storage_config or hf_assets_path is not provided."
-                hf_assets_path = self.hf_storage_config.hf_assets_path
-                checkpoint_id = hf_assets_path
-                if not os.path.isdir(checkpoint_id):
-                    raise ValueError(
-                        "model.hf_assets_path is being used to load HF weights but the path is not valid. \
-                        Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
-                    )
-                logger.info(
-                    f"loading HF safetensors from --model.hf_assets_path: {hf_assets_path}"
+        # Phase 2: Overlay — checkpoint folder (resume) or additional_load_path.
+        loaded |= self._load_overlay(step)
+
+        if loaded:
+            GarbageCollection.collect("GC collection for checkpoint loading.")
+        return loaded
+
+    def _resolve_initial_load_path(self) -> str | None:
+        """Resolve the initial load path for base/pretrained weights.
+
+        When ``initial_load_path`` is explicitly set, it is always used.
+        The ``hf_assets_path`` fallback is only used on fresh start (no
+        checkpoint folder) to avoid wasteful HF reloads on every resume.
+        """
+        if self.initial_load_path:
+            if not os.path.isdir(self.initial_load_path):
+                raise ValueError(
+                    "checkpoint.initial_load_path is specified but the path is not valid."
                 )
-            else:
-                return False
-        else:
-            if self.initial_load_path:
-                logger.warning(
-                    "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
-                    f"Checkpointer will use the checkpoints from the checkpoint.folder {self.folder}."
+            return self.initial_load_path
+
+        # hf_assets_path fallback: only on fresh start (no checkpoint folder)
+        if self.initial_load_in_hf and not os.path.isdir(self.folder):
+            assert (
+                self.hf_storage_config is not None
+                and self.hf_storage_config.hf_assets_path is not None
+            ), "from_hf is True but hf_storage_config or hf_assets_path is not provided."
+            hf_assets_path = self.hf_storage_config.hf_assets_path
+            if not os.path.isdir(hf_assets_path):
+                raise ValueError(
+                    "model.hf_assets_path is being used to load HF weights but the path is not valid. "
+                    "Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                 )
-            if self.initial_load_in_hf:
+            return hf_assets_path
+
+        return None
+
+    def _load_initial(self) -> bool:
+        """Phase 1: Load base/pretrained weights from initial_load_path.
+
+        Always loads when initial_load_path is explicitly set, regardless
+        of whether the checkpoint folder exists. The hf_assets_path fallback
+        is only used on fresh start (no checkpoint folder).
+        """
+        checkpoint_id = self._resolve_initial_load_path()
+        if checkpoint_id is None:
+            return False
+
+        from_hf = self.initial_load_in_hf
+        from_quantized = self.initial_load_in_hf_quantized
+
+        if from_hf:
+            assert (
+                self.initial_load_model_only
+            ), "Only model can be loaded when loading from HF's safetensors checkpoint."
+        if from_quantized:
+            assert (
+                from_hf
+            ), "Quantized checkpoint can only be loaded from HuggingFace format."
+
+        logger.info(
+            f"Loading initial checkpoint from {checkpoint_id}"
+            f"{' (HF format)' if from_hf else ''}."
+        )
+        begin = time.monotonic()
+        states = self._states_to_load(model_only=self.initial_load_model_only)
+        self.dcp_load(
+            states,
+            checkpoint_id=checkpoint_id,
+            from_hf=from_hf,
+            from_quantized=from_quantized,
+        )
+        logger.info(
+            f"Finished loading initial checkpoint in "
+            f"{time.monotonic() - begin:.2f} seconds."
+        )
+        return True
+
+    def _load_overlay(self, step: int = -1) -> bool:
+        """Phase 2: Load overlay checkpoint (resume or additional weights).
+
+        Checkpoint folder takes priority over additional_load_path.
+        On resume, loads the full training state. additional_load_path
+        loads model weights only.
+        """
+        if os.path.isdir(self.folder):
+            if self.additional_load_path:
                 logger.warning(
-                    "checkpoint.initial_load_in_hf is True but the checkpoint.folder exists. "
-                    "Checkpointer will not load from HF safetensors"
+                    "checkpoint.additional_load_path is set but the checkpoint "
+                    "folder exists. The additional_load_path will be ignored — "
+                    "the checkpoint folder serves as the overlay."
                 )
             step = self._find_load_step() if step == -1 else step
             if step == -1:
@@ -682,23 +756,50 @@ class CheckpointManager(Configurable):
 
             if not os.path.isdir(checkpoint_id):
                 raise FileNotFoundError(
-                    f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
+                    f"--checkpoint.load_step={step} but checkpoint "
+                    f"{checkpoint_id} is not found."
                 )
 
-        logger.info(f"Loading the checkpoint from {checkpoint_id}.")
-        begin = time.monotonic()
-        states = self._states_to_load(model_only)
-        self.dcp_load(
-            states,
-            checkpoint_id=checkpoint_id,
-            from_hf=from_hf,
-            from_quantized=from_quantized,
-        )
-        GarbageCollection.collect("GC collection for checkpoint loading.")
-        logger.info(
-            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
-        )
-        return True
+            logger.info(f"Loading resume checkpoint from {checkpoint_id}.")
+            begin = time.monotonic()
+            states = self._states_to_load(model_only)
+            self.dcp_load(
+                states,
+                checkpoint_id=checkpoint_id,
+                from_hf=False,
+                from_quantized=False,
+            )
+            logger.info(
+                f"Finished loading resume checkpoint in "
+                f"{time.monotonic() - begin:.2f} seconds."
+            )
+            return True
+
+        if self.additional_load_path:
+            if not os.path.isdir(self.additional_load_path):
+                raise ValueError(
+                    "checkpoint.additional_load_path is specified but the path "
+                    "is not valid."
+                )
+
+            logger.info(
+                f"Loading additional checkpoint from {self.additional_load_path}."
+            )
+            begin = time.monotonic()
+            states = self._states_to_load(model_only=True)
+            self.dcp_load(
+                states,
+                checkpoint_id=self.additional_load_path,
+                from_hf=False,
+                from_quantized=False,
+            )
+            logger.info(
+                f"Finished loading additional checkpoint in "
+                f"{time.monotonic() - begin:.2f} seconds."
+            )
+            return True
+
+        return False
 
     def maybe_wait_for_staging(self) -> None:
         """Wait for the staging to finish if it is enabled.
