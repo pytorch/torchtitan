@@ -200,6 +200,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self._init_device()
         self.parallel_dims = self.init_distributed()
         config.maybe_log()
+        self._init_gc()
         self._init_determinism()
         self._build_model()
         self._build_training_infrastructure()
@@ -210,15 +211,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         device_module.set_device(self.device)
 
-    def _init_determinism(self) -> None:
+    def _init_gc(self) -> None:
         config = self.config
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq, debug=config.training.gc_debug
         )
+
+    def _init_determinism(self) -> None:
         dist_utils.set_determinism(
             self.parallel_dims,
             self.device,
-            config.debug,
+            self.config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
 

@@ -155,14 +155,12 @@ class PrecompileFakeTrainer(Trainer):
         return parallel_dims
 
     def _init_determinism(self) -> None:
-        config = self.config
-        self.gc_handler = utils.GarbageCollection(
-            gc_freq=config.training.gc_freq, debug=config.training.gc_debug
-        )
         # Match the deterministic mode that the training loop will use.
         # The backward graph captures use_deterministic_algorithms() at
         # compile time and asserts it matches at runtime.
-        if config.debug.deterministic:
+        # We can't call super() here because dist_utils.set_determinism
+        # does DTensor RNG seeding which fails under CooR's fake PG.
+        if self.config.debug.deterministic:
             torch.use_deterministic_algorithms(True)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
@@ -209,11 +207,11 @@ class PrecompileFakeTrainer(Trainer):
         # compile_on_one_rank=True.  Re-enable for the tracing phase after.
         import torch.distributed.config as dist_config
 
-        model.to_empty(device=utils.device_type)
+        model.to_empty(device=init_device)
         dist_config.compile_on_one_rank = False
         try:
             with torch.no_grad():
-                model.init_weights(buffer_device=None)
+                model.init_weights(buffer_device=buffer_device)
         finally:
             dist_config.compile_on_one_rank = True
         model.train()
