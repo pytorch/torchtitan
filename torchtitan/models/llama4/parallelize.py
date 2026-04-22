@@ -530,7 +530,6 @@ def apply_moe_ep_tp(
     comm_backend: str = "standard",
     enable_sp: bool = True,
     pad_multiple: int | None = None,
-    use_local_output: bool = False,
 ):
     """
     Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
@@ -544,8 +543,6 @@ def apply_moe_ep_tp(
         comm_backend: MoE communication backend.
         enable_sp: Whether sequence parallelism is enabled.
         pad_multiple: Optional token padding multiple for compatible expert kernels.
-        use_local_output: Controls the MoE module final output placements in
-            PrepareModuleInputOutput
     """
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -569,7 +566,7 @@ def apply_moe_ep_tp(
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
-                    use_local_output=use_local_output,
+                    use_local_output=False,
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(

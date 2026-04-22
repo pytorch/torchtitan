@@ -54,18 +54,18 @@ def _apply_non_moe_tp_to_decoder(
     loss_parallel: bool,
     enable_async_tp: bool,
 ):
-    """Apply tensor parallelism to the decoder without SequenceParallel.
+    """Apply tensor parallelism to the decoder with full DTensor.
 
-    Hidden states stay as plain tensors between layers because the residual
-    connection (``x = x + self.attention(...)``) requires matching types, and
-    DeepStack uses boolean indexing which DTensor does not support. NoParallel
-    on norms wraps plain tensors as DTensor(Replicate) at each layer boundary.
+    Hidden states flow as DTensor(Replicate) between layers. The embedding
+    output is plain tensor (needed for vision scatter before the decoder loop),
+    but each transformer block wraps its input as DTensor via PrepareModuleInput.
+    DeepStack boolean indexing handles DTensor via to_local in the 
     """
     top_level_plan = {
         "tok_embeddings": RowwiseParallel(
             input_layouts=Replicate(),
             output_layouts=Replicate(),
-            use_local_output=True,  # needed for _scatter
+            use_local_output=True,  # plain tensor needed for _scatter_vision_embeds
         ),
         "norm": NoParallel(),
         "output": ColwiseParallel(
@@ -98,6 +98,17 @@ def _apply_non_moe_tp_to_decoder(
                 "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
             }
 
+        # Wrap hidden_states as DTensor(Replicate) at block entry.
+        # Becuase no SP applied, the input placement is Replicate().
+        parallelize_module(
+            transformer_block,
+            tp_mesh,
+            PrepareModuleInput(
+                input_layouts=(Replicate(), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
+            ),
+        )
+
         layer_plan = {
             "attention_norm": NoParallel(),
             "ffn_norm": NoParallel(),
@@ -113,8 +124,9 @@ def _apply_non_moe_tp_to_decoder(
                 sequence_dim=2, use_local_output=False
             ),
             "attention.wo": RowwiseParallel(
-                output_layouts=Replicate()
-            ),  # return plain tensor for x + attention(...)
+                output_layouts=Replicate(),
+                use_local_output=False,
+            ),
         }
 
         # pyrefly: ignore [missing-attribute]
@@ -123,8 +135,9 @@ def _apply_non_moe_tp_to_decoder(
                 {
                     "feed_forward.w1": ColwiseParallel(use_local_output=False),
                     "feed_forward.w2": RowwiseParallel(
-                        output_layouts=Replicate()
-                    ),  # returns plain tensor for x + feed_forward(...)
+                        output_layouts=Replicate(),
+                        use_local_output=False,
+                    ),
                     "feed_forward.w3": ColwiseParallel(use_local_output=False),
                 }
             )
@@ -311,8 +324,8 @@ def parallelize_qwen3_vl(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=False,
             pad_multiple=find_pad_multiple(model_converters.converters),
-            use_local_output=True,  # Plain tensors for DeepStack boolean indexing
         )
+
 
     # Apply activation checkpointing
     if ac_config.mode != "none":

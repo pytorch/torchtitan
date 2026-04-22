@@ -48,6 +48,16 @@ __all__ = [
 def _build_get_mesh_callback(
     parallel_dims: ParallelDims,
 ) -> Callable[[tuple[str, ...], _MeshLayout | None], DeviceMesh | None]:
+    """Build a callback that resolves a DeviceMesh from dimension names.
+
+    Pipeline parallelism requires an SPMD mesh during module split so that
+    at runtime the current PP rank can reconstruct a DTensor after receiving
+    a plain tensor from the previous PP rank. DTensors are not directly
+    serializable across PP stages (because ProcessGroup is not serializable),
+    so each stage uses this callback to obtain its local DeviceMesh and
+    re-wrap incoming tensors as DTensors with the correct placements.
+    """
+
     def _get_mesh(
         mesh_dim_names: tuple[str, ...], mesh_layout: _MeshLayout | None
     ) -> DeviceMesh | None:

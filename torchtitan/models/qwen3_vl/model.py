@@ -445,6 +445,16 @@ class Qwen3VLModel(Qwen3Model):
                 f"but {num_vision_embeds} vision embeddings."
             )
 
+        # DTensor does not support boolean indexing. Convert to plain
+        # tensor for the scatter. The next transformer block's
+        # PrepareModuleInput will re-wrap it as DTensor.
+        # NOTE: clone() is required because to_local() returns a view and
+        # the in-place boolean scatter below would conflict with autograd's
+        # custom backward on the view.
+        from torch.distributed._tensor import DTensor
+        if isinstance(hidden_states, DTensor):
+            hidden_states = hidden_states.to_local().clone()
+
         hidden_states[vision_pos_masks] = (
             hidden_states[vision_pos_masks] + vision_embeds
         )
