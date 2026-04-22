@@ -100,7 +100,16 @@ class DummyTrainerConfig:
         )
 
 
-class TestCheckpointManager(unittest.TestCase):
+class CheckpointTestBase:
+    """
+    Base class providing common setup and teardown logic for checkpointing tests.
+
+    Note: This class does not inherit from `unittest.TestCase` to prevent the
+    unittest runner from attempting to execute it as a standalone test suite.
+    Actual test classes should use multiple inheritance:
+    `class TestSpecificLogic(CheckpointTestBase, unittest.TestCase)`.
+    """
+
     def setUp(self):
         self.base_temp_dir = tempfile.mkdtemp()
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
@@ -162,6 +171,8 @@ class TestCheckpointManager(unittest.TestCase):
             elif key in states and isinstance(states[key], torch.Tensor):
                 states[key].copy_(val)
 
+
+class TestCheckpointManager(CheckpointTestBase, unittest.TestCase):
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
@@ -700,6 +711,9 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=1)
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
+
+
+# =============================================================================
 
 
 if __name__ == "__main__":
