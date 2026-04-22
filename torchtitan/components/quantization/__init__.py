@@ -22,22 +22,17 @@ import torch._inductor.config
 import torch.nn as nn
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from .module_utils import inject_module_protocol
 from .utils import module_filter_fn
-
-# Mapping from quantization type to the pad_multiple needed for grouped GEMMs.
-# FP8: 16 byte alignment / 1 byte per elem = 16 elements.
-# MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
-PAD_MULTIPLE_MAP: dict[str, int] = {
-    "float8": 16,
-    "mxfp8": 32,
-}
-
-AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
 @dataclass(kw_only=True, slots=True)
@@ -174,13 +169,17 @@ class MXFP8Quant(QuantizationConfig):
         )
 
 
-
 def has_quantization(model_config) -> bool:
-    """Check if any Linear in the model config uses float8 quantization."""
-    return any(
+    """Check if any module in the model config has quantization applied."""
+    has_float8_linear = any(
         isinstance(lc, Float8LinearConfig)
         for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
     )
+    has_moe_quant = any(
+        config._convert_fn is not None
+        for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config)
+    )
+    return has_float8_linear or has_moe_quant
 
 
 def convert_to_float8(
@@ -234,8 +233,8 @@ def convert_to_float8(
         logger.debug("Set torch._inductor.config.emulate_precision_casts to True")
 
     # Build filter function
-    clean_fqns = [f for f in filter_fqns if f != AUTO_FILTER_SMALL_KN_FLAG]
-    use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in filter_fqns
+    clean_fqns = [f for f in filter_fqns if f != "auto_filter_small_kn"]
+    use_auto_filter = "auto_filter_small_kn" in filter_fqns
     if use_auto_filter:
         try:
             from torchao.float8 import _auto_filter_for_recipe
@@ -274,6 +273,34 @@ def convert_to_float8(
     logger.info("Swapped to Float8Linear layers")
 
 
+def _swap_token_dispatcher(config, pad_multiple: int) -> None:
+    """Swap token dispatcher config to support padded grouped GEMMs."""
+    td = config.token_dispatcher
+    if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
+        td, TorchAOTokenDispatcher.Config
+    ):
+        config.token_dispatcher = TorchAOTokenDispatcher.Config(
+            num_experts=td.num_experts,
+            top_k=td.top_k,
+            score_before_experts=td.score_before_experts,
+            pad_multiple=pad_multiple,
+        )
+    elif isinstance(td, DeepEPTokenDispatcher.Config):
+        if td.comm_backend == "deepep":
+            raise ValueError(
+                "DeepEP does not support pad_multiple. "
+                "Use hybridep or standard comm backend instead."
+            )
+        config.token_dispatcher = DeepEPTokenDispatcher.Config(
+            num_experts=td.num_experts,
+            top_k=td.top_k,
+            score_before_experts=td.score_before_experts,
+            comm_backend=td.comm_backend,
+            non_blocking_capacity_factor=td.non_blocking_capacity_factor,
+            pad_multiple=pad_multiple,
+        )
+
+
 def convert_moe_to_float8(
     model_config,
     *,
@@ -304,13 +331,8 @@ def convert_moe_to_float8(
             "torchao installation does not have MoE training support. Please install torchao nightly build."
         ) from e
 
-    from torchtitan.models.common.token_dispatcher import (
-        AllToAllTokenDispatcher,
-        DeepEPTokenDispatcher,
-        TorchAOTokenDispatcher,
-    )
-
-    pad_multiple = PAD_MULTIPLE_MAP["float8"]
+    # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
+    pad_multiple = 16
 
     def convert_fn(mod: nn.Module) -> nn.Module:
         config = Float8TrainingOpConfig()
@@ -319,30 +341,7 @@ def convert_moe_to_float8(
 
     for fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config):
         config._convert_fn = convert_fn
-        td = config.token_dispatcher
-        if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
-            td, TorchAOTokenDispatcher.Config
-        ):
-            config.token_dispatcher = TorchAOTokenDispatcher.Config(
-                num_experts=td.num_experts,
-                top_k=td.top_k,
-                score_before_experts=td.score_before_experts,
-                pad_multiple=pad_multiple,
-            )
-        elif isinstance(td, DeepEPTokenDispatcher.Config):
-            if td.comm_backend == "deepep":
-                raise ValueError(
-                    "DeepEP does not support pad_multiple. "
-                    "Use hybridep or standard comm backend instead."
-                )
-            config.token_dispatcher = DeepEPTokenDispatcher.Config(
-                num_experts=td.num_experts,
-                top_k=td.top_k,
-                score_before_experts=td.score_before_experts,
-                comm_backend=td.comm_backend,
-                non_blocking_capacity_factor=td.non_blocking_capacity_factor,
-                pad_multiple=pad_multiple,
-            )
+        _swap_token_dispatcher(config, pad_multiple)
 
     logger.info(
         "Converted GroupedExperts to use dynamic float8 rowwise quantization "
@@ -397,40 +396,12 @@ def convert_moe_to_mxfp8(
         )
     convert_fn = _make_mxfp8_convert_fn(recipe_name, pad_token_groups_for_grouped_mm)
 
-    from torchtitan.models.common.token_dispatcher import (
-        AllToAllTokenDispatcher,
-        DeepEPTokenDispatcher,
-        TorchAOTokenDispatcher,
-    )
-
-    pad_multiple = PAD_MULTIPLE_MAP["mxfp8"]
+    # MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
+    pad_multiple = 32
 
     for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config):
         config._convert_fn = convert_fn
-        td = config.token_dispatcher
-        if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
-            td, TorchAOTokenDispatcher.Config
-        ):
-            config.token_dispatcher = TorchAOTokenDispatcher.Config(
-                num_experts=td.num_experts,
-                top_k=td.top_k,
-                score_before_experts=td.score_before_experts,
-                pad_multiple=pad_multiple,
-            )
-        elif isinstance(td, DeepEPTokenDispatcher.Config):
-            if td.comm_backend == "deepep":
-                raise ValueError(
-                    "DeepEP does not support pad_multiple. "
-                    "Use hybridep or standard comm backend instead."
-                )
-            config.token_dispatcher = DeepEPTokenDispatcher.Config(
-                num_experts=td.num_experts,
-                top_k=td.top_k,
-                score_before_experts=td.score_before_experts,
-                comm_backend=td.comm_backend,
-                non_blocking_capacity_factor=td.non_blocking_capacity_factor,
-                pad_multiple=pad_multiple,
-            )
+        _swap_token_dispatcher(config, pad_multiple)
 
     logger.info(
         f"Converted GroupedExperts to use dynamic {recipe_name} quantization "
