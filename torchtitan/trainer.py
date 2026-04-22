@@ -196,57 +196,78 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert (
             config.model_spec is not None
         ), "model_spec must be set before creating Trainer"
-        model_spec = config.model_spec
 
+        self._init_device()
+        self.parallel_dims = self.init_distributed()
+        config.maybe_log()
+        self._init_determinism()
+        self._build_model()
+        self._build_training_infrastructure()
+
+    def _init_device(self) -> None:
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
-        # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
-        # init distributed and build meshes
-        self.parallel_dims = parallel_dims = self.init_distributed()
-
-        # Logging needs to happen after distributed initialized
-        config.maybe_log()
-
-        if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
-        else:
-            batch_degree, batch_rank = 1, 0
-
-        # take control of garbage collection to avoid stragglers
+    def _init_determinism(self) -> None:
+        config = self.config
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq, debug=config.training.gc_debug
         )
-
-        # Set random seed, and maybe enable deterministic mode
-        # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
-            parallel_dims,
+            self.parallel_dims,
             self.device,
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        # build tokenizer
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
-        # build dataloader
+    def _build_model(self) -> None:
+        parallel_dims = self.parallel_dims
+
+        if parallel_dims.dp_enabled:
+            batch_mesh = parallel_dims.get_mesh("batch")
+            self._batch_degree = batch_mesh.size()
+            self._batch_rank = batch_mesh.get_local_rank()
+        else:
+            self._batch_degree = 1
+            self._batch_rank = 0
+
+        self._build_data_pipeline()
+        self._build_and_parallelize_model()
+
+    def _build_data_pipeline(self) -> None:
+        config = self.config
+        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
         self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
+            dp_world_size=self._batch_degree,
+            dp_rank=self._batch_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
             local_batch_size=config.training.local_batch_size,
         )
 
-        # build model (using meta init)
+    def _get_compile_config_for_parallelize(self):
+        return self.config.compile
+
+    def _init_model_weights(
+        self,
+        model: torch.nn.Module,
+        init_device: str,
+        buffer_device: torch.device | None,
+    ) -> None:
+        model.to_empty(device=init_device)
+        with torch.no_grad():
+            cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+        model.train()
+
+    def _build_and_parallelize_model(self) -> None:
+        config = self.config
+        model_spec = config.model_spec
+        parallel_dims = self.parallel_dims
+
         model_config = model_spec.model
-        # set the model args from training job configs
-        model_config.update_from_config(
-            trainer_config=config,
-        )
+        model_config.update_from_config(trainer_config=config)
         self.model_config = model_config
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
@@ -257,52 +278,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ):
             model = model_config.build()
 
-        # Build the collection of model converters. No-op if converters empty
         model_compile_enabled = (
             config.compile.enable and "model" in config.compile.components
         )
-        model_converters = config.model_converters.build(
+        self._model_converters = config.model_converters.build(
             parallel_dims=parallel_dims,
             model_compile_enabled=model_compile_enabled,
         )
-        model_converters.convert(model)
+        self._model_converters.convert(model)
 
-        # Verify all submodules satisfy the Module protocol
         # TODO: move this to module validate().
-        # This is current put here to verify module build and
-        # converter, which should guanrantee Module protocol.
-        # On the other hand, some parallelism wrappers don't
-        # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
 
-        # Check if any converter uses quantization (FP8, MX, etc.)
-        has_quantization = any(
+        self._has_quantization = any(
             isinstance(cc, QuantizationConverter.Config)
             for cc in config.model_converters.converters
         )
 
-        # metrics logging
-        self.metrics_processor = config.metrics.build(
-            parallel_dims=parallel_dims,
-            dump_folder=config.dump_folder,
-            pp_schedule=config.parallelism.pipeline_parallel_schedule,
-            config_dict=config.to_dict(),
-            has_quantization=has_quantization,
-        )
-        color = self.metrics_processor.color
-
-        # calculate model size and flops per token
         (
-            model_param_count,
-            self.metrics_processor.num_flops_per_token,
+            self._model_param_count,
+            self._num_flops_per_token,
         ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
 
-        logger.info(
-            f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
-            f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
-        )
-
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        device_type = utils.device_type
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
@@ -318,28 +316,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.compile, parallel_dims=parallel_dims
         )
 
-        # verify batch sizes
-        global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * batch_degree
-        assert global_batch_size > 0
-        assert (
-            global_batch_size % (config.training.local_batch_size * batch_degree) == 0
-        ), (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {batch_degree}) != 0)"
-        )
+        parallelize_compile_config = self._get_compile_config_for_parallelize()
 
-        # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * batch_degree
-        )
-        assert self.gradient_accumulation_steps > 0
-
-        # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not model_spec.pipelining_fn:
                 raise RuntimeError(
@@ -347,7 +325,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     f"does not support pipelining"
                 )
 
-            # apply both Pipeline Parallel and SPMD-style scaling techniques
             (
                 self.pp_schedule,
                 self.model_parts,
@@ -359,68 +336,92 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 training=config.training,
                 model_converters=config.model_converters,
                 parallelism=config.parallelism,
-                compile_config=config.compile,
+                compile_config=parallelize_compile_config,
                 ac_config=config.activation_checkpoint,
                 dump_folder=config.dump_folder,
                 device=self.device,
-                model_config=model_config,
+                model_config=self.model_config,
                 parallelize_fn=model_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
             )
-            # when PP is enabled, `model` obj is no longer used after this point,
-            # model_parts is used instead
             del model
 
             for m in self.model_parts:
-                m.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, m).init_weights(buffer_device=buffer_device)
-                m.train()
-
-            # confirm that user will be able to view loss metrics on the console
-            ensure_pp_loss_visible(
-                parallel_dims=parallel_dims,
-                pp_schedule=config.parallelism.pipeline_parallel_schedule,
-                color=color,
-            )
+                self._init_model_weights(m, init_device, buffer_device)
         else:
             if not config.checkpoint.create_seed_checkpoint:
-                # Skip parallelize_fn for seed checkpoints — nothing from
-                # it is needed (AC, compile, nD parallelism, mixed precision, etc.).
                 model = model_spec.parallelize_fn(
                     model,
                     parallel_dims=parallel_dims,
                     training=config.training,
                     model_converters=config.model_converters,
                     parallelism=config.parallelism,
-                    compile_config=config.compile,
+                    compile_config=parallelize_compile_config,
                     ac_config=config.activation_checkpoint,
                     dump_folder=config.dump_folder,
                 )
 
-            model.to_empty(device=init_device)
-            with torch.no_grad():
-                # TODO: Change this back to init_weights once
-                # autoparallel contains the wrap_init_states
-                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-            model.train()
-
+            self._init_model_weights(model, init_device, buffer_device)
             self.model_parts = [model]
 
-        # initialize device memory monitor and get peak flops for MFU calculation
+    def _build_training_infrastructure(self) -> None:
+        config = self.config
+        model_spec = config.model_spec
+        parallel_dims = self.parallel_dims
+        batch_degree = self._batch_degree
+        batch_rank = self._batch_rank
+
+        self.metrics_processor = config.metrics.build(
+            parallel_dims=parallel_dims,
+            dump_folder=config.dump_folder,
+            pp_schedule=config.parallelism.pipeline_parallel_schedule,
+            config_dict=config.to_dict(),
+            has_quantization=self._has_quantization,
+        )
+        color = self.metrics_processor.color
+
+        self.metrics_processor.num_flops_per_token = self._num_flops_per_token
+
+        logger.info(
+            f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
+            f"{color.red}size: {self._model_param_count:,} total parameters"
+            f"{color.reset}"
+        )
+
+        if parallel_dims.pp_enabled:
+            ensure_pp_loss_visible(
+                parallel_dims=parallel_dims,
+                pp_schedule=config.parallelism.pipeline_parallel_schedule,
+                color=color,
+            )
+
         device_memory_monitor = self.metrics_processor.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
         logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
         device_mem_stats = device_memory_monitor.get_peak_stats()
         logger.info(
-            f"{device_type.upper()} memory usage for model: "
+            f"{utils.device_type.upper()} memory usage for model: "
             f"{device_mem_stats.max_reserved_gib:.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)"
         )
 
-        # build optimizer after applying parallelisms to the model
+        global_batch_size = config.training.global_batch_size
+        if global_batch_size < 0:
+            global_batch_size = config.training.local_batch_size * batch_degree
+        assert global_batch_size > 0
+        assert (
+            global_batch_size % (config.training.local_batch_size * batch_degree) == 0
+        ), (
+            f"global batch size must be multiple of local batch size times "
+            f"data-parallel degree ({global_batch_size} "
+            f"% ({config.training.local_batch_size} * {batch_degree}) != 0)"
+        )
+
+        self.gradient_accumulation_steps = global_batch_size // (
+            config.training.local_batch_size * batch_degree
+        )
+        assert self.gradient_accumulation_steps > 0
+
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
@@ -430,19 +431,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             optimizers=self.optimizers,
             training_steps=config.training.steps,
         )
-        # Post optimizer step model converters hook.
-        # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
-        # where it issues a single all-reduce for all parameters at once for better performance
         self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
+            lambda *args, **kwargs: self._model_converters.post_optimizer_hook(
                 self.model_parts
             )
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
 
-        # Initialize trainer states that will be saved in checkpoint.
-        # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
 
@@ -453,7 +449,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+                model_spec.state_dict_adapter(self.model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter
                 else None
             ),
@@ -465,7 +461,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
-        # Build validator if validation is configured
         if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
