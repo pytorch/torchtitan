@@ -22,6 +22,7 @@ import operator
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
@@ -54,6 +55,10 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:

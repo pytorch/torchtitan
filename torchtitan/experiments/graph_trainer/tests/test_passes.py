@@ -915,7 +915,6 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 0)
 
 
-
 class TestCpuOffloadPass(TestCase):
     """Unit tests for the CPU offload pass on synthetic FX graphs.
 
