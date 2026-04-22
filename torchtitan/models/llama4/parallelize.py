@@ -71,9 +71,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -390,6 +387,19 @@ def apply_moe_ep_tp(
     enable_sp: bool = True,
     pad_multiple: int | None = None,
 ):
+    """
+    Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
+
+    Args:
+        model: Model containing transformer blocks.
+        tp_mesh: Tensor-parallel device mesh.
+        ep_mesh: Expert-parallel device mesh.
+        etp_mesh: Expert tensor-parallel device mesh.
+        ep_etp_mesh: Combined EP/ETP mesh.
+        comm_backend: MoE communication backend.
+        enable_sp: Whether sequence parallelism is enabled.
+        pad_multiple: Optional token padding multiple for compatible expert kernels.
+    """
     assert ep_mesh is not None or tp_mesh is not None
 
     sp_layout = Shard(1) if enable_sp else Replicate()
@@ -480,7 +490,10 @@ def apply_moe_ep_tp(
             if tp_mesh is not None:
                 if isinstance(dispatcher, AllToAllTokenDispatcher):
                     dispatcher.sp_size = tp_mesh.size()
-                    dispatcher.sp_rank = tp_mesh.get_local_rank()
+                    # Use _sym_get_coordinate so the rank is a SymInt
+                    # under CooR precompile instead of a concrete int
+                    # that gets baked into the FX graph.
+                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
             if isinstance(dispatcher, TorchAOTokenDispatcher):
                 assert (
                     pad_multiple is not None

@@ -380,6 +380,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
             with torch.compiler._patch_autograd_grad():
                 result = fn(state_for_fn, *user_list)
+
             flat_outs, output_spec = pytree.tree_flatten(result)
             num_flat_outputs = len(flat_outs)
             unwrapped_outs, output_layouts = _unwrap_subclasses(flat_outs)

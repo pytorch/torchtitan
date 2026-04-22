@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.sharding import (
+from torchtitan.models.common.decoder_sharding import (
     replicate_norm_spec,
     sequence_parallel_spec,
     set_decoder_sharding_spec,
@@ -23,7 +22,6 @@ if TYPE_CHECKING:
 
 def set_llama4_sharding_spec(
     config: "Llama4Model.Config",
-    parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
     enable_sp: bool,
@@ -32,8 +30,6 @@ def set_llama4_sharding_spec(
 
     No-op when TP is not enabled.
     """
-    if not parallel_dims.tp_enabled:
-        return
 
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:

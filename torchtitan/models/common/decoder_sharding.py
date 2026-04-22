@@ -7,16 +7,55 @@
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import MeshDimName, ShardingSpec
+from torchtitan.protocols.sharding import MeshDimName, NamedPlacement, ShardingSpec
 
+DP_REPLICATE = MeshDimName.DP_REPLICATE
+DP_SHARD = MeshDimName.DP_SHARD
+CP = MeshDimName.CP
 TP = MeshDimName.TP
+
+
+def dense_param_placement(*, tp: Placement) -> NamedPlacement:
+    """Placement for dense-path params/buffers.
+
+    DP/CP dims are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
+    DP_SHARD post-parallelize. TP placement is caller-specified.
+    """
+    return {
+        DP_REPLICATE: Replicate(),
+        DP_SHARD: Replicate(),
+        CP: Replicate(),
+        TP: tp,
+    }
+
+
+def dense_activation_placement(
+    *,
+    tp: Placement,
+    cp: Placement = Shard(1),
+) -> NamedPlacement:
+    """Placement for dense-path activations.
+
+    DP dims are batch-sharded (``Shard(0)``). CP defaults to seq-sharded
+    (``Shard(1)``); override to ``Replicate()`` for K/V after all-gather.
+    TP placement is caller-specified.
+    """
+    return {
+        DP_REPLICATE: Shard(0),
+        DP_SHARD: Shard(0),
+        CP: cp,
+        TP: tp,
+    }
 
 
 def colwise_spec() -> ShardingSpec:
     """ColwiseParallel: weight Shard(0), output Shard(-1)."""
     return ShardingSpec(
-        state_shardings={"weight": {TP: Shard(0)}, "bias": {TP: Shard(0)}},
-        out_shardings={TP: Shard(-1)},
+        state_shardings={
+            "weight": dense_param_placement(tp=Shard(0)),
+            "bias": dense_param_placement(tp=Shard(0)),
+        },
+        out_dst_shardings=dense_activation_placement(tp=Shard(-1)),
     )
 
 
@@ -26,20 +65,23 @@ def rowwise_spec(*, output_sp: bool = False) -> ShardingSpec:
     ``output_sp=True``  -> output ``Shard(1)`` (reduce-scatter into SP region).
     ``output_sp=False`` -> output ``Replicate()`` (all-reduce).
     """
-    output: Placement = Shard(1) if output_sp else Replicate()
+    out_tp: Placement = Shard(1) if output_sp else Replicate()
     return ShardingSpec(
-        state_shardings={"weight": {TP: Shard(1)}, "bias": {TP: Replicate()}},
-        out_shardings={TP: output},
+        state_shardings={
+            "weight": dense_param_placement(tp=Shard(1)),
+            "bias": dense_param_placement(tp=Replicate()),
+        },
+        out_dst_shardings=dense_activation_placement(tp=out_tp),
     )
 
 
 def sequence_parallel_spec() -> ShardingSpec:
     """SequenceParallel norm: weight Replicate, activations Shard(1)."""
     return ShardingSpec(
-        state_shardings={"weight": {TP: Replicate()}},
-        input_layouts={"input": {TP: Shard(1)}},
-        in_shardings={"input": {TP: Shard(1)}},
-        out_shardings={TP: Shard(1)},
+        state_shardings={"weight": dense_param_placement(tp=Replicate())},
+        in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
+        in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
+        out_dst_shardings=dense_activation_placement(tp=Shard(1)),
     )
 
 
@@ -49,7 +91,9 @@ def replicate_norm_spec() -> ShardingSpec:
     Needed so the norm's weight becomes a DTensor alongside DTensor
     activations; otherwise we'd mix plain Tensor and DTensor inside the op.
     """
-    return ShardingSpec(state_shardings={"weight": {TP: Replicate()}})
+    return ShardingSpec(
+        state_shardings={"weight": dense_param_placement(tp=Replicate())},
+    )
 
 
 def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
@@ -86,13 +130,13 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
     attention_cfg.sharding_spec = ShardingSpec(
-        input_layouts={
-            "x": {TP: attn_x_placement},
-            "rope_cache": {TP: Replicate()},
+        in_src_shardings={
+            "x": dense_activation_placement(tp=attn_x_placement),
+            "rope_cache": dense_param_placement(tp=Replicate()),
         },
-        in_shardings={
-            "x": {TP: Replicate()},
-            "rope_cache": {TP: Replicate()},
+        in_dst_shardings={
+            "x": dense_activation_placement(tp=Replicate()),
+            "rope_cache": dense_param_placement(tp=Replicate()),
         },
     )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
@@ -112,8 +156,8 @@ def set_dense_ffn_sharding(
     FFN's input wrap is a no-op redistribute when placements already agree.
     """
     feed_forward_cfg.sharding_spec = ShardingSpec(
-        input_layouts={"x": {TP: attn_x_placement}},
-        in_shardings={"x": {TP: Replicate()}},
+        in_src_shardings={"x": dense_activation_placement(tp=attn_x_placement)},
+        in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
     )
     feed_forward_cfg.w1.sharding_spec = colwise_spec()
     feed_forward_cfg.w3.sharding_spec = colwise_spec()
@@ -129,26 +173,26 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).
     """
-    activation_sharding: Placement = Shard(1) if enable_sp else Replicate()
-    loss_sharding: Placement = Shard(-1) if loss_parallel else Replicate()
+    activation_tp: Placement = Shard(1) if enable_sp else Replicate()
+    loss_tp: Placement = Shard(-1) if loss_parallel else Replicate()
 
     # freqs_cis buffer on the decoder root: Replicate on all dims.
     config.sharding_spec = ShardingSpec(
-        state_shardings={"freqs_cis": {TP: Replicate()}},
+        state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
     )
     config.tok_embeddings.sharding_spec = ShardingSpec(
-        state_shardings={"weight": {TP: Shard(0)}},
-        input_layouts={"input": {TP: Replicate()}},
-        in_shardings={"input": {TP: Replicate()}},
-        out_shardings={TP: activation_sharding},
+        state_shardings={"weight": dense_param_placement(tp=Shard(0))},
+        in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
+        in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
+        out_dst_shardings=dense_activation_placement(tp=activation_tp),
     )
     config.norm.sharding_spec = (
         sequence_parallel_spec() if enable_sp else replicate_norm_spec()
     )
 
     config.output.sharding_spec = ShardingSpec(
-        state_shardings={"weight": {TP: Shard(0)}},
-        input_layouts={"input": {TP: activation_sharding}},
-        in_shardings={"input": {TP: Replicate()}},
-        out_shardings={TP: loss_sharding},
+        state_shardings={"weight": dense_param_placement(tp=Shard(0))},
+        in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
+        in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
+        out_dst_shardings=dense_activation_placement(tp=loss_tp),
     )

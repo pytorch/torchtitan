@@ -35,9 +35,6 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -81,6 +78,7 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
+            enable_sp=parallelism.enable_sequence_parallel,
             pad_multiple=find_pad_multiple(model_converters.converters),
         )
 

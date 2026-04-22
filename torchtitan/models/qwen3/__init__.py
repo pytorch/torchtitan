@@ -624,6 +624,7 @@ def model_registry(
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
+    set_qwen3_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,

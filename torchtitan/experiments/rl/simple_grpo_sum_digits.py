@@ -27,9 +27,8 @@ import logging
 import os
 import re
 import time
-from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 import torchstore as ts
@@ -42,14 +41,14 @@ from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Episode, TrainBatch
+from torchtitan.experiments.rl.types import Completion, Episode, TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
 
 
 class GRPOLoss(Configurable):
-    """Clipped GRPO loss with an optional KL penalty.
+    """Clipped GRPO surrogate loss.
 
     Takes per-sample response logprobs (already extracted from whatever
     packing or padding format the trainer uses).
@@ -57,37 +56,22 @@ class GRPOLoss(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        kl_coef: float = 0.0
-        """KL divergence penalty coefficient against the reference model."""
         clip_eps: float = 0.2
         """PPO clipping epsilon for the probability ratio."""
 
     def __init__(self, config: Config):
-        self.kl_coef = config.kl_coef
         self.clip_eps = config.clip_eps
 
     def __call__(
         self,
         policy_logprobs: list[torch.Tensor],
         advantages: torch.Tensor,
-        ref_logprobs: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        per_sample_mean_log_ratio = []
-        per_sample_mean_kl = []
+        per_sample_mean_lps = []
+        for policy_lps in policy_logprobs:
+            per_sample_mean_lps.append(policy_lps.mean())
 
-        if ref_logprobs is not None:
-            for policy_lps, ref_lps in zip(policy_logprobs, ref_logprobs):
-                token_log_ratio = policy_lps - ref_lps.detach()
-                per_sample_mean_log_ratio.append(token_log_ratio.mean())
-
-                token_ratio = torch.exp(token_log_ratio)
-                token_kl = token_ratio - 1 - token_log_ratio
-                per_sample_mean_kl.append(token_kl.mean())
-        else:
-            for policy_lps in policy_logprobs:
-                per_sample_mean_log_ratio.append(policy_lps.mean())
-
-        mean_log_ratio = torch.stack(per_sample_mean_log_ratio)
+        mean_log_ratio = torch.stack(per_sample_mean_lps)
         ratio = torch.exp(mean_log_ratio)
 
         unclipped_loss = ratio * advantages
@@ -95,21 +79,15 @@ class GRPOLoss(Configurable):
         clipped_loss = clipped_ratio * advantages
         pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
 
-        kl_div = torch.tensor(0.0)
-        if per_sample_mean_kl:
-            kl_div = torch.stack(per_sample_mean_kl).mean()
-
-        loss = pg_loss + self.kl_coef * kl_div
         metrics = {
             "pg_loss": pg_loss.item(),
-            "kl_div": kl_div.item(),
             "ratio_mean": ratio.mean().item(),
             "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
             .float()
             .mean()
             .item(),
         }
-        return loss, metrics
+        return pg_loss, metrics
 
 
 class Provisioner:
@@ -146,23 +124,16 @@ class Provisioner:
         return _bootstrap
 
 
-def _log_samples(episodes: list[Episode]) -> None:
-    """Log the first completion per group for debugging."""
-    seen_groups: set[str] = set()
-    for ep in episodes:
-        if ep.group_id in seen_groups:
+def _log_samples(items: list[Episode] | list[Completion]) -> None:
+    """Log the first sample per prompt for debugging."""
+    seen_prompts: set[int] = set()
+    for item in items:
+        if item.prompt_idx in seen_prompts:
             continue
-        seen_groups.add(ep.group_id)
-        extracted = extract_answer(ep.text)
-        is_correct = (
-            extracted == int(ep.expected_answer) if ep.expected_answer else None
-        )
-        mark = "+" if is_correct else "-"
-        logger.info(
-            f"  [{mark}] expected={ep.expected_answer} extracted={extracted} "
-            f"reward={ep.reward:+.1f}"
-        )
-        logger.info(f"       A: {ep.text[:300].replace(chr(10), ' ').strip()}")
+        seen_prompts.add(item.prompt_idx)
+        reward_str = f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
+        logger.info(f"  [prompt {item.prompt_idx}]{reward_str}")
+        logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
 class RLTrainer(Configurable):
@@ -194,7 +165,7 @@ class RLTrainer(Configurable):
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
         )
-        """PolicyTrainer config. Controls optimizer, training, parallelism"""
+        """PolicyTrainer config. Controls optimizer, training, parallelism."""
 
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
@@ -215,16 +186,15 @@ class RLTrainer(Configurable):
                         f"batch_invariant requires bfloat16 generator dtype, "
                         f"got {self.generator.model_dtype!r}"
                     )
+                if self.trainer.parallelism.enable_sequence_parallel:
+                    raise ValueError(
+                        "batch_invariant mode doesn't support SP now. "
+                        "SP uses reduce-scatter which only supports Ring in NCCL "
+                        "and has not been validated for determinism."
+                    )
 
     def __init__(self, config: Config):
         self.config = config
-
-        # Patch model_spec to use the RL-specific parallelize function.
-        # TODO: Switch to canonical Qwen3 parallel plan
-        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-
-        config.model_spec.parallelize_fn = parallelize_qwen3
-
         self.task = SumDigitsTask(seed=42)
         self._proc_meshes = []
 
@@ -292,7 +262,7 @@ class RLTrainer(Configurable):
                 [ep.advantage for ep in episodes],
                 dtype=torch.float32,
             ),
-            token_logprobs=[ep.token_log_probs for ep in episodes],
+            token_logprobs=[ep.token_logprobs for ep in episodes],
         )
 
     async def setup(
@@ -417,13 +387,18 @@ class RLTrainer(Configurable):
             config.trainer,
             model_spec=config.model_spec,
             hf_assets_path=config.hf_assets_path,
-            transfer_dtype=config.generator.model_dtype,
+            generator_dtype=config.generator.model_dtype,
         )
+
+        # Generator uses RL-specific parallelize (TP-only, no FSDP, vLLM-compatible)
+        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+
+        gen_model_spec = replace(config.model_spec, parallelize_fn=parallelize_qwen3)
         self.generator = generator_mesh.spawn(
             "generator",
             VLLMGenerator,
             config.generator,
-            model_spec=config.model_spec,
+            model_spec=gen_model_spec,
             model_path=config.hf_assets_path,
         )
         self.grader = grader_mesh.spawn(
@@ -448,43 +423,46 @@ class RLTrainer(Configurable):
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
 
-        Generates on eval prompts, scores them, and reports accuracy.
+        Uses the generator's default (training) sampling config and
+        scores the first sample per prompt -- preserves the
+        pre-refactor eval signal.
+
+        TODO: report both greedy (temperature=0, n=1) and pass@k
+        (training temp, n=k) so mode-sharpening vs. coverage
+        regressions are both visible. A single-sample score hides
+        both signals.
 
         Args:
-            num_samples: Number of eval prompts to generate
+            num_samples: Number of eval prompts to generate.
 
         Returns:
-            Dict with accuracy, correct, total, format_rate
+            Dict with accuracy, correct, total, format_rate, format_ok.
         """
         eval_task = SumDigitsTask(seed=99)
         eval_prompts = []
         eval_answers = []
-        eval_questions = []
         for _ in range(num_samples):
             question, answer = eval_task.create_question()
             eval_prompts.append(self.system_prompt + "\n\n" + question)
             eval_answers.append(answer)
-            eval_questions.append(question)
 
-        # Generate on eval prompts
-        episodes = self._get_rank_0_value(
-            self.generator.generate.call(eval_prompts, eval_answers).get()
+        completions = self._get_rank_0_value(
+            self.generator.generate.call(eval_prompts).get()
         )
 
-        # Score: check first episode per prompt (episodes are ordered by prompt)
+        # Score the first sample per prompt. Completions come back in
+        # prompt_idx order, length num_samples * n.
+        n = self.config.generator.sampling.n
         correct = 0
         format_ok = 0
-        samples_per_prompt = self.config.generator.num_samples_per_prompt
-        for i, (question, answer) in enumerate(zip(eval_questions, eval_answers)):
-            ep = episodes[i * samples_per_prompt]
-            extracted = extract_answer(ep.text)
-            is_correct = extracted == int(answer)
-            has_tag = bool(re.search(r"\[ANSWER\]", ep.text))
-            correct += int(is_correct)
-            format_ok += int(has_tag)
+        for i, answer in enumerate(eval_answers):
+            c = completions[i * n]
+            extracted = extract_answer(c.text)
+            correct += int(extracted == int(answer))
+            format_ok += int(bool(re.search(r"\[ANSWER\]", c.text)))
 
         if self.config.log_samples:
-            _log_samples(episodes)
+            _log_samples(completions)
 
         result = {
             "accuracy": correct / num_samples,
@@ -518,53 +496,72 @@ class RLTrainer(Configurable):
             # Generate data sample for this step
             train_prompts = []
             train_answers = []
-            train_questions = []
             for _ in range(self.config.num_episodes_per_step):
                 question, answer = self.task.create_question()
                 train_prompts.append(self.system_prompt + "\n\n" + question)
                 train_answers.append(answer)
-                train_questions.append(question)
 
             step_start: float = time.perf_counter()
 
-            # Fully sync RL loop (GRPO)
-            # 1. Generator produces flat list of Episodes with group_id
-            # TODO: Create a queue to use all episodes from all GPUs
-            episodes = self._get_rank_0_value(
-                self.generator.generate.call(train_prompts, train_answers).get()
+            # 1. Generator produces flat list of Completions.
+            # TODO: Create a queue to use all completions from all GPUs.
+            completions = self._get_rank_0_value(
+                self.generator.generate.call(train_prompts).get()
             )
 
-            # 2. Grader computes rewards per episode
-            episodes = self._get_rank_0_value(
-                self.grader.score.call(episodes).get(), has_gpus=False
-            )
+            # 2. Group by prompt_idx; one grader call per prompt.
+            groups: dict[int, list[Completion]] = {}
+            for c in completions:
+                groups.setdefault(c.prompt_idx, []).append(c)
 
-            # 3. Controller computes GRPO advantages (normalize within group)
-            groups: dict[str, list[int]] = defaultdict(list)
-            for idx, ep in enumerate(episodes):
-                groups[ep.group_id].append(idx)
-            for indices in groups.values():
-                rewards = torch.tensor([episodes[i].reward for i in indices])
-                mean_reward = rewards.mean().item()
-                for i in indices:
-                    episodes[i].advantage = episodes[i].reward - mean_reward
+            # 3. Score each group, apply mean-baseline advantage, collect Episodes.
+            episodes: list[Episode] = []
+            for pidx, group in groups.items():
+                scored = self._get_rank_0_value(
+                    self.grader.score.call(group, train_answers[pidx]).get(),
+                    has_gpus=False,
+                )
+                group_mean = sum(sc.reward for sc in scored) / len(scored)
+                for sc in scored:
+                    c = sc.completion
+                    episodes.append(
+                        Episode(
+                            policy_version=c.policy_version,
+                            prompt_idx=c.prompt_idx,
+                            prompt_token_ids=c.prompt_token_ids,
+                            text=c.text,
+                            token_ids=c.token_ids,
+                            token_logprobs=c.token_logprobs,
+                            reward=sc.reward,
+                            advantage=sc.reward - group_mean,
+                        )
+                    )
 
             if self.config.log_samples:
                 _log_samples(episodes)
 
-            # 4. Trainer updates policy using pre-collated batches
+            # 5. Trainer forward + backward
             maybe_sharded_episodes = self._shard_episodes(episodes)
             batches = [
                 self._collate_episodes(per_rank_episodes)
                 for per_rank_episodes in maybe_sharded_episodes
             ]
-            metrics = self._get_rank_0_value(self.trainer.step.call(batches).get())
+            fwd_bwd_metrics = self._get_rank_0_value(
+                self.trainer.forward_backward.call(batches).get()
+            )
 
-            # 5. Sync weights
+            # 6. Optimizer step
+            optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
+
+            metrics = {**fwd_bwd_metrics, **optim_metrics}
+
+            # 7. Sync weights
             t0 = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            self.generator.pull_model_state_dict.call(
+                optim_metrics["policy_version"]
+            ).get()
             t_total = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
 
