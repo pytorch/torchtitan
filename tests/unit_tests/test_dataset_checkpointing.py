@@ -10,7 +10,7 @@ import torch
 from datasets import load_dataset
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextDataLoader, HuggingFaceTextDataset
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
@@ -87,8 +87,6 @@ class TestDatasetCheckpointing(unittest.TestCase):
           3. ``load_state_dict()`` replays the same ``shuffle(seed=42+epoch)``
              so a resumed run observes the identical sample order.
         """
-        from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
-
         def _build_ds():
             return HuggingFaceTextDataset(
                 dataset_name="c4_test",
