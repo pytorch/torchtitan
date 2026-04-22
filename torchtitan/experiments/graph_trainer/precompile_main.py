@@ -94,10 +94,20 @@ class PrecompileFakeTrainer:
                 f"aot_fx_trace, got '{mode}'."
             )
 
-        self._init_fake_distributed(config)
-        self._build_model(config, compile_config)
+        self.compile_config = compile_config
 
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        self._init_fake_distributed(config)
+        self._build_model(config)
+
+        self._tokenizer = None
+
+    @property
+    def tokenizer(self):
+        if self._tokenizer is None:
+            self._tokenizer = self.config.tokenizer.build(
+                tokenizer_path=self.config.hf_assets_path
+            )
+        return self._tokenizer
 
     def _init_fake_distributed(self, config):
         """Initialize fake process group and CooR for single-process compile."""
@@ -160,8 +170,9 @@ class PrecompileFakeTrainer:
         )
         self.parallel_dims.build_mesh()
 
-    def _build_model(self, config, compile_config):
+    def _build_model(self, config):
         """Build, parallelize, and initialize the model on a single device."""
+        compile_config = self.compile_config
         model_spec = config.model_spec
         if model_spec is None:
             raise ValueError(
@@ -225,7 +236,6 @@ class PrecompileFakeTrainer:
         model.train()
 
         self.model = model
-        self.compile_config = compile_config
 
         logger.info("Model parallelized and materialized")
 
@@ -323,12 +333,7 @@ class PrecompileFakeTrainer:
         # Forward pass triggers AOT compilation; the backward graph is compiled
         # eagerly (not lazily) because serializable=True sets
         # force_non_lazy_backward_lowering=True in aot_compile_joint.
-        seq_len = self.config.training.seq_len
-        local_batch_size = self.config.training.local_batch_size
-        vocab_size = self.model_config.vocab_size
-        dummy_inputs = torch.randint(
-            0, vocab_size, (local_batch_size, seq_len), device=self.device
-        )
+        dummy_inputs, _ = self._make_dummy_inputs()
 
         logger.info("Running forward pass to trigger AOT compilation...")
         compiled_model(dummy_inputs)
@@ -393,9 +398,6 @@ class PrecompileFakeTrainer:
                     inner_attention,
                     (FlexAttention.Config, VarlenAttention.Config),
                 ):
-                    assert (
-                        self.tokenizer is not None
-                    ), "tokenizer is required for flex/varlen attention"
                     extra_kwargs["attention_masks"] = cast(
                         Decoder, self.model
                     ).get_attention_masks(
