@@ -6,25 +6,6 @@
 
 import torch
 import torch.nn as nn
-
-# Patch torch.topk to compute values via gather instead of native topk values.
-# torch.topk backward uses aten.scatter.src which crashes on DTensor.
-# gather backward uses aten.scatter_add which works on DTensor.
-# This makes topk safe for DTensor without changing any model code.
-# Native titan avoids this by using topk for indices only + gather for scores
-# (moe.py:274,281). HF routers use topk for both, so we patch topk itself.
-_orig_topk = torch.topk
-
-
-def _topk_with_gather(input, k, dim=-1, largest=True, sorted=True, *, out=None):
-    with torch.no_grad():
-        _, indices = _orig_topk(input, k, dim=dim, largest=largest, sorted=sorted)
-    values = input.gather(dim, indices)
-    return torch.return_types.topk((values, indices))
-
-
-torch.topk = _topk_with_gather
-
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
@@ -337,9 +318,7 @@ def parallelize_hf_transformers(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """

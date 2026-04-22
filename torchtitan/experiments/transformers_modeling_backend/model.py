@@ -115,10 +115,10 @@ class HFTransformerModel(BaseModel):
                 TitanMoeModelConfig,
             )
 
-            self._has_moe = isinstance(model_config, TitanMoeModelConfig)
+            self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
-            self._create_getter_setter_dynamically(has_moe=self._has_moe)
+            self._create_getter_setter_dynamically(is_moe=self.is_moe)
 
             self._titan_injected_model_args = {}
             self._configure_hf_attention(attn_implementation)
@@ -209,11 +209,11 @@ class HFTransformerModel(BaseModel):
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
             # NOTE:(3outeille):This will force create_causal_mask to return None
-            AttentionInterface._global_mapping[
-                attn_implementation
-            ] = sdpa_attention_forward
+            AttentionInterface._global_mapping[attn_implementation] = (
+                sdpa_attention_forward
+            )
 
-        def _create_getter_setter_dynamically(self, has_moe: bool):
+        def _create_getter_setter_dynamically(self, is_moe: bool):
             """
             Create properties dynamically based on tt and hf attribute mappings.
             For example, creates a property 'dim' that reads/writes to 'hidden_size'.
@@ -230,7 +230,7 @@ class HFTransformerModel(BaseModel):
 
             # Setup attribute mappings
             self._tt_to_hf_attribute_map = dict(_TT_TO_HF_MAPPINGS["dense"])
-            if has_moe:
+            if is_moe:
                 self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
@@ -300,7 +300,7 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not getattr(self, "_has_moe", False) and not hasattr(self, "inter_dim"):
+            if not getattr(self, "is_moe", False) and not hasattr(self, "inter_dim"):
                 ffn_hidden_size = 4 * self.dim
                 ffn_hidden_size = int(2 * ffn_hidden_size / 3)
                 if self.ffn_dim_multiplier is not None:
@@ -428,7 +428,7 @@ class HFTransformerModel(BaseModel):
         # of index_add_). Works transparently with hook-based EP/TP because
         # all hooks preserve the standard (hidden_states, top_k_index,
         # top_k_weights) interface.
-        if config._has_moe and hasattr(config, "_experts_implementation"):
+        if config.is_moe and hasattr(config, "_experts_implementation"):
             config._experts_implementation = "grouped_mm"
 
         self.model = model_cls(config=config)
