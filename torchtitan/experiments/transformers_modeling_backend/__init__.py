@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass
+from typing import Literal
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.protocols.model_spec import ModelSpec
@@ -46,6 +47,10 @@ class TitanMoeModelConfig(TitanModelConfig):
     decoder_sparse_step: int = 1
     norm_topk_prob: bool = False
     num_nextn_predict_layers: int | None = None
+    # Selects the HF experts forward kernel via PretrainedConfig._experts_implementation.
+    # "grouped_mm" is the fused fast path; "eager" is HF's original for-loop
+    # (numerical reference for debugging).
+    experts_implementation: Literal["grouped_mm", "batched_mm", "eager"] = "grouped_mm"
 
 
 flavors = {

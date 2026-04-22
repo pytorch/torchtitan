@@ -423,13 +423,13 @@ class HFTransformerModel(BaseModel):
                 "Weight initialization might not match TorchTitan."
             )
 
-        # Use grouped_mm for expert computation instead of the eager for-loop.
-        # This is faster (fused kernel) and deterministic (reshape+sum instead
-        # of index_add_). Works transparently with hook-based EP/TP because
-        # all hooks preserve the standard (hidden_states, top_k_index,
-        # top_k_weights) interface.
+        # Select the HF experts forward kernel. Default is "grouped_mm"
+        # (fused, deterministic via reshape+sum instead of index_add_).
+        # Override via TitanMoeModelConfig.experts_implementation. Works
+        # transparently with hook-based EP/TP because all hooks preserve
+        # the standard (hidden_states, top_k_index, top_k_weights) interface.
         if config.is_moe and hasattr(config, "_experts_implementation"):
-            config._experts_implementation = "grouped_mm"
+            config._experts_implementation = config.experts_implementation
 
         self.model = model_cls(config=config)
         self.max_seq_len = config.max_seq_len
