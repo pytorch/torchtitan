@@ -13,9 +13,9 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (

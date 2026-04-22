@@ -177,7 +177,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -210,7 +209,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -251,7 +249,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -274,7 +271,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
         self.assertFalse(manager.load(step=-1))
@@ -298,7 +294,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
         res = manager.load(step=-1)
@@ -328,7 +323,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -362,7 +356,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
         manager1.save(curr_step=1, last_step=True)
@@ -382,7 +375,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
         r1 = manager2.load(step=1)
@@ -437,7 +429,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=checkpoint_config,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -478,7 +469,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=states,
             config=checkpoint_config,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -515,7 +505,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -541,7 +530,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -587,7 +575,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -625,7 +612,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -652,7 +638,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -693,7 +678,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-
             base_folder=self.trainer_config.dump_folder,
         )
 
