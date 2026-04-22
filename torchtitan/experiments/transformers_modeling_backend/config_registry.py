@@ -18,7 +18,7 @@ from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.tools.profiling import ProfilingConfig
+from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 
@@ -29,7 +29,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("debugmodel"),
-        profiling=ProfilingConfig(profile_freq=5),
+        profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -60,7 +60,7 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("full"),
-        profiling=ProfilingConfig(profile_freq=5),
+        profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
