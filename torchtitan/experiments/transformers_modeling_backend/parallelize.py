@@ -6,7 +6,6 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import (
@@ -43,6 +42,9 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoPara
 from torchtitan.experiments.transformers_modeling_backend.compile import (
     apply_compile_sparse,
 )
+from torchtitan.experiments.transformers_modeling_backend.token_dispatcher import (
+    HFTokenDispatcher,
+)
 from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
@@ -55,179 +57,50 @@ from torchtitan.tools.logging import logger
 class HFExpertParallel(ParallelStyle):
     """Expert Parallelism for HF Transformers MoE models.
 
-    Adapts torchtitan's ``ExpertParallel`` for the HF experts interface.
-    The key difference is the input/output contract:
+    Thin ParallelStyle: shards expert params on dim 0 and plumbs an
+    ``HFTokenDispatcher`` into ``distribute_module`` input/output hooks.
+    All dispatch/combine logic lives in ``HFTokenDispatcher``.
 
-    - **Native ``ExpertParallel``** expects pre-sorted tokens:
-      input ``(routed_input, num_tokens_per_expert)``, output is sorted
-      expert results. The ``Reorderer`` in ``MoE.forward`` handles sorting
-      before and unsorting after the experts call.
+    Mirrors native ``ExpertParallel`` in ``torchtitan/distributed/
+    expert_parallel.py``: the ParallelStyle only shards weights and sets
+    ``ep_group`` on the dispatcher attached to the experts module.
 
-    - **``HFExpertParallel``** receives unsorted tokens from the HF
-      ``SparseMoeBlock``: input ``(hidden_states, top_k_index, top_k_weights)``.
-      Sorting, routing weight transport, and local routing construction
-      happen inside ``_token_dispatch``. ``_token_combine`` handles
-      unsorting and top_k accumulation, returning the final output
-      directly (HF expects experts to return the accumulated result).
-
-    Partition is the same: both shard expert params on dim 0 via
-    ``distribute_tensor(..., [Shard(0)])``.
-
-    Applied to the experts module via ``parallelize_module``. The MoE block
-    forward and experts forward run unchanged — dispatch/combine happen
-    in input/output hooks registered by ``distribute_module``.
+    The dispatcher must be attached to the experts module *before*
+    ``parallelize_module(experts, ep_mesh, HFExpertParallel())`` is
+    called — done in ``apply_moe_ep_tp``. Native models attach it during
+    ``GroupedExperts.__init__``; we can't modify HF's experts module, so
+    we attach externally.
     """
 
-    def __init__(self):
-        super().__init__()
-        self._ep_group = None
-        self._ep_size = None
-        self._num_local_experts = None
-        self._global_num_experts = None
-
     def _partition_fn(self, name, mod, device_mesh):
-        """Shard expert params on dim 0 across EP ranks.
-
-        Same as native ``ExpertParallel``. Also captures EP metadata
-        (group, sizes) for use in dispatch/combine.
-        """
         for param_name, param in list(mod.named_parameters(recurse=False)):
             mod.register_parameter(
                 param_name,
                 nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])),
             )
         # Only set EP metadata on the top-level experts module
-        # (distribute_module calls _partition_fn on children too)
+        # (distribute_module calls _partition_fn on children too).
         if hasattr(mod, "num_experts"):
+            assert hasattr(mod, "token_dispatcher"), (
+                f"{type(mod).__name__} missing token_dispatcher attribute. "
+                "apply_moe_ep_tp() must attach an HFTokenDispatcher before "
+                "parallelize_module(experts, ep_mesh, HFExpertParallel())."
+            )
+            assert isinstance(
+                mod.token_dispatcher, HFTokenDispatcher
+            ), f"Expected HFTokenDispatcher, got {type(mod.token_dispatcher)}"
             ep_size = device_mesh.size()
-            self._ep_group = device_mesh.get_group()
-            self._ep_size = ep_size
-            self._global_num_experts = mod.num_experts
-            self._num_local_experts = mod.num_experts // ep_size
-
-    def _token_dispatch(self, mod, inputs, device_mesh):
-        """Sort tokens by expert, all-to-all dispatch, build local routing.
-
-        Unlike native ``ExpertParallel`` which receives pre-sorted
-        ``(routed_input, num_tokens_per_expert)``, this receives the HF
-        interface and performs sorting internally.
-
-        Args:
-            inputs: ``(hidden_states, top_k_index, top_k_weights)``
-                - hidden_states: ``(num_tokens, hidden_dim)``
-                - top_k_index: ``(num_tokens, top_k)`` global expert indices
-                - top_k_weights: ``(num_tokens, top_k)`` routing weights
-
-        Returns:
-            ``(dispatched_tokens, local_top_k_index, local_top_k_weights)``
-                - dispatched_tokens: ``(num_received, hidden_dim)``
-                - local_top_k_index: ``(num_received, 1)`` local expert indices
-                - local_top_k_weights: ``(num_received, 1)`` routing weights
-        """
-        hidden_states, top_k_index, top_k_weights = inputs
-        ep_size = self._ep_size
-        num_local = self._num_local_experts
-        global_num_experts = self._global_num_experts
-        ep_group = self._ep_group
-
-        num_tokens = hidden_states.size(0)
-        top_k = top_k_index.size(-1)
-
-        # Flatten token-expert pairs
-        token_idx = (
-            torch.arange(num_tokens, device=hidden_states.device)
-            .unsqueeze(1)
-            .expand(-1, top_k)
-            .reshape(-1)
-        )
-        expert_ids = top_k_index.reshape(-1)
-        sample_weights = top_k_weights.reshape(-1)
-
-        # Sort by expert
-        perm = torch.argsort(expert_ids, stable=True)
-        inv_perm = torch.empty_like(perm)
-        inv_perm[perm] = torch.arange(perm.size(0), device=hidden_states.device)
-
-        routed_input = hidden_states[token_idx[perm]]
-        sorted_weights = sample_weights[perm]
-
-        # Compute num_tokens_per_expert
-        num_tokens_per_expert = torch.histc(
-            expert_ids[perm].int(),
-            bins=global_num_experts,
-            min=0,
-            max=global_num_experts - 1,
-        )
-
-        # Exchange per-expert token counts
-        with torch.no_grad():
-            input_splits_t = num_tokens_per_expert.view(ep_size, num_local).sum(dim=1)
-            output_splits_t = torch.empty_like(input_splits_t)
-            torch.distributed.all_to_all_single(
-                output_splits_t, input_splits_t, group=ep_group
-            )
-            self._input_splits = input_splits_t.int().tolist()
-            self._output_splits = output_splits_t.int().tolist()
-
-        # Dispatch tokens
-        dispatched = all_to_all_single_autograd(
-            routed_input, self._output_splits, self._input_splits, ep_group
-        )
-
-        # Dispatch routing weights alongside tokens
-        dispatched_weights = all_to_all_single_autograd(
-            sorted_weights.unsqueeze(-1),
-            self._output_splits,
-            self._input_splits,
-            ep_group,
-        ).squeeze(-1)
-
-        # Exchange per-expert counts for local routing
-        with torch.no_grad():
-            local_ntpe_tensor = torch.empty_like(num_tokens_per_expert)
-            torch.distributed.all_to_all_single(
-                local_ntpe_tensor, num_tokens_per_expert, group=ep_group
-            )
-
-        # Build local mock routing (matches by-source-rank token ordering)
-        local_ntpe_per_source = local_ntpe_tensor.view(ep_size, num_local)
-        local_expert_indices = torch.repeat_interleave(
-            torch.arange(num_local, device=hidden_states.device).repeat(ep_size),
-            local_ntpe_per_source.reshape(-1).long(),
-        )
-        mock_top_k_index = local_expert_indices.unsqueeze(1)
-        mock_top_k_weights = dispatched_weights.unsqueeze(1)
-
-        # Save state for combine
-        self._inv_perm = inv_perm
-        self._num_tokens = num_tokens
-        self._top_k = top_k
-
-        return dispatched, mock_top_k_index, mock_top_k_weights
-
-    def _token_combine(self, mod, output, device_mesh):
-        """All-to-all combine, unsort, sum across top_k.
-
-        Unlike native ``ExpertParallel`` which returns sorted output
-        (``MoE.forward`` handles unsorting), this returns the final
-        accumulated result — shape ``(num_tokens, hidden_dim)``.
-        """
-        combined = all_to_all_single_autograd(
-            output,
-            self._input_splits,  # reversed
-            self._output_splits,  # reversed
-            self._ep_group,
-        )
-        combined = combined[self._inv_perm]
-        return combined.view(self._num_tokens, self._top_k, -1).sum(dim=1)
+            mod.token_dispatcher.ep_group = device_mesh.get_group()
+            mod.token_dispatcher.ep_size = ep_size
+            mod.token_dispatcher.num_local_experts = mod.num_experts // ep_size
 
     def _apply(self, module, device_mesh):
         return distribute_module(
             module,
             device_mesh,
             partition_fn=self._partition_fn,
-            input_fn=self._token_dispatch,
-            output_fn=self._token_combine,
+            input_fn=lambda m, inp, _mesh: m.token_dispatcher.dispatch(*inp),
+            output_fn=lambda m, out, _mesh: m.token_dispatcher.combine(out),
         )
 
 
@@ -661,6 +534,17 @@ def apply_moe_ep_tp(
 
         # --- EP: shard experts on dim 0, register dispatch/combine ---
         if ep_mesh is not None:
+            # Resolve top_k attribute name across HF MoE variants (top_k on
+            # Mixtral, num_experts_per_tok on Qwen3MoE/DeepSeek). Only
+            # carried for documentation in the dispatcher Config — the
+            # HFTokenDispatcher overrides infer top_k from input shape.
+            top_k = getattr(moe_block, "top_k", None) or getattr(
+                moe_block, "num_experts_per_tok", 1
+            )
+            experts.token_dispatcher = HFTokenDispatcher.Config(
+                num_experts=experts.num_experts,
+                top_k=top_k,
+            ).build()
             parallelize_module(experts, ep_mesh, HFExpertParallel())
 
         # --- TP: shard expert weights (TP-only), replicate gate, hooks ---
