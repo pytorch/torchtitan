@@ -23,7 +23,7 @@ from .attention import (
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import compute_ffn_hidden_dim, FeedForward
+from .feed_forward import compute_ffn_hidden_dim, FeedForward, FusedFeedForward
 from .linear import Linear
 from .moe import MoE
 from .rmsnorm import RMSNorm
@@ -40,6 +40,7 @@ __all__ = [
     "Decoder",
     "Embedding",
     "FeedForward",
+    "FusedFeedForward",
     "FlexAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",

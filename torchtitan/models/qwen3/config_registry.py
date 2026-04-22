@@ -241,11 +241,11 @@ def qwen3_32b() -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
+def qwen3_debugmodel_fused() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_fused_qkv"),
+        model_spec=model_registry("debugmodel_fused"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

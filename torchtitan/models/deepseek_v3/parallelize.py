@@ -29,6 +29,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.models.common.feed_forward import FusedFeedForward
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.protocols import ModelConvertersContainer
@@ -262,17 +263,21 @@ def apply_non_moe_tp(
 
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward": prepare_module_input(
-                        input_layouts=(sp_layout,),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": colwise_parallel(),
-                }
-            )
+            ffn_plan: dict[str, object] = {
+                "feed_forward": prepare_module_input(
+                    input_layouts=(sp_layout,),
+                    desired_input_layouts=(Replicate(),),
+                ),
+            }
+            # pyrefly: ignore [missing-attribute]
+            if isinstance(transformer_block.feed_forward, FusedFeedForward):
+                ffn_plan["feed_forward.w13"] = colwise_parallel()
+                ffn_plan["feed_forward.w2"] = rowwise_output_plan
+            else:
+                ffn_plan["feed_forward.w1"] = colwise_parallel()
+                ffn_plan["feed_forward.w2"] = rowwise_output_plan
+                ffn_plan["feed_forward.w3"] = colwise_parallel()
+            layer_plan.update(ffn_plan)
 
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]

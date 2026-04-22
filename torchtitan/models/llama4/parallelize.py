@@ -48,6 +48,7 @@ from torchtitan.distributed.tensor_parallel import (
     NoParallel,
 )
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.feed_forward import FusedFeedForward
 
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -288,17 +289,21 @@ def apply_non_moe_tp(
         }
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward": prepare_module_input(
-                        input_layouts=(sp_layout,),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": colwise_parallel(),
-                }
-            )
+            ffn_plan: dict[str, object] = {
+                "feed_forward": prepare_module_input(
+                    input_layouts=(sp_layout,),
+                    desired_input_layouts=(Replicate(),),
+                ),
+            }
+            # pyrefly: ignore [missing-attribute]
+            if isinstance(transformer_block.feed_forward, FusedFeedForward):
+                ffn_plan["feed_forward.w13"] = colwise_parallel()
+                ffn_plan["feed_forward.w2"] = rowwise_output_plan
+            else:
+                ffn_plan["feed_forward.w1"] = colwise_parallel()
+                ffn_plan["feed_forward.w2"] = rowwise_output_plan
+                ffn_plan["feed_forward.w3"] = colwise_parallel()
+            layer_plan.update(ffn_plan)
 
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]
@@ -568,20 +573,32 @@ def apply_moe_ep_tp(
                 # skips the Partial→Replicate all-reduce in forward. The
                 # reduction happens once at the MoE output boundary
                 # (PrepareModuleInputOutput).
-                # pyrefly: ignore [no-matching-overload]
-                moe_layer_plan.update(
-                    {
-                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
-                        ),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial(),
-                        ),
-                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
-                        ),
-                    }
-                )
+                # pyrefly: ignore [no-matching-overload, missing-attribute]
+                if isinstance(transformer_block.moe.shared_experts, FusedFeedForward):
+                    moe_layer_plan.update(
+                        {
+                            "moe.shared_experts.w13": ColwiseParallelWithGradPlacement(
+                                local_input_grad_placements=(Partial(),)
+                            ),
+                            "moe.shared_experts.w2": RowwiseParallel(
+                                output_layouts=Partial(),
+                            ),
+                        }
+                    )
+                else:
+                    moe_layer_plan.update(
+                        {
+                            "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
+                                local_input_grad_placements=(Partial(),)
+                            ),
+                            "moe.shared_experts.w2": RowwiseParallel(
+                                output_layouts=Partial(),
+                            ),
+                            "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
+                                local_input_grad_placements=(Partial(),)
+                            ),
+                        }
+                    )
             parallelize_module(
                 # pyrefly: ignore [bad-argument-type]
                 module=transformer_block,

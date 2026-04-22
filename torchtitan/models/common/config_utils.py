@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward, FusedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -125,14 +125,49 @@ def make_gqa_config(
     )
 
 
+def _fused_mlp_param_init(
+    init_a: dict[str, Callable], init_b: dict[str, Callable]
+) -> dict[str, Callable]:
+    """Build a param_init dict that applies init_a to the first half and init_b
+    to the second half of each parameter (split along dim 0)."""
+    fused = {}
+    for name in init_a:
+        fn_a, fn_b = init_a[name], init_b[name]
+
+        def make_fn(a=fn_a, b=fn_b):
+            def fn(param):
+                mid = param.shape[0] // 2
+                a(param[:mid])
+                b(param[mid:])
+
+            return fn
+
+        fused[name] = make_fn()
+    return fused
+
+
 def make_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
-) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config."""
+    fuse_mlp: bool = False,
+) -> FeedForward.Config | FusedFeedForward.Config:
+    """Build a fully-specified FeedForward or FusedFeedForward config."""
+    if fuse_mlp:
+        return FusedFeedForward.Config(
+            w13=Linear.Config(
+                in_features=dim,
+                out_features=2 * hidden_dim,
+                param_init=_fused_mlp_param_init(w1_param_init, w2w3_param_init),
+            ),
+            w2=Linear.Config(
+                in_features=hidden_dim,
+                out_features=dim,
+                param_init=w2w3_param_init,
+            ),
+        )
     return FeedForward.Config(
         w1=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w1_param_init
@@ -151,7 +186,7 @@ def make_moe_config(
     num_experts: int = 8,
     router: TokenChoiceTopKRouter.Config,
     experts: GroupedExperts.Config,
-    shared_experts: FeedForward.Config | None = None,
+    shared_experts: FeedForward.Config | FusedFeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
