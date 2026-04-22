@@ -67,7 +67,7 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if training.full_dtensor:
+    if parallelism.full_dtensor:
         # Full DTensor: use multi-D SPMD mesh. CP is handled declaratively
         # via LocalMapSpec (K/V Replicate on CP dim), not apply_cp_to_forward.
         spmd_mesh = get_dense_spmd_mesh(parallel_dims)
@@ -104,12 +104,12 @@ def parallelize_llama(
     # In full DTensor mode, DDP-only (dp_replicate without dp_shard/cp) also
     # uses the FSDP path with DataParallelMeshDims.
     use_fsdp = parallel_dims.fsdp_enabled or (
-        training.full_dtensor and parallel_dims.dp_replicate_enabled
+        parallelism.full_dtensor and parallel_dims.dp_replicate_enabled
     )
     if use_fsdp:
-        if training.full_dtensor:
+        if parallelism.full_dtensor:
             dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
-                model, parallel_dims, training.full_dtensor
+                model, parallel_dims, parallelism.full_dtensor
             )
         else:
             names = (

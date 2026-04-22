@@ -10,9 +10,9 @@ from collections.abc import Callable
 
 import torch
 import torch.nn as nn
+from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-from torch.distributed.pipelining._utils import GetMeshCallback
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -31,7 +31,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ParallelizeFunction
@@ -44,6 +43,30 @@ __all__ = [
     "generate_llm_fqn_per_model_part",
     "pipeline_module_split",
 ]
+
+
+def _build_get_mesh_callback(
+    parallel_dims: ParallelDims,
+) -> Callable[[tuple[str, ...], _MeshLayout | None], DeviceMesh | None]:
+    """Build a callback that resolves a DeviceMesh from dimension names.
+
+    Pipeline parallelism requires an SPMD mesh during module split so that
+    at runtime the current PP rank can reconstruct a DTensor after receiving
+    a plain tensor from the previous PP rank. DTensors are not directly
+    serializable across PP stages (because ProcessGroup is not serializable),
+    so each stage uses this callback to obtain its local DeviceMesh and
+    re-wrap incoming tensors as DTensors with the correct placements.
+    """
+
+    def _get_mesh(
+        mesh_dim_names: tuple[str, ...], mesh_layout: _MeshLayout | None
+    ) -> DeviceMesh | None:
+        mesh = parallel_dims.get_mesh(list(mesh_dim_names))
+        if mesh_layout is not None and mesh._layout != mesh_layout:
+            return None
+        return mesh
+
+    return _get_mesh
 
 
 def pipeline_llm(
@@ -132,12 +155,14 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
+    get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = pipeline_module_split(
         model,
         pp_mesh,
         parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
+        get_mesh=get_mesh_cb,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -159,22 +184,6 @@ def pipeline_llm(
         # NOTE: this is to update the model in the stage
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
-
-    # Config-based TP keeps DTensors on the PP boundary. The PipelineStage
-    # strips DTensors to local tensors for P2P send and reconstructs them on
-    # recv by looking up the mesh in its ``_mesh_cache``. Register the mesh
-    # that carries those DTensors so the reconstruction can find it.
-    pp_dtensor_mesh: DeviceMesh | None = None
-    if training.full_dtensor:
-        pp_dtensor_mesh = get_dense_spmd_mesh(parallel_dims)
-    elif parallel_dims.tp_enabled:
-        pp_dtensor_mesh = parallel_dims.get_mesh("tp")
-    if pp_dtensor_mesh is not None:
-        get_mesh_cb: GetMeshCallback = (
-            lambda mesh_dim_names, mesh_layout: pp_dtensor_mesh
-        )
-        for stage in stages:
-            stage._mesh_cache._get_mesh_cb = get_mesh_cb
 
     pp_schedule = build_pipeline_schedule(
         parallelism=parallelism,
@@ -388,6 +397,7 @@ def pipeline_module_split(
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
+    get_mesh: Callable | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
@@ -474,6 +484,7 @@ def pipeline_module_split(
             num_stages,
             device,
             group=pp_mesh.get_group("pp"),
+            get_mesh=get_mesh,
         )
         return stage, model
 

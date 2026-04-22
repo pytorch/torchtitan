@@ -531,6 +531,7 @@ def model_registry(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
+    set_deepseek_v3_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,

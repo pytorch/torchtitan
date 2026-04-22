@@ -117,6 +117,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
 
+            # Populate sharding spec on the model config now that
+            # parallelism-driven flags (loss_parallel, enable_sp, full_dtensor)
+            # are known.
+            if (
+                self.model_spec is not None
+                and self.model_spec.set_sharding_spec_fn is not None
+            ):
+                kwargs: dict[str, bool] = {
+                    "loss_parallel": not self.parallelism.disable_loss_parallel,
+                    "enable_sp": self.parallelism.enable_sequence_parallel,
+                }
+                # full_dtensor is only accepted by models with the full DTensor
+                # sharding path (currently llama3). Pass it only when enabled.
+                if self.parallelism.full_dtensor:
+                    kwargs["full_dtensor"] = True
+                self.model_spec.set_sharding_spec_fn(
+                    self.model_spec.model, **kwargs
+                )
+
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
@@ -249,26 +268,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             trainer_config=config,
         )
         self.model_config = model_config
+        # Sharding specs are already populated on ``model_config`` by
+        # ``Trainer.Config.__post_init__`` (via ``set_sharding_spec_fn``),
+        # which runs before ``Trainer.__init__``.
 
-        if config.training.full_dtensor:
+        if config.parallelism.full_dtensor:
             full_dtensor.validate_config(parallel_dims, model_spec, model_config)
 
-        # Fill sharding specs based on parallelism settings (before build)
-        if model_spec.set_sharding_spec_fn is not None:
-            sharding_kwargs: dict[str, bool] = {
-                "loss_parallel": not config.parallelism.disable_loss_parallel,
-                "enable_sp": config.parallelism.enable_sequence_parallel,
-            }
-            if config.training.full_dtensor:
-                sharding_kwargs["full_dtensor"] = True
-            model_spec.set_sharding_spec_fn(
-                model_config, parallel_dims, **sharding_kwargs
-            )
+        logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
-        logger.info(
-            f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
-        )
+
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
@@ -660,7 +669,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen += labels.numel()
 
         # Convert inputs/labels to DTensors on the SPMD mesh
-        if self.config.training.full_dtensor:
+        if self.config.parallelism.full_dtensor:
             inputs, labels = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
@@ -725,7 +734,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # local to avoid mixed DTensor/tensor in cross_entropy.
                 if (
                     isinstance(pred, DTensor)
-                    and not self.config.training.full_dtensor
+                    and not self.config.parallelism.full_dtensor
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()

@@ -8,15 +8,20 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.sharding import (
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
     replicate_norm_spec,
     sequence_parallel_spec,
     set_decoder_sharding_spec,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
-from torchtitan.protocols.sharding import LocalMapSpec, ShardingSpec
+from torchtitan.protocols.sharding import (
+    LocalMapSpec,
+    MeshDimName,
+    NamedPlacement,
+    ShardingSpec,
+)
 
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
@@ -24,7 +29,6 @@ if TYPE_CHECKING:
 
 def set_llama3_sharding_spec(
     config: "Llama3Model.Config",
-    parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
     enable_sp: bool,
@@ -32,70 +36,53 @@ def set_llama3_sharding_spec(
 ) -> None:
     """Fill ``sharding_spec`` on all Llama3 sub-configs.
 
-    No-op when TP is not enabled and not full_dtensor.
+    Specs are populated unconditionally — the mesh actually passed to
+    ``Module.parallelize()`` at runtime determines which declarations
+    apply. Declarations for mesh dims that aren't enabled (e.g. ``TP``
+    placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
+    ``loss_parallel`` controls whether the output projection is vocab-parallel.
     ``full_dtensor`` extends the inner-attention ``LocalMapSpec`` to also
-    carry DP/CP placements so all params/inputs flow as DTensors on the
-    multi-D SPMD mesh.
+    carry DP/CP placements so q/k/v flow as DTensors on the multi-D SPMD mesh.
     """
-    if not parallel_dims.tp_enabled and not full_dtensor:
-        return
-
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(
-            layer_cfg,
-            parallel_dims,
-            enable_sp=enable_sp,
-            full_dtensor=full_dtensor,
+            layer_cfg, enable_sp=enable_sp, full_dtensor=full_dtensor
         )
 
 
-def _build_inner_attn_local_map_spec(
-    parallel_dims: ParallelDims,
-    full_dtensor: bool,
-) -> LocalMapSpec:
-    """Build LocalMapSpec for inner attention based on active mesh dims.
+def _build_inner_attn_local_map_spec(full_dtensor: bool) -> LocalMapSpec:
+    """Build LocalMapSpec for inner attention.
 
     q/k/v are (bs, seq, heads, head_dim). TP shards on heads (dim 2).
-    In full DTensor CP mode, Q keeps Shard(1) on CP (sequence),
-    K/V get Replicate on CP — DTensor all-gathers K/V across CP ranks.
+    Under full DTensor: q/k/v are batch-sharded on DP dims; Q keeps
+    sequence-sharding on CP while K/V are Replicate so DTensor all-gathers
+    them across CP ranks.
 
-    Placements are ordered to match the SPMD mesh dim order:
-    dp_replicate, dp_shard, cp, tp (only active dims present).
+    Non-full_dtensor path: parallelize is called with a 1-D TP mesh, so
+    declaring only ``{TP: Shard(2)}`` matches (strict resolve iterates
+    mesh dims only).
     """
-    q_placements: list[Placement] = []
-    kv_placements: list[Placement] = []
-
+    q: NamedPlacement
+    kv: NamedPlacement
     if full_dtensor:
-        # DP dims: q/k/v are batch-sharded (Shard(0)) on dp_replicate/dp_shard
-        if parallel_dims.dp_replicate_enabled:
-            q_placements.append(Shard(0))
-            kv_placements.append(Shard(0))
-        if parallel_dims.dp_shard_enabled:
-            q_placements.append(Shard(0))
-            kv_placements.append(Shard(0))
-        if parallel_dims.cp_enabled:
-            q_placements.append(Shard(1))  # Q: keep sequence-sharded
-            kv_placements.append(Replicate())  # K/V: all-gather
-    if parallel_dims.tp_enabled:
-        q_placements.append(Shard(2))  # heads
-        kv_placements.append(Shard(2))  # heads
-
-    q_pl = tuple(q_placements)
-    kv_pl = tuple(kv_placements)
+        q = dense_activation_placement(tp=Shard(2))
+        kv = dense_activation_placement(tp=Shard(2), cp=Replicate())
+    else:
+        q = {MeshDimName.TP: Shard(2)}
+        kv = {MeshDimName.TP: Shard(2)}
 
     return LocalMapSpec(
-        in_placements=(q_pl, kv_pl, kv_pl),
-        out_placements=(q_pl,),
-        in_grad_placements=(q_pl, kv_pl, kv_pl),
+        in_placements=(q, kv, kv),
+        out_placements=(q,),
+        in_grad_placements=(q, kv, kv),
     )
 
 
 def _set_llama3_layer_sharding(
     layer_cfg: "Llama3TransformerBlock.Config",
-    parallel_dims: ParallelDims,
     *,
     enable_sp: bool,
     full_dtensor: bool,
@@ -118,7 +105,7 @@ def _set_llama3_layer_sharding(
     # Inner attention: local_map to convert DTensors to local tensors.
     # Under full DTensor, placements include DP/CP dims (K/V all-gathered on CP).
     layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
-        local_map=_build_inner_attn_local_map_spec(parallel_dims, full_dtensor),
+        local_map=_build_inner_attn_local_map_spec(full_dtensor),
     )
 
     assert layer_cfg.feed_forward is not None

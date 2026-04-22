@@ -345,7 +345,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                 ]
             ],
             "Full DTensor FSDP",
@@ -355,7 +355,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
                 ]
@@ -367,7 +367,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.data_parallel_shard_degree=2",
                 ]
@@ -379,7 +379,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.data_parallel_shard_degree=2",
@@ -392,7 +392,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
@@ -406,7 +406,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
@@ -419,7 +419,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--parallelism.pipeline_parallel_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.data_parallel_shard_degree=2",
@@ -432,7 +432,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.pipeline_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
@@ -446,7 +446,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.full_dtensor",
+                    "--parallelism.full_dtensor",
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.pipeline_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",

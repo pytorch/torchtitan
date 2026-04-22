@@ -51,8 +51,8 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            local_batch_size=1,
+            seq_len=512,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -75,8 +75,8 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
         optimizer=OptimizersContainer.Config(lr=3e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            local_batch_size=1,
+            seq_len=512,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -106,7 +106,7 @@ def qwen3_vl_2b() -> Trainer.Config:
         training=TrainingConfig(
             local_batch_size=8,
             seq_len=4096,
-            steps=100,
+            steps=1000,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
@@ -135,7 +135,7 @@ def qwen3_vl_8b() -> Trainer.Config:
         training=TrainingConfig(
             local_batch_size=4,
             seq_len=4096,
-            steps=100,
+            steps=1000,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
@@ -160,11 +160,11 @@ def qwen3_vl_30b_a3b() -> Trainer.Config:
         model_spec=model_registry("30B-A3B", moe_comm_backend="standard"),
         dataloader=_qwen3_vl_dataloader("cc12m"),
         optimizer=OptimizersContainer.Config(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
             seq_len=4096,
-            steps=100,
+            steps=1000,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,

@@ -40,16 +40,10 @@ class MeshDimName(StrEnum):
 
 
 # Placement per mesh dim, keyed by MeshDimName.
-# Example: {MeshDimName.TP: Shard(0), MeshDimName.DP: Replicate()}
-# Unspecified mesh dims default to Replicate() at resolve time.
+# Example: {MeshDimName.TP: Shard(0), MeshDimName.DP_SHARD: Replicate()}
+# Every spec must declare a placement for every mesh dim it will be applied
+# against; ``resolve_placements`` errors otherwise.
 NamedPlacement = dict[MeshDimName, Placement]
-
-
-class Unconstrained(Placement):
-    """Preserve existing placement — no redistribution."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -59,15 +53,19 @@ class LocalMapSpec:
     Wraps forward with ``local_map()``: DTensor -> local before forward,
     local -> DTensor after forward.
 
+    Placements are ``NamedPlacement`` (keyed by mesh dim name). At
+    parallelize time they are resolved to positional tuples matching the
+    runtime mesh's dim order.
+
     Attributes:
-        in_placements: Per-input placements (positional: q, k, v).
-        out_placements: Per-output placements.
-        in_grad_placements: Per-input gradient placements.
+        in_placements: Per-input NamedPlacements (positional: q, k, v).
+        out_placements: Per-output NamedPlacements.
+        in_grad_placements: Per-input-gradient NamedPlacements.
     """
 
-    in_placements: tuple[tuple[Placement, ...], ...]
-    out_placements: tuple[tuple[Placement, ...], ...]
-    in_grad_placements: tuple[tuple[Placement, ...], ...]
+    in_placements: tuple[NamedPlacement, ...]
+    out_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[NamedPlacement, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -81,34 +79,40 @@ class ShardingSpec:
     keyed by mesh dim names.  At ``parallelize()`` time, NamedPlacements
     are resolved to ``tuple[Placement, ...]`` in mesh dim order.
 
-    Completely dtype-agnostic at this memoent — quantization (Float8/MXFP8) is
+    Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
+
+    Redistribution is expressed as a (source, destination) pair: src declares
+    what the tensor's placement is entering the boundary, dst declares the
+    desired placement after redistribution. For DTensor, the src is usually
+    implicit in the tensor's ``placements``; declaring it explicitly keeps
+    the contract uniform with future erased-type systems that require both
+    sides of every redistribute.
 
     Attributes:
         state_shardings: Parameter/buffer placements for ``distribute_tensor``.
             Outer dict keys are param names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
-        input_layouts: A workaround to annotate plain tensor inputs as DTensors,
-            keyed by ``forward()`` arg name. Used when inputs arrive as
-            plain tensors (e.g., from dataloader or FSDP-only path).
-            e.g. ``{"x": {TP: Shard(1)}}`` means the plain tensor is a
-            local shard on TP dim. ``None`` means no annotation needed.
-            Will be unnecessary once full DTensor is adopted.
-        in_shardings: Desired input placements after redistribution,
+        in_src_shardings: Source placements of inputs, keyed by ``forward()``
+            arg name. Used to annotate plain tensors as DTensors via
+            ``DTensor.from_local`` when inputs arrive plain (e.g. from
+            dataloader or FSDP-only path). Also declares the src side of
+            the input redistribute pair.
+            e.g. ``{"x": {TP: Shard(1)}}``.
+        in_dst_shardings: Desired input placements after redistribution,
             keyed by ``forward()`` arg name.
             e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
             ``None`` means no input redistribution.
-        out_shardings: Desired output placement.
+        out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
         local_map: If set, wraps forward with ``local_map()``.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
-    # TODO: Remove once all inputs flow as DTensors (full DTensor regime).
-    input_layouts: dict[str, NamedPlacement] | None = None
-    in_shardings: dict[str, NamedPlacement] | None = None
-    out_shardings: NamedPlacement | None = None
+    in_src_shardings: dict[str, NamedPlacement] | None = None
+    in_dst_shardings: dict[str, NamedPlacement] | None = None
+    out_dst_shardings: NamedPlacement | None = None
     local_map: LocalMapSpec | None = None
 
     def to_dict(self) -> dict:
@@ -120,12 +124,21 @@ def resolve_placements(
     named: NamedPlacement,
     mesh_dim_names: tuple[str, ...],
 ) -> tuple[Placement, ...]:
-    """Convert NamedPlacement to ``tuple[Placement, ...]`` in mesh dim order.
+    """Resolve NamedPlacement against a mesh in dim order.
 
-    Unspecified mesh dims default to ``Unconstrained()``. Each caller decides
-    how to resolve ``Unconstrained`` for its context (state distribution
-    needs a concrete placement, input redistribution preserves existing).
+    Every spec must explicitly declare a placement for every mesh dim it
+    will be applied against. Missing declarations raise ``ValueError``;
+    extra declarations (dims not in the mesh) are ignored.
     """
-    return tuple(
-        named.get(MeshDimName(dim_name), Unconstrained()) for dim_name in mesh_dim_names
-    )
+    result = []
+    for dim_name in mesh_dim_names:
+        key = MeshDimName(dim_name)
+        if key not in named:
+            raise ValueError(
+                f"Sharding spec does not declare a placement for mesh dim "
+                f"{dim_name!r}. Declared: "
+                f"{sorted(k.value for k in named)}; "
+                f"required: {list(mesh_dim_names)}."
+            )
+        result.append(named[key])
+    return tuple(result)

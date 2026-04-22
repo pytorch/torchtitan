@@ -47,12 +47,6 @@ class TrainingConfig:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
-    full_dtensor: bool = False
-    """
-    Whether to use full DTensor for input parallelization instead of the default
-    FSDP/TP-based approach. This is experimental.
-    """
-
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
@@ -137,6 +131,12 @@ class ParallelismConfig:
 
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+
+    full_dtensor: bool = False
+    """
+    Whether to use full DTensor for input parallelization instead of the default
+    FSDP/TP-based approach. This is experimental.
+    """
 
     pipeline_parallel_degree: int = 1
     """

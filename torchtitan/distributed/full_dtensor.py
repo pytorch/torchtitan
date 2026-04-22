@@ -6,13 +6,13 @@
 
 """Full DTensor infrastructure for SPMD-style parallelization.
 
-When ``training.full_dtensor`` is enabled, all model parameters, buffers,
-and inputs become DTensors on a multi-dimensional SPMD mesh.  FSDP uses
-``DataParallelMeshDims`` to identify which mesh dimensions are
-data-parallel.
+When ``parallelism.full_dtensor`` is enabled, all model parameters,
+buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
+FSDP uses ``DataParallelMeshDims`` to identify which mesh dimensions
+are data-parallel.
 
-TP sharding is handled by ``Module.parallelize(spmd_mesh, full_dtensor=True)``
-using config-based ``ShardingSpec``.
+TP sharding is handled by ``Module.parallelize(spmd_mesh)`` using
+config-based ``ShardingSpec``.
 """
 
 from typing import Any

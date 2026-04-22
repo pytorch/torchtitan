@@ -316,8 +316,8 @@ def _debugmodel_moe(
             n_kv_heads=2,
             head_dim=head_dim,
             moe_hidden_dim=768,
-            num_experts=64,
-            top_k=8,
+            num_experts=8,
+            top_k=4,
             moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_vl_vision_encoder_config(
