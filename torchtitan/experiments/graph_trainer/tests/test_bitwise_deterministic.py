@@ -308,6 +308,15 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
+    def test_precompile_vs_eager(self):
+        """Precompiled aot_fx_trace produces bitwise identical results to eager."""
+        _set_deterministic()
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        _set_deterministic()
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_eager, run_precompile, "eager vs precompile: ")
+
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
@@ -352,6 +361,15 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_precompile_vs_eager(self):
+        """Precompiled aot_fx_trace produces bitwise identical results to eager."""
+        _set_deterministic()
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        _set_deterministic()
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_eager, run_precompile, "eager vs precompile: ")
 
 
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
