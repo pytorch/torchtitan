@@ -842,10 +842,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 base_folder=config.dump_folder,
             ) as memory_profiler,
         ):
+            # NSYS capture via cudaProfilerApi: only trace steady-state steps
+            nsys_start = int(os.environ.get("NSYS_START_STEP", "0"))
+            nsys_end = int(os.environ.get("NSYS_END_STEP", "0"))
+            nsys_enabled = nsys_start > 0 and nsys_end > nsys_start
+
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
                 self.gc_handler.run(self.step)
+
+                if nsys_enabled and self.step == nsys_start:
+                    logger.info("nsys: starting capture at step %d", self.step)
+                    torch.cuda.cudart().cudaProfilerStart()
+
                 try:
                     self.train_step(data_iterator)
                 except DataloaderExhaustedError:
@@ -861,6 +871,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.step
                 ):
                     self.validator.validate(self.model_parts, self.step)
+
+                if nsys_enabled and self.step == nsys_end:
+                    logger.info("nsys: stopping capture at step %d", self.step)
+                    torch.cuda.cudart().cudaProfilerStop()
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
