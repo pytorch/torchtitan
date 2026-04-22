@@ -905,9 +905,7 @@ class TestModelWrapperModes(unittest.TestCase):
         )
 
         # Interval save: adapter keys only, native format
-        interval_sd = wrapper.state_dict(
-            mode=StateDictMode.EXPORT, last_step=False
-        )
+        interval_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
         self.assertEqual(
             set(interval_sd.keys()),
             {"lora_a", "lora_b"},
