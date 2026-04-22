@@ -319,7 +319,10 @@ def apply_moe_ep_tp(
             if tp_mesh is not None:
                 if isinstance(dispatcher, AllToAllTokenDispatcher):
                     dispatcher.sp_size = tp_mesh.size()
-                    dispatcher.sp_rank = tp_mesh.get_local_rank()
+                    # Use _sym_get_coordinate so the rank is a SymInt
+                    # under CooR precompile instead of a concrete int
+                    # that gets baked into the FX graph.
+                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
             if isinstance(dispatcher, TorchAOTokenDispatcher):
                 assert (
                     pad_multiple is not None

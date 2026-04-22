@@ -84,6 +84,8 @@ Stale artifacts are detected automatically via config fingerprinting and
 will raise an error at load time. Delete old artifacts and re-run
 precompile when upgrading PyTorch or changing the model/parallelism setup.
 
+#### Llama3 (dense model)
+
 ```bash
 # Step 1: precompile on a single process (needs only 1 GPU)
 python -m torchtitan.experiments.graph_trainer.precompile_main \
@@ -104,6 +106,33 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2
+```
+
+#### DeepSeek-v3 (MoE model with expert parallelism)
+
+```bash
+# Step 1: precompile on a single process (needs only 1 GPU)
+python -m torchtitan.experiments.graph_trainer.precompile_main \
+    --module graph_trainer.deepseek_v3 \
+    --config graph_trainer_deepseek_v3_debugmodel \
+    --compile.passes full_inductor_compilation \
+    --compile.joint_passes inductor_decomposition \
+    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2 \
+    --parallelism.expert_parallel_degree 4 \
+    --parallelism.expert_tensor_parallel_degree 1
+
+# Step 2: load and train with torchrun (uses all GPUs)
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
+    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
+    --compile.passes full_inductor_compilation \
+    --compile.joint_passes inductor_decomposition \
+    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2 \
+    --parallelism.expert_parallel_degree 4 \
+    --parallelism.expert_tensor_parallel_degree 1
 ```
 
 **`--virtual-local-rank`:** This torchrun flag makes every worker process see
