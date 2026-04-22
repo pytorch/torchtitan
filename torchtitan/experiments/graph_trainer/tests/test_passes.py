@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+from unittest.mock import patch
 
 import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -12,15 +13,26 @@ from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
+from torch.cuda._graph_annotations import _is_tools_id_unavailable
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.traceback import preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _MODULE_FQN,
+    annotate_module_fqns,
+)
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
+from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    minimal_fx_tracer,
+    trace_train_step,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_sac_pass,
+    insert_kernel_annotations_pass,
     reassign_to_pg_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
@@ -284,7 +296,7 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
     def test_getitem_propagates_parent_tags(self):
-        """operator.getitem nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -298,19 +310,14 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].target, torch.ops.aten.add.Tensor)
         self.assertEqual(nodes[2].target, operator.getitem)
 
-        # Set ac_region_id on the tuple-returning parent (the direct parent of getitem)
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 3}
-
         apply_sac_pass(gm)
 
         tuple_node = nodes[1]
         getitem_node = nodes[2]
         self.assertEqual(getitem_node.meta["recompute"], tuple_node.meta["recompute"])
-        self.assertEqual(tuple_node.meta["ac_graph_id"], 3)
-        self.assertEqual(getitem_node.meta["ac_graph_id"], 3)
 
     def test_wait_tensor_propagates_parent_tags(self):
-        """wait_tensor nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """wait_tensor nodes should inherit the parent's recompute tag."""
         custom_save = {torch.ops._c10d_functional.reduce_scatter_tensor.default}
         gm = self._build_gm(
             [
@@ -319,7 +326,7 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 3}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.3.attention"}
 
         apply_sac_pass(gm, op_list_to_save=custom_save)
 
@@ -327,25 +334,9 @@ class TestApplySACPass(TestCase):
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
-        self.assertEqual(rs_node.meta["ac_graph_id"], 3)
-        self.assertEqual(wait_node.meta["ac_graph_id"], 3)
 
-    def test_ac_graph_id_defaults_to_zero(self):
-        """Nodes without ac_region_id annotation should have ac_graph_id = 0."""
-        gm = self._build_gm(
-            [
-                torch.ops.aten.add.Tensor,
-                torch.ops.aten.mm.default,
-                torch.ops.aten.relu.default,
-            ]
-        )
-        apply_sac_pass(gm)
-        for node in self._get_call_function_nodes(gm):
-            if node.target is not operator.getitem:
-                self.assertEqual(node.meta["ac_graph_id"], 0)
-
-    def test_ac_graph_id_from_annotation(self):
-        """Nodes with _AC_REGION_ID_KEY in custom metadata should use that as ac_graph_id."""
+    def test_boundary_nodes_forced_to_must_save(self):
+        """Nodes at AC region boundaries should be forced to MUST_SAVE."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -353,14 +344,14 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        # Simulate annotate_fn setting custom metadata on different nodes
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 1}
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 2}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
+        nodes[1].meta["custom"] = {_MODULE_FQN: "layers.1.attention"}
 
         apply_sac_pass(gm)
 
-        self.assertEqual(nodes[0].meta["ac_graph_id"], 1)
-        self.assertEqual(nodes[1].meta["ac_graph_id"], 2)
+        # add is at the boundary (layer 0 -> layer 1), forced to MUST_SAVE
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(nodes[1].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
     def test_custom_op_list_to_save(self):
         """A custom op_list_to_save should override the defaults."""
@@ -387,11 +378,11 @@ class TestApplySACPass(TestCase):
         custom_save = {torch.ops.aten.mm.default, torch.ops.aten.max.default}
         gm = self._build_gm(
             [
-                torch.ops.aten.mm.default,  # 1st mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.max.default,  # in save list -> MUST_SAVE
-                torch.ops.aten.mm.default,  # 2nd mm -> PREFER_RECOMPUTE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.add.Tensor,  # not in save list -> PREFER_RECOMPUTE
-                torch.ops.aten.mm.default,  # 3rd mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
             ]
         )
         apply_sac_pass(gm, op_list_to_save=custom_save)
@@ -399,7 +390,7 @@ class TestApplySACPass(TestCase):
         expected = [
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.max.default, CheckpointPolicy.MUST_SAVE),
-            (torch.ops.aten.mm.default, CheckpointPolicy.PREFER_RECOMPUTE),
+            (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.add.Tensor, CheckpointPolicy.PREFER_RECOMPUTE),
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
         ]
@@ -900,6 +891,235 @@ class TestRemoveIdentitySlicePass(TestCase):
 from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
     TestCustomCodegenPass,
 )
+
+
+class TestAnnotateModuleFqns(TestCase):
+    """Unit tests for annotate_module_fqns and insert_kernel_annotations_pass."""
+
+    def _trace_and_get_fqns(self, model, *args):
+        """Trace fwd+bwd with trace_train_step and return module_fqn annotations."""
+
+        def fwd_step(model, *inputs):
+            pred = model(inputs[0])
+            loss = pred.sum()
+            params = [p for p in model.parameters() if p.requires_grad]
+            grads = torch.autograd.grad(loss, params)
+            return [loss] + list(grads)
+
+        traced = trace_train_step(fwd_step)(model, *args)
+        fqns = set()
+        for node in traced.gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+        return fqns
+
+    def test_annotate_transformer_like_model(self):
+        """Module FQNs survive trace_train_step for a transformer-like model
+        with distinct submodule classes (norm, attention, ffn)."""
+
+        class Norm(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(dim)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        class Attention(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.wq = torch.nn.Linear(dim, dim, bias=False)
+                self.wo = torch.nn.Linear(dim, dim, bias=False)
+
+            def forward(self, x):
+                return self.wo(torch.relu(self.wq(x)))
+
+        class FFN(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.w1 = torch.nn.Linear(dim, dim * 2, bias=False)
+                self.w2 = torch.nn.Linear(dim * 2, dim, bias=False)
+
+            def forward(self, x):
+                return self.w2(torch.relu(self.w1(x)))
+
+        class TransformerBlock(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.attention_norm = Norm(dim)
+                self.attention = Attention(dim)
+                self.ffn_norm = Norm(dim)
+                self.feed_forward = FFN(dim)
+
+            def forward(self, x):
+                h = x + self.attention(self.attention_norm(x))
+                return h + self.feed_forward(self.ffn_norm(h))
+
+        class Model(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.layer = TransformerBlock(dim)
+
+            def forward(self, x):
+                return self.layer(x)
+
+        dim = 16
+        model = Model(dim)
+        annotate_module_fqns(model)
+        fqns = self._trace_and_get_fqns(model, torch.randn(4, dim))
+
+        # Verify key module paths are present.  The Norm wrapper has no
+        # ops of its own, so its inner LayerNorm gets the deepest path.
+        self.assertIn("layer.attention_norm.norm", fqns)
+        self.assertIn("layer.attention", fqns)
+        self.assertIn("layer.attention.wq", fqns)
+        self.assertIn("layer.attention.wo", fqns)
+        self.assertIn("layer.ffn_norm.norm", fqns)
+        self.assertIn("layer.feed_forward", fqns)
+        self.assertIn("layer.feed_forward.w1", fqns)
+        self.assertIn("layer.feed_forward.w2", fqns)
+
+    def test_same_class_instances_get_distinct_fqns(self):
+        """Two parameterless instances of the same class get distinct fqns.
+
+        Uses minimal_fx_tracer directly (not trace_train_step) because
+        parameterless models cannot produce gradients via autograd.grad.
+        """
+
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = Block()
+                self.b = Block()
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+
+        def fwd_only(state, x):
+            return model(x)
+
+        traced = minimal_fx_tracer(fwd_only)({}, torch.randn(4))
+        fqns = set()
+        for node in traced.gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def test_same_class_parameterless_works_with_make_fx(self):
+        """Same-class parameterless instances get distinct fqns with plain make_fx."""
+
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = Block()
+                self.b = Block()
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+
+        with preserve_node_meta():
+            gm = make_fx(model)(torch.randn(4))
+
+        fqns = set()
+        for node in gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def test_same_class_instances_with_params_get_distinct_fqns(self):
+        """Two instances of the same class with parameters get distinct fqns."""
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.nn.Linear(4, 4)
+                self.b = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+        fqns = self._trace_and_get_fqns(model, torch.randn(2, 4))
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def _build_annotated_gm(self):
+        """Build a GraphModule with module_fqn annotations on its nodes."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        n1.meta["custom"] = {_MODULE_FQN: "attn"}
+        n2 = graph.call_function(torch.sigmoid, (n1,))
+        n2.meta["custom"] = {_MODULE_FQN: "attn"}
+        n3 = graph.call_function(torch.tanh, (n2,))
+        n3.meta["custom"] = {_MODULE_FQN: "ffn"}
+        graph.output(n3)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def test_insert_kernel_annotations_pass_inserts_calls(self):
+        """When tools ID is available, the pass inserts enter/exit calls."""
+        if _is_tools_id_unavailable():
+            self.skipTest("cudaGraphNodeGetToolsId not available")
+
+        gm = self._build_annotated_gm()
+        num_before = sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+        insert_kernel_annotations_pass(gm)
+
+        num_after = sum(1 for n in gm.graph.nodes if n.op == "call_function")
+        # 2 scopes (attn, ffn) = 2 enters + 2 exits = 4 new nodes
+        self.assertEqual(num_after - num_before, 4)
+
+    def test_insert_kernel_annotations_pass_noop_when_unavailable(self):
+        """When tools ID is unavailable, the pass leaves the graph unchanged."""
+        gm = self._build_annotated_gm()
+        num_before = len(list(gm.graph.nodes))
+
+        with patch(
+            "torch.cuda._graph_annotations._is_tools_id_unavailable",
+            return_value=True,
+        ):
+            insert_kernel_annotations_pass(gm)
+
+        num_after = len(list(gm.graph.nodes))
+        self.assertEqual(num_before, num_after)
+
+    def test_insert_kernel_annotations_pass_noop_without_metadata(self):
+        """The pass should not insert anything when no custom metadata exists."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        graph.output(n1)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        num_before = len(list(gm.graph.nodes))
+        insert_kernel_annotations_pass(gm)
+        num_after = len(list(gm.graph.nodes))
+
+        self.assertEqual(num_before, num_after)
 
 
 if __name__ == "__main__":
