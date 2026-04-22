@@ -265,11 +265,11 @@ def data_parallel(
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
     full_dtensor: bool = False,
-    ignored_params: set[nn.Parameter] | None = None,
+    ignored_modules: set[nn.Parameter] | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
-        param_sharding = (Replicate(),) * device_mesh.ndim
+        param_sharding = (Replicate(),)
     elif mode == "fully_shard":
         param_sharding = (Shard(shard_dim),)
     elif mode == "hybrid_shard":
@@ -291,9 +291,9 @@ def data_parallel(
             continue
 
         # Skip parameters that are explicitly ignored (e.g., shared or frozen weights).
-        if ignored_params is not None:
+        if ignored_modules is not None:
             params_dict = {
-                p_name: p for p_name, p in params_dict.items() if p not in ignored_params
+                p_name: p for p_name, p in params_dict.items() if p not in ignored_modules
             }
             if not params_dict:
                 continue
