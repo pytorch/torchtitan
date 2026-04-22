@@ -43,6 +43,10 @@ from torchtitan.tools.logging import logger
 aten = torch.ops.aten
 
 
+def _is_backward_node(node: Node) -> bool:
+    return node.meta.get("autograd_backward", False)
+
+
 # ============================================================
 # Node eligibility
 # ============================================================
@@ -234,6 +238,8 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
         if node not in forward_nodes:
             continue
         layer_id = node.meta.get("custom", {}).get(_AC_REGION_ID)
+        # Skip the last layer: its activations are consumed immediately in
+        # backward, so offloading adds overhead with no memory benefit.
         if layer_id is None or layer_id == last_layer_id:
             continue
         if not _can_offload_node(node):
@@ -288,19 +294,12 @@ def apply_cpu_offload_pass(
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
     """
-    # Lazy import to avoid circular dependency (passes.py imports cpu_offload.py)
-    from torchtitan.experiments.graph_trainer.passes import tlparse_log_graph_pass
-
-    tlparse_log_graph_pass(gm, graph_name="cpu_offload_before")
-
-    _, backward_nodes = _classify_forward_backward(gm)
-
     # 1. Collect nodes tagged for offload, with their backward consumers
     offloadable: list[tuple[Node, list[Node]]] = []
     for node in gm.graph.nodes:
         if node.meta.get("recompute") is not CheckpointPolicy.MUST_CPU_OFFLOAD:
             continue
-        bwd_users = [u for u in node.users if u in backward_nodes]
+        bwd_users = [u for u in node.users if _is_backward_node(u)]
         if not bwd_users:
             continue
         offloadable.append((node, bwd_users))
@@ -317,8 +316,9 @@ def apply_cpu_offload_pass(
 
     for node, bwd_users in offloadable:
         val = node.meta.get("val")
-        if val is None:
-            continue
+        assert val is not None, (
+            f"Node {node.name} tagged for offload has no 'val' metadata"
+        )
 
         # Infer reload device from the original tensor's device before offload
         device = val.device
@@ -362,6 +362,10 @@ def apply_cpu_offload_pass(
         for user in bwd_users:
             user.replace_input_with(node, wait_node)
 
+        logger.debug(
+            f"CPU offload: offloading {node.name} "
+            f"({_tensor_bytes(val) / 1024:.1f} KB, {val.shape})"
+        )
         total_bytes += _tensor_bytes(val)
 
     # TODO: Add scheduling optimizations (defer offload waits, prefetch reloads)
@@ -375,7 +379,6 @@ def apply_cpu_offload_pass(
 
     gm.graph.lint()
     gm.recompile()
-    tlparse_log_graph_pass(gm, graph_name="cpu_offload_after")
     logger.info(
         f"CPU offload: offloaded {len(offloadable)} tensors "
         f"({total_bytes / 1024 / 1024:.2f} MB)"

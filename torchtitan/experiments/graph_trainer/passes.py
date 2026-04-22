@@ -22,7 +22,6 @@ import operator
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
@@ -56,10 +55,6 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 )
 from torchtitan.tools.logging import logger
 
-if TYPE_CHECKING:
-    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-    from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
@@ -90,7 +85,8 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        cpu_offload_pass,
+        # TODO: uncomment after sorting out common tagging API between offload and sac
+        # cpu_offload_pass,
         selective_activation_remat_pass,
         # TODO: bucketing is failing for DSv3, allgather prefetching
         # for Llama3 is not working.
@@ -197,9 +193,9 @@ def apply_graph_passes(
             before_snapshot = snapshot_graph(gm)
             start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
-        assert isinstance(
-            gm, torch.fx.GraphModule
-        ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
+        assert isinstance(gm, torch.fx.GraphModule), (
+            f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
+        )
         if debug:
             elapsed = time.perf_counter() - start
             logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
@@ -594,24 +590,24 @@ def annotate_flex_attention_for_regional_inductor_pass(
             torch.ops.higher_order.flex_attention_backward,
         }:
             continue
-        node.meta.setdefault("custom", {})[
-            "compile_with_inductor"
-        ] = flex_compile_annotation
+        node.meta.setdefault("custom", {})["compile_with_inductor"] = (
+            flex_compile_annotation
+        )
         for inp in node.all_input_nodes:
             if inp.op != "get_attr":
                 continue
             submod = getattr(gm, inp.target, None)
             if not isinstance(submod, torch.fx.GraphModule):
                 continue
-            inp.meta.setdefault("custom", {})[
-                "compile_with_inductor"
-            ] = flex_compile_annotation
+            inp.meta.setdefault("custom", {})["compile_with_inductor"] = (
+                flex_compile_annotation
+            )
 
             # Following are the nodes in mask_mod subgraph
             for sub_node in submod.graph.nodes:
-                sub_node.meta.setdefault("custom", {})[
-                    "compile_with_inductor"
-                ] = mask_compile_annotation
+                sub_node.meta.setdefault("custom", {})["compile_with_inductor"] = (
+                    mask_compile_annotation
+                )
     return gm
 
 
