@@ -624,14 +624,6 @@ class HFTransformerModel(BaseModel):
                     std = config.initializer_range
                     module.weight.data.normal_(mean=0.0, std=std)
 
-                if module.padding_idx is not None:
-                    try:
-                        module.weight.data[module.padding_idx].zero_()
-                    except RuntimeError:
-                        # DTensor indexing can fail on TP-sharded embeddings
-                        # when the local shard can't be redistributed cleanly.
-                        pass
-
             elif (
                 isinstance(
                     module,
