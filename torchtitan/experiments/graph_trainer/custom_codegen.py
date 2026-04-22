@@ -576,12 +576,14 @@ def custom_codegen_pass(
         gm: Input graph module.
         example_inputs: Placeholder arg for compiler signature compatibility.
         codegen_dir: Directory for generated code files. Defaults to
-            ``<tempdir>/torchtitan_fx_codegen``.
+            ``<tempdir>/torchtitan_fx_codegen_<uid>``.
     """
     import tempfile
 
     if codegen_dir is None:
-        codegen_dir = os.path.join(tempfile.gettempdir(), "torchtitan_fx_codegen")
+        codegen_dir = os.path.join(
+            tempfile.gettempdir(), f"torchtitan_fx_codegen_{os.getuid()}"
+        )
 
     logger.info("[CUSTOM_CODEGEN] Saving code to %s", codegen_dir)
 

@@ -18,7 +18,6 @@ from torchtitan.config import Configurable
 from torchtitan.protocols.sharding import (
     resolve_placements,
     ShardingSpec,
-    Unconstrained,
 )
 
 
@@ -179,7 +178,7 @@ class Module(nn.Module, Configurable):
         2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
 
         The wrapping order is:
-            ``shard_inputs -> [optional local_map] fn -> shard_outputs``.
+            ``reshard inputs -> [optional local_map] fn -> reshard outputs``.
 
         fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
 
@@ -203,34 +202,32 @@ class Module(nn.Module, Configurable):
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named dims"
         mesh_dim_names = mesh.mesh_dim_names
 
-        # Distribute parameters and buffers per state_shardings.
-        # Unconstrained dims default to Replicate for state distribution
-        # (distribute_tensor requires concrete placements).
-        from torch.distributed.tensor import Replicate as _Replicate
-
-        def _resolve_state(named_pl):
-            pl = resolve_placements(named_pl, mesh_dim_names)
-            return tuple(
-                _Replicate() if isinstance(p, Unconstrained) else p for p in pl
+        # Distribute parameters and buffers per state_shardings. Every spec
+        # must declare a placement for every mesh dim; ``resolve_placements``
+        # raises otherwise.
+        for name, param in self.named_parameters(recurse=False):
+            if name not in spec.state_shardings:
+                continue
+            placements = resolve_placements(
+                spec.state_shardings[name], mesh_dim_names
+            )
+            self.register_parameter(
+                name,
+                nn.Parameter(distribute_tensor(param, mesh, list(placements))),
             )
 
-        for name, param in self.named_parameters(recurse=False):
-            if name in spec.state_shardings:
-                placements = _resolve_state(spec.state_shardings[name])
-                self.register_parameter(
-                    name,
-                    nn.Parameter(distribute_tensor(param, mesh, list(placements))),
-                )
-
         for name, buffer in self.named_buffers(recurse=False):
-            if name in spec.state_shardings and buffer is not None:
-                placements = _resolve_state(spec.state_shardings[name])
-                persistent = name not in self._non_persistent_buffers_set
-                self.register_buffer(
-                    name,
-                    distribute_tensor(buffer, mesh, list(placements)),
-                    persistent=persistent,
-                )
+            if name not in spec.state_shardings or buffer is None:
+                continue
+            placements = resolve_placements(
+                spec.state_shardings[name], mesh_dim_names
+            )
+            persistent = name not in self._non_persistent_buffers_set
+            self.register_buffer(
+                name,
+                distribute_tensor(buffer, mesh, list(placements)),
+                persistent=persistent,
+            )
 
         # Cache positional arg names of the original forward so _shard_inputs
         # can read them from the cache instead of calling inspect every forward.
@@ -238,11 +235,21 @@ class Module(nn.Module, Configurable):
 
         fn = self.forward
         if spec.local_map is not None:
+            # Resolve each NamedPlacement to a positional tuple for the
+            # current mesh.
+            lm = spec.local_map
             fn = local_map(
                 fn,
-                in_placements=spec.local_map.in_placements,
-                out_placements=spec.local_map.out_placements,
-                in_grad_placements=spec.local_map.in_grad_placements,
+                in_placements=tuple(
+                    resolve_placements(p, mesh_dim_names) for p in lm.in_placements
+                ),
+                out_placements=tuple(
+                    resolve_placements(p, mesh_dim_names) for p in lm.out_placements
+                ),
+                in_grad_placements=tuple(
+                    resolve_placements(p, mesh_dim_names)
+                    for p in lm.in_grad_placements
+                ),
                 device_mesh=mesh,
             )
 
@@ -262,15 +269,14 @@ class Module(nn.Module, Configurable):
         """Redistribute inputs to desired placements.
 
         Two-step process per input:
-        1. If plain tensor, wrap as DTensor using ``input_layouts`` (annotation).
-        2. If DTensor placements != ``in_shardings``, redistribute.
-
-        Step 1 is required because we are not yet in the full-DTensor regime.
+        1. If plain tensor, wrap as DTensor using ``in_src_shardings``
+           (declares the source placement of the incoming tensor).
+        2. If DTensor placements != ``in_dst_shardings``, redistribute.
         """
         spec = self._sharding_spec
         assert spec is not None
 
-        if spec.in_shardings is None and spec.input_layouts is None:
+        if spec.in_dst_shardings is None and spec.in_src_shardings is None:
             return args, kwargs
 
         # Use pre-cached positional arg names (populated in parallelize()) to
@@ -283,31 +289,22 @@ class Module(nn.Module, Configurable):
 
         assert mesh.mesh_dim_names is not None
         mesh_dim_names = mesh.mesh_dim_names
-        in_shardings = spec.in_shardings or {}
-        input_layouts = spec.input_layouts or {}
+        in_dst_shardings = spec.in_dst_shardings or {}
+        in_src_shardings = spec.in_src_shardings or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
 
-            # Step 1: Annotate plain tensor as DTensor using input_layouts
-            if not isinstance(value, DTensor) and name in input_layouts:
-                from torch.distributed.tensor import Replicate as _Replicate
-
-                layout = resolve_placements(input_layouts[name], mesh_dim_names)
-                # Plain tensor needs concrete placements; Unconstrained -> Replicate
-                layout = tuple(
-                    _Replicate() if isinstance(p, Unconstrained) else p for p in layout
-                )
+            # Step 1: Annotate plain tensor as DTensor using in_src_shardings.
+            if not isinstance(value, DTensor) and name in in_src_shardings:
+                layout = resolve_placements(in_src_shardings[name], mesh_dim_names)
                 value = DTensor.from_local(value, mesh, layout, run_check=False)
 
             # Step 2: Redistribute to desired placement if needed.
-            # Unconstrained dims preserve the tensor's existing placement.
-            if name in in_shardings and isinstance(value, DTensor):
-                desired = resolve_placements(in_shardings[name], mesh_dim_names)
-                desired = tuple(
-                    actual if isinstance(d, Unconstrained) else d
-                    for d, actual in zip(desired, value.placements)
+            if name in in_dst_shardings and isinstance(value, DTensor):
+                desired = resolve_placements(
+                    in_dst_shardings[name], mesh_dim_names
                 )
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
@@ -327,24 +324,18 @@ class Module(nn.Module, Configurable):
         TODO: Currently only handles a single DTensor output. Extend to
         support nested outputs (tuples, dicts) when models with
         multi-tensor forward returns (e.g., Flux, MoE) adopt
-        config-based sharding. out_shardings would also need to become
+        config-based sharding. out_dst_shardings would also need to become
         a nested structure.
         """
         spec = self._sharding_spec
         assert spec is not None
 
-        if spec.out_shardings is None:
+        if spec.out_dst_shardings is None:
             return outputs
         assert mesh.mesh_dim_names is not None
-        desired = resolve_placements(spec.out_shardings, mesh.mesh_dim_names)
-        if isinstance(outputs, DTensor):
-            # Unconstrained dims preserve the tensor's existing placement
-            desired = tuple(
-                actual if isinstance(d, Unconstrained) else d
-                for d, actual in zip(desired, outputs.placements)
-            )
-            if outputs.placements != desired:
-                outputs = outputs.redistribute(placements=desired, async_op=True)
+        desired = resolve_placements(spec.out_dst_shardings, mesh.mesh_dim_names)
+        if isinstance(outputs, DTensor) and outputs.placements != desired:
+            outputs = outputs.redistribute(placements=desired, async_op=True)
         return outputs
 
     @classmethod

@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.sharding import (
+from torchtitan.models.common.decoder_sharding import (
     replicate_norm_spec,
     sequence_parallel_spec,
     set_decoder_sharding_spec,
@@ -24,19 +23,20 @@ if TYPE_CHECKING:
 
 def set_llama3_sharding_spec(
     config: "Llama3Model.Config",
-    parallel_dims: ParallelDims,
     *,
     loss_parallel: bool,
     enable_sp: bool,
 ) -> None:
     """Fill ``sharding_spec`` on all Llama3 sub-configs.
 
-    No-op when TP is not enabled. ``enable_sp`` controls SequenceParallel,
-    which is decoupled from TP (see ``ParallelismConfig.enable_sequence_parallel``).
-    """
-    if not parallel_dims.tp_enabled:
-        return
+    Specs are populated unconditionally — the mesh actually passed to
+    ``Module.parallelize()`` at runtime determines which declarations
+    apply. Declarations for mesh dims that aren't enabled (e.g. ``TP``
+    placements under FSDP-only) are skipped at parallelize time.
 
+    ``enable_sp`` controls SequenceParallel (decoupled from TP).
+    ``loss_parallel`` controls whether the output projection is vocab-parallel.
+    """
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
