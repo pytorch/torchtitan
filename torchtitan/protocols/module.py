@@ -82,28 +82,23 @@ class Module(nn.Module, Configurable):
 
         self._init_self_parameters()
 
-        # Trainer flow: (1) build model on meta device, (2) Module.parallelize
-        # distributes params/buffers to DTensors, (3) call init_states. Params
-        # are filled in-place here, preserving DTensor-ness. But
-        # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``)
-        # which replaces the DTensor entry with a plain tensor. Snapshot the
-        # (mesh, placements) of DTensor buffers before the reassignment and
-        # re-distribute the post-init plain tensor to restore DTensor-ness.
-        dtensor_meta = {
-            name: (buf.device_mesh, buf.placements)
-            for name, buf in self._buffers.items()
-            if isinstance(buf, DTensor)
+        # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``),
+        # replacing any DTensor entry with a plain tensor. Fill the existing
+        # DTensor's local shard in place instead, preserving DTensor identity.
+        # ``_local_tensor.copy_`` only shape-matches when placements are all
+        # Replicate or Partial (local == global); a Shard-placed buffer would
+        # raise and need explicit redistribute.
+        dtensor_bufs = {
+            name: buf for name, buf in self._buffers.items() if isinstance(buf, DTensor)
         }
         self._init_self_buffers(buffer_device=buffer_device)
-        for name, (mesh, placements) in dtensor_meta.items():
-            buf = self._buffers.get(name)
-            if buf is not None and not isinstance(buf, DTensor):
-                persistent = name not in self._non_persistent_buffers_set
-                self.register_buffer(
-                    name,
-                    distribute_tensor(buf, mesh, list(placements)),
-                    persistent=persistent,
-                )
+        for name, orig_buf in dtensor_bufs.items():
+            new_buf = self._buffers.get(name)
+            if new_buf is None or isinstance(new_buf, DTensor):
+                continue
+            orig_buf._local_tensor.copy_(new_buf)
+            persistent = name not in self._non_persistent_buffers_set
+            self.register_buffer(name, orig_buf, persistent=persistent)
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own parameters via ``_init_param``.
