@@ -11,14 +11,13 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
-    replicate_norm_spec,
+    norm_spec,
     rowwise_spec,
-    sequence_parallel_spec,
     set_decoder_sharding_spec,
     set_qkv_linear_sharding,
 )
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import ShardingSpec
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
@@ -51,14 +50,14 @@ def _set_gpt_oss_layer_sharding(
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
 
-    norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
-    layer_cfg.attention_norm.sharding_spec = norm_spec
-    layer_cfg.ffn_norm.sharding_spec = norm_spec
+    norm = norm_spec(enable_sp=enable_sp)
+    layer_cfg.attention_norm.sharding_spec = norm
+    layer_cfg.ffn_norm.sharding_spec = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     # Attention: input x gathered to Replicate, freqs_cis always Replicate.
     # sinks parameter is sharded across heads via state_shardings.
-    attention.sharding_spec = ShardingSpec(
+    attention.sharding_spec = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=Shard(0))},
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
