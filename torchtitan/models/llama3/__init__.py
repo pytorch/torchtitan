@@ -380,12 +380,15 @@ def model_registry(
     attn_backend: str = "sdpa",
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
+    # Populate sharding_spec with conservative defaults so the returned
+    # ModelSpec.model is usable standalone (without Trainer). Trainer's
+    # update_from_config will repopulate with actual parallelism settings.
+    set_llama3_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_llama,
-        set_sharding_spec_fn=set_llama3_sharding_spec,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
