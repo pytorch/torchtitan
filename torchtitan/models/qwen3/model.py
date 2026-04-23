@@ -135,7 +135,6 @@ class Qwen3Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
-            # Populate sharding_spec with actual parallelism settings.
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_spec
 
             set_qwen3_sharding_spec(
