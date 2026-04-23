@@ -105,6 +105,11 @@ def compile_time_passes(
         ),
         regional_inductor_pass,
     ]
+    if config.parallelism.enable_async_tensor_parallel:
+        # Insert async TP overlap pass after regional_inductor but before
+        # cudagraph/codegen passes.  The pass delays wait_tensor nodes so
+        # that TP collectives overlap with independent computation.
+        passes.append(async_tp_comm_overlap_pass)
     if use_cudagraph:
         # Must run before custom_codegen_pass (last in pre_passes)
         # which replaces the GraphModule's forward().
@@ -956,6 +961,100 @@ def tlparse_log_graph_pass(
         ),
         expect_trace_id=False,
     )
+
+    return gm
+
+
+def async_tp_comm_overlap_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """Overlap TP collective communication with independent computation.
+
+    This pass delays ``wait_tensor`` nodes as late as possible so that
+    asynchronous collectives (all-reduce, reduce-scatter, all-gather) overlap
+    with independent computation.  The ``_c10d_functional`` ops are already
+    non-blocking: the collective is launched immediately and ``wait_tensor``
+    synchronizes.  Moving ``wait_tensor`` later in topological order allows
+    independent compute kernels to execute concurrently on the GPU while the
+    collective runs on the NCCL stream.
+
+    The pass is numerically transparent -- it only reorders nodes; it does not
+    modify or replace any operations.
+
+    Algorithm:
+        For each ``wait_tensor`` node in the graph:
+        1. Identify the *earliest consumer* -- the first node in topological
+           order that uses the ``wait_tensor`` output (directly or through
+           getitem chains).
+        2. Move the ``wait_tensor`` to right before that earliest consumer.
+
+    The collective launch node stays in its original position so the NCCL
+    kernel starts as early as possible.  The gap between the collective launch
+    and the delayed ``wait_tensor`` is the overlap window where independent
+    compute kernels can execute concurrently.
+    """
+    from torch._inductor.fx_passes.bucketing import (
+        is_all_gather_into_tensor,
+        is_all_reduce_tensor,
+        is_reduce_scatter_tensor,
+        is_wait_tensor,
+    )
+
+    def _is_collective(node: torch.fx.Node) -> bool:
+        return (
+            is_all_gather_into_tensor(node)
+            or is_all_reduce_tensor(node)
+            or is_reduce_scatter_tensor(node)
+        )
+
+    # Build topological index for ordering comparisons.
+    topo_order: dict[torch.fx.Node, int] = {}
+    for idx, node in enumerate(gm.graph.nodes):
+        topo_order[node] = idx
+
+    num_moved = 0
+    # Iterate over a snapshot since we'll mutate ordering.
+    for node in list(gm.graph.nodes):
+        if not is_wait_tensor(node):
+            continue
+        # Only process wait_tensors whose input is a collective.
+        collective_node = node.args[0]
+        if not isinstance(collective_node, torch.fx.Node) or not _is_collective(
+            collective_node
+        ):
+            continue
+
+        # Find the earliest consumer of the wait_tensor result.
+        users = list(node.users.keys())
+        if not users:
+            continue
+
+        earliest_user = min(users, key=lambda u: topo_order.get(u, float("inf")))
+
+        # Only move if there's a gap (at least one node between wait and user).
+        current_pos = topo_order.get(node, 0)
+        user_pos = topo_order.get(earliest_user, 0)
+        if user_pos <= current_pos + 1:
+            continue
+
+        # Move wait_tensor to right before its earliest consumer.
+        # The collective launch node stays in its original position so the
+        # NCCL kernel starts as early as possible.
+        earliest_user.prepend(node)
+        num_moved += 1
+
+    if num_moved > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(
+            "Async TP comm overlap: delayed %d wait_tensor node(s) for "
+            "collective/compute overlap",
+            num_moved,
+        )
+    else:
+        logger.info(
+            "Async TP comm overlap: no wait_tensor nodes eligible for reordering"
+        )
 
     return gm
 
