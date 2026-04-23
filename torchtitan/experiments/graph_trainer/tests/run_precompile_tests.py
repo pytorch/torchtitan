@@ -36,6 +36,7 @@ class PrecompileTestDefinition:
     test_descr: str
     test_name: str
     ngpu: int = 8
+    disabled: bool = False
 
 
 def _run_cmd(cmd):
@@ -98,6 +99,13 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_name="aot_llama3_precompile_regional_inductor",
             ngpu=8,
         ),
+        # TODO: disabled — manual_overlap_bucketing (upstream PyTorch) does
+        # not support make_fx-traced graphs where collective group_name args
+        # are FX Node references instead of string literals. The bucketing
+        # and comm_analysis code crashes with
+        # "AttributeError: 'Node' object has no attribute 'size'" or
+        # "assert isinstance(group_name, str)".
+        # See https://fburl.com/torchtitan_bucketing_precompile for details.
         PrecompileTestDefinition(
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
@@ -119,6 +127,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_descr="aot_fx_trace llama3 precompile FSDP+TP",
             test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
             ngpu=8,
+            disabled=True,
         ),
         PrecompileTestDefinition(
             precompile_command=(
@@ -145,6 +154,8 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_descr="aot_fx_trace deepseek_v3 precompile FSDP+TP+EP",
             test_name="aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep",
             ngpu=8,
+            # TODO: same upstream bucketing incompatibility as llama3 above
+            disabled=True,
         ),
     ]
 
@@ -158,6 +169,9 @@ def run_precompile_tests(args):
     ran_any = False
     for test in test_list:
         if args.test_name != "all" and test.test_name != args.test_name:
+            continue
+        if test.disabled:
+            logger.info(f"Skipping disabled test: {test.test_name}")
             continue
         if args.ngpu < test.ngpu:
             logger.info(
