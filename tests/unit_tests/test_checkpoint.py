@@ -379,19 +379,24 @@ class TestCheckpointManager(unittest.TestCase):
         )
         r1 = manager2.load(step=1)
         self.assertTrue(r1)
-        mock_load.assert_called_once()
-        args1, kwargs1 = mock_load.call_args
-        self.assertEqual(kwargs1.get("checkpoint_id"), path1)
+        # Choice 2: initial_load_path always loads (phase 1), plus
+        # checkpoint folder exists so overlay loads too (phase 2).
+        self.assertEqual(mock_load.call_count, 2)
+        _, kwargs_initial = mock_load.call_args_list[0]
+        self.assertEqual(kwargs_initial.get("checkpoint_id"), path1)
+        _, kwargs_overlay = mock_load.call_args_list[1]
+        self.assertEqual(
+            kwargs_overlay.get("checkpoint_id"),
+            os.path.join(self.test_folder, "step-1"),
+        )
         # Phase 3: save new step under default folder, then load that
         manager2.save(curr_step=2, last_step=True)
-        # Default folder is test_folder, so step-2 under that
         step2_dir = os.path.join(self.test_folder, "step-2")
         self.assertTrue(os.path.isdir(step2_dir))
         r2 = manager2.load(step=2)
         self.assertTrue(r2)
-        self.assertEqual(mock_load.call_count, 2)
-        args2, kwargs2 = mock_load.call_args_list[1]
-        self.assertEqual(kwargs2.get("checkpoint_id"), step2_dir)
+        # 2 more loads: initial + overlay for step 2
+        self.assertEqual(mock_load.call_count, 4)
         manager1.close()
         manager2.close()
 
@@ -933,16 +938,173 @@ class TestModelWrapperModes(unittest.TestCase):
 
         # Interval save: adapter keys only, native format
         interval_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
-        self.assertEqual(set(interval_sd.keys()), {"lora_a", "lora_b"})
+        self.assertEqual(
+            set(interval_sd.keys()),
+            {"lora_a", "lora_b"},
+        )
 
         # Final save: merged base keys, apply to_hf
         final_sd = wrapper.to_hf(
             wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
         )
-        self.assertEqual(set(final_sd.keys()), {"hf_weight", "hf_bias"})
+        self.assertEqual(
+            set(final_sd.keys()),
+            {"hf_weight", "hf_bias"},
+        )
 
         # Key spaces are disjoint
-        self.assertTrue(set(interval_sd.keys()).isdisjoint(set(final_sd.keys())))
+        self.assertTrue(
+            set(interval_sd.keys()).isdisjoint(set(final_sd.keys())),
+        )
+
+
+class TestTwoPhaseFormatMapping(unittest.TestCase):
+    """Tests for the 2-phase save/load format mapping.
+
+    The converter's format adapter (e.g. PEFT) depends on the base model's
+    key mapping (from_hf_map) to construct external key names. These tests
+    verify the cross-dependency produces correct roundtrips and catches
+    common wiring bugs.
+    """
+
+    def setUp(self):
+        self.model = nn.Linear(4, 4)
+        self.model.lora_a = nn.Parameter(torch.randn(4, 2))
+        self.model.lora_b = nn.Parameter(torch.randn(2, 4))
+
+        # Base model key mapping: native ↔ HF
+        self.base_hf_map = {
+            "weight": "model.layers.0.self_attn.q_proj.weight",
+            "bias": "model.layers.0.self_attn.q_proj.bias",
+        }
+
+        # Converter (PEFT) key mapping depends on base model's HF names.
+        # native "lora_a" → PEFT "base_model.model.<hf_base_path>.lora_A.weight"
+        hf_base_path = "model.layers.0.self_attn.q_proj"
+        self.converter_hf_map = {
+            "lora_a": f"base_model.model.{hf_base_path}.lora_A.weight",
+            "lora_b": f"base_model.model.{hf_base_path}.lora_B.weight",
+        }
+
+    def _make_base_to_hf(self, hf_map):
+        def to_hf(sd):
+            return {hf_map[k]: v for k, v in sd.items() if k in hf_map}
+
+        return to_hf
+
+    def _make_base_from_hf(self, hf_map):
+        reverse_map = {v: k for k, v in hf_map.items()}
+
+        def from_hf(sd):
+            return {reverse_map[k]: v for k, v in sd.items() if k in reverse_map}
+
+        return from_hf
+
+    def _make_converter_to_hf(self, converter_map):
+        def to_hf(sd):
+            return {converter_map[k]: v for k, v in sd.items() if k in converter_map}
+
+        return to_hf
+
+    def _make_converter_from_hf(self, converter_map):
+        reverse_map = {v: k for k, v in converter_map.items()}
+
+        def from_hf(sd):
+            return {reverse_map[k]: v for k, v in sd.items() if k in reverse_map}
+
+        return from_hf
+
+    def test_stale_base_map_breaks_peft_save_then_load(self):
+        """PEFT converter: save with map A, load with map B → keys lost."""
+        converter_to_hf = self._make_converter_to_hf(self.converter_hf_map)
+
+        new_hf_base_path = "model.layers.0.self_attn.qkv_proj"
+        stale_converter_map = {
+            "lora_a": f"base_model.model.{new_hf_base_path}.lora_A.weight",
+            "lora_b": f"base_model.model.{new_hf_base_path}.lora_B.weight",
+        }
+        stale_from_hf = self._make_converter_from_hf(stale_converter_map)
+
+        adapter_sd = {"lora_a": torch.randn(4, 2), "lora_b": torch.randn(2, 4)}
+        peft_sd = converter_to_hf(adapter_sd)
+        roundtripped = stale_from_hf(peft_sd)
+        self.assertEqual(len(roundtripped), 0, "Stale PEFT map → no keys loaded")
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_two_phase_save_uses_different_mappings(self, mock_gsd):
+        """Phase 1 (base) and phase 2 (converter) must use separate mappings."""
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        base_to_hf = self._make_base_to_hf(self.base_hf_map)
+        converter_to_hf = self._make_converter_to_hf(self.converter_hf_map)
+
+        def merge_transform(sd, last_step):
+            if last_step:
+                return {k: v for k, v in sd.items() if not k.startswith("lora_")}
+            return {k: v for k, v in sd.items() if k.startswith("lora_")}
+
+        wrapper = ModelWrapper(
+            self.model,
+            key_filter=lambda k: k.startswith("lora_"),
+            converter_transform=merge_transform,
+            to_hf=base_to_hf,
+        )
+
+        # Phase 1: merged base → base to_hf
+        merged_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
+        hf_base = wrapper.to_hf(merged_sd)
+        self.assertTrue(
+            all(k.startswith("model.") for k in hf_base),
+            f"Phase 1 should produce HF base keys, got {list(hf_base.keys())}",
+        )
+
+        # Phase 2: adapter keys → converter to_hf
+        adapter_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
+        hf_adapter = converter_to_hf(adapter_sd)
+        self.assertTrue(
+            all("lora_" in k.lower() for k in hf_adapter),
+            f"Phase 2 should produce PEFT keys, got {list(hf_adapter.keys())}",
+        )
+
+        # Key spaces must not overlap
+        self.assertEqual(
+            set(hf_base.keys()) & set(hf_adapter.keys()),
+            set(),
+            "Base HF keys and converter HF keys must not overlap",
+        )
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_two_phase_load_roundtrip(self, mock_gsd):
+        """Full 2-phase load: base from HF + adapter from PEFT → native."""
+        base_to_hf = self._make_base_to_hf(self.base_hf_map)
+        base_from_hf = self._make_base_from_hf(self.base_hf_map)
+        converter_to_hf = self._make_converter_to_hf(self.converter_hf_map)
+        converter_from_hf = self._make_converter_from_hf(self.converter_hf_map)
+
+        # Simulate saving in 2 phases
+        base_native = {"weight": torch.randn(4, 4), "bias": torch.randn(4)}
+        adapter_native = {"lora_a": torch.randn(4, 2), "lora_b": torch.randn(2, 4)}
+
+        hf_checkpoint = base_to_hf(base_native)
+        peft_checkpoint = converter_to_hf(adapter_native)
+
+        # Simulate loading in 2 phases
+        loaded_base = base_from_hf(hf_checkpoint)
+        loaded_adapter = converter_from_hf(peft_checkpoint)
+
+        # Verify roundtrip
+        self.assertEqual(set(loaded_base.keys()), set(base_native.keys()))
+        self.assertEqual(set(loaded_adapter.keys()), set(adapter_native.keys()))
+        for k in base_native:
+            self.assertTrue(torch.equal(base_native[k], loaded_base[k]))
+        for k in adapter_native:
+            self.assertTrue(torch.equal(adapter_native[k], loaded_adapter[k]))
 
 
 if __name__ == "__main__":

@@ -457,11 +457,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else None
         )
 
+        converter_format_adapter_cls = model_converters.format_adapter()
+        converter_sd_adapter = (
+            converter_format_adapter_cls(model_config, config.hf_assets_path)
+            if converter_format_adapter_cls is not None
+            else None
+        )
+
         model_wrapper = ModelWrapper(
             self.model_parts,
             key_filter=model_converters.key_filter(),
             converter_transform=model_converters.state_dict_transform(),
             sd_adapter=sd_adapter,
+            converter_sd_adapter=converter_sd_adapter,
         )
 
         from torchtitan.components.checkpoint import HFStorageConfig
@@ -473,6 +481,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             hf_storage_config=HFStorageConfig.from_adapter(sd_adapter),
+            converter_hf_storage_config=HFStorageConfig.from_adapter(
+                converter_sd_adapter
+            ),
             base_folder=config.dump_folder,
         )
 
