@@ -43,9 +43,11 @@ def apply_cp_to_forward(
 
     The attention type is inferred via isinstance on the first module.
 
-    TODO: Once full DTensor is adopted, CP redistribution could be
-    expressed declaratively via ShardingSpec instead of direct
-    forward wrapping.
+    TODO: This is a temporary workaround that manually allgathers K/V
+    (FlexAttention) or wraps inputs as CP-sharded DTensors (SDPA).
+    Once all models adopt config-based sharding with full DTensor,
+    CP redistribution should be expressed declaratively via
+    ShardingConfig and this function should be removed.
 
     Args:
         attention_modules: Sequence of inner attention modules to apply CP to.

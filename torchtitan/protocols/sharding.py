@@ -6,7 +6,7 @@
 
 """Sharding types for config-based parallelization.
 
-``ShardingSpec`` is set on ``Module.Config`` by ``set_sharding_spec()``
+``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_spec()``
 and read by ``Module.parallelize(mesh)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshDimName``) so they are
 self-documenting and support multi-dim meshes.
@@ -43,11 +43,17 @@ class MeshDimName(StrEnum):
 # Example: {MeshDimName.TP: Shard(0), MeshDimName.DP_SHARD: Replicate()}
 # Every spec must declare a placement for every mesh dim it will be applied
 # against; ``resolve_placements`` errors otherwise.
+#
+# Shard order: we implicitly assume the trivial outer -> inner order matching
+# the mesh dim order. The only non-trivial case is FSDP + TP both sharding on
+# dim 0, but it doesn't need to be annotated today.
+# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
+# carrying explicit shard-order info) once that lands.
 NamedPlacement = dict[MeshDimName, Placement]
 
 
 @dataclass(kw_only=True, slots=True)
-class LocalMapSpec:
+class LocalMapConfig:
     """Spec for modules computing on local tensors.
 
     Wraps forward with ``local_map()``: DTensor -> local before forward,
@@ -72,7 +78,7 @@ class LocalMapSpec:
 
 
 @dataclass(kw_only=True, slots=True)
-class ShardingSpec:
+class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``NamedPlacement`` (``dict[MeshDimName, Placement]``)
@@ -117,7 +123,7 @@ class ShardingSpec:
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_map: LocalMapSpec | None = None
+    local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""

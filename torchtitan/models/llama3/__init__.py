@@ -29,7 +29,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
 from .parallelize import parallelize_llama
-from .sharding import set_llama3_sharding_spec
 from .state_dict_adapter import Llama3StateDictAdapter
 
 __all__ = [
@@ -380,7 +379,6 @@ def model_registry(
     attn_backend: str = "sdpa",
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
-    set_llama3_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
