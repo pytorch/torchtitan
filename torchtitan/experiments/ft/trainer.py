@@ -315,8 +315,7 @@ class FaultTolerantTrainer(Trainer):
             self.model_parts,
             key_filter=model_converters.key_filter(),
             converter_transform=model_converters.state_dict_transform(),
-            to_hf=sd_adapter.to_hf if sd_adapter else None,
-            from_hf=sd_adapter.from_hf if sd_adapter else None,
+            sd_adapter=sd_adapter,
         )
 
         from torchtitan.components.checkpoint import HFStorageConfig
@@ -327,15 +326,7 @@ class FaultTolerantTrainer(Trainer):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            hf_storage_config=(
-                HFStorageConfig(
-                    fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
-                    hf_assets_path=sd_adapter.hf_assets_path,
-                    get_storage_reader=sd_adapter.get_hf_storage_reader,
-                )
-                if sd_adapter
-                else None
-            ),
+            hf_storage_config=HFStorageConfig.from_adapter(sd_adapter),
             base_folder=config.dump_folder,
             ft_manager=self.ft_manager,
         )

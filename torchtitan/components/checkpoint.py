@@ -59,6 +59,16 @@ class HFStorageConfig:
     hf_assets_path: str | None
     get_storage_reader: Callable[..., Any]
 
+    @classmethod
+    def from_adapter(cls, adapter: Any | None) -> "HFStorageConfig | None":
+        if adapter is None:
+            return None
+        return cls(
+            fqn_to_index_mapping=adapter.fqn_to_index_mapping,
+            hf_assets_path=adapter.hf_assets_path,
+            get_storage_reader=adapter.get_hf_storage_reader,
+        )
+
 
 class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
@@ -500,43 +510,19 @@ class CheckpointManager(Configurable):
     def dcp_load(
         self,
         state_dict: dict[str, Any],
-        checkpoint_id: str,
-        from_hf: bool,
-        from_quantized: bool,
+        checkpoint_id: str | None = None,
+        storage_reader: Any = None,
     ) -> None:
-        """Load the checkpoint with dcp.
-        Args:
-            state_dict (dict): The state dict to load.
-            checkpoint_id (str): The checkpoint id to load.
-            from_hf (bool): Whether to load from HuggingFace checkpoint with
-                its own model definition and safetensors format.
+        """Pure I/O: load a checkpoint via DCP.
+
+        All format logic (HF conversion, key filtering) is handled by
+        callers using ModelWrapper modes. This method only calls dcp.load.
         """
-
-        if from_hf:
-            assert (
-                self.hf_storage_config is not None
-            ), "trying to load checkpoint in HF safetensors format, but hf_storage_config is not provided."
-            model_wrapper: ModelWrapper = self.states[MODEL]
-            hf_state_dict = model_wrapper.to_hf(
-                model_wrapper.filter_base_keys(model_wrapper.state_dict())
-            )
-            hf_storage_reader = self.hf_storage_config.get_storage_reader(
-                checkpoint_id, from_quantized
-            )
-
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
-
-            model_wrapper.load_state_dict(model_wrapper.from_hf(hf_state_dict))
-        else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
-
-            # TODO: Since we flatten the model states in state_dict, we need to
-            # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
-                self.states[MODEL].load_state_dict(state_dict)
+        dcp.load(
+            state_dict,
+            checkpoint_id=checkpoint_id,
+            storage_reader=storage_reader,
+        )
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -687,13 +673,23 @@ class CheckpointManager(Configurable):
 
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
-        states = self._states_to_load(model_only)
-        self.dcp_load(
-            states,
-            checkpoint_id=checkpoint_id,
-            from_hf=from_hf,
-            from_quantized=from_quantized,
-        )
+
+        if from_hf:
+            assert (
+                self.hf_storage_config is not None
+            ), "trying to load checkpoint in HF safetensors format, but hf_storage_config is not provided."
+            hf_sd = self.states[MODEL].state_dict(mode=StateDictMode.BASE_EXTERNAL)
+            self.dcp_load(
+                hf_sd,
+                storage_reader=self.hf_storage_config.get_storage_reader(
+                    checkpoint_id, from_quantized
+                ),
+            )
+            self.states[MODEL].load_state_dict(hf_sd, mode=StateDictMode.BASE_EXTERNAL)
+        else:
+            states = self._states_to_load(model_only)
+            self.dcp_load(states, checkpoint_id=checkpoint_id)
+            self.states[MODEL].load_state_dict(states)
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
