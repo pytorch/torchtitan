@@ -129,7 +129,6 @@ def compile_time_passes(
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
-    compile_time_passes_fn: Callable[..., list[Callable]] = compile_time_passes,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -138,12 +137,6 @@ def construct_default_graph_passes(
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
-
-    Args:
-        compile_time_passes_fn: Callable that builds the compile-time pass
-            list.  Defaults to :func:`compile_time_passes`.  Override to
-            customize which passes are applied (e.g. skip passes that are
-            incompatible with the precompile serialization path).
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
@@ -156,7 +149,7 @@ def construct_default_graph_passes(
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes_fn(traced_result, config, use_cudagraph=use_cudagraph)
+            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
         )
 
     # cudagraph should be the last pass.

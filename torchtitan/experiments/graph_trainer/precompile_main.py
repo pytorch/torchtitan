@@ -309,7 +309,6 @@ def _precompile_aot_fx_trace(
     parallel_dims,
     device,
     tokenizer,
-    compile_time_passes_fn=None,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
@@ -423,10 +422,21 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
+        joint_transformer_block_bucketing_reordering_pass,
     )
 
-    passes_fn = compile_time_passes_fn or compile_time_passes
-    passes = passes_fn(traced_result, config)
+    passes = compile_time_passes(traced_result, config)
+
+    # TODO: Remove this filter once upstream manual_overlap_bucketing
+    # supports make_fx-traced graphs where collective group_name args
+    # are FX Node references instead of string literals.
+    passes = [
+        p
+        for p in passes
+        if getattr(p, "func", p)
+        is not joint_transformer_block_bucketing_reordering_pass
+    ]
+
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
