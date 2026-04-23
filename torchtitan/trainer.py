@@ -23,6 +23,7 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -450,17 +451,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        sd_adapter = (
+            model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+            if model_spec.state_dict_adapter
+            else None
+        )
+
+        model_wrapper = ModelWrapper(
+            self.model_parts,
+            key_filter=model_converters.key_filter(),
+            converter_transform=model_converters.state_dict_transform(),
+            sd_adapter=sd_adapter,
+        )
+
+        from torchtitan.components.checkpoint import HFStorageConfig
+
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
-            model_parts=self.model_parts,
+            model_wrapper=model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            hf_storage_config=HFStorageConfig.from_adapter(sd_adapter),
             base_folder=config.dump_folder,
         )
 

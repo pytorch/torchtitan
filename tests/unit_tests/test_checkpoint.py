@@ -17,6 +17,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.model_wrapper import ModelWrapper
 
 
 class FakeOptimizersContainer:
@@ -108,6 +109,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         self.model_part = nn.Linear(2, 2)
         self.model_parts = [self.model_part]
+        self.model_wrapper = ModelWrapper(self.model_parts)
         self.states = {"trainer": torch.tensor([1.2347])}
         # TODO: Use a real OptimizerContainer here so that we can actually verify
         # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
@@ -153,7 +155,7 @@ class TestCheckpointManager(unittest.TestCase):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, storage_reader=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -170,12 +172,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_load.side_effect = self.fake_load
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -203,12 +204,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -244,12 +244,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -267,12 +266,11 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.folder = "nonexistent"
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         self.assertFalse(manager.load(step=-1))
@@ -291,12 +289,11 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.folder = "checkpoints"
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         res = manager.load(step=-1)
@@ -321,12 +318,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -355,12 +351,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.checkpoint.last_save_model_only = True
         manager1 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         manager1.save(curr_step=1, last_step=True)
@@ -375,12 +370,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.dump_folder = self.test_folder
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         r1 = manager2.load(step=1)
@@ -430,12 +424,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=checkpoint_config,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -471,12 +464,11 @@ class TestCheckpointManager(unittest.TestCase):
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=states,
             config=checkpoint_config,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -508,12 +500,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -534,12 +525,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -580,12 +570,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=[fake_model],
+            model_wrapper=ModelWrapper([fake_model]),
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -618,12 +607,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -645,12 +633,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -675,7 +662,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, storage_reader=None):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
@@ -686,12 +673,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.checkpoint.initial_load_model_only = False
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_wrapper=self.model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -700,6 +686,263 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=1)
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
+
+
+class TestModelWrapperModes(unittest.TestCase):
+    def setUp(self):
+        self.model = nn.Linear(4, 4)
+        # Simulate converter-owned keys by naming convention
+        self.model.lora_a = nn.Parameter(torch.randn(4, 2))
+        self.model.lora_b = nn.Parameter(torch.randn(2, 4))
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_full_mode_returns_all_keys(self, mock_gsd):
+        wrapper = ModelWrapper(self.model)
+        sd = wrapper.state_dict()
+        self.assertIn("weight", sd)
+        self.assertIn("bias", sd)
+        self.assertIn("lora_a", sd)
+        self.assertIn("lora_b", sd)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_partition_and_base_external_mode(self, mock_gsd):
+        """_partition splits by key_filter; BASE_EXTERNAL mode composes
+        partition + to_hf on state_dict side and from_hf + partition on
+        load_state_dict side."""
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        def fake_from_hf(sd):
+            return {k.removeprefix("hf_"): v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(
+            self.model,
+            key_filter=lambda k: k.startswith("lora_"),
+            to_hf=fake_to_hf,
+            from_hf=fake_from_hf,
+        )
+        sd = wrapper.state_dict()
+
+        # _partition: base vs converter, with and without key_filter
+        base = wrapper._partition(sd, keep_converter=False)
+        self.assertIn("weight", base)
+        self.assertNotIn("lora_a", base)
+        conv = wrapper._partition(sd, keep_converter=True)
+        self.assertIn("lora_a", conv)
+        self.assertNotIn("weight", conv)
+        no_filter = ModelWrapper(self.model)
+        self.assertEqual(
+            no_filter._partition(sd, keep_converter=False).keys(), sd.keys()
+        )
+        self.assertEqual(len(no_filter._partition(sd, keep_converter=True)), 0)
+
+        # state_dict(BASE_EXTERNAL): partition then to_hf
+        hf_sd = wrapper.state_dict(mode=StateDictMode.BASE_EXTERNAL)
+        self.assertIn("hf_weight", hf_sd)
+        self.assertNotIn("hf_lora_a", hf_sd)
+
+        # load_state_dict(BASE_EXTERNAL): from_hf then partition
+        with mock.patch(
+            "torchtitan.components.model_wrapper.set_model_state_dict"
+        ) as mock_ssd:
+            wrapper.load_state_dict(
+                {"hf_weight": torch.randn(4), "hf_lora_a": torch.randn(4)},
+                mode=StateDictMode.BASE_EXTERNAL,
+            )
+            loaded = mock_ssd.call_args.kwargs.get(
+                "model_state_dict",
+                mock_ssd.call_args[1].get("model_state_dict"),
+            )
+            self.assertIn("weight", loaded)
+            self.assertNotIn("lora_a", loaded)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_export_mode_applies_converter_transform(self, mock_gsd):
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        def fake_transform(sd, last_step):
+            return {k: v for k, v in sd.items() if k.startswith("lora_")}
+
+        wrapper = ModelWrapper(
+            self.model,
+            converter_transform=fake_transform,
+        )
+
+        sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
+        self.assertNotIn("weight", sd)
+        self.assertIn("lora_a", sd)
+        self.assertIn("lora_b", sd)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_export_mode_passes_last_step(self, mock_gsd):
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        received_last_step = []
+
+        def tracking_transform(sd, last_step):
+            received_last_step.append(last_step)
+            return sd
+
+        wrapper = ModelWrapper(
+            self.model,
+            converter_transform=tracking_transform,
+        )
+
+        wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
+        wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
+        self.assertEqual(received_last_step, [False, True])
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_to_hf_composable(self, mock_gsd):
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(self.model, to_hf=fake_to_hf)
+        sd = wrapper.to_hf(wrapper.state_dict())
+        self.assertIn("hf_weight", sd)
+        self.assertNotIn("weight", sd)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_export_without_to_hf_stays_native(self, mock_gsd):
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(self.model, to_hf=fake_to_hf)
+        sd = wrapper.state_dict(mode=StateDictMode.EXPORT)
+        self.assertIn("weight", sd)
+        self.assertNotIn("hf_weight", sd)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.set_model_state_dict",
+    )
+    def test_from_hf_composable(self, mock_ssd):
+        def fake_from_hf(hf_sd):
+            return {"weight": hf_sd["hf_weight"]}
+
+        wrapper = ModelWrapper(self.model, from_hf=fake_from_hf)
+        native_sd = wrapper.from_hf({"hf_weight": torch.randn(4, 4)})
+        wrapper.load_state_dict(native_sd)
+        mock_ssd.assert_called_once()
+
+    def test_from_hf_raises_without_callable(self):
+        wrapper = ModelWrapper(self.model)
+        with self.assertRaises(ValueError):
+            wrapper.from_hf({"hf_weight": torch.randn(4, 4)})
+
+    def test_to_hf_raises_without_callable(self):
+        wrapper = ModelWrapper(self.model)
+        with self.assertRaises(ValueError):
+            wrapper.to_hf({"weight": torch.randn(4, 4)})
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_to_hf_on_full_state_dict(self, mock_gsd):
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(self.model, to_hf=fake_to_hf)
+        hf_sd = wrapper.to_hf(wrapper.state_dict())
+        self.assertIn("hf_weight", hf_sd)
+        self.assertIn("hf_bias", hf_sd)
+        self.assertIn("hf_lora_a", hf_sd)
+        self.assertIn("hf_lora_b", hf_sd)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_export_then_to_hf_composable(self, mock_gsd):
+        """Verify converter_transform runs before to_hf when composed."""
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        order = []
+
+        def fake_transform(sd, last_step):
+            order.append("converter")
+            return {k: v for k, v in sd.items() if k.startswith("lora_")}
+
+        def fake_to_hf(sd):
+            order.append("to_hf")
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(
+            self.model,
+            converter_transform=fake_transform,
+            to_hf=fake_to_hf,
+        )
+        sd = wrapper.to_hf(
+            wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
+        )
+        self.assertEqual(order, ["converter", "to_hf"])
+        self.assertIn("hf_lora_a", sd)
+        self.assertIn("hf_lora_b", sd)
+        self.assertNotIn("hf_weight", sd)
+
+    @mock.patch(
+        "torchtitan.components.model_wrapper.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_export_two_modes_produce_disjoint_key_spaces(self, mock_gsd):
+        """Same converter_transform produces different keys for interval vs final save.
+
+        Interval (last_step=False): adapter keys only (e.g. LoRA weights).
+        Final (last_step=True): merged base keys only (adapters folded in).
+        The two key spaces must be disjoint — to_hf should only be applied
+        to the base keys (final save), not adapter keys (interval save).
+        """
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        def merge_transform(sd, last_step):
+            if last_step:
+                return {k: v for k, v in sd.items() if not k.startswith("lora_")}
+            return {k: v for k, v in sd.items() if k.startswith("lora_")}
+
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        wrapper = ModelWrapper(
+            self.model,
+            key_filter=lambda k: k.startswith("lora_"),
+            converter_transform=merge_transform,
+            to_hf=fake_to_hf,
+        )
+
+        # Interval save: adapter keys only, native format
+        interval_sd = wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=False)
+        self.assertEqual(set(interval_sd.keys()), {"lora_a", "lora_b"})
+
+        # Final save: merged base keys, apply to_hf
+        final_sd = wrapper.to_hf(
+            wrapper.state_dict(mode=StateDictMode.EXPORT, last_step=True)
+        )
+        self.assertEqual(set(final_sd.keys()), {"hf_weight", "hf_bias"})
+
+        # Key spaces are disjoint
+        self.assertTrue(set(interval_sd.keys()).isdisjoint(set(final_sd.keys())))
 
 
 if __name__ == "__main__":
