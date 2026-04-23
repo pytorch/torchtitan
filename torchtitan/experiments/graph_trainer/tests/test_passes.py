@@ -39,6 +39,12 @@ from torchtitan.experiments.graph_trainer.passes import (
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
+    TestCpuOffloadPass,
+)
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
+    TestCustomCodegenPass,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
@@ -265,7 +271,10 @@ class TestApplySACPass(TestCase):
                 # If the next op is getitem, wrap in a tuple so getitem has
                 # a proper tuple/list input.
                 if i + 1 < len(op_targets) and op_targets[i + 1] is operator.getitem:
-                    _make_tuple = lambda x: (x, x)
+
+                    def _make_tuple(x):
+                        return (x, x)
+
                     last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -885,12 +894,6 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 2)
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
-
-
-# Import TestCustomCodegenPass so it's discoverable when running this file
-from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
-    TestCustomCodegenPass,
-)
 
 
 class TestAnnotateModuleFqns(TestCase):

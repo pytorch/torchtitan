@@ -37,7 +37,13 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
-from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_layer_id,
+    _is_backward_node,
+    _MODULE_FQN,
+    _NOT_IN_LAYERS,
+)
+from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
@@ -53,12 +59,6 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
-
-_NOT_IN_LAYERS = -1
-
-
-def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("autograd_backward", False)
 
 
 def compile_time_passes(
@@ -86,6 +86,8 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        # TODO: uncomment after sorting out common tagging API between offload and sac
+        # cpu_offload_pass,
         selective_activation_remat_pass,
         # TODO: bucketing is failing for DSv3, allgather prefetching
         # for Llama3 is not working.
@@ -610,22 +612,6 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
-def _get_layer_id(node: torch.fx.Node) -> int:
-    """Extract the layer index from the node's module_fqn metadata.
-
-    Nodes under ``layers.<N>`` return ``N``.
-    All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
-    """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
-    parts = fqn.split(".")
-    if parts[0] == "layers" and len(parts) >= 2:
-        try:
-            return int(parts[1])
-        except ValueError:
-            pass
-    return _NOT_IN_LAYERS
-
-
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -989,4 +975,5 @@ AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
+    "cpu_offload": cpu_offload_pass,
 }
