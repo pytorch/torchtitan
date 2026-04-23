@@ -62,17 +62,18 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    try:
-        from torchtitan.components.quantization import Float8Linear
-    except ImportError:
-        Float8Linear = None
+    from torchtitan.components.quantization import Float8Linear, MXFP8Linear
 
-    has_float8_linear = Float8Linear is not None and any(
-        isinstance(lc, Float8Linear.Config)
+    quantized_linear_types = (MXFP8Linear.Config,)
+    if Float8Linear is not None:
+        quantized_linear_types = (Float8Linear.Config, MXFP8Linear.Config)
+
+    has_quant_linear = any(
+        isinstance(lc, quantized_linear_types)
         for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
     )
-    has_moe_quant = any(
-        config._convert_fn is not None
+    has_quant_moe = any(
+        getattr(type(config), "_is_quantized", False)
         for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config)
     )
-    return has_float8_linear or has_moe_quant
+    return has_quant_linear or has_quant_moe

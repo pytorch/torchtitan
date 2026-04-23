@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import MXFP8Quantizer
+from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -196,7 +196,7 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     config.model_spec = model_registry(
         "flux-schnell",
         quantization=[
-            MXFP8Quantizer.Config(
+            MXFP8LinearConverter.Config(
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -220,7 +220,7 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     config.model_spec = model_registry(
         "flux-dev",
         quantization=[
-            MXFP8Quantizer.Config(
+            MXFP8LinearConverter.Config(
                 fqns=[
                     "double_blocks",
                     "single_blocks",

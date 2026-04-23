@@ -13,13 +13,13 @@
 # Note: Performance
 # The quantization modules are intended to be ran under `torch.compile`` for competitive performance
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import partial
 from importlib.util import find_spec
+from typing import ClassVar, Literal
 
 import torch
 import torch._inductor.config
-import torch.nn as nn
 from torchtitan.config import Configurable
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
@@ -64,6 +64,129 @@ except ImportError:
     Float8Linear = None
 
 
+class MXFP8Linear:
+    """Namespace for MXFP8-quantized Linear config."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        """Builds Linear then applies MXFP8 quantization via quantize_()."""
+
+        _recipe_name: str = "mxfp8_rceil"
+        _pad_token_groups: bool = True
+
+        def build(self, **kwargs):
+            from torchao.prototype.moe_training.config import (
+                MXFP8TrainingOpConfig,
+                MXFP8TrainingRecipe,
+            )
+            from torchao.quantization.quant_api import quantize_
+
+            instance = Linear.Config.build(self, **kwargs)
+            param_init = getattr(instance, "_param_init", None)
+            recipe = MXFP8TrainingRecipe(self._recipe_name)
+            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+            mxfp8_op_config.pad_token_groups_for_grouped_mm = self._pad_token_groups
+            quantize_(instance, config=mxfp8_op_config)
+            if param_init is not None:
+                instance._param_init = param_init
+            return instance
+
+
+class Float8GroupedExperts:
+    """Float8-quantized GroupedExperts config factory.
+
+    Dynamically creates Config subclasses that override ``build()`` to apply
+    float8 quantization, preserving model-specific Config fields
+    (e.g. GptOssGroupedExperts.Config.swiglu_limit).
+    """
+
+    _cache: ClassVar[dict[type, type]] = {}
+
+    @classmethod
+    def from_config(cls, config: GroupedExperts.Config) -> GroupedExperts.Config:
+        base_cls = type(config)
+        if base_cls not in cls._cache:
+
+            @dataclass(kw_only=True, slots=True)
+            class Config(base_cls):
+                _is_quantized: ClassVar[bool] = True
+
+                def build(self, **kwargs):
+                    from torchao.prototype.moe_training.config import (
+                        Float8TrainingOpConfig,
+                    )
+                    from torchao.quantization.quant_api import quantize_
+
+                    instance = base_cls.build(self, **kwargs)
+                    param_init = getattr(instance, "_param_init", None)
+                    quantize_(instance, config=Float8TrainingOpConfig())
+                    if param_init is not None:
+                        instance._param_init = param_init
+                    return instance
+
+            cls._cache[base_cls] = Config
+
+        ConfigCls = cls._cache[base_cls]
+        return ConfigCls(
+            **{f.name: getattr(config, f.name) for f in fields(config)}
+        )
+
+
+class MXFP8GroupedExperts:
+    """MXFP8-quantized GroupedExperts config factory.
+
+    Dynamically creates Config subclasses that override ``build()`` to apply
+    MXFP8 quantization, preserving model-specific Config fields.
+    """
+
+    _cache: ClassVar[dict[type, type]] = {}
+
+    @classmethod
+    def from_config(
+        cls,
+        config: GroupedExperts.Config,
+        *,
+        recipe_name: str = "mxfp8_rceil",
+        pad_token_groups: bool = True,
+    ) -> GroupedExperts.Config:
+        base_cls = type(config)
+        if base_cls not in cls._cache:
+
+            @dataclass(kw_only=True, slots=True)
+            class Config(base_cls):
+                _is_quantized: ClassVar[bool] = True
+                _recipe_name: str = "mxfp8_rceil"
+                _pad_token_groups: bool = True
+
+                def build(self, **kwargs):
+                    from torchao.prototype.moe_training.config import (
+                        MXFP8TrainingOpConfig,
+                        MXFP8TrainingRecipe,
+                    )
+                    from torchao.quantization.quant_api import quantize_
+
+                    instance = base_cls.build(self, **kwargs)
+                    param_init = getattr(instance, "_param_init", None)
+                    recipe = MXFP8TrainingRecipe(self._recipe_name)
+                    mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+                    mxfp8_op_config.pad_token_groups_for_grouped_mm = (
+                        self._pad_token_groups
+                    )
+                    quantize_(instance, config=mxfp8_op_config)
+                    if param_init is not None:
+                        instance._param_init = param_init
+                    return instance
+
+            cls._cache[base_cls] = Config
+
+        ConfigCls = cls._cache[base_cls]
+        return ConfigCls(
+            **{f.name: getattr(config, f.name) for f in fields(config)},
+            _recipe_name=recipe_name,
+            _pad_token_groups=pad_token_groups,
+        )
+
+
 class QuantizationConverter(Configurable):
     """Base class for quantization converters.
 
@@ -80,13 +203,13 @@ class QuantizationConverter(Configurable):
         raise NotImplementedError
 
 
-class Float8LinearQuantizer(QuantizationConverter):
+class Float8LinearConverter(QuantizationConverter):
     """Replace matching Linear.Config with Float8Linear.Config."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
-        recipe_name: str = "rowwise"
-        """Float8 recipe name ("rowwise", "rowwise_with_gw_hp")."""
+        recipe_name: Literal["rowwise", "rowwise_with_gw_hp"] = "rowwise"
+        """Float8 recipe name."""
 
         filter_fqns: list[str] = field(default_factory=list)
         """
@@ -187,7 +310,7 @@ class Float8LinearQuantizer(QuantizationConverter):
         logger.info("Swapped to Float8Linear layers")
 
 
-class Float8MoEQuantizer(QuantizationConverter):
+class Float8MoEConverter(QuantizationConverter):
     """Apply FP8 quantization to MoE expert grouped GEMMs."""
 
     @dataclass(kw_only=True, slots=True)
@@ -211,27 +334,16 @@ class Float8MoEQuantizer(QuantizationConverter):
                 "enable it with --compile.enable"
             )
 
-        from torchao.quantization.quant_api import quantize_
-
-        try:
-            from torchao.prototype.moe_training.config import Float8TrainingOpConfig
-        except ImportError as e:
-            raise ImportError(
-                "torchao installation does not have MoE training support. "
-                "Please install torchao nightly build."
-            ) from e
-
-        def convert_fn(mod: nn.Module) -> nn.Module:
-            config = Float8TrainingOpConfig()
-            quantize_(mod, config=config)
-            return mod
-
         # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
         pad_multiple = 16
 
-        for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config):
-            config._convert_fn = convert_fn
+        for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
             swap_token_dispatcher(config, pad_multiple)
+            new_config = Float8GroupedExperts.from_config(config)
+            if isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
 
         logger.info(
             "Converted GroupedExperts to use dynamic float8 rowwise quantization "
@@ -239,78 +351,31 @@ class Float8MoEQuantizer(QuantizationConverter):
         )
 
 
-class MXFP8MoEQuantizer(QuantizationConverter):
-    """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        recipe_name: str = "mxfp8_rceil"
-        """Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]"""
-
-        pad_token_groups: bool = True
-        """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
-        Set to False when EP is enabled (TorchTitan handles padding instead,
-        except for DeepEP backend)."""
-
-    def __init__(self, config: Config):
-        self.config = config
-
-    def convert(self, model_config) -> None:
-        if find_spec("torchao") is None:
-            raise ImportError(
-                "torchao is not installed. Please install it to use MXFP8 MoE training."
-            )
-        assert has_cuda_capability(
-            10, 0
-        ), "MXFP8 is only supported on SM100 or architectures"
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of MXFP8 dynamic quantization."
-            )
-
-        from torchao.prototype.moe_training.config import (
-            MXFP8TrainingOpConfig,
-            MXFP8TrainingRecipe,
-        )
-        from torchao.quantization.quant_api import quantize_
-
-        recipe_name = self.config.recipe_name
-        pad_token_groups = self.config.pad_token_groups
-
-        def convert_fn(mod: nn.Module) -> nn.Module:
-            recipe = MXFP8TrainingRecipe(recipe_name)
-            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            mxfp8_op_config.pad_token_groups_for_grouped_mm = pad_token_groups
-            quantize_(mod, config=mxfp8_op_config)
-            return mod
-
-        # MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
-        pad_multiple = 32
-
-        for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config):
-            config._convert_fn = convert_fn
-            swap_token_dispatcher(config, pad_multiple)
-
-        logger.info(
-            f"Converted GroupedExperts to use dynamic {recipe_name} "
-            "quantization for grouped_mm and linear ops"
-        )
-
-
-class MXFP8Quantizer(QuantizationConverter):
+class MXFP8LinearConverter(QuantizationConverter):
     """Apply MXFP8 quantization to modules matching FQNs (e.g. Flux blocks)."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
-        fqns: list[str] = field(default_factory=list)
-        """List of fully qualified names of modules to apply MXFP8 quantization."""
+        recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
+        """
+        Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
 
-        recipe_name: str = "mxfp8_rceil"
-        """Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]"""
+        - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
+        """
+
+        fqns: list[str] = field(default_factory=list)
+        """
+        *Prototype feature, performance optimization still in progress*
+        Comma-separated list of fully qualified names of MoE modules to apply MXFP8 dynamic quantization
+        on grouped GEMM operations.
+        This is a prototype feature that requires the torchao nightly build.
+        """
 
         pad_token_groups: bool = True
-        """If True, TorchAO pads token groups for MXFP8 grouped GEMM."""
+        """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
+        If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
+        as part of the EP implementation (except for DeepEP backend).
+        Otherwise, if EP is not enabled, we need TorchAO to pad the token groups."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -320,37 +385,89 @@ class MXFP8Quantizer(QuantizationConverter):
             raise ImportError(
                 "torchao is not installed. Please install it to use MXFP8 quantization."
             )
+
         assert has_cuda_capability(
             10, 0
         ), "MXFP8 is only supported on SM100 or architectures"
+
         if not self.config.model_compile_enabled:
             logger.warning(
                 "torch.compile enablement is required for highest performance "
                 "of MXFP8 dynamic quantization."
             )
 
-        from torchao.prototype.moe_training.config import (
-            MXFP8TrainingOpConfig,
-            MXFP8TrainingRecipe,
-        )
-        from torchao.quantization.quant_api import quantize_
-
-        recipe_name = self.config.recipe_name
-        pad_token_groups = self.config.pad_token_groups
-
-        def convert_fn(mod: nn.Module) -> nn.Module:
-            recipe = MXFP8TrainingRecipe(recipe_name)
-            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            mxfp8_op_config.pad_token_groups_for_grouped_mm = pad_token_groups
-            quantize_(mod, config=mxfp8_op_config)
-            return mod
-
         fqns = self.config.fqns
-        for fqn, config, _parent, _attr in model_config.walk(Linear.Config):
+        for fqn, config, parent, attr in model_config.walk(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                config._convert_fn = convert_fn
+                new_config = MXFP8Linear.Config(
+                    in_features=config.in_features,
+                    out_features=config.out_features,
+                    bias=config.bias,
+                    param_init=config.param_init,
+                    _recipe_name=self.config.recipe_name,
+                    _pad_token_groups=self.config.pad_token_groups,
+                )
+                if isinstance(parent, list):
+                    parent[attr] = new_config
+                else:
+                    setattr(parent, attr, new_config)
 
         logger.info(
-            f"Converted modules to use dynamic {recipe_name} "
+            f"Converted modules to use dynamic {self.config.recipe_name} "
+            "quantization for grouped_mm and linear ops"
+        )
+
+
+class MXFP8MoEConverter(QuantizationConverter):
+    """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
+        """
+        Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
+
+        - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
+        """
+
+        pad_token_groups: bool = True
+        """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
+        If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
+        as part of the EP implementation (except for DeepEP backend).
+        Otherwise, if EP is not enabled, we need TorchAO to pad the token groups."""
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def convert(self, model_config) -> None:
+        if find_spec("torchao") is None:
+            raise ImportError(
+                "torchao is not installed. Please install it to use MXFP8 MoE training."
+            )
+
+        assert has_cuda_capability(
+            10, 0
+        ), "MXFP8 is only supported on SM100 or architectures"
+
+        if not self.config.model_compile_enabled:
+            logger.warning(
+                "torch.compile enablement is required for highest performance "
+                "of MXFP8 dynamic quantization."
+            )
+
+        # MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
+        pad_multiple = 32
+        for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
+            swap_token_dispatcher(config, pad_multiple)
+            new_config = MXFP8GroupedExperts.from_config(
+                config, recipe_name=self.config.recipe_name, pad_token_groups=self.config.pad_token_groups
+            )
+            if isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
+        logger.info(
+            f"Converted GroupedExperts to use dynamic {self.config.recipe_name} "
             "quantization for grouped_mm and linear ops"
         )
