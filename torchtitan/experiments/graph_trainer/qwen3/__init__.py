@@ -33,7 +33,6 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3,
-        set_sharding_spec_fn=None,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,

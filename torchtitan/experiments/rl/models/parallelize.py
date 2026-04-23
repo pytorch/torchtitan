@@ -6,10 +6,9 @@
 
 # RL-specific parallelize function for the qwen3 model.
 # Applies tensor parallelism via config-based sharding. Sharding specs are
-# filled on the config before build (by ``ModelSpec.set_sharding_spec_fn``
-# in the trainer, and directly in the vllm_wrapper for the generator). This
-# file then just walks the built model and dispatches
-# ``Module.parallelize(tp_mesh)``.
+# filled on the config before build (via direct ``set_qwen3_sharding_spec``
+# calls in the RL trainer and vllm_wrapper). This file then just walks the
+# built model and dispatches ``Module.parallelize(tp_mesh)``.
 
 import logging
 

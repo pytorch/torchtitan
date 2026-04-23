@@ -361,7 +361,6 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_llama,
-        set_sharding_spec_fn=set_llama4_sharding_spec,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
