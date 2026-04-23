@@ -62,7 +62,10 @@ class ExpertParallel(ParallelStyle):
             mod.token_dispatcher,
             (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
         ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
-        mod.token_dispatcher.ep_group = device_mesh.get_group()
+        # Pass DeviceMesh (not ProcessGroup) so that CooR precompile
+        # can use torch.ops._dtensor.mesh_get_process_group to keep
+        # the FX graph rank-agnostic.
+        mod.token_dispatcher.ep_mesh = device_mesh
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -107,4 +110,7 @@ class ExpertTensorParallel(ExpertParallel):
             mod.token_dispatcher,
             (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
         ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
-        mod.token_dispatcher.ep_group = device_mesh["ep"].get_group()
+        # Pass DeviceMesh (not ProcessGroup) so that CooR precompile
+        # can use torch.ops._dtensor.mesh_get_process_group to keep
+        # the FX graph rank-agnostic.
+        mod.token_dispatcher.ep_mesh = device_mesh["ep"]

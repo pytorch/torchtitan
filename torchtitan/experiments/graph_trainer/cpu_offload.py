@@ -27,41 +27,24 @@ This module works with the make_fx traced joint fwd+bwd graph, using
 """
 
 import operator
-import re
 
 import torch
 
 # Import upstream custom ops for async activation offloading.
 # Registering the ops is a side-effect of importing the module.
-import torch._functorch._activation_offloading.offload_ops as offload_ops  # noqa: F401
+import torch._functorch._activation_offloading.offload_ops  # noqa: F401
 import torch.fx
 from torch.fx import Node
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_layer_id,
+    _is_backward_node,
+    _NOT_IN_LAYERS,
+)
 from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
-
-# Pattern to extract the layer index from a module FQN like "layers.0.attention.wq"
-_LAYER_INDEX_RE = re.compile(r"layers\.(\d+)")
-
-
-def _is_backward_node(node: Node) -> bool:
-    return node.meta.get("autograd_backward", False)
-
-
-def _get_layer_id(node: Node) -> int | None:
-    """Extract the transformer block layer index from a node's module FQN.
-
-    Looks for the pattern ``layers.<N>`` in the FQN and returns N.
-    Returns None if the node has no module_fqn or no layer index.
-    """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
-    if fqn is None:
-        return None
-    m = _LAYER_INDEX_RE.search(fqn)
-    return int(m.group(1)) if m else None
 
 
 # ============================================================
@@ -176,11 +159,7 @@ def _classify_forward_backward(
     """Classify nodes in a make_fx traced joint graph as forward or backward.
 
     Uses ``autograd_backward`` metadata set by PyTorch's autograd engine during
-    make_fx tracing. This is the same classification used by the SAC remat pass,
-    ensuring consistent forward/backward boundaries across graph passes.
-
-    Nodes without ``autograd_backward`` metadata (placeholders, output, newly
-    inserted nodes) are excluded from both sets.
+    make_fx tracing.
 
     Returns:
         Tuple of (forward_nodes, backward_nodes).
@@ -191,7 +170,7 @@ def _classify_forward_backward(
     for node in gm.graph.nodes:
         if node.op not in ("call_function", "get_attr"):
             continue
-        if node.meta.get("autograd_backward", False):
+        if _is_backward_node(node):
             backward_nodes.add(node)
         else:
             forward_nodes.add(node)
@@ -204,7 +183,10 @@ def _classify_forward_backward(
 # ============================================================
 
 
-def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
+def tag_all_offloadable_activations(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
     """Tag all saved activations eligible for CPU offloading.
 
     This is a reference implementation that offloads all offloadable
@@ -225,16 +207,20 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
+        example_inputs: Example inputs (unused, required by graph pass interface).
+
+    Returns:
+        The GraphModule with eligible nodes tagged for offload.
     """
-    forward_nodes, backward_nodes = _classify_forward_backward(gm)
+    forward_nodes, _ = _classify_forward_backward(gm)
 
     # Find all layer IDs to determine the last layer
     all_layer_ids: set[int] = set()
     for node in gm.graph.nodes:
         lid = _get_layer_id(node)
-        if lid is not None:
+        if lid != _NOT_IN_LAYERS:
             all_layer_ids.add(lid)
-    last_layer_id = max(all_layer_ids) if len(all_layer_ids) > 1 else None
+    last_layer_id = max(all_layer_ids) if len(all_layer_ids) > 1 else _NOT_IN_LAYERS
 
     tagged = 0
     total_bytes = 0
@@ -245,7 +231,7 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
         layer_id = _get_layer_id(node)
         # Skip the last layer: its activations are consumed immediately in
         # backward, so offloading adds overhead with no memory benefit.
-        if layer_id is None or layer_id == last_layer_id:
+        if layer_id == _NOT_IN_LAYERS or layer_id == last_layer_id:
             continue
         if not _can_offload_node(node):
             continue
@@ -257,14 +243,13 @@ def tag_all_offloadable_activations(gm: torch.fx.GraphModule) -> None:
 
         node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
         tagged += 1
-        val = node.meta.get("val")
-        if val is not None:
-            total_bytes += _tensor_bytes(val)
+        total_bytes += _tensor_bytes(node.meta["val"])
 
     logger.info(
         f"CPU offload: tagged {tagged} activations for offload "
         f"({total_bytes / 1024 / 1024:.2f} MB)"
     )
+    return gm
 
 
 # ============================================================

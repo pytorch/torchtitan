@@ -37,7 +37,12 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID, _MODULE_FQN
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_layer_id,
+    _is_backward_node,
+    _MODULE_FQN,
+    _NOT_IN_LAYERS,
+)
 from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
@@ -54,10 +59,6 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
-
-
-def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("autograd_backward", False)
 
 
 def compile_time_passes(
@@ -617,30 +618,26 @@ def apply_sac_pass(
     *,
     op_list_to_save: set | None = None,
 ) -> torch.fx.GraphModule:
-    """
-    Apply selective activation checkpointing on the joint graph.
+    """Apply selective activation checkpointing on the joint graph.
 
-    This pass iterates over all call_function nodes in the joint graph and annotates
-    each with a CheckpointPolicy. Ops in ``op_list_to_save`` are marked MUST_SAVE
-    (their outputs are kept as activations for the backward pass), while all other
-    ops are marked PREFER_RECOMPUTE (their outputs may be discarded and recomputed
-    during backward).
+    Annotates forward ``call_function`` nodes with a ``CheckpointPolicy``:
 
-    To reduce memory further, every second ``mm`` op is marked PREFER_RECOMPUTE
-    instead of MUST_SAVE, matching the behavior of the eager selective AC policy
-    in ``torchtitan.distributed.activation_checkpoint``.
+    - Ops in ``op_list_to_save`` → ``MUST_SAVE`` (outputs kept for backward).
+    - All other ops → ``PREFER_RECOMPUTE`` (outputs may be discarded and
+      recomputed during backward).
+    - ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
 
-    The annotations are later consumed by the min-cut partitioner
-    (``min_cut_rematerialization_partition``) to split the joint graph into separate
-    forward and backward graphs.
+    After tagging, a boundary pass forces ``MUST_SAVE`` on recomputable nodes
+    whose output crosses a layer boundary (layer N → layer N+1), since
+    recomputing them would require rerunning the entire preceding layer.
 
-    Usage: set ``--compile.joint_passes apply_sac``.
+    The model must have been annotated with ``annotate_module_fqns`` before
+    tracing so that nodes carry ``module_fqn`` metadata.
 
     Args:
-        gm: The joint forward-backward graph module
-        op_list_to_save: Set of op targets whose outputs should be saved.
-            Defaults to ``torchtitan.distributed.activation_checkpoint._get_save_ops()``
-            if None.
+        gm: The joint forward-backward graph module.
+        op_list_to_save: Op targets whose outputs should be saved.
+            Defaults to ``_get_save_ops()`` if None.
 
     Returns:
         The annotated graph module
@@ -648,11 +645,11 @@ def apply_sac_pass(
     if op_list_to_save is None:
         op_list_to_save = _get_save_ops()
 
-    mm_count = 0
-    ac_region_stats: dict[int, dict[str, int]] = defaultdict(
+    layer_stats: dict[int, dict[str, int]] = defaultdict(
         lambda: {"save": 0, "recompute": 0}
     )
 
+    # Pass 1: Tag each forward node with a recompute policy.
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
@@ -666,49 +663,63 @@ def apply_sac_pass(
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
         ):
-            # Propagate recompute tag from the parent node:
-            # - getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa),
-            #   it is followed by getitem nodes that extract individual elements.
-            #   They inherit the parent's recompute tag, otherwise they will be
-            #   exposed as graph outputs and saved for backwards unnecessarily.
-            # - wait_tensor: Semantically tied to its parent async collective
-            #   (e.g., reduce_scatter_tensor, all_gather_into_tensor) and must
-            #   share the same save/recompute decision.
+            # Propagate from parent: getitem extracts tuple elements,
+            # wait_tensor is tied to its async collective — both must
+            # share the parent's save/recompute decision.
             parent = node.args[0]
             if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
                 node.meta["recompute"] = parent.meta["recompute"]
-                node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
-        custom_meta = node.meta.get("custom", {})
-        ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
-        node.meta["ac_graph_id"] = ac_region_id
 
-        if node.target is torch.ops.aten.mm.default:
-            mm_count += 1
-            # Save every odd mm, recompute every even mm
-            if mm_count % 2 == 0:
-                policy = CheckpointPolicy.PREFER_RECOMPUTE
-            else:
-                policy = CheckpointPolicy.MUST_SAVE
-        elif node.target in op_list_to_save:
-            policy = CheckpointPolicy.MUST_SAVE
-        else:
-            policy = CheckpointPolicy.PREFER_RECOMPUTE
+        layer_id = _get_layer_id(node)
 
-        node.meta["recompute"] = policy
-        if policy == CheckpointPolicy.MUST_SAVE:
-            ac_region_stats[ac_region_id]["save"] += 1
+        # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
+        # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
+        # because the alternating heuristic is arbitrary.
+        save = node.target in op_list_to_save
+        node.meta["recompute"] = (
+            CheckpointPolicy.MUST_SAVE if save else CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        if save:
+            layer_stats[layer_id]["save"] += 1
         else:
-            ac_region_stats[ac_region_id]["recompute"] += 1
+            layer_stats[layer_id]["recompute"] += 1
+
+    # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
+    # feeds into a node in a higher layer, saving it is cheaper than
+    # recomputing the entire preceding layer.
+    def _is_recomputable(n: torch.fx.Node) -> bool:
+        return n.meta.get("recompute") in (
+            CheckpointPolicy.PREFER_RECOMPUTE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+        )
+
+    boundary_saves = 0
+    for node in gm.graph.nodes:
+        if _is_backward_node(node) or not _is_recomputable(node):
+            continue
+        node_layer_id = _get_layer_id(node)
+        for user in node.users:
+            if (
+                not _is_backward_node(user)
+                and _is_recomputable(user)
+                and _get_layer_id(user) > node_layer_id
+            ):
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                boundary_saves += 1
+                break
 
     gm.recompile()
     logger.info("Applied selective activation checkpointing (SAC) graph pass.")
-    for ac_region_id in sorted(ac_region_stats):
-        stats = ac_region_stats[ac_region_id]
+    if boundary_saves:
+        logger.info(f"  Forced {boundary_saves} nodes to MUST_SAVE at layer boundaries")
+    for layer_id in sorted(layer_stats):
+        stats = layer_stats[layer_id]
+        label = "non-layer" if layer_id == _NOT_IN_LAYERS else str(layer_id)
         logger.info(
-            f"  AC region {ac_region_id}: "
-            f"{stats['save']} nodes annotated with MUST_SAVE, "
-            f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
+            f"  Layer {label}: "
+            f"{stats['save']} MUST_SAVE, "
+            f"{stats['recompute']} PREFER_RECOMPUTE"
         )
     return gm
 
@@ -723,8 +734,8 @@ def selective_activation_remat_pass(
     applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
     PREFER_RECOMPUTE forward ops before backward and DCE originals.
 
-    The model must have been annotated with annotate_ac_regions before
-    tracing so that nodes have custom["ac_region_id"] metadata.
+    The model must have been annotated with annotate_module_fqns before
+    tracing so that nodes have custom["module_fqn"] metadata.
     """
     from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
         remat_using_tags_for_fwd_loss_bwd_graph,
