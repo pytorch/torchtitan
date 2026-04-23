@@ -174,12 +174,21 @@ class RLTrainer(Configurable):
             if self.trainer.debug.batch_invariant:
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # TODO: Replace trainer dtype constraint to use mixed
-                #  training enabled by FSDP.
-                if self.trainer.training.dtype != "bfloat16":
+                # Trainer computation must be in bfloat16 to match generator.
+                # This can be achieved either by:
+                #   1. Setting training.dtype="bfloat16" (full bf16 training), or
+                #   2. Using FSDP mixed precision with
+                #      training.mixed_precision_param="bfloat16" to cast fp32
+                #      weights to bf16 during forward.
+                fsdp_provides_bf16 = (
+                    self.trainer.training.mixed_precision_param == "bfloat16"
+                )
+                if self.trainer.training.dtype != "bfloat16" and not fsdp_provides_bf16:
                     raise ValueError(
-                        f"batch_invariant requires bfloat16 training dtype, "
-                        f"got {self.trainer.training.dtype!r}"
+                        f"batch_invariant requires bfloat16 training dtype "
+                        f"or FSDP mixed precision with "
+                        f"mixed_precision_param='bfloat16', "
+                        f"got dtype={self.trainer.training.dtype!r}"
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(

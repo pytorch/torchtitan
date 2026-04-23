@@ -23,12 +23,13 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.config.configs import CompileConfig
+from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
+from torchtitan.config.configs import CompileConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.llama4.parallelize import apply_fsdp
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,14 @@ def parallelize_qwen3(
     parallelism: ParallelismConfig,
     compile_config: CompileConfig | None = None,
     has_position_id: bool = False,
+    training: TrainingConfig | None = None,
 ):
     """
-    Apply tensor parallelism to the Qwen3 dense model for RL training/inference.
+    Apply tensor parallelism (and optionally FSDP) to the Qwen3 dense model
+    for RL training/inference.
 
     NOTE: The function signature is intentionally simpler than core torchtitan's
-    parallelize_qwen3 — it only accepts the configs needed for TP.
+    parallelize_qwen3 — it only accepts the configs needed for TP and FSDP.
     TODO: Change to core torchtitan's Qwen3 parallel plan when full DTensor is ready
 
     Args:
@@ -54,6 +57,8 @@ def parallelize_qwen3(
         has_position_id: Whether position IDs are passed as an explicit argument
             to the attention module. True for vLLM inference (generator),
             False for training (trainer).
+        training: TrainingConfig, required when FSDP is enabled for mixed
+            precision dtype settings.
     """
 
     if parallel_dims.tp_enabled:
@@ -74,6 +79,21 @@ def parallelize_qwen3(
         and "model" in compile_config.components
     ):
         apply_compile(model, compile_config)
+
+    if parallel_dims.fsdp_enabled:
+        if training is None:
+            raise ValueError(
+                "TrainingConfig is required when FSDP is enabled "
+                "(data_parallel_shard_degree > 1)"
+            )
+        dp_mesh = parallel_dims.get_mesh("fsdp")
+        apply_fsdp(
+            model,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+        )
 
     return model
 

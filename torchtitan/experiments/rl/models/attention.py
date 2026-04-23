@@ -179,7 +179,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             extra_kwargs["num_splits"] = 1
 
         if self.enable_gqa:
-            extra_kwargs["enable_gqa"] = True
+            # enable_gqa kwarg requires a recent PyTorch build; FA3 auto-
+            # detects GQA from the head count mismatch when the kwarg is
+            # absent, so we only pass it when the API supports it.
+            import inspect
+
+            sig = inspect.signature(torch.nn.attention.varlen.varlen_attn_out)
+            if "enable_gqa" in sig.parameters:
+                extra_kwargs["enable_gqa"] = True
 
         return torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
