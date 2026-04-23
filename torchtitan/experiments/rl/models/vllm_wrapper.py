@@ -181,19 +181,23 @@ class TorchTitanVLLMModelWrapper(Module):
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
 
-        # RoPE config from model for cache extension
-        self.rope_config = self.config.rope
-
         # Create ParallelDims and configs from vLLM config at runtime.
-        # vLLM config contains the tensor_parallel_size from command-line args
-        # and this will be consistent across all worker processes.
         self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
             vllm_config
         )
 
+        # Build model on meta device to avoid allocating full model on every
+        # GPU. This is critical for large MoE models where replicating all
+        # experts would OOM. After parallelization (which sets up EP/TP
+        # sharding on meta tensors), to_empty() allocates only the local
+        # shards on the actual device.
+        with torch.device("meta"):
+            self.model = self.config.build()
+
+        # RoPE config from model for cache extension
+        self.rope_config = self.config.rope
+
         # Apply parallelism using the model's own parallelize function.
-        # Pass no-op defaults for training-only args (FSDP, AC, compile)
-        # so the core function skips those features.
         from torchtitan.config import (
             ActivationCheckpointConfig,
             CompileConfig,
@@ -212,6 +216,11 @@ class TorchTitanVLLMModelWrapper(Module):
             dump_folder="",
             inference=True,
         )
+
+        # Materialize model on GPU — only allocates local shards (not full
+        # model) thanks to EP/TP DTensor sharding applied above.
+        device_type = vllm_config.device_config.device.type
+        self.model.to_empty(device=device_type)
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
         # may use up to 2x max_seq_len, so use max_model_len which already
@@ -352,6 +361,10 @@ class TorchTitanVLLMModelWrapper(Module):
 
         logits = self.model.output(hidden_states)
 
+        # Ensure logits are plain tensors for vLLM's sampling code
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
+
         return logits
 
     def load_weights_from_state_dict(self, state_dict):
@@ -388,6 +401,16 @@ class TorchTitanVLLMModelWrapper(Module):
 
         # Load HF state dict using DCP
         hf_state_dict = adapter.to_hf(self.model.state_dict())
+
+        # Filter out keys not in the HF checkpoint (e.g. expert_bias is a
+        # torchtitan training buffer initialized to zeros).
+        hf_keys_in_checkpoint = set(
+            storage_reader.read_metadata().state_dict_metadata.keys()
+        )
+        hf_state_dict = {
+            k: v for k, v in hf_state_dict.items() if k in hf_keys_in_checkpoint
+        }
+
         dcp.load(hf_state_dict, storage_reader=storage_reader)
 
         # Convert HF state dict to TorchTitan format
