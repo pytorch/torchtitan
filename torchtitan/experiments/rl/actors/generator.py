@@ -85,9 +85,9 @@ def _prepare_generation_request_metrics(
         if stats.num_generation_tokens > 1:
             first_to_last_token_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
             metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
-            metric_values[
-                f"{prefix}/inter_token_latency_ms"
-            ] = first_to_last_token_ms / (stats.num_generation_tokens - 1)
+            metric_values[f"{prefix}/inter_token_latency_ms"] = (
+                first_to_last_token_ms / (stats.num_generation_tokens - 1)
+            )
 
     # Emit each value with both Mean and Max aggregators.
     return [
@@ -211,6 +211,9 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
+        vllm_attn_backend: str = "varlen"
+        """Which attention impl to use inside vLLM: 'varlen' or 'flex'."""
+
         def __post_init__(self):
             # VLLMGenerator only supports TP. vLLM handles its own parallelism;
             # we only apply TP via the core parallelize function.
@@ -286,10 +289,25 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        if config.vllm_attn_backend == "flex":
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+            if config.debug.batch_invariant:
+                os.environ["VLLM_BATCH_INVARIANT"] = "1"
+        else:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
         set_batch_invariance(config.debug.batch_invariant)
+
+        # Set vLLM attention backend
+        # if config.vllm_attn_backend == "flex":
+        #     os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        #     if config.debug.batch_invariant:
+        #         os.environ["VLLM_BATCH_INVARIANT"] = "1"
+        # else:
+        #     os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        #     if config.debug.batch_invariant:
+        #         set_batch_invariance(True)
 
         self._set_determinism(config.debug)
 
@@ -316,16 +334,24 @@ class VLLMGenerator(Actor, Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
-                backend=AttentionBackendEnum.CUSTOM,
+                backend=(
+                    AttentionBackendEnum.FLEX_ATTENTION
+                    if config.vllm_attn_backend == "flex"
+                    else AttentionBackendEnum.CUSTOM
+                ),
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
         engine_kwargs["max_model_len"] = model_spec.model.rope.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
-        # FA2 requires block_size to be a multiple of 256
-        if not has_cuda_capability(9, 0):
+
+        if config.vllm_attn_backend == "flex":
+            engine_kwargs["enable_chunked_prefill"] = False
+        elif not has_cuda_capability(9, 0):
+            # FA2 requires block_size to be a multiple of 256
             engine_kwargs["block_size"] = 256
+
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
         )
