@@ -18,7 +18,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_ac_regions,
     annotate_module_fqns,
     apply_graph_ac,
 )
@@ -40,11 +39,9 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes.
-    - AC region annotation: Tags each transformer block's forward with a unique
-      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
-      boundaries for the min-cut partitioner.
     - Module FQN annotation: Tags each submodule's forward with its
-      fully-qualified name for downstream passes.
+      fully-qualified name for downstream passes (bucketing, SAC region
+      boundaries, etc.).
     """
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
@@ -58,7 +55,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
     annotate_module_fqns(model)
-    annotate_ac_regions(model)
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -125,6 +121,7 @@ def parallelize_deepseekv3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            enable_sp=parallelism.enable_sequence_parallel,
         )
 
     if ac_config.mode != "none":

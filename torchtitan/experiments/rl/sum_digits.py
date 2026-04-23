@@ -11,6 +11,8 @@ import re
 
 import torch
 
+from torchtitan.experiments.rl.types import Completion
+
 
 def extract_answer(text: str) -> int | None:
     """Extract a numeric answer from model output.
@@ -75,30 +77,32 @@ class SumDigitsTask:
 
     def reward_function(
         self,
-        completions: list[str],
+        completions: list[Completion],
         expected_answer: str = "",
     ) -> torch.Tensor:
-        """Compute rewards for sum digits task.
+        """Compute rewards for a group of completions sharing a prompt.
 
         Args:
-            completions: List of completion strings for one prompt (len=group_size)
-            expected_answer: Expected answer string for this prompt
+            completions: Completions generated for one prompt (typically
+                ``sampling.n`` of them).
+            expected_answer: Expected answer for this prompt.
 
         Returns:
-            Tensor of rewards (+1.0 correct, -1.0 wrong, +0.2 format bonus)
+            Tensor of rewards, one per input completion (+1.0 correct,
+            -1.0 wrong, +0.2 format bonus).
         """
         expected = int(expected_answer) if expected_answer else 0
         rewards = []
-        for completion in completions:
-            extracted = extract_answer(completion)
+        for c in completions:
+            extracted = extract_answer(c.text)
             is_correct = extracted == expected
             reward = 1.0 if is_correct else -1.0
             # Format bonus: only if correct, exactly one [ANSWER] tag, and generation stops after it
-            answer_tags = re.findall(r"\[ANSWER\]", completion)
+            answer_tags = re.findall(r"\[ANSWER\]", c.text)
             if (
                 is_correct
                 and len(answer_tags) == 1
-                and re.search(r"\[ANSWER\]\s*-?\d+\s*$", completion)
+                and re.search(r"\[ANSWER\]\s*-?\d+\s*$", c.text)
             ):
                 reward += 0.2
             rewards.append(reward)
