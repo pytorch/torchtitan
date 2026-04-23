@@ -11,7 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
+from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
@@ -84,22 +84,29 @@ class Module(nn.Module, Configurable):
         self._init_self_parameters()
 
         # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``),
-        # replacing any DTensor entry with a plain tensor. Fill the existing
-        # DTensor's local shard in place instead, preserving DTensor identity.
-        # ``_local_tensor.copy_`` only shape-matches when placements are all
-        # Replicate or Partial (local == global); a Shard-placed buffer would
-        # raise and need explicit redistribute.
-        dtensor_bufs = {
-            name: buf for name, buf in self._buffers.items() if isinstance(buf, DTensor)
+        # replacing any DTensor entry with a plain tensor. Restore DTensor-ness
+        # by wrapping the freshly computed global tensor as Replicate (every
+        # rank runs this init and produces the same value) and redistributing
+        # to the original placements — works for Replicate / Shard / Partial.
+        dtensor_meta = {
+            name: (buf.device_mesh, buf.placements)
+            for name, buf in self._buffers.items()
+            if isinstance(buf, DTensor)
         }
         self._init_self_buffers(buffer_device=buffer_device)
-        for name, orig_buf in dtensor_bufs.items():
+        for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
             if new_buf is None or isinstance(new_buf, DTensor):
                 continue
-            orig_buf._local_tensor.copy_(new_buf)
+            replicated = DTensor.from_local(
+                new_buf, mesh, (Replicate(),) * mesh.ndim, run_check=False
+            )
             persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(name, orig_buf, persistent=persistent)
+            self.register_buffer(
+                name,
+                replicated.redistribute(mesh, list(placements)),
+                persistent=persistent,
+            )
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own parameters via ``_init_param``.
