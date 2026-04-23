@@ -43,6 +43,7 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     apply_graph_ac,
     parallelize_inputs,
@@ -65,7 +66,6 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
