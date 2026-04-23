@@ -538,8 +538,12 @@ class RLTrainer(Configurable):
             metrics = {**fwd_bwd_metrics, **optim_metrics}
 
             # --- Weight sync --- #
+            t0 = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
+            t_push = time.perf_counter() - t0
             self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            t_sync = time.perf_counter() - t0
+            logger.info(f"Weight sync: push={t_push:.3f}s, total={t_sync:.3f}s")
 
             # --- Logging --- #
             token_lens = [len(ep.token_ids) for ep in episodes]
