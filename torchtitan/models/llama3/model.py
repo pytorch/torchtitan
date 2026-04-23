@@ -111,7 +111,6 @@ class Llama3Model(Decoder):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            # Populate sharding_spec with actual parallelism settings.
             from torchtitan.models.llama3.sharding import set_llama3_sharding_spec
 
             set_llama3_sharding_spec(
