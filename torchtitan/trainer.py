@@ -255,7 +255,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
-
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),

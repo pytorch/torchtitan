@@ -15,10 +15,7 @@ from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
-from torchtitan.protocols.sharding import (
-    resolve_placements,
-    ShardingSpec,
-)
+from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -39,14 +36,14 @@ class Module(nn.Module, Configurable):
     """
 
     _param_init: dict[str, Callable] | None = None
-    _sharding_spec: ShardingSpec | None = None
+    _sharding_spec: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
     _forward_wrapped: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
-        sharding_spec: ShardingSpec | None = None
+        sharding_spec: ShardingConfig | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -86,8 +83,13 @@ class Module(nn.Module, Configurable):
 
         self._init_self_parameters()
 
-        # Buffers declared in state_shardings must remain DTensors after
-        # _init_self_buffers reassignment; snapshot placements and restore.
+        # Trainer flow: (1) build model on meta device, (2) Module.parallelize
+        # distributes params/buffers to DTensors, (3) call init_states. Params
+        # are filled in-place here, preserving DTensor-ness. But
+        # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``)
+        # which replaces the DTensor entry with a plain tensor. Snapshot the
+        # (mesh, placements) of DTensor buffers before the reassignment and
+        # re-distribute the post-init plain tensor to restore DTensor-ness.
         dtensor_meta = {
             name: (buf.device_mesh, buf.placements)
             for name, buf in self._buffers.items()
@@ -208,9 +210,7 @@ class Module(nn.Module, Configurable):
         for name, param in self.named_parameters(recurse=False):
             if name not in spec.state_shardings or isinstance(param, DTensor):
                 continue
-            placements = resolve_placements(
-                spec.state_shardings[name], mesh_dim_names
-            )
+            placements = resolve_placements(spec.state_shardings[name], mesh_dim_names)
             self.register_parameter(
                 name,
                 nn.Parameter(distribute_tensor(param, mesh, list(placements))),
@@ -223,9 +223,7 @@ class Module(nn.Module, Configurable):
                 or isinstance(buffer, DTensor)
             ):
                 continue
-            placements = resolve_placements(
-                spec.state_shardings[name], mesh_dim_names
-            )
+            placements = resolve_placements(spec.state_shardings[name], mesh_dim_names)
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -252,8 +250,7 @@ class Module(nn.Module, Configurable):
                     resolve_placements(p, mesh_dim_names) for p in lm.out_placements
                 )
                 in_grad_placements = tuple(
-                    resolve_placements(p, mesh_dim_names)
-                    for p in lm.in_grad_placements
+                    resolve_placements(p, mesh_dim_names) for p in lm.in_grad_placements
                 )
                 fn = local_map(
                     fn,
@@ -315,9 +312,7 @@ class Module(nn.Module, Configurable):
 
             # Step 2: Redistribute to desired placement if needed.
             if name in in_dst_shardings and isinstance(value, DTensor):
-                desired = resolve_placements(
-                    in_dst_shardings[name], mesh_dim_names
-                )
+                desired = resolve_placements(in_dst_shardings[name], mesh_dim_names)
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 

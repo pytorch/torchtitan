@@ -49,6 +49,9 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
         tensor_parallel_degree=tp,
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
+        disable_loss_parallel=True,
+        enable_sequence_parallel=False,
+        full_dtensor=False,
     )
     return SimpleNamespace(training=training, parallelism=parallelism)
 

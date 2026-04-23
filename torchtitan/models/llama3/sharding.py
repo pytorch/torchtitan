@@ -10,17 +10,16 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
-    replicate_norm_spec,
-    sequence_parallel_spec,
+    norm_spec,
     set_decoder_sharding_spec,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
 from torchtitan.protocols.sharding import (
-    LocalMapSpec,
+    LocalMapConfig,
     MeshDimName,
     NamedPlacement,
-    ShardingSpec,
+    ShardingConfig,
 )
 
 if TYPE_CHECKING:
@@ -43,7 +42,7 @@ def set_llama3_sharding_spec(
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
     ``loss_parallel`` controls whether the output projection is vocab-parallel.
-    ``full_dtensor`` extends the inner-attention ``LocalMapSpec`` to also
+    ``full_dtensor`` extends the inner-attention ``LocalMapConfig`` to also
     carry DP/CP placements so q/k/v flow as DTensors on the multi-D SPMD mesh.
     """
     set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
@@ -53,8 +52,8 @@ def set_llama3_sharding_spec(
         )
 
 
-def _build_inner_attn_local_map_spec(full_dtensor: bool) -> LocalMapSpec:
-    """Build LocalMapSpec for inner attention.
+def _build_inner_attn_local_map_spec(full_dtensor: bool) -> LocalMapConfig:
+    """Build LocalMapConfig for inner attention.
 
     q/k/v are (bs, seq, heads, head_dim). TP shards on heads (dim 2).
     Under full DTensor: q/k/v are batch-sharded on DP dims; Q keeps
@@ -74,7 +73,7 @@ def _build_inner_attn_local_map_spec(full_dtensor: bool) -> LocalMapSpec:
         q = {MeshDimName.TP: Shard(2)}
         kv = {MeshDimName.TP: Shard(2)}
 
-    return LocalMapSpec(
+    return LocalMapConfig(
         in_placements=(q, kv, kv),
         out_placements=(q,),
         in_grad_placements=(q, kv, kv),
@@ -95,16 +94,16 @@ def _set_llama3_layer_sharding(
     stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to
     Replicate.
     """
-    norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
-    layer_cfg.attention_norm.sharding_spec = norm_spec
-    layer_cfg.ffn_norm.sharding_spec = norm_spec
+    norm = norm_spec(enable_sp=enable_sp)
+    layer_cfg.attention_norm.sharding_spec = norm
+    layer_cfg.ffn_norm.sharding_spec = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
 
     # Inner attention: local_map to convert DTensors to local tensors.
     # Under full DTensor, placements include DP/CP dims (K/V all-gathered on CP).
-    layer_cfg.attention.inner_attention.sharding_spec = ShardingSpec(
+    layer_cfg.attention.inner_attention.sharding_spec = ShardingConfig(
         local_map=_build_inner_attn_local_map_spec(full_dtensor),
     )
 

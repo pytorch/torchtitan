@@ -421,14 +421,11 @@ class PolicyTrainer(Actor, Configurable):
         means "skip StorageVolumes and let the destination read directly
         from the source's GPU memory".
 
-        Uses get_model_state_dict() to unshard FSDP state before pushing.
         """
         from monarch.rdma import is_rdma_available
 
-        full_sd = get_model_state_dict(self.model)
-
         await ts.put_state_dict(
-            full_sd,
+            self.model.state_dict(),
             "model_state_dict",
             direct_rdma=is_rdma_available(),
             transfer_dtype=self._transfer_dtype,
