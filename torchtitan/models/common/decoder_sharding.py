@@ -20,6 +20,11 @@ def dense_param_placement(*, tp: Placement) -> NamedPlacement:
 
     DP/CP dims are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
     DP_SHARD post-parallelize. TP placement is caller-specified.
+
+    TODO: Ideally placements would be defined on a computation mesh that
+    has a single DP dim (no DP_REPLICATE vs DP_SHARD distinction). That
+    requires a mesh switch between FSDP storage and computation — likely
+    resolved by FlexShard. Revisit once FlexShard lands.
     """
     return {
         DP_REPLICATE: Replicate(),
