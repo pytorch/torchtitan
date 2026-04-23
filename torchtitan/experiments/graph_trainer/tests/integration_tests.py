@@ -500,6 +500,27 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_float8_tests() -> list[OverrideDefinitions]:
+    """Float8 integration tests (require H100/SM89+ machines)."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_float8",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 float8 FSDP+TP",
+            "aot_fx_trace_llama3_float8_fsdp_tp",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+    ]
+
+
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
@@ -537,8 +558,13 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_test_list() -> list[OverrideDefinitions]:
-    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3)."""
-    return _build_llama3_tests() + _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3 + Float8)."""
+    return (
+        _build_llama3_tests()
+        + _build_deepseek_v3_tests()
+        + _build_qwen3_tests()
+        + _build_float8_tests()
+    )
 
 
 def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
@@ -547,8 +573,8 @@ def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 + Qwen3 tests (for H100 machines)."""
-    return _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """DeepSeek-v3 + Qwen3 + Float8 tests (for H100 machines)."""
+    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_float8_tests()
 
 
 _TEST_SUITES_FUNCTION = {
