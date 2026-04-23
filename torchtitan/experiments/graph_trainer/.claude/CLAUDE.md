@@ -98,6 +98,26 @@ python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_d
     --test_suite graph_trainer_default --ngpu 8
 ```
 
+### Listing Activations Saved for Backward
+
+`list_activations_pass` (`list_activations.py`) prints all forward nodes
+consumed by backward, grouped by layer with identical patterns consolidated.
+Shows memory, dtype, shape, submodule, target op, and source location.
+Useful for understanding activation memory and informing SAC/offload policies.
+
+Add it to `compile_time_passes` before `selective_activation_remat_pass`:
+
+```python
+from torchtitan.experiments.graph_trainer.list_activations import list_activations_pass
+
+passes: list[Callable] = [
+    ...
+    list_activations_pass,
+    selective_activation_remat_pass,
+    ...
+]
+```
+
 ### Debugging Graph Passes
 
 Add `--compile.debug_graph_passes` to enable per-pass instrumentation:
