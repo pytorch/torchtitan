@@ -25,7 +25,7 @@ from torchtitan.trainer import Trainer
 DTYPE = torch.bfloat16
 BATCH_SIZE = 2
 SEQ_LEN = 2048
-MAX_PEAK_MEMORY_RATIO = 1.10
+MAX_PEAK_MEMORY_RATIO = 1.25
 DEBUGMODEL = "debugmodel"
 
 

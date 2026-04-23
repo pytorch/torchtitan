@@ -17,7 +17,6 @@ from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
-_AC_REGION_ID = "ac_region_id"
 _MODULE_FQN = "module_fqn"
 
 
@@ -33,19 +32,6 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
-
-
-def annotate_ac_regions(model: nn.Module) -> None:
-    """Annotate each transformer block with a unique AC region ID.
-
-    This enables apply_sac_pass to assign different ac_graph_id values
-    per block, creating AC region boundaries between transformer blocks.
-    """
-    layers = model.get_submodule("layers")
-    for layer_id, transformer_block in layers.named_children():
-        transformer_block.forward = annotate_fn({_AC_REGION_ID: int(layer_id)})(
-            transformer_block.forward
-        )
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
