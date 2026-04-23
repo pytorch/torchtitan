@@ -191,7 +191,6 @@ class TorchTitanVLLMModelWrapper(Module):
         # ShardingSpec / LocalMapSpec attached.
         set_qwen3_sharding_spec(
             self.config,
-            self.parallel_dims,
             loss_parallel=False,
             enable_sp=parallelism.enable_sequence_parallel,
         )

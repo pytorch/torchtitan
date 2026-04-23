@@ -245,20 +245,21 @@ class Module(nn.Module, Configurable):
                 # Resolve each NamedPlacement to a positional tuple for the
                 # current mesh.
                 lm = spec.local_map
+                in_placements = tuple(
+                    resolve_placements(p, mesh_dim_names) for p in lm.in_placements
+                )
+                out_placements = tuple(
+                    resolve_placements(p, mesh_dim_names) for p in lm.out_placements
+                )
+                in_grad_placements = tuple(
+                    resolve_placements(p, mesh_dim_names)
+                    for p in lm.in_grad_placements
+                )
                 fn = local_map(
                     fn,
-                    in_placements=tuple(
-                        resolve_placements(p, mesh_dim_names)
-                        for p in lm.in_placements
-                    ),
-                    out_placements=tuple(
-                        resolve_placements(p, mesh_dim_names)
-                        for p in lm.out_placements
-                    ),
-                    in_grad_placements=tuple(
-                        resolve_placements(p, mesh_dim_names)
-                        for p in lm.in_grad_placements
-                    ),
+                    in_placements=in_placements,
+                    out_placements=out_placements,
+                    in_grad_placements=in_grad_placements,
                     device_mesh=mesh,
                     redistribute_inputs=True,
                 )

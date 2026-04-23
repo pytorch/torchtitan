@@ -111,6 +111,16 @@ class Llama3Model(Decoder):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
+            # Populate sharding_spec with actual parallelism settings.
+            from torchtitan.models.llama3.sharding import set_llama3_sharding_spec
+
+            set_llama3_sharding_spec(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+                full_dtensor=parallelism.full_dtensor,
+            )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
