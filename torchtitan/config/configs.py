@@ -119,6 +119,12 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
+    enable_fsdp_symm_mem: bool = False
+    """
+    Whether to enable FSDP2 symmetric-memory communication optimizations for
+    all FSDP modules after `fully_shard` has been applied.
+    """
+
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 

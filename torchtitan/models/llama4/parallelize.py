@@ -35,6 +35,7 @@ from torchtitan.distributed.expert_parallel import (
 )
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import (
@@ -322,6 +323,9 @@ def apply_fsdp(
             )
 
     fully_shard(model, **fsdp_config)
+
+    if parallelism.enable_fsdp_symm_mem:
+        enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
