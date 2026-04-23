@@ -155,7 +155,7 @@ class TestCheckpointManager(unittest.TestCase):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, storage_reader=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -667,7 +667,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, storage_reader=None):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
@@ -716,26 +716,58 @@ class TestModelWrapperModes(unittest.TestCase):
         "torchtitan.components.model_wrapper.get_model_state_dict",
         side_effect=lambda m: dict(m.named_parameters()),
     )
-    def test_filter_base_keys_excludes_converter_keys(self, mock_gsd):
+    def test_partition_and_base_external_mode(self, mock_gsd):
+        """_partition splits by key_filter; BASE_EXTERNAL mode composes
+        partition + to_hf on state_dict side and from_hf + partition on
+        load_state_dict side."""
+        from torchtitan.components.model_wrapper import StateDictMode
+
+        def fake_to_hf(sd):
+            return {"hf_" + k: v for k, v in sd.items()}
+
+        def fake_from_hf(sd):
+            return {k.removeprefix("hf_"): v for k, v in sd.items()}
+
         wrapper = ModelWrapper(
             self.model,
             key_filter=lambda k: k.startswith("lora_"),
+            to_hf=fake_to_hf,
+            from_hf=fake_from_hf,
         )
-        sd = wrapper.filter_base_keys(wrapper.state_dict())
-        self.assertIn("weight", sd)
-        self.assertIn("bias", sd)
-        self.assertNotIn("lora_a", sd)
-        self.assertNotIn("lora_b", sd)
-
-    @mock.patch(
-        "torchtitan.components.model_wrapper.get_model_state_dict",
-        side_effect=lambda m: dict(m.named_parameters()),
-    )
-    def test_filter_base_keys_noop_without_key_filter(self, mock_gsd):
-        wrapper = ModelWrapper(self.model)
         sd = wrapper.state_dict()
-        filtered = wrapper.filter_base_keys(sd)
-        self.assertEqual(sd.keys(), filtered.keys())
+
+        # _partition: base vs converter, with and without key_filter
+        base = wrapper._partition(sd, keep_converter=False)
+        self.assertIn("weight", base)
+        self.assertNotIn("lora_a", base)
+        conv = wrapper._partition(sd, keep_converter=True)
+        self.assertIn("lora_a", conv)
+        self.assertNotIn("weight", conv)
+        no_filter = ModelWrapper(self.model)
+        self.assertEqual(
+            no_filter._partition(sd, keep_converter=False).keys(), sd.keys()
+        )
+        self.assertEqual(len(no_filter._partition(sd, keep_converter=True)), 0)
+
+        # state_dict(BASE_EXTERNAL): partition then to_hf
+        hf_sd = wrapper.state_dict(mode=StateDictMode.BASE_EXTERNAL)
+        self.assertIn("hf_weight", hf_sd)
+        self.assertNotIn("hf_lora_a", hf_sd)
+
+        # load_state_dict(BASE_EXTERNAL): from_hf then partition
+        with mock.patch(
+            "torchtitan.components.model_wrapper.set_model_state_dict"
+        ) as mock_ssd:
+            wrapper.load_state_dict(
+                {"hf_weight": torch.randn(4), "hf_lora_a": torch.randn(4)},
+                mode=StateDictMode.BASE_EXTERNAL,
+            )
+            loaded = mock_ssd.call_args.kwargs.get(
+                "model_state_dict",
+                mock_ssd.call_args[1].get("model_state_dict"),
+            )
+            self.assertIn("weight", loaded)
+            self.assertNotIn("lora_a", loaded)
 
     @mock.patch(
         "torchtitan.components.model_wrapper.get_model_state_dict",
