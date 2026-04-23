@@ -37,7 +37,7 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
@@ -54,6 +54,8 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 )
 from torchtitan.tools.logging import logger
 
+_NOT_IN_LAYERS = -1
+
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
@@ -61,6 +63,9 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
 
 def compile_time_passes(
     traced_result: "TracedResult",
+    config: "GraphTrainer.Config",
+    *,
+    use_cudagraph: bool = False,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -71,13 +76,23 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime
     """
+    # from torchtitan.experiments.graph_trainer.common_utils import (
+    #     get_default_transformer_block_buckets,
+    # )
     from torchtitan.models.common.attention import FlexAttention
 
-    return [
+    # n_layers = len(config.model_spec.model.layers)
+    passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
         selective_activation_remat_pass,
+        # TODO: bucketing is failing for DSv3, allgather prefetching
+        # for Llama3 is not working.
+        # functools.partial(
+        #     joint_transformer_block_bucketing_reordering_pass,
+        #     fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
+        # ),
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
@@ -87,40 +102,53 @@ def compile_time_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
-        # TODO: Switch to upstream PyTorch implementation when
-        # https://github.com/pytorch/pytorch/pull/178246 lands.
-        # custom_codegen_pass saves the FX graph to disk for:
-        # 1. Debugging: inspect the generated graph code directly
-        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
-        #    gives fine-grained operator-level attribution in profiler traces
-        # 3. User-editable codegen: users can directly modify the generated
-        #    program on disk for fine-grain scheduling optimizations, with
-        #    hot-reload picking up changes at runtime
-        custom_codegen_pass,
     ]
+    if use_cudagraph:
+        # Must run before custom_codegen_pass (last in pre_passes)
+        # which replaces the GraphModule's forward().
+        # Also must run before cudagraph_pass.
+        passes.append(insert_kernel_annotations_pass)
+    # TODO: Switch to upstream PyTorch implementation when
+    # https://github.com/pytorch/pytorch/pull/178246 lands.
+    # custom_codegen_pass saves the FX graph to disk for:
+    # 1. Debugging: inspect the generated graph code directly
+    # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+    #    gives fine-grained operator-level attribution in profiler traces
+    # 3. User-editable codegen: users can directly modify the generated
+    #    program on disk for fine-grain scheduling optimizations, with
+    #    hot-reload picking up changes at runtime
+    passes.append(custom_codegen_pass)
+    return passes
 
 
 def construct_default_graph_passes(
     traced_result: "TracedResult",
-    *,
-    precompiled: bool = False,
+    config: "GraphTrainer.Config",
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
-    When ``precompiled=False`` (default), returns the full list: cleanup,
+    When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
     FlexAttention annotation, regional_inductor, and cudagraph.
 
-    When ``precompiled=True``, the artifact already has cleanup and
-    regional_inductor baked in, so only cudagraph is returned.
+    When ``precompile_artifact_dir`` is set, the artifact has graph
+    transformed during precompile phase, so only cudagraph is returned.
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
+    use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
+        traced_result.gm
+    )
+
+    has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
+
     passes: list[Callable] = []
-    if not precompiled:
-        passes.extend(compile_time_passes(traced_result))
+    if not has_precompile_artifact:
+        passes.extend(
+            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
+        )
 
     # cudagraph should be the last pass.
-    if is_cudagraph_compatible(traced_result.gm):
+    if use_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
@@ -332,6 +360,58 @@ def transformer_block_bucketing_reordering_pass(
 
 
 
+def joint_transformer_block_bucketing_reordering_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    fsdp_manual_buckets,
+) -> torch.fx.GraphModule:
+    """Apply manual bucketing and reordering on a joint fwd+bwd graph.
+
+    The joint graph is processed in two passes to ensure each direction's
+    collectives are bucketed independently and reordering uses the correct
+    execution order (forward order for fwd, reversed order for bwd).
+
+    Used by the aot_fx_trace mode where forward and backward are in a
+    single graph.
+    """
+
+    def _make_module_fqn_stack_fn(
+        *, bwd: bool
+    ) -> Callable[[torch.fx.Node], list[tuple[str, type]]]:
+        """Create a module_stack_fn that filters nodes by forward/backward direction."""
+
+        def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
+            is_bwd = node.meta.get("autograd_backward", False)
+            if is_bwd != bwd:
+                return []
+            fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+            if not fqn:
+                return []
+            return [(fqn, torch.nn.Module)]
+
+        return _stack_fn
+
+    # Forward graph pass: bucket and reorder forward collectives
+    manual_overlap_bucketing(
+        gm,
+        module_bucket_plans=fsdp_manual_buckets,
+        insert_overlap_deps=False,
+        module_stack_fn=_make_module_fqn_stack_fn(bwd=False),
+    )
+
+    # Backward backward pass: bucket and reorder backward collectives
+    manual_overlap_bucketing(
+        gm,
+        module_bucket_plans=fsdp_manual_buckets,
+        insert_overlap_deps=False,
+        module_stack_fn=_make_module_fqn_stack_fn(bwd=True),
+    )
+
+    gm.recompile()
+    return gm
+
+
 def _ops_filter_with_distributed(name: str) -> bool:
     """Ops filter that allows distributed collective ops for serialization.
 
@@ -442,6 +522,96 @@ def regional_inductor_pass(
     # regional_inductor may switch to boxed calling convention; reset to
     # default so the graph can be called with positional args as usual.
     gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    gm.recompile()
+    return gm
+
+
+def insert_kernel_annotations_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Insert mark_kernels() calls at module boundaries in the FX graph.
+
+    Reads ``node.meta["custom"]["module_fqn"]`` (set via
+    ``annotate_module_fqns``) and inserts enter/exit calls so that
+    CUDA graph capture records the annotations.
+
+    Requires ``cuda-python`` package and CUDA toolkit/driver >= 13.1
+    (or cuda-compat >= 13.1).  Returns the graph unchanged when unavailable.
+
+    Also enables annotation capture on :class:`CUDAGraphWrapper` so that
+    ``enable_annotations=True`` is passed to ``torch.cuda.graph()``.
+
+    Alternative approaches:
+
+    1. **fx.Interpreter**: During cudagraph capture, run the graph via an
+       ``fx.Interpreter`` subclass that reads ``module_fqn`` metadata and
+       calls ``mark_kernels`` enter/exit around each node — avoids mutating
+       the graph.
+    2. **Custom CodeGen**: Use a custom ``torch.fx.graph.CodeGen`` to emit
+       enter/exit lines (or ``with`` blocks) directly in the generated
+       Python code.
+
+    The current graph-pass approach is the least invasive.
+    """
+    from torch.cuda._graph_annotations import _is_tools_id_unavailable
+
+    from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+    from torchtitan.experiments.graph_trainer.cudagraph import (
+        enable_cudagraph_annotations,
+    )
+
+    def _enter(annotation: dict) -> object:
+        from torch.cuda._graph_annotations import mark_kernels
+
+        ctx = mark_kernels(annotation)
+        ctx.__enter__()
+        return ctx
+
+    def _exit(ctx: object) -> None:
+        ctx.__exit__(None, None, None)  # type: ignore[union-attr]
+
+    if _is_tools_id_unavailable():
+        return gm
+
+    enable_cudagraph_annotations()
+
+    graph = gm.graph
+    current_fqn: str | None = None
+    current_ctx_node = None
+
+    for node in list(graph.nodes):
+        fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+
+        if fqn != current_fqn:
+            # Close previous scope
+            if current_ctx_node is not None:
+                with graph.inserting_before(node):
+                    exit_node = graph.call_function(_exit, (current_ctx_node,))
+                    exit_node.meta["custom"] = {}
+                current_ctx_node = None
+
+            # Open new scope
+            if fqn is not None:
+                with graph.inserting_before(node):
+                    enter_node = graph.call_function(
+                        _enter,
+                        ({_MODULE_FQN: fqn},),
+                    )
+                    enter_node.meta["custom"] = {}
+                current_ctx_node = enter_node
+
+            current_fqn = fqn
+
+    # Close any trailing scope (before output/return)
+    if current_ctx_node is not None:
+        output_nodes = [n for n in graph.nodes if n.op == "output"]
+        if output_nodes:
+            with graph.inserting_before(output_nodes[0]):
+                exit_node = graph.call_function(_exit, (current_ctx_node,))
+                exit_node.meta["custom"] = {}
+
+    graph.lint()
     gm.recompile()
     return gm
 
@@ -566,36 +736,48 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
+def _get_layer_id(node: torch.fx.Node) -> int:
+    """Extract the layer index from the node's module_fqn metadata.
+
+    Nodes under ``layers.<N>`` return ``N``.
+    All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
+    """
+    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    parts = fqn.split(".")
+    if parts[0] == "layers" and len(parts) >= 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return _NOT_IN_LAYERS
+
+
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
     op_list_to_save: set | None = None,
 ) -> torch.fx.GraphModule:
-    """
-    Apply selective activation checkpointing on the joint graph.
+    """Apply selective activation checkpointing on the joint graph.
 
-    This pass iterates over all call_function nodes in the joint graph and annotates
-    each with a CheckpointPolicy. Ops in ``op_list_to_save`` are marked MUST_SAVE
-    (their outputs are kept as activations for the backward pass), while all other
-    ops are marked PREFER_RECOMPUTE (their outputs may be discarded and recomputed
-    during backward).
+    Annotates forward ``call_function`` nodes with a ``CheckpointPolicy``:
 
-    To reduce memory further, every second ``mm`` op is marked PREFER_RECOMPUTE
-    instead of MUST_SAVE, matching the behavior of the eager selective AC policy
-    in ``torchtitan.distributed.activation_checkpoint``.
+    - Ops in ``op_list_to_save`` → ``MUST_SAVE`` (outputs kept for backward).
+    - All other ops → ``PREFER_RECOMPUTE`` (outputs may be discarded and
+      recomputed during backward).
+    - ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
 
-    The annotations are later consumed by the min-cut partitioner
-    (``min_cut_rematerialization_partition``) to split the joint graph into separate
-    forward and backward graphs.
+    After tagging, a boundary pass forces ``MUST_SAVE`` on recomputable nodes
+    whose output crosses a layer boundary (layer N → layer N+1), since
+    recomputing them would require rerunning the entire preceding layer.
 
-    Usage: set ``--compile.joint_passes apply_sac``.
+    The model must have been annotated with ``annotate_module_fqns`` before
+    tracing so that nodes carry ``module_fqn`` metadata.
 
     Args:
-        gm: The joint forward-backward graph module
-        op_list_to_save: Set of op targets whose outputs should be saved.
-            Defaults to ``torchtitan.distributed.activation_checkpoint._get_save_ops()``
-            if None.
+        gm: The joint forward-backward graph module.
+        op_list_to_save: Op targets whose outputs should be saved.
+            Defaults to ``_get_save_ops()`` if None.
 
     Returns:
         The annotated graph module
@@ -603,11 +785,11 @@ def apply_sac_pass(
     if op_list_to_save is None:
         op_list_to_save = _get_save_ops()
 
-    mm_count = 0
-    ac_region_stats: dict[int, dict[str, int]] = defaultdict(
+    layer_stats: dict[int, dict[str, int]] = defaultdict(
         lambda: {"save": 0, "recompute": 0}
     )
 
+    # Pass 1: Tag each forward node with a recompute policy.
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
@@ -621,49 +803,63 @@ def apply_sac_pass(
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
         ):
-            # Propagate recompute tag from the parent node:
-            # - getitem: When a node returns a tuple/list (e.g., rmsnorm, sdpa),
-            #   it is followed by getitem nodes that extract individual elements.
-            #   They inherit the parent's recompute tag, otherwise they will be
-            #   exposed as graph outputs and saved for backwards unnecessarily.
-            # - wait_tensor: Semantically tied to its parent async collective
-            #   (e.g., reduce_scatter_tensor, all_gather_into_tensor) and must
-            #   share the same save/recompute decision.
+            # Propagate from parent: getitem extracts tuple elements,
+            # wait_tensor is tied to its async collective — both must
+            # share the parent's save/recompute decision.
             parent = node.args[0]
             if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
                 node.meta["recompute"] = parent.meta["recompute"]
-                node.meta["ac_graph_id"] = parent.meta.get("ac_graph_id", 0)
             continue
-        custom_meta = node.meta.get("custom", {})
-        ac_region_id = custom_meta.get(_AC_REGION_ID, 0)
-        node.meta["ac_graph_id"] = ac_region_id
 
-        if node.target is torch.ops.aten.mm.default:
-            mm_count += 1
-            # Save every odd mm, recompute every even mm
-            if mm_count % 2 == 0:
-                policy = CheckpointPolicy.PREFER_RECOMPUTE
-            else:
-                policy = CheckpointPolicy.MUST_SAVE
-        elif node.target in op_list_to_save:
-            policy = CheckpointPolicy.MUST_SAVE
-        else:
-            policy = CheckpointPolicy.PREFER_RECOMPUTE
+        layer_id = _get_layer_id(node)
 
-        node.meta["recompute"] = policy
-        if policy == CheckpointPolicy.MUST_SAVE:
-            ac_region_stats[ac_region_id]["save"] += 1
+        # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
+        # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
+        # because the alternating heuristic is arbitrary.
+        save = node.target in op_list_to_save
+        node.meta["recompute"] = (
+            CheckpointPolicy.MUST_SAVE if save else CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        if save:
+            layer_stats[layer_id]["save"] += 1
         else:
-            ac_region_stats[ac_region_id]["recompute"] += 1
+            layer_stats[layer_id]["recompute"] += 1
+
+    # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
+    # feeds into a node in a higher layer, saving it is cheaper than
+    # recomputing the entire preceding layer.
+    def _is_recomputable(n: torch.fx.Node) -> bool:
+        return n.meta.get("recompute") in (
+            CheckpointPolicy.PREFER_RECOMPUTE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+        )
+
+    boundary_saves = 0
+    for node in gm.graph.nodes:
+        if _is_backward_node(node) or not _is_recomputable(node):
+            continue
+        node_layer_id = _get_layer_id(node)
+        for user in node.users:
+            if (
+                not _is_backward_node(user)
+                and _is_recomputable(user)
+                and _get_layer_id(user) > node_layer_id
+            ):
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                boundary_saves += 1
+                break
 
     gm.recompile()
     logger.info("Applied selective activation checkpointing (SAC) graph pass.")
-    for ac_region_id in sorted(ac_region_stats):
-        stats = ac_region_stats[ac_region_id]
+    if boundary_saves:
+        logger.info(f"  Forced {boundary_saves} nodes to MUST_SAVE at layer boundaries")
+    for layer_id in sorted(layer_stats):
+        stats = layer_stats[layer_id]
+        label = "non-layer" if layer_id == _NOT_IN_LAYERS else str(layer_id)
         logger.info(
-            f"  AC region {ac_region_id}: "
-            f"{stats['save']} nodes annotated with MUST_SAVE, "
-            f"{stats['recompute']} nodes annotated with PREFER_RECOMPUTE"
+            f"  Layer {label}: "
+            f"{stats['save']} MUST_SAVE, "
+            f"{stats['recompute']} PREFER_RECOMPUTE"
         )
     return gm
 
@@ -678,8 +874,8 @@ def selective_activation_remat_pass(
     applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
     PREFER_RECOMPUTE forward ops before backward and DCE originals.
 
-    The model must have been annotated with annotate_ac_regions before
-    tracing so that nodes have custom["ac_region_id"] metadata.
+    The model must have been annotated with annotate_module_fqns before
+    tracing so that nodes have custom["module_fqn"] metadata.
     """
     from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
         remat_using_tags_for_fwd_loss_bwd_graph,
