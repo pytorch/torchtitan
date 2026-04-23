@@ -17,6 +17,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.model_wrapper import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
@@ -304,17 +305,28 @@ class FaultTolerantTrainer(Trainer):
         self.ntokens_seen = 0
 
         # FT addition: pass ft_manager to CheckpointManager
+        sd_adapter = (
+            model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+            if model_spec.state_dict_adapter
+            else None
+        )
+
+        model_wrapper = ModelWrapper(
+            self.model_parts,
+            key_filter=model_converters.key_filter(),
+            converter_transform=model_converters.state_dict_transform(),
+            sd_adapter=sd_adapter,
+        )
+
+        from torchtitan.components.checkpoint import HFStorageConfig
+
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
-            model_parts=self.model_parts,
+            model_wrapper=model_wrapper,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            hf_storage_config=HFStorageConfig.from_adapter(sd_adapter),
             base_folder=config.dump_folder,
             ft_manager=self.ft_manager,
         )
