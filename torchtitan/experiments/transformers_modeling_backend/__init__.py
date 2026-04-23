@@ -57,7 +57,6 @@ def model_registry(flavor: str) -> ModelSpec:
         flavor=flavor,
         model=flavors[flavor],
         parallelize_fn=parallelize_hf_transformers,
-        set_sharding_spec_fn=None,
         pipelining_fn=pipeline_hf_transformers,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Placement, Replicate, Shard
 
+from torchtitan.models.common.attention import GQAttention
+
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
@@ -17,7 +19,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
-from torchtitan.models.common.attention import GQAttention
 from torchtitan.protocols.sharding import ShardingSpec
 
 if TYPE_CHECKING:
