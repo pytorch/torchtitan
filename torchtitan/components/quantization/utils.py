@@ -36,7 +36,7 @@ def swap_token_dispatcher(config, pad_multiple: int) -> bool:
     """Swap token dispatcher config to support padded grouped GEMMs.
 
     Returns True if the dispatcher handles padding (TorchAOTokenDispatcher
-    or DeepEP hybridep), False if TorchAO must pad token groups itself.
+    or hybridep), False if TorchAO must pad token groups itself.
     """
     td = config.token_dispatcher
     if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
