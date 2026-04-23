@@ -32,8 +32,12 @@ def module_filter_fn(
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-def swap_token_dispatcher(config, pad_multiple: int) -> None:
-    """Swap token dispatcher config to support padded grouped GEMMs."""
+def swap_token_dispatcher(config, pad_multiple: int) -> bool:
+    """Swap token dispatcher config to support padded grouped GEMMs.
+
+    Returns True if the dispatcher handles padding (TorchAOTokenDispatcher
+    or DeepEP hybridep), False if TorchAO must pad token groups itself.
+    """
     td = config.token_dispatcher
     if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
         td, TorchAOTokenDispatcher.Config
@@ -44,6 +48,7 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
             score_before_experts=td.score_before_experts,
             pad_multiple=pad_multiple,
         )
+        return True
     elif isinstance(td, DeepEPTokenDispatcher.Config):
         if td.comm_backend == "deepep":
             raise ValueError(
@@ -58,18 +63,16 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
             non_blocking_capacity_factor=td.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )
+        return True
+    return False
 
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
     from torchtitan.components.quantization import Float8Linear, MXFP8Linear
 
-    quantized_linear_types = (MXFP8Linear.Config,)
-    if Float8Linear is not None:
-        quantized_linear_types = (Float8Linear.Config, MXFP8Linear.Config)
-
     has_quant_linear = any(
-        isinstance(lc, quantized_linear_types)
+        isinstance(lc, (Float8Linear.Config, MXFP8Linear.Config))
         for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
     )
     has_quant_moe = any(

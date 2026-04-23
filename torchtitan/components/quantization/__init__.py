@@ -29,39 +29,46 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import module_filter_fn, swap_token_dispatcher
 
 
-try:
-    from torchao.float8.float8_linear import Float8Linear as TorchAOFloat8Linear
+class Float8Linear:
+    """Namespace for Float8-quantized Linear config.
 
-    class Float8Linear(TorchAOFloat8Linear, Linear):
-        """Configurable Float8Linear.
+    The diamond-inherited module class (TorchAOFloat8Linear + Linear) is
+    created lazily on first build to avoid a top-level torchao import.
+    """
 
-        Uses diamond inheritance (TorchAOFloat8Linear + Linear) so that:
-        - All Float8Linear logic (forward, state_dict, etc.) is reused as-is.
-        - The Module protocol is satisfied (init_states, _param_init, etc.).
-        """
+    _module_cls: ClassVar[type | None] = None
 
-        @dataclass(kw_only=True, slots=True)
-        class Config(Linear.Config):
-            """Drop-in replacement for Linear.Config that builds Float8Linear."""
+    @classmethod
+    def _get_module_cls(cls):
+        if cls._module_cls is None:
+            from torchao.float8.float8_linear import (
+                Float8Linear as TorchAOFloat8Linear,
+            )
 
-            _torchao_config: object = None
+            class Float8LinearModule(TorchAOFloat8Linear, Linear):
+                def __init__(self, *args, **kwargs):
+                    TorchAOFloat8Linear.__init__(self, *args, **kwargs)
 
-            def build(self, **kwargs):
-                instance = Float8Linear(
-                    self.in_features,
-                    self.out_features,
-                    bias=self.bias,
-                    config=self._torchao_config,
-                )
-                if self.param_init is not None:
-                    instance._param_init = self.param_init
-                return instance
+            cls._module_cls = Float8LinearModule
+        return cls._module_cls
 
-        def __init__(self, *args, **kwargs):
-            TorchAOFloat8Linear.__init__(self, *args, **kwargs)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        """Drop-in replacement for Linear.Config that builds Float8Linear."""
 
-except ImportError:
-    Float8Linear = None
+        _torchao_config: object = None
+
+        def build(self, **kwargs):
+            module_cls = Float8Linear._get_module_cls()
+            instance = module_cls(
+                self.in_features,
+                self.out_features,
+                bias=self.bias,
+                config=self._torchao_config,
+            )
+            if self.param_init is not None:
+                instance._param_init = self.param_init
+            return instance
 
 
 class MXFP8Linear:
@@ -228,7 +235,7 @@ class Float8LinearConverter(QuantizationConverter):
         self.config = config
 
     def convert(self, model_config) -> None:
-        if Float8Linear is None:
+        if find_spec("torchao") is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             )
@@ -372,10 +379,7 @@ class MXFP8LinearConverter(QuantizationConverter):
         """
 
         pad_token_groups: bool = True
-        """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
-        If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
-        as part of the EP implementation (except for DeepEP backend).
-        Otherwise, if EP is not enabled, we need TorchAO to pad the token groups."""
+        """If True, TorchAO pads token groups for MXFP8 linear ops."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -430,12 +434,6 @@ class MXFP8MoEConverter(QuantizationConverter):
         - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
         """
 
-        pad_token_groups: bool = True
-        """If True, TorchAO pads token groups for MXFP8 grouped GEMM.
-        If EP is enabled, TorchTitan handles the token group padding for MXFP8 grouped GEMM
-        as part of the EP implementation (except for DeepEP backend).
-        Otherwise, if EP is not enabled, we need TorchAO to pad the token groups."""
-
     def __init__(self, config: Config):
         self.config = config
 
@@ -458,9 +456,11 @@ class MXFP8MoEConverter(QuantizationConverter):
         # MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
         pad_multiple = 32
         for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
-            swap_token_dispatcher(config, pad_multiple)
+            dispatcher_handles_padding = swap_token_dispatcher(config, pad_multiple)
             new_config = MXFP8GroupedExperts.from_config(
-                config, recipe_name=self.config.recipe_name, pad_token_groups=self.config.pad_token_groups
+                config,
+                recipe_name=self.config.recipe_name,
+                pad_token_groups=not dispatcher_handles_padding,
             )
             if isinstance(parent, list):
                 parent[attr] = new_config
