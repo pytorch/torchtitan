@@ -9,8 +9,7 @@ from typing import TYPE_CHECKING
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.decoder_sharding import (
-    replicate_norm_spec,
-    sequence_parallel_spec,
+    norm_spec,
     set_decoder_sharding_spec,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
@@ -54,9 +53,9 @@ def _set_llama3_layer_sharding(
     stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to
     Replicate.
     """
-    norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
-    layer_cfg.attention_norm.sharding_spec = norm_spec
-    layer_cfg.ffn_norm.sharding_spec = norm_spec
+    norm = norm_spec(enable_sp=enable_sp)
+    layer_cfg.attention_norm.sharding_spec = norm
+    layer_cfg.ffn_norm.sharding_spec = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)

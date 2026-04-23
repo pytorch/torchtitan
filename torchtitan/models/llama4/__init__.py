@@ -33,7 +33,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 from .parallelize import parallelize_llama
-from .sharding import set_llama4_sharding_spec
 from .state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
@@ -355,7 +354,6 @@ def model_registry(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
-    set_llama4_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="llama4",
         flavor=flavor,
