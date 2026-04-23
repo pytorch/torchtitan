@@ -348,10 +348,35 @@ class TestTraceDTensor(unittest.TestCase):
             layout.meta is not None for layout in traced.input_subclass_layouts.values()
         )
         self.assertTrue(has_subclass)
+        placeholders = [n for n in traced.gm.graph.nodes if n.op == "placeholder"]
+        self.assertTrue(
+            all(isinstance(n.meta.get("val"), torch.Tensor) for n in placeholders)
+        )
 
         out_eager = model(tokens_dt)
         wrapped = run_traced_train_step(traced, model, tokens_dt)
         self.assertTrue(torch.equal(out_eager.full_tensor(), wrapped.full_tensor()))
+
+    def test_dtensor_graph_has_no_untyped_placeholders(self):
+        from torch.distributed._tensor import DTensor, Replicate
+        from torch.distributed.device_mesh import init_device_mesh
+
+        mesh = init_device_mesh(self.DEVICE, (1,))
+
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        self._distribute_params(model, mesh)
+
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
+
+        def forward(model, tokens):
+            return model(tokens)
+
+        traced = trace_train_step(forward)(model, tokens_dt)
+        placeholders = [n for n in traced.gm.graph.nodes if n.op == "placeholder"]
+        self.assertTrue(
+            all(isinstance(n.meta.get("val"), torch.Tensor) for n in placeholders)
+        )
 
     def test_dtensor_train_step(self):
         from torch.distributed._tensor import DTensor, Replicate
