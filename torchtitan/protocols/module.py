@@ -24,6 +24,30 @@ from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 _created_classes: dict[type, type] = {}
 
 
+def _assert_matching_placements(
+    *,
+    owner: str,
+    kind: str,
+    name: str,
+    existing: tuple,
+    expected: tuple,
+) -> None:
+    """Raise if an already-distributed tensor's placements disagree with spec.
+
+    When a param/buffer is already a DTensor at parallelize time, it was
+    distributed by a sibling module sharing the same underlying tensor
+    (e.g. weight tying). The two sides must agree on sharding; otherwise
+    tying has been wired across incompatible sharding configs.
+    """
+    if tuple(existing) != tuple(expected):
+        raise ValueError(
+            f"{owner}.{name} ({kind}) is already a DTensor with placements "
+            f"{tuple(existing)}, but its sharding_spec expects {tuple(expected)}. "
+            "This usually means a tied parameter is referenced by two modules "
+            "with conflicting sharding_spec entries."
+        )
+
+
 class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
@@ -38,7 +62,7 @@ class Module(nn.Module, Configurable):
     _param_init: dict[str, Callable] | None = None
     _sharding_spec: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
-    _forward_wrapped: bool = False
+    _parallelized: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -189,6 +213,13 @@ class Module(nn.Module, Configurable):
 
         CP (applied before ``parallelize``) is captured inside ``local_map``.
         """
+        if self._parallelized:
+            raise ValueError(
+                f"{type(self).__name__} has already been parallelized. "
+                "Module.parallelize() must be called at most once per instance."
+            )
+        self._parallelized = True
+
         # Recurse children first
         queue = list(self.children())
         while queue:
@@ -209,23 +240,44 @@ class Module(nn.Module, Configurable):
         # Distribute parameters and buffers per state_shardings. Every spec
         # must declare a placement for every mesh dim; ``resolve_placements``
         # raises otherwise.
+        #
+        # An already-DTensor param/buffer indicates it was distributed by a
+        # sibling Module that shares the underlying tensor (e.g. weight tying:
+        # ``self.tok_embeddings.weight = self.output.weight``). Skip the
+        # re-distribute, but verify the existing placements match this spec —
+        # a mismatch means tying wired together two modules with conflicting
+        # sharding configs, which would silently corrupt state.
         for name, param in self.named_parameters(recurse=False):
-            if name not in spec.state_shardings or isinstance(param, DTensor):
+            if name not in spec.state_shardings:
                 continue
             placements = resolve_placements(spec.state_shardings[name], mesh_dim_names)
+            if isinstance(param, DTensor):
+                _assert_matching_placements(
+                    owner=type(self).__name__,
+                    kind="parameter",
+                    name=name,
+                    existing=param.placements,
+                    expected=placements,
+                )
+                continue
             self.register_parameter(
                 name,
                 nn.Parameter(distribute_tensor(param, mesh, list(placements))),
             )
 
         for name, buffer in self.named_buffers(recurse=False):
-            if (
-                name not in spec.state_shardings
-                or buffer is None
-                or isinstance(buffer, DTensor)
-            ):
+            if name not in spec.state_shardings or buffer is None:
                 continue
             placements = resolve_placements(spec.state_shardings[name], mesh_dim_names)
+            if isinstance(buffer, DTensor):
+                _assert_matching_placements(
+                    owner=type(self).__name__,
+                    kind="buffer",
+                    name=name,
+                    existing=buffer.placements,
+                    expected=placements,
+                )
+                continue
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -233,43 +285,39 @@ class Module(nn.Module, Configurable):
                 persistent=persistent,
             )
 
-        # Wrap forward with redistribution (+ local_map if needed).
-        # Skip if already wrapped (idempotent for post-init_weights calls).
-        if not self._forward_wrapped:
-            # Cache positional arg names of the original forward so _shard_inputs
-            # can read them from the cache instead of calling inspect every forward.
-            self._cache_pos_arg_names()
+        # Cache positional arg names of the original forward so _shard_inputs
+        # can read them from the cache instead of calling inspect every forward.
+        self._cache_pos_arg_names()
 
-            fn = self.forward
-            if spec.local_map is not None:
-                # Resolve each NamedPlacement to a positional tuple for the
-                # current mesh.
-                lm = spec.local_map
-                in_placements = tuple(
-                    resolve_placements(p, mesh_dim_names) for p in lm.in_placements
-                )
-                out_placements = tuple(
-                    resolve_placements(p, mesh_dim_names) for p in lm.out_placements
-                )
-                in_grad_placements = tuple(
-                    resolve_placements(p, mesh_dim_names) for p in lm.in_grad_placements
-                )
-                fn = local_map(
-                    fn,
-                    in_placements=in_placements,
-                    out_placements=out_placements,
-                    in_grad_placements=in_grad_placements,
-                    device_mesh=mesh,
-                    redistribute_inputs=True,
-                )
+        fn = self.forward
+        if spec.local_map is not None:
+            # Resolve each NamedPlacement to a positional tuple for the
+            # current mesh.
+            lm = spec.local_map
+            in_placements = tuple(
+                resolve_placements(p, mesh_dim_names) for p in lm.in_placements
+            )
+            out_placements = tuple(
+                resolve_placements(p, mesh_dim_names) for p in lm.out_placements
+            )
+            in_grad_placements = tuple(
+                resolve_placements(p, mesh_dim_names) for p in lm.in_grad_placements
+            )
+            fn = local_map(
+                fn,
+                in_placements=in_placements,
+                out_placements=out_placements,
+                in_grad_placements=in_grad_placements,
+                device_mesh=mesh,
+                redistribute_inputs=True,
+            )
 
-            def with_redistribution(*args, **kwargs):
-                args, kwargs = self._shard_inputs(mesh, args, kwargs)
-                outputs = fn(*args, **kwargs)
-                return self._shard_outputs(mesh, outputs)
+        def with_redistribution(*args, **kwargs):
+            args, kwargs = self._shard_inputs(mesh, args, kwargs)
+            outputs = fn(*args, **kwargs)
+            return self._shard_outputs(mesh, outputs)
 
-            self.forward = with_redistribution
-            self._forward_wrapped = True
+        self.forward = with_redistribution
 
     def _shard_inputs(
         self,

@@ -15,8 +15,6 @@ TP sharding is handled by ``Module.parallelize(spmd_mesh)`` using
 config-based ``ShardingSpec``.
 """
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -29,19 +27,17 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 
 def validate_config(
     parallel_dims: ParallelDims,
-    model_spec: Any,
-    model_config: Any,
+    model: nn.Module,
 ) -> None:
     """Validate that the current configuration is compatible with full DTensor.
 
-    Raises NotImplementedError with a clear message if incompatible.
+    Walks ``model`` to discover the actual attention modules in use and
+    raises ``NotImplementedError`` with a clear message if incompatible.
     """
-    if model_spec.name != "llama3":
-        raise NotImplementedError(
-            f"full_dtensor is currently only implemented for llama3, "
-            f"got model {model_spec.name!r}. Disable full_dtensor or switch "
-            "to llama3."
-        )
+    from torchtitan.models.common.attention import (
+        ScaledDotProductAttention,
+        VarlenAttention,
+    )
 
     if parallel_dims.ep_enabled:
         raise NotImplementedError(
@@ -49,18 +45,19 @@ def validate_config(
             "Disable EP or disable full_dtensor."
         )
 
-    layers = getattr(model_config, "layers", None)
-    layer = layers[0] if layers else None
-    attn_config = getattr(layer, "attention", None) if layer else None
-    attn_backend = getattr(attn_config, "attn_backend", "sdpa")
-    if parallel_dims.cp_enabled and attn_backend in ("sdpa", "varlen"):
-        raise NotImplementedError(
-            f"full_dtensor + CP is not supported with {attn_backend} attention. "
-            "After K/V all-gather on CP, Q and K/V have asymmetric sequence "
-            "lengths, which sdpa/varlen cannot handle with is_causal=True. "
-            "Use FlexAttention (e.g. --config llama3_debugmodel_flex_attn) "
-            "or disable CP."
-        )
+    if parallel_dims.cp_enabled:
+        for m in model.modules():
+            if isinstance(m, (ScaledDotProductAttention, VarlenAttention)):
+                backend = (
+                    "sdpa" if isinstance(m, ScaledDotProductAttention) else "varlen"
+                )
+                raise NotImplementedError(
+                    f"full_dtensor + CP is not supported with {backend} attention. "
+                    "After K/V all-gather on CP, Q and K/V have asymmetric sequence "
+                    "lengths, which sdpa/varlen cannot handle with is_causal=True. "
+                    "Use FlexAttention (e.g. --config llama3_debugmodel_flex_attn) "
+                    "or disable CP."
+                )
 
 
 def get_dense_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:

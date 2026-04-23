@@ -44,6 +44,9 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

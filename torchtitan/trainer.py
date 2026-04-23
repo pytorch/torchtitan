@@ -250,9 +250,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.model_config = model_config
 
-        if config.parallelism.full_dtensor:
-            full_dtensor.validate_config(parallel_dims, model_spec, model_config)
-
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
         with (

@@ -32,7 +32,11 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.full_dtensor import get_dense_spmd_mesh, resolve_fsdp_mesh
+from torchtitan.distributed.full_dtensor import (
+    get_dense_spmd_mesh,
+    resolve_fsdp_mesh,
+    validate_config,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -65,6 +69,7 @@ def parallelize_llama(
         """
 
     if parallelism.full_dtensor:
+        validate_config(parallel_dims, model)
         # Full DTensor: use multi-D SPMD mesh. CP is handled declaratively
         # via LocalMapSpec (K/V Replicate on CP dim), not apply_cp_to_forward.
         spmd_mesh = get_dense_spmd_mesh(parallel_dims)
