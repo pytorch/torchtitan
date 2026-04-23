@@ -32,12 +32,17 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
+    create_flex_block_mask,
     create_positions_from_seq_lens,
     create_varlen_metadata,
     extract_response_logprobs,
+    pad_to_block_aligned,
+    unpad_from_block_aligned,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.types import TrainBatch
+from torchtitan.models.common.attention import FlexAttention
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -78,6 +83,9 @@ class PolicyTrainer(Actor, Configurable):
         loss: Configurable.Config = field(default_factory=Configurable.Config)
         ac_config: ActivationCheckpointConfig = field(
             default_factory=lambda: ActivationCheckpointConfig(mode="none")
+        )
+        model_converters: ModelConvertersContainer.Config = field(
+            default_factory=ModelConvertersContainer.Config
         )
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
@@ -130,8 +138,26 @@ class PolicyTrainer(Actor, Configurable):
         else:
             self.sd_adapter = None
 
+        # Detect attention backend for mask creation
+        inner_attn_cfg = model_spec.model.layers[0].attention.inner_attention
+        self._use_flex = isinstance(inner_attn_cfg, FlexAttention.Config)
+        self._batch_invariant = config.debug.batch_invariant
+        if self._use_flex:
+            self._flex_block_size = inner_attn_cfg.block_size
+
+        # Build model converters (e.g. float8). No-op if converters list is empty.
+        model_compile_enabled = (
+            config.compile.enable and "model" in config.compile.components
+        )
+        model_converters = config.model_converters.build(
+            parallel_dims=self.parallel_dims,
+            model_compile_enabled=model_compile_enabled,
+        )
+
         # Create training policy model
-        model = self._build_model(model_spec, config, device_type, hf_assets_path)
+        model = self._build_model(
+            model_spec, config, model_converters, device_type, hf_assets_path
+        )
         model.train()
         self.model = model
         self.model_parts = [model]
@@ -141,6 +167,14 @@ class PolicyTrainer(Actor, Configurable):
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
+        )
+
+        # Post optimizer step model converters hook.
+        # e.g. calculate float8 dynamic amax/scale for FSDP2
+        self.optimizers.register_step_post_hook(
+            lambda *args, **kwargs: model_converters.post_optimizer_hook(
+                self.model_parts
+            )
         )
 
         self.policy_version = 0
@@ -198,6 +232,7 @@ class PolicyTrainer(Actor, Configurable):
         self,
         model_spec: ModelSpec,
         config: Config,
+        model_converters: ModelConvertersContainer,
         device_type: str,
         hf_assets_path: str,
     ):
@@ -206,6 +241,7 @@ class PolicyTrainer(Actor, Configurable):
         Args:
             model_spec: Model specification for building and parallelizing.
             config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
+            model_converters: Built model converters instance for pre-parallelize conversion.
             device_type: Device type string (e.g. "cuda").
             hf_assets_path: Path to HF assets folder for checkpoint loading.
 
@@ -213,26 +249,24 @@ class PolicyTrainer(Actor, Configurable):
             Initialized model with weights loaded from checkpoint.
         """
 
-        # TODO: Also support flex attention backend later.
         from torchtitan.models.common.attention import VarlenAttention
 
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
-        ), "Only varlen attention backend is allowed."
-
-        # Fill sharding configs on the config BEFORE build via the
-        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
-        # ``torchtitan.Trainer``'s call, so we invoke it directly).
-        model_spec.model.update_from_config(trainer_config=config)
+            inner_attn, (VarlenAttention.Config, FlexAttention.Config)
+        ), f"Only varlen and flex attention backends are allowed, got {type(inner_attn)}."
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
 
+        model_converters.convert(model)
+
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
             training=config.training,
+            model_converters=config.model_converters,
             parallelism=config.parallelism,
             compile_config=config.compile,
             ac_config=config.ac_config,
@@ -281,12 +315,35 @@ class PolicyTrainer(Actor, Configurable):
                 f"generation max_tokens."
             )
 
-        attention_masks = create_varlen_metadata(seq_lens, device)
-        positions = create_positions_from_seq_lens(seq_lens, device)
+        if self._use_flex and self._batch_invariant:
+            attention_masks, maybe_padded_seq_lens = create_flex_block_mask(
+                seq_lens, device, self._flex_block_size
+            )
+            padded_ids, positions = pad_to_block_aligned(
+                token_ids.squeeze(0), seq_lens, maybe_padded_seq_lens, device
+            )
+            logits = self.model(
+                padded_ids, attention_masks=attention_masks, positions=positions
+            )
+            logits = unpad_from_block_aligned(logits, seq_lens, maybe_padded_seq_lens)
+            token_ids = unpad_from_block_aligned(
+                padded_ids, seq_lens, maybe_padded_seq_lens
+            )
+        elif self._use_flex:
+            attention_masks, _ = create_flex_block_mask(
+                seq_lens, device, self._flex_block_size
+            )
+            positions = create_positions_from_seq_lens(seq_lens, device)
+            logits = self.model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
+        else:
+            attention_masks = create_varlen_metadata(seq_lens, device)
+            positions = create_positions_from_seq_lens(seq_lens, device)
+            logits = self.model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
 
-        logits = self.model(
-            token_ids, attention_masks=attention_masks, positions=positions
-        )
         all_policy_logprobs = compute_logprobs(logits, token_ids)
         policy_logprobs = extract_response_logprobs(
             all_policy_logprobs, seq_lens, prompt_lens, response_lens

@@ -19,6 +19,8 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
+
+_BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 from torchtitan.experiments.rl.actors.generator import (
     GeneratorCompileConfig,
     SamplingConfig,
@@ -31,10 +33,14 @@ from torchtitan.models.qwen3 import model_registry
 
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
+    """GRPO training config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train)."""
+    spec = model_registry("0.6B", attn_backend="flex")
+    for layer_cfg in spec.model.layers:
+        layer_cfg.attention.inner_attention.kernel_options["SPLIT_KV"] = 1
+        layer_cfg.attention.inner_attention.kernel_options["FORCE_USE_FLEX_ATTENTION"] = True
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        model_spec=spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_prompts_per_step=5,
@@ -49,23 +55,25 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
+            compile=CompileConfig(enable=False),
+            debug=_BATCH_INVARIANT_DEBUG,
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
+            gpu_memory_limit=0.7,
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
             sampling=SamplingConfig(
@@ -74,6 +82,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
+            debug=_BATCH_INVARIANT_DEBUG,
+            vllm_attn_backend="flex",
         ),
     )
 
