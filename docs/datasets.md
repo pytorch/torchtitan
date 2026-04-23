@@ -1,26 +1,27 @@
 # Custom Datasets in torchtitan
 
-`torchtitan` is designed to work seamlessly with most HuggingFace datasets. While we provide the C4 dataset for numerics and convergence testing, you can easily add support for your own datasets. Here's how to do it using Wikipedia as an example.
+`torchtitan` is designed to work seamlessly with most HuggingFace datasets. It supports three training flavours — **pre-training** (plain text), **instruction-tuning / SFT** (chat), and **multimodal** (vision) — each with its own dataloader. Both text flavours support single-source and multi-source interleaved configurations.
 
-## Quick Start
-Locate the dataset configuration file:
+## Dataset file locations
+
 ```
-torchtitan/datasets/hf_datasets/hf_datasets.py
+torchtitan/hf_datasets/text_datasets.py        # pre-training and SFT
+torchtitan/hf_datasets/multimodal/mm_datasets.py  # vision
 ```
 
-## Adding Your Dataset
-You'll need to add three components:
-1. A dataset loader function
-2. A sample processor function
-3. A dataset configuration entry
+---
 
-### 1. Define Dataset Loader
-Create a function that specifies how to load your dataset:
+## Pre-training datasets
+
+### Adding a custom text dataset
+
+You need three components: a loader function, a sample processor, and a registry entry.
+
+#### 1. Define a dataset loader
 
 ```python
 def load_wikipedia_dataset(dataset_path: str, **kwargs):
     """Load Wikipedia dataset with specific configuration."""
-    logger.info("Loading Wikipedia dataset...")
     return load_dataset(
         dataset_path,
         name="20220301.en",
@@ -30,47 +31,146 @@ def load_wikipedia_dataset(dataset_path: str, **kwargs):
     )
 ```
 
-### 2. Define Sample Processor
-Create a function that processes individual samples from your dataset:
+#### 2. Define a sample processor
 
 ```python
-def process_wikipedia_text(sample: Dict[str, Any]) -> str:
+def process_wikipedia_text(sample: dict[str, Any]) -> str:
     """Process Wikipedia dataset sample text."""
     return f"{sample['title']}\n\n{sample['text']}"
 ```
 
-### 3. Register Your Dataset
-Add your dataset configuration to the DATASETS dictionary:
+#### 3. Register your dataset
 
 ```python
 DATASETS = {
     # ... existing datasets ...
     "wikipedia": DatasetConfig(
-        path="wikipedia",  # default HuggingFace dataset path
+        path="wikipedia",
         loader=load_wikipedia_dataset,
         sample_processor=process_wikipedia_text,
     ),
 }
 ```
 
-### 4. Configure Your Training
-In your config_registry function, set your dataset:
+#### 4. Configure training
 
 ```python
 dataloader=HuggingFaceTextDataLoader.Config(
     dataset="wikipedia",
+    infinite=True,
 ),
 ```
 
-That's it! Your custom dataset is now ready to use with `torchtitan`.
+---
 
-## Key Points
-- The DatasetConfig contains all necessary components for a dataset:
-  - `path`: The default path to the dataset (can be overridden during training)
-  - `loader`: Function to load the dataset
-  - `sample_processor`: Function to process individual samples
-- The loader function should return a HuggingFace dataset object
-- The processor function should return a string that combines the relevant fields from your dataset
-- Use `streaming=True` for large datasets to manage memory efficiently
+## Instruction-tuning / SFT datasets (chat)
 
-Now you can start training with your custom dataset!
+The `ChatDataLoader` handles single-turn `[user, assistant]` message pairs. It tokenizes samples using the model's chat template, masks prompt tokens in labels so loss is computed on the assistant response only, and packs multiple short samples into each sequence.
+
+### Configuring a chat dataloader
+
+```python
+from torchtitan.hf_datasets.text_datasets import ChatDataLoader
+
+def process_gsm8k(sample: dict) -> list[dict]:
+    return [
+        {"role": "user",      "content": sample["question"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]
+
+dataloader=ChatDataLoader.Config(
+    dataset_path="openai/gsm8k",
+    load_dataset_kwargs={"name": "main", "split": "train"},
+    sample_processor=process_gsm8k,
+    infinite=True,
+),
+```
+
+---
+
+## Multi-source interleaved dataloaders
+
+Both text flavours support interleaving multiple sources with configurable sampling weights. At each step a source is drawn proportionally to its weight. Iteration stops when the first source is exhausted, defining an epoch boundary — re-looping and shuffling are handled per source exactly as in the single-source case.
+
+All sources must share the same `infinite` setting.
+
+### Interleaved pre-training
+
+```python
+from torchtitan.hf_datasets.text_datasets import (
+    HFDataSource,
+    InterleavedHuggingFaceTextDataLoader,
+)
+
+dataloader=InterleavedHuggingFaceTextDataLoader.Config(
+    sources=[
+        HFDataSource(dataset="c4",         weight=7.0, infinite=True),
+        HFDataSource(dataset="wikipedia",  weight=2.0, infinite=True),
+        HFDataSource(dataset="my_dataset", weight=1.0, infinite=True),
+    ],
+    seed=42,
+),
+```
+
+### Interleaved SFT
+
+```python
+from torchtitan.hf_datasets.text_datasets import (
+    ChatDataSource,
+    InterleavedChatDataLoader,
+)
+
+def process_gsm8k(sample):
+    return [
+        {"role": "user",      "content": sample["question"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]
+
+def process_alpaca(sample):
+    return [
+        {"role": "user",      "content": sample["instruction"]},
+        {"role": "assistant", "content": sample["output"]},
+    ]
+
+dataloader=InterleavedChatDataLoader.Config(
+    sources=[
+        ChatDataSource(
+            dataset_path="openai/gsm8k",
+            load_dataset_kwargs={"name": "main", "split": "train"},
+            sample_processor=process_gsm8k,
+            weight=3.0,
+            infinite=True,
+        ),
+        ChatDataSource(
+            dataset_path="tatsu-lab/alpaca",
+            load_dataset_kwargs={"split": "train"},
+            sample_processor=process_alpaca,
+            weight=1.0,
+            infinite=True,
+        ),
+    ],
+    seed=42,
+),
+```
+
+### Weight semantics
+
+Weights are **sampling probabilities**, normalised internally. A weight of `3.0` alongside `1.0` means the first source is drawn three times as often on average — it does not mean the source is iterated three times per epoch. The epoch boundary is defined by whichever source exhausts first.
+
+This makes weights easy to reason about as a **token mixture ratio**: if source A has weight 3 and source B has weight 1, roughly 75 % of training tokens will come from A and 25 % from B, regardless of the absolute dataset sizes.
+
+### Checkpointing
+
+Interleaved dataloaders are fully stateful. The interleaver RNG and the state of every source are saved together, so resuming from a checkpoint produces byte-identical continuations.
+
+---
+
+## Summary
+
+| Use case | Dataloader |
+|---|---|
+| Single pre-training source | `HuggingFaceTextDataLoader` |
+| Multiple pre-training sources | `InterleavedHuggingFaceTextDataLoader` |
+| Single SFT source | `ChatDataLoader` |
+| Multiple SFT sources | `InterleavedChatDataLoader` |
+| Multimodal (vision + text) | `MultiModalDataLoader` |
