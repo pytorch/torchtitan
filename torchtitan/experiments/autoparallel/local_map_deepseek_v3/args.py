@@ -47,3 +47,31 @@ def get_sample_config() -> DeepSeekV3ModelArgs:
         v_head_dim=128,
         mscale=0.70,
     )
+
+
+def get_16b_sdpa_config() -> DeepSeekV3ModelArgs:
+    return DeepSeekV3ModelArgs(
+        vocab_size=102400,
+        max_seq_len=4096,
+        dim=2048,
+        inter_dim=10944,
+        moe_inter_dim=1408,
+        n_layers=27,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=_MoEArgs(
+            num_experts=64,
+            num_shared_experts=2,
+            top_k=6,
+            score_func="softmax",
+            route_norm=False,
+            score_before_experts=False,
+            mesh=None,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        mscale=0.70,
+    )
