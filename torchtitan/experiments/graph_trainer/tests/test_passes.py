@@ -22,7 +22,6 @@ from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
-    _AC_REGION_ID,
     _MODULE_FQN,
     annotate_module_fqns,
 )
@@ -40,6 +39,12 @@ from torchtitan.experiments.graph_trainer.passes import (
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
+    TestCpuOffloadPass,
+)
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
+    TestCustomCodegenPass,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
@@ -266,7 +271,10 @@ class TestApplySACPass(TestCase):
                 # If the next op is getitem, wrap in a tuple so getitem has
                 # a proper tuple/list input.
                 if i + 1 < len(op_targets) and op_targets[i + 1] is operator.getitem:
-                    _make_tuple = lambda x: (x, x)
+
+                    def _make_tuple(x):
+                        return (x, x)
+
                     last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -297,7 +305,7 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
     def test_getitem_propagates_parent_tags(self):
-        """operator.getitem nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -311,19 +319,14 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].target, torch.ops.aten.add.Tensor)
         self.assertEqual(nodes[2].target, operator.getitem)
 
-        # Set ac_region_id on the tuple-returning parent (the direct parent of getitem)
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 3}
-
         apply_sac_pass(gm)
 
         tuple_node = nodes[1]
         getitem_node = nodes[2]
         self.assertEqual(getitem_node.meta["recompute"], tuple_node.meta["recompute"])
-        self.assertEqual(tuple_node.meta["ac_graph_id"], 3)
-        self.assertEqual(getitem_node.meta["ac_graph_id"], 3)
 
     def test_wait_tensor_propagates_parent_tags(self):
-        """wait_tensor nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """wait_tensor nodes should inherit the parent's recompute tag."""
         custom_save = {torch.ops._c10d_functional.reduce_scatter_tensor.default}
         gm = self._build_gm(
             [
@@ -332,7 +335,7 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 3}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.3.attention"}
 
         apply_sac_pass(gm, op_list_to_save=custom_save)
 
@@ -340,25 +343,9 @@ class TestApplySACPass(TestCase):
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
-        self.assertEqual(rs_node.meta["ac_graph_id"], 3)
-        self.assertEqual(wait_node.meta["ac_graph_id"], 3)
 
-    def test_ac_graph_id_defaults_to_zero(self):
-        """Nodes without ac_region_id annotation should have ac_graph_id = 0."""
-        gm = self._build_gm(
-            [
-                torch.ops.aten.add.Tensor,
-                torch.ops.aten.mm.default,
-                torch.ops.aten.relu.default,
-            ]
-        )
-        apply_sac_pass(gm)
-        for node in self._get_call_function_nodes(gm):
-            if node.target is not operator.getitem:
-                self.assertEqual(node.meta["ac_graph_id"], 0)
-
-    def test_ac_graph_id_from_annotation(self):
-        """Nodes with _AC_REGION_ID_KEY in custom metadata should use that as ac_graph_id."""
+    def test_boundary_nodes_forced_to_must_save(self):
+        """Nodes at AC region boundaries should be forced to MUST_SAVE."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -366,14 +353,14 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        # Simulate annotate_fn setting custom metadata on different nodes
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 1}
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 2}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
+        nodes[1].meta["custom"] = {_MODULE_FQN: "layers.1.attention"}
 
         apply_sac_pass(gm)
 
-        self.assertEqual(nodes[0].meta["ac_graph_id"], 1)
-        self.assertEqual(nodes[1].meta["ac_graph_id"], 2)
+        # add is at the boundary (layer 0 -> layer 1), forced to MUST_SAVE
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(nodes[1].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
     def test_custom_op_list_to_save(self):
         """A custom op_list_to_save should override the defaults."""
@@ -400,11 +387,11 @@ class TestApplySACPass(TestCase):
         custom_save = {torch.ops.aten.mm.default, torch.ops.aten.max.default}
         gm = self._build_gm(
             [
-                torch.ops.aten.mm.default,  # 1st mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.max.default,  # in save list -> MUST_SAVE
-                torch.ops.aten.mm.default,  # 2nd mm -> PREFER_RECOMPUTE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.add.Tensor,  # not in save list -> PREFER_RECOMPUTE
-                torch.ops.aten.mm.default,  # 3rd mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
             ]
         )
         apply_sac_pass(gm, op_list_to_save=custom_save)
@@ -412,7 +399,7 @@ class TestApplySACPass(TestCase):
         expected = [
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.max.default, CheckpointPolicy.MUST_SAVE),
-            (torch.ops.aten.mm.default, CheckpointPolicy.PREFER_RECOMPUTE),
+            (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.add.Tensor, CheckpointPolicy.PREFER_RECOMPUTE),
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
         ]
@@ -907,12 +894,6 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 2)
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
-
-
-# Import TestCustomCodegenPass so it's discoverable when running this file
-from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
-    TestCustomCodegenPass,
-)
 
 
 class TestAnnotateModuleFqns(TestCase):

@@ -445,6 +445,13 @@ class Qwen3VLModel(Qwen3Model):
                 f"but {num_vision_embeds} vision embeddings."
             )
 
+        # TODO(@shuhuayu): Replace boolean indexing with DTensor-compatible ops
+        # so this clone() is no longer needed.
+        # clone() is needed because hidden_states may be a view (from
+        # PrepareModuleInputOutput's to_local()) and the in-place boolean
+        # scatter below conflicts with autograd's custom backward on views.
+        hidden_states = hidden_states.clone()
+
         hidden_states[vision_pos_masks] = (
             hidden_states[vision_pos_masks] + vision_embeds
         )
