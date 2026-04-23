@@ -27,7 +27,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3Model, Qwen3TransformerBlock
 from .parallelize import parallelize_qwen3
-from .sharding import set_qwen3_sharding_spec
 from .state_dict_adapter import Qwen3StateDictAdapter
 
 __all__ = [
@@ -624,7 +623,6 @@ def model_registry(
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
-    set_qwen3_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,

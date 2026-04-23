@@ -18,6 +18,27 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 _MODULE_FQN = "module_fqn"
+_NOT_IN_LAYERS = -1
+
+
+def _is_backward_node(node: torch.fx.Node) -> bool:
+    return node.meta.get("autograd_backward", False)
+
+
+def _get_layer_id(node: torch.fx.Node) -> int:
+    """Extract the layer index from the node's module_fqn metadata.
+
+    Nodes under ``layers.<N>`` return ``N``.
+    All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
+    """
+    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    parts = fqn.split(".")
+    if parts[0] == "layers" and len(parts) >= 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return _NOT_IN_LAYERS
 
 
 def annotate_module_fqns(model: nn.Module) -> None:

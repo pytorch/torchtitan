@@ -9,7 +9,6 @@ from dataclasses import fields
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.llama3 import llama3_configs
-from torchtitan.models.llama3.sharding import set_llama3_sharding_spec
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -29,7 +28,6 @@ def model_registry(
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
-    set_llama3_sharding_spec(config, loss_parallel=True, enable_sp=False)
     return ModelSpec(
         name="graph_trainer/llama3",
         flavor=flavor,

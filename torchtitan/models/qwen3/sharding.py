@@ -13,14 +13,13 @@ from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
-    replicate_norm_spec,
-    sequence_parallel_spec,
+    norm_spec,
     set_decoder_sharding_spec,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
 )
-from torchtitan.protocols.sharding import ShardingSpec
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
@@ -51,9 +50,9 @@ def _set_qwen3_layer_sharding(
     attention = layer_cfg.attention
     assert isinstance(attention, GQAttention.Config)
 
-    norm_spec = sequence_parallel_spec() if enable_sp else replicate_norm_spec()
-    layer_cfg.attention_norm.sharding_spec = norm_spec
-    layer_cfg.ffn_norm.sharding_spec = norm_spec
+    norm = norm_spec(enable_sp=enable_sp)
+    layer_cfg.attention_norm.sharding_spec = norm
+    layer_cfg.ffn_norm.sharding_spec = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
@@ -61,7 +60,7 @@ def _set_qwen3_layer_sharding(
 
     # QK norms: shard on head dim (dim=2) — independent of SP.
     if attention.qk_norm is not None:
-        attention.qk_norm.sharding_spec = ShardingSpec(
+        attention.qk_norm.sharding_spec = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=Replicate())},
             in_src_shardings={"input": dense_activation_placement(tp=Shard(2))},
             in_dst_shardings={"input": dense_activation_placement(tp=Shard(2))},
