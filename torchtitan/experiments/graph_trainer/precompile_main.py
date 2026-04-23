@@ -429,7 +429,10 @@ def _precompile_aot_fx_trace(
 
     # TODO: Remove this filter once upstream manual_overlap_bucketing
     # supports make_fx-traced graphs where collective group_name args
-    # are FX Node references instead of string literals.
+    # are FX Node references instead of string literals. The bucketing
+    # and comm_analysis code crashes with
+    # "AttributeError: 'Node' object has no attribute 'size'" or
+    # "assert isinstance(group_name, str)".
     passes = [
         p
         for p in passes
