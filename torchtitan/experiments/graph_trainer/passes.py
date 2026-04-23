@@ -104,6 +104,7 @@ def compile_time_passes(
             flex_compile_config=FlexAttention.inductor_configs,
         ),
         regional_inductor_pass,
+        autobucketing_reordering_pass,
     ]
     if use_cudagraph:
         # Must run before custom_codegen_pass (last in pre_passes)

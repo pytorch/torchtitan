@@ -57,6 +57,47 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --parallelism.expert_tensor_parallel_degree=1
 ```
 
+### Benchmark
+
+Use `run_train.sh` with a small number of steps. Add flags to disable
+tensorboard, profiling, and flight recorder for cleaner timing.
+
+```bash
+# Llama3 8B aot_fx_trace (8×H100, FSDP+TP, 20 steps)
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --metrics.no-enable_tensorboard \
+    --profiling.no-enable_profiling \
+    --comm.trace_buf_size=0 \
+    --training.steps 20
+
+# DeepSeek-v3 16B aot_fx_trace (8×H100, FSDP+TP+EP, 20 steps)
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --parallelism.expert_parallel_degree=2 \
+    --metrics.no-enable_tensorboard \
+    --profiling.no-enable_profiling \
+    --comm.trace_buf_size=0 \
+    --training.steps 20
+```
+
+Look at the last logged step for steady-state metrics (the first few steps
+include compilation overhead):
+
+```
+step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,376  tflops: 253.41  mfu: 25.62%
+```
+
+### Profiling
+
+Add `--profiling.enable_profiling` and/or `--profiling.enable_memory_snapshot`
+to any `run_train.sh` command. Traces go to `outputs/profile_traces/`,
+memory snapshots to `outputs/memory_snapshot/`.
+
 ### Tests
 
 ```bash

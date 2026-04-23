@@ -1,0 +1,14 @@
+commit	tps	memory_gib	status	mfu_pct	description
+4463e48	6938	46.9	keep	40.63	baseline
+xxxxxxx	6927	46.9	discard	40.57	regional inductor for all compute ops (no improvement)
+5b1ae19	7214	49.0	keep	42.24	autobucketing reordering pass for comm/compute overlap
+xxxxxxx	7215	49.0	discard	42.25	DCE pass (no improvement over existing cleanup)
+xxxxxxx	7223	49.0	discard	42.30	regional inductor + autobucketing (inductor adds nothing over autobucketing alone)
+xxxxxxx	5002	49.0	discard	29.29	autobucketing without cudagraph (30% regression from launch overhead)
+xxxxxxx	7199	49.0	discard	42.16	separate AG PG + autobucketing (no improvement)
+xxxxxxx	7159	49.0	discard	41.92	aggressive autobucketing params (worse than default)
+xxxxxxx	7200	49.0	discard	42.16	elementwise-only regional inductor (bug: 0 nodes tagged)
+xxxxxxx	0	0.0	crash	0.0	RoPE+MLP regional inductor (1920 nodes; numerics failed - complex mul/silu)
+xxxxxxx	0	0.0	crash	0.0	silu+mul only inductor (160 nodes; DSv3 numerics failed - sigmoid rounding)
+xxxxxxx	7221	49.0	discard	42.29	constant folding (no improvement)
+xxxxxxx	7225	48.9	discard	42.31	in-place op conversion (226 ops; no TPS improvement; -40MB memory)
