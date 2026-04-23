@@ -155,8 +155,12 @@ class RLTrainer(Configurable):
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
-        num_episodes_per_step: int = 5
-        """Number of episodes to create before every training step."""
+        num_prompts_per_step: int = 5
+        """Number of distinct prompts (= GRPO groups) drawn per training step.
+
+        The total episodes per step is ``num_prompts_per_step * group_size``,
+        where ``group_size`` is ``generator.sampling.n`` (completions per prompt).
+        """
 
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
@@ -409,30 +413,19 @@ class RLTrainer(Configurable):
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
-    def _rollout(
-        self,
-        num_problems: int,
-        n_per_problem: int,
-    ) -> list[Trajectory]:
-        """Run the GRPO group rollout: one env per problem, stepped ``n_per_problem`` times.
-
-        Each env pulls its problem from ``self._train_rng``. vLLM
-        returns ``num_problems * n_per_problem`` completions ordered by
-        problem index then sample-within-request; each drives one
-        single-turn step on its env.
-        """
-        envs = [SumDigitsEnv(self._train_rng) for _ in range(num_problems)]
+    def _collect_rollout(self, num_prompts: int) -> list[Trajectory]:
+        """Collect group rollouts: one single use env per prompt, scored and returned"""
+        group_size = self.config.generator.sampling.n
+        envs = [SumDigitsEnv(self._train_rng) for _ in range(num_prompts)]
         completions = self._get_rank_0_value(
             self.generator.generate.call([env.prompt for env in envs]).get()
         )
 
         trajectories: list[Trajectory] = []
         for sample_idx, env in enumerate(envs):
-            group = completions[
-                sample_idx * n_per_problem : (sample_idx + 1) * n_per_problem
-            ]
+            group = completions[sample_idx * group_size : (sample_idx + 1) * group_size]
             for c in group:
-                step = env.step(c.text)
+                step = env.step(c.text)  # Score the Completion
                 trajectories.append(
                     Trajectory(sample_idx=sample_idx, transitions=[(c, step)])
                 )
@@ -492,11 +485,11 @@ class RLTrainer(Configurable):
 
         # Score the first completion per prompt via the env. Completions come
         # back in prompt_idx order, length num_samples * n.
-        n = self.config.generator.sampling.n
+        group_size = self.config.generator.sampling.n
         correct = 0
         format_ok = 0
         for i, env in enumerate(envs):
-            c = completions[i * n]
+            c = completions[i * group_size]
             step = env.step(c.text)
             # Correct iff reward includes the +1.0 correctness component.
             correct += int(step.reward >= 1.0)
@@ -527,10 +520,7 @@ class RLTrainer(Configurable):
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
-            trajectories = self._rollout(
-                self.config.num_episodes_per_step,
-                self.config.generator.sampling.n,
-            )
+            trajectories = self._collect_rollout(self.config.num_prompts_per_step)
             episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
@@ -551,6 +541,7 @@ class RLTrainer(Configurable):
             self.trainer.push_model_state_dict.call().get()
             self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
 
+            # --- Logging --- #
             token_lens = [len(ep.token_ids) for ep in episodes]
             rewards = [ep.reward for ep in episodes]
             logger.info(
