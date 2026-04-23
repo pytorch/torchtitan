@@ -28,11 +28,14 @@ class StateDictMode(str, enum.Enum):
         config determines the exact behavior for interval vs export saves.
     BASE_EXTERNAL: Base model keys in external format. For building DCP load
         containers that match an HF checkpoint on disk.
+    CONVERTER_EXTERNAL: Converter-owned keys in external format. For building
+        DCP load containers or loading converter checkpoints (e.g. PEFT).
     """
 
     RAW = "raw"
     EXPORT = "export"
     BASE_EXTERNAL = "base_external"
+    CONVERTER_EXTERNAL = "converter_external"
 
 
 class ModelWrapper(Stateful):
@@ -51,6 +54,7 @@ class ModelWrapper(Stateful):
     Format helpers (pure transforms, no filtering):
 
     - ``to_hf(sd)`` / ``from_hf(sd)`` — base model native ↔ HF format
+    - ``converter_to_hf(sd)`` / ``converter_from_hf(sd)`` — converter native ↔ external format
 
     Key filtering is handled internally by ``state_dict(mode)`` and
     ``load_state_dict(sd, mode)`` via ``_partition()``.
@@ -64,6 +68,8 @@ class ModelWrapper(Stateful):
         sd_adapter: Base model state dict adapter providing ``to_hf``/``from_hf``.
             Callables are extracted during construction; the adapter reference
             is not stored.
+        converter_sd_adapter: Converter state dict adapter providing
+            ``to_hf``/``from_hf`` for the converter's external format.
         to_hf: Explicit callable override (used by tests). ``sd_adapter``
             takes precedence if both are provided.
         from_hf: Explicit callable override (used by tests).
@@ -78,6 +84,7 @@ class ModelWrapper(Stateful):
             Callable[[dict[str, Any], bool], dict[str, Any]] | None
         ) = None,
         sd_adapter: Any | None = None,
+        converter_sd_adapter: Any | None = None,
         to_hf: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         from_hf: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
@@ -86,6 +93,12 @@ class ModelWrapper(Stateful):
         self._converter_transform = converter_transform
         self._to_hf = sd_adapter.to_hf if sd_adapter else to_hf
         self._from_hf = sd_adapter.from_hf if sd_adapter else from_hf
+        self._converter_to_hf = (
+            converter_sd_adapter.to_hf if converter_sd_adapter else None
+        )
+        self._converter_from_hf = (
+            converter_sd_adapter.from_hf if converter_sd_adapter else None
+        )
 
     def _get_state_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +135,7 @@ class ModelWrapper(Stateful):
                 - RAW: all keys, native format, no transforms.
                 - EXPORT: converter-transformed for saves.
                 - BASE_EXTERNAL: base keys in external format (load container).
+                - CONVERTER_EXTERNAL: converter keys in external format (load container).
 
             last_step: Only used in EXPORT mode. Passed to
                 converter_transform so it can distinguish interval
@@ -133,6 +147,8 @@ class ModelWrapper(Stateful):
                 sd = self._converter_transform(sd, last_step)
         elif mode == StateDictMode.BASE_EXTERNAL:
             sd = self.to_hf(self._partition(sd, keep_converter=False))
+        elif mode == StateDictMode.CONVERTER_EXTERNAL:
+            sd = self.converter_to_hf(self._partition(sd, keep_converter=True))
         return sd
 
     def load_state_dict(
@@ -148,10 +164,15 @@ class ModelWrapper(Stateful):
 
                 - RAW: load as-is (native format).
                 - BASE_EXTERNAL: apply from_hf + partition before loading.
+                - CONVERTER_EXTERNAL: apply converter_from_hf + partition before loading.
                 - EXPORT: same as RAW (no reverse transform).
         """
         if mode == StateDictMode.BASE_EXTERNAL:
             state_dict = self._partition(self.from_hf(state_dict), keep_converter=False)
+        elif mode == StateDictMode.CONVERTER_EXTERNAL:
+            state_dict = self._partition(
+                self.converter_from_hf(state_dict), keep_converter=True
+            )
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=state_dict,
@@ -170,3 +191,15 @@ class ModelWrapper(Stateful):
         if self._from_hf is None:
             raise ValueError("from_hf requires a from_hf callable")
         return self._from_hf(hf_state_dict)
+
+    def converter_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert a native converter state dict to external format."""
+        if self._converter_to_hf is None:
+            raise ValueError("converter_to_hf requires a converter_to_hf callable")
+        return self._converter_to_hf(state_dict)
+
+    def converter_from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert an external format converter state dict to native format."""
+        if self._converter_from_hf is None:
+            raise ValueError("converter_from_hf requires a converter_from_hf callable")
+        return self._converter_from_hf(hf_state_dict)
