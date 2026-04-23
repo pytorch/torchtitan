@@ -46,6 +46,14 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
 
+    memory_budget: float = 0.5
+    """
+    Memory budget for ILP-based SAC (selective activation checkpointing).
+    Only used when "apply_ilp_sac" is in compile.joint_passes. Controls
+    the fraction of total activation memory that can be saved (0.0-1.0).
+    0.0 = recompute everything, 1.0 = save everything.
+    """
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:

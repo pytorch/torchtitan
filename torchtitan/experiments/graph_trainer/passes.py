@@ -724,6 +724,110 @@ def apply_sac_pass(
     return gm
 
 
+def apply_ilp_sac_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    memory_budget: float = 0.5,
+) -> torch.fx.GraphModule:
+    """Apply ILP-based selective activation checkpointing on the joint graph.
+
+    Uses an Integer Linear Program to decide which activations to save vs
+    recompute, minimizing recomputation time subject to a memory budget.
+
+    After ILP tagging, the same boundary pass as ``apply_sac_pass`` forces
+    ``MUST_SAVE`` on recomputable nodes whose output crosses a layer boundary.
+
+    ``getitem`` / ``wait_tensor`` nodes inherit the parent's policy.
+
+    Requires PuLP (``pip install pulp``).
+
+    Args:
+        gm: The joint forward-backward graph module.
+        memory_budget: Fraction of total activation memory to allow (0.0-1.0).
+            0.0 = recompute everything, 1.0 = save everything.
+
+    Returns:
+        The annotated graph module.
+    """
+    from torchtitan.experiments.graph_trainer.sac_ilp import solve_ilp_policy
+
+    logger.info(f"Solving ILP for SAC policy with memory_budget={memory_budget:.2f}")
+    ilp_policies = solve_ilp_policy(gm, memory_budget)
+
+    layer_stats: dict[int, dict[str, int]] = defaultdict(
+        lambda: {"save": 0, "recompute": 0}
+    )
+
+    # Pass 1: Tag each forward node with the ILP-computed policy.
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+
+        if _is_backward_node(node):
+            continue
+
+        if node.target in (
+            operator.getitem,
+            torch.ops._c10d_functional.wait_tensor.default,
+        ):
+            # Propagate from parent
+            parent = node.args[0]
+            if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
+                node.meta["recompute"] = parent.meta["recompute"]
+            continue
+
+        layer_id = _get_layer_id(node)
+
+        if node.name in ilp_policies:
+            policy = ilp_policies[node.name]
+        else:
+            # Nodes not in ILP (e.g. no backward consumers) default to recompute
+            policy = CheckpointPolicy.PREFER_RECOMPUTE
+
+        node.meta["recompute"] = policy
+        if policy == CheckpointPolicy.MUST_SAVE:
+            layer_stats[layer_id]["save"] += 1
+        else:
+            layer_stats[layer_id]["recompute"] += 1
+
+    # Pass 2: Force MUST_SAVE at layer boundaries (same as apply_sac_pass).
+    def _is_recomputable(n: torch.fx.Node) -> bool:
+        return n.meta.get("recompute") in (
+            CheckpointPolicy.PREFER_RECOMPUTE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+        )
+
+    boundary_saves = 0
+    for node in gm.graph.nodes:
+        if _is_backward_node(node) or not _is_recomputable(node):
+            continue
+        node_layer_id = _get_layer_id(node)
+        for user in node.users:
+            if (
+                not _is_backward_node(user)
+                and _is_recomputable(user)
+                and _get_layer_id(user) > node_layer_id
+            ):
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                boundary_saves += 1
+                break
+
+    gm.recompile()
+    logger.info(f"Applied ILP-based SAC pass (memory_budget={memory_budget:.2f}).")
+    if boundary_saves:
+        logger.info(f"  Forced {boundary_saves} nodes to MUST_SAVE at layer boundaries")
+    for layer_id in sorted(layer_stats):
+        stats = layer_stats[layer_id]
+        label = "non-layer" if layer_id == _NOT_IN_LAYERS else str(layer_id)
+        logger.info(
+            f"  Layer {label}: "
+            f"{stats['save']} MUST_SAVE, "
+            f"{stats['recompute']} PREFER_RECOMPUTE"
+        )
+    return gm
+
+
 def selective_activation_remat_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
@@ -975,5 +1079,6 @@ AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
+    "apply_ilp_sac": apply_ilp_sac_pass,
     "cpu_offload": cpu_offload_pass,
 }

@@ -582,7 +582,14 @@ def get_joint_custom_passes_from_config(
         if pass_name == "inductor_decomposition":
             continue
 
-        joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
+        pass_fn = AVAILABLE_JOINT_PASSES[pass_name]
+
+        # Bind per-pass config parameters via functools.partial
+        if pass_name == "apply_ilp_sac":
+            memory_budget = getattr(compile_config, "memory_budget", 0.5)
+            pass_fn = functools.partial(pass_fn, memory_budget=memory_budget)
+
+        joint_custom_passes.append(pass_fn)
 
     if joint_pass_names:
         logger.info(f"Using joint passes from config: {joint_pass_names}")
