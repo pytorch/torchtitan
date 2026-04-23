@@ -24,7 +24,10 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.fsdp import disable_fsdp_gradient_division
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -116,6 +119,9 @@ def apply_fsdp(
 
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
+
+    if parallelism.enable_fsdp_symm_mem:
+        enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
@@ -223,6 +229,9 @@ def parallelize_encoders(
         fully_shard(block, **fsdp_config)
     # pyrefly: ignore [no-matching-overload]
     fully_shard(t5_model.hf_module, **fsdp_config)
+
+    if parallelism.enable_fsdp_symm_mem:
+        enable_fsdp_symm_mem(t5_model.hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     # pyrefly: ignore [bad-argument-type]
