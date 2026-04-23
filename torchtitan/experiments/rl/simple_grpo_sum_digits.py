@@ -12,9 +12,8 @@ This demonstrates:
    running on separate GPU meshes
 2. Weight synchronization across meshes: trainer gathers full (unsharded) weights,
    generator reshards to match its own parallelism layout via distribute_tensor
-3. Separate scoring component for reward and advantage computation
-
-The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
+3. Envs driven rollouts; reward and advantage computation live inline
+   in the controller.
 
 Command to run:
 python3 torchtitan/experiments/rl/simple_grpo_sum_digits.py \
@@ -24,8 +23,9 @@ python3 torchtitan/experiments/rl/simple_grpo_sum_digits.py \
 
 import asyncio
 import logging
+import math
 import os
-import re
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -38,10 +38,9 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
-from torchtitan.experiments.rl.actors.grader import Grader
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsTask
-from torchtitan.experiments.rl.types import Completion, Episode, TrainBatch
+from torchtitan.experiments.rl.sum_digits import format_reward, SumDigitsEnv
+from torchtitan.experiments.rl.types import Completion, Episode, TrainBatch, Trajectory
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -195,7 +194,7 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        self.task = SumDigitsTask(seed=42)
+        self._train_rng = random.Random(42)
         self._proc_meshes = []
 
     async def cleanup(self):
@@ -275,9 +274,9 @@ class RLTrainer(Configurable):
     ):
         """Spawn Monarch actors on separate meshes and initialize weights.
 
-        Creates separate GPU meshes for trainer and generator, a CPU mesh for
-        the grader, and synchronizes initial weights from trainer to generator.
-        Must be called before :meth:`train`.
+        Creates separate GPU meshes for trainer and generator and
+        synchronizes initial weights from trainer to generator. Must be
+        called before :meth:`train`.
 
         Args:
             host_mesh: Optional multi-node HostMesh. When provided,
@@ -308,8 +307,6 @@ class RLTrainer(Configurable):
             f"{self.generator_world_size} generator GPUs + "
             f"{self.trainer_world_size} trainer GPUs = {total_gpus} total"
         )
-
-        self.system_prompt = self.task.get_system_prompt()
 
         self._multi_node = host_mesh is not None
 
@@ -358,8 +355,6 @@ class RLTrainer(Configurable):
                 per_host={"gpus": generator_gpus_per_node},
                 bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
             )
-            # Grader runs on CPU on the first trainer node
-            grader_mesh = trainer_host_mesh.spawn_procs()
         else:
             # Single-node mode: partition GPUs on this_host() via
             # CUDA_VISIBLE_DEVICES
@@ -372,10 +367,9 @@ class RLTrainer(Configurable):
                 per_host={"gpus": self.generator_world_size},
                 bootstrap=provisioner.allocate(self.generator_world_size),
             )
-            grader_mesh = this_host().spawn_procs()
 
         # Store proc meshes for cleanup
-        self._proc_meshes = [trainer_mesh, generator_mesh, grader_mesh]
+        self._proc_meshes = [trainer_mesh, generator_mesh]
 
         await setup_torch_elastic_env_async(trainer_mesh)
         await setup_torch_elastic_env_async(generator_mesh)
@@ -401,11 +395,6 @@ class RLTrainer(Configurable):
             model_spec=gen_model_spec,
             model_path=config.hf_assets_path,
         )
-        self.grader = grader_mesh.spawn(
-            "grader",
-            Grader,
-            self.task.reward_function,
-        )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -419,6 +408,63 @@ class RLTrainer(Configurable):
         self.trainer.push_model_state_dict.call().get()
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
+
+    def _rollout(
+        self,
+        num_problems: int,
+        n_per_problem: int,
+    ) -> list[Trajectory]:
+        """Run the GRPO group rollout: one env per problem, stepped ``n_per_problem`` times.
+
+        Each env pulls its problem from ``self._train_rng``. vLLM
+        returns ``num_problems * n_per_problem`` completions ordered by
+        problem index then sample-within-request; each drives one
+        single-turn step on its env.
+        """
+        envs = [SumDigitsEnv(self._train_rng) for _ in range(num_problems)]
+        completions = self._get_rank_0_value(
+            self.generator.generate.call([env.prompt for env in envs]).get()
+        )
+
+        trajectories: list[Trajectory] = []
+        for sample_idx, env in enumerate(envs):
+            group = completions[
+                sample_idx * n_per_problem : (sample_idx + 1) * n_per_problem
+            ]
+            for c in group:
+                step = env.step(c.text)
+                trajectories.append(
+                    Trajectory(sample_idx=sample_idx, transitions=[(c, step)])
+                )
+        return trajectories
+
+    @staticmethod
+    def _build_episodes(trajectories: list[Trajectory]) -> list[Episode]:
+        """Group trajectories by sample, apply mean-baseline advantage, flatten to Episodes."""
+        groups: dict[int, list[Trajectory]] = {}
+        for t in trajectories:
+            groups.setdefault(t.sample_idx, []).append(t)
+
+        episodes: list[Episode] = []
+        for sample_idx, group in groups.items():
+            rewards = [t.total_reward for t in group]
+            group_mean = sum(rewards) / len(rewards)
+            for t in group:
+                # Single-turn: exactly one (completion, step) per trajectory.
+                c, _ = t.transitions[0]
+                episodes.append(
+                    Episode(
+                        policy_version=c.policy_version,
+                        prompt_idx=sample_idx,
+                        prompt_token_ids=c.prompt_token_ids,
+                        text=c.text,
+                        token_ids=c.token_ids,
+                        token_logprobs=c.token_logprobs,
+                        reward=t.total_reward,
+                        advantage=t.total_reward - group_mean,
+                    )
+                )
+        return episodes
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -438,28 +484,23 @@ class RLTrainer(Configurable):
         Returns:
             Dict with accuracy, correct, total, format_rate, format_ok.
         """
-        eval_task = SumDigitsTask(seed=99)
-        eval_prompts = []
-        eval_answers = []
-        for _ in range(num_samples):
-            question, answer = eval_task.create_question()
-            eval_prompts.append(self.system_prompt + "\n\n" + question)
-            eval_answers.append(answer)
-
+        eval_rng = random.Random(99)
+        envs = [SumDigitsEnv(eval_rng) for _ in range(num_samples)]
         completions = self._get_rank_0_value(
-            self.generator.generate.call(eval_prompts).get()
+            self.generator.generate.call([env.prompt for env in envs]).get()
         )
 
-        # Score the first sample per prompt. Completions come back in
-        # prompt_idx order, length num_samples * n.
+        # Score the first completion per prompt via the env. Completions come
+        # back in prompt_idx order, length num_samples * n.
         n = self.config.generator.sampling.n
         correct = 0
         format_ok = 0
-        for i, answer in enumerate(eval_answers):
+        for i, env in enumerate(envs):
             c = completions[i * n]
-            extracted = extract_answer(c.text)
-            correct += int(extracted == int(answer))
-            format_ok += int(bool(re.search(r"\[ANSWER\]", c.text)))
+            step = env.step(c.text)
+            # Correct iff reward includes the +1.0 correctness component.
+            correct += int(step.reward >= 1.0)
+            format_ok += int(format_reward(c.text) > 0)
 
         if self.config.log_samples:
             _log_samples(completions)
@@ -478,137 +519,62 @@ class RLTrainer(Configurable):
         return result
 
     async def train(self):
-        """Run the RL training loop.
-
-        Must call :meth:`setup` first.
-        """
         num_steps = self.config.num_steps
-
-        # Pre-training evaluation
-        logger.info("Evaluating pre-training baseline...")
+        logger.info(f"Pre-training eval; then {num_steps} steps of RL training")
         pre_eval = await self.evaluate()
 
-        logger.info("=" * 80)
-        logger.info(f"Starting RL training for {num_steps} steps")
-        logger.info("=" * 80)
-
         for step in range(num_steps):
-            # Generate data sample for this step
-            train_prompts = []
-            train_answers = []
-            for _ in range(self.config.num_episodes_per_step):
-                question, answer = self.task.create_question()
-                train_prompts.append(self.system_prompt + "\n\n" + question)
-                train_answers.append(answer)
+            step_start = time.perf_counter()
 
-            step_start: float = time.perf_counter()
-
-            # 1. Generator produces flat list of Completions.
-            # TODO: Create a queue to use all completions from all GPUs.
-            completions = self._get_rank_0_value(
-                self.generator.generate.call(train_prompts).get()
+            # --- Collect data and create episodes --- #
+            trajectories = self._rollout(
+                self.config.num_episodes_per_step,
+                self.config.generator.sampling.n,
             )
-
-            # 2. Group by prompt_idx; one grader call per prompt.
-            groups: dict[int, list[Completion]] = {}
-            for c in completions:
-                groups.setdefault(c.prompt_idx, []).append(c)
-
-            # 3. Score each group, apply mean-baseline advantage, collect Episodes.
-            episodes: list[Episode] = []
-            for pidx, group in groups.items():
-                scored = self._get_rank_0_value(
-                    self.grader.score.call(group, train_answers[pidx]).get(),
-                    has_gpus=False,
-                )
-                group_mean = sum(sc.reward for sc in scored) / len(scored)
-                for sc in scored:
-                    c = sc.completion
-                    episodes.append(
-                        Episode(
-                            policy_version=c.policy_version,
-                            prompt_idx=c.prompt_idx,
-                            prompt_token_ids=c.prompt_token_ids,
-                            text=c.text,
-                            token_ids=c.token_ids,
-                            token_logprobs=c.token_logprobs,
-                            reward=sc.reward,
-                            advantage=sc.reward - group_mean,
-                        )
-                    )
+            episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
                 _log_samples(episodes)
 
-            # 5. Trainer forward + backward
-            maybe_sharded_episodes = self._shard_episodes(episodes)
+            # --- Train step --- #
             batches = [
                 self._collate_episodes(per_rank_episodes)
-                for per_rank_episodes in maybe_sharded_episodes
+                for per_rank_episodes in self._shard_episodes(episodes)
             ]
             fwd_bwd_metrics = self._get_rank_0_value(
                 self.trainer.forward_backward.call(batches).get()
             )
-
-            # 6. Optimizer step
             optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
-
             metrics = {**fwd_bwd_metrics, **optim_metrics}
 
-            # 7. Sync weights
-            t0 = time.perf_counter()
+            # --- Weight sync --- #
             self.trainer.push_model_state_dict.call().get()
-            t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(
-                optim_metrics["policy_version"]
-            ).get()
-            t_total = time.perf_counter() - t0
-            logger.info(f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s")
+            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
 
-            t_step = time.perf_counter() - step_start
-
-            all_token_lens = [len(ep.token_ids) for ep in episodes]
-            avg_len = sum(all_token_lens) / len(all_token_lens)
-
-            all_rewards = [ep.reward for ep in episodes]
-            reward_mean = sum(all_rewards) / len(all_rewards)
-            correct_count = sum(1 for r in all_rewards if r > 0)
-            total_count = len(all_rewards)
-
+            token_lens = [len(ep.token_ids) for ep in episodes]
+            rewards = [ep.reward for ep in episodes]
             logger.info(
                 f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
-                f"Reward: {reward_mean:+.3f} | "
-                f"Correct: {correct_count:>2}/{total_count} | "
-                f"Avg tokens: {avg_len:>3.0f} | "
+                f"Reward: {sum(rewards) / len(rewards):+.3f} | "
+                f"Correct: {sum(1 for r in rewards if r >= 1.0):>2}/{len(rewards)} | "
+                f"Avg tokens: {sum(token_lens) / len(token_lens):>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
                 f"max={metrics['logprob_diff_max']:.4e} | "
-                f"Time: {t_step:.1f}s"
+                f"Time: {time.perf_counter() - step_start:.1f}s"
             )
 
-            # Check for divergence
-            if not torch.isfinite(torch.tensor(metrics["loss"])):
-                logger.info("!" * 80)
-                logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
-                logger.info("!" * 80)
+            if not math.isfinite(metrics["loss"]):
+                logger.error("Loss is NaN/Inf; training diverged")
                 break
 
-        # Post-training evaluation
-        logger.info("RL Training complete")
-        logger.info("Evaluating post-training performance...")
+        logger.info("Post-training eval")
         post_eval = await self.evaluate()
-
-        logger.info("=" * 80)
         logger.info(
-            f"Pre-training:  Accuracy={pre_eval['accuracy']:.0%} "
-            f"({pre_eval['correct']}/{pre_eval['total']}) "
-            f"Format={pre_eval['format_rate']:.0%} ({pre_eval['format_ok']}/{pre_eval['total']})"
+            f"Pre:  acc={pre_eval['accuracy']:.0%} ({pre_eval['correct']}/{pre_eval['total']}) "
+            f"format={pre_eval['format_rate']:.0%} ({pre_eval['format_ok']}/{pre_eval['total']})\n"
+            f"Post: acc={post_eval['accuracy']:.0%} ({post_eval['correct']}/{post_eval['total']}) "
+            f"format={post_eval['format_rate']:.0%} ({post_eval['format_ok']}/{post_eval['total']})"
         )
-        logger.info(
-            f"Post-training: Accuracy={post_eval['accuracy']:.0%} "
-            f"({post_eval['correct']}/{post_eval['total']}) "
-            f"Format={post_eval['format_rate']:.0%} ({post_eval['format_ok']}/{post_eval['total']})"
-        )
-        logger.info("=" * 80)
 
 
 async def main():

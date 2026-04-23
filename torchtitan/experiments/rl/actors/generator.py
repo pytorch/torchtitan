@@ -112,7 +112,7 @@ class VLLMGenerator(Actor, Configurable):
 
     Maintains a vLLM engine synchronized with the Trainer via weight
     sync. ``generate()`` produces a flat list of Completions; reward
-    and advantage computation live in the controller and Grader.
+    and advantage computation live in the controller.
 
     Args:
         config: Generator-specific configuration.

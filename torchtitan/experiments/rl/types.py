@@ -10,6 +10,19 @@ import torch
 
 
 @dataclass
+class Step:
+    """Env transition: reward, done flag, and optional next observation.
+
+    ``observation`` (the next prompt the agent will see) is only
+    populated by multi-turn envs. Single-turn envs leave it None.
+    """
+
+    reward: float
+    done: bool
+    observation: str | None = None
+
+
+@dataclass
 class Completion:
     """A single generated sequence from the generator.
 
@@ -26,16 +39,25 @@ class Completion:
 
 
 @dataclass
-class ScoredCompletion:
-    """A Completion with a scalar reward attached by the grader."""
+class Trajectory:
+    """One rollout: a sequence of ``(Completion, Step)`` transitions.
 
-    completion: Completion
-    reward: float
+    Single-turn tasks produce trajectories with one transition. The
+    Completion carries the generator's token-level metadata; the Step
+    carries the env's reward and done flag.
+    """
+
+    sample_idx: int
+    transitions: list[tuple[Completion, Step]]
+
+    @property
+    def total_reward(self) -> float:
+        return sum(s.reward for _, s in self.transitions)
 
 
 @dataclass
 class Episode:
-    """Training sample: flattened scored completion + GRPO advantage.
+    """Training sample: flattened trajectory + GRPO advantage.
 
     Flat shape (rather than composition) because the trainer collate
     path and logging read these fields directly.
