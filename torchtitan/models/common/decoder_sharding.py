@@ -154,7 +154,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
 
 
 def set_gqa_inner_attention_local_map(
-    inner_attention_cfg, *, num_outputs: int = 1
+    inner_attention_cfg, *, return_lse: bool = False
 ) -> None:
     """Install a ``LocalMapSpec`` on an inner-attention config.
 
@@ -162,11 +162,12 @@ def set_gqa_inner_attention_local_map(
     TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
     to local tensors before the kernel runs, then wraps outputs back.
 
-    ``num_outputs`` controls the number of tensor outputs: 1 for the usual
-    (attn_out) case; 2 for kernels that return ``(output, lse)`` like
-    GPT-OSS's flash attention with ``return_lse=True``.
+    ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
+    GPT-OSS's flash attention with ``return_lse=True``); both outputs share
+    the same heads-sharded placement.
     """
     qkv_placements: NamedPlacement = {TP: Shard(2)}
+    num_outputs = 2 if return_lse else 1
     inner_attention_cfg.sharding_spec = ShardingSpec(
         local_map=LocalMapSpec(
             in_placements=(qkv_placements, qkv_placements, qkv_placements),

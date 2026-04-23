@@ -73,5 +73,5 @@ def _set_gpt_oss_layer_sharding(
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
 
-    # GPT-OSS flash attention always returns (output, lse), hence num_outputs=2.
-    set_gqa_inner_attention_local_map(attention.inner_attention, num_outputs=2)
+    # GPT-OSS flash attention always returns (output, lse).
+    set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)

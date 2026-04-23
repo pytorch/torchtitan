@@ -116,18 +116,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
 
-            # Populate sharding spec on the model config now that
-            # parallelism-driven flags (loss_parallel, enable_sp) are known.
-            if (
-                self.model_spec is not None
-                and self.model_spec.set_sharding_spec_fn is not None
-            ):
-                self.model_spec.set_sharding_spec_fn(
-                    self.model_spec.model,
-                    loss_parallel=not self.parallelism.disable_loss_parallel,
-                    enable_sp=self.parallelism.enable_sequence_parallel,
-                )
-
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
