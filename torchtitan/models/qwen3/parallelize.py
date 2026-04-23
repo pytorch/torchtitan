@@ -51,6 +51,7 @@ def parallelize_qwen3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
+    inference: bool = False,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -107,6 +108,11 @@ def parallelize_qwen3(
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
+
+    # Skip FSDP, AC, and compile for inference. FSDP is incompatible
+    # with torch.inference_mode() and unnecessary for inference.
+    if inference:
+        return model
 
     if ac_config.mode != "none":
         apply_ac(

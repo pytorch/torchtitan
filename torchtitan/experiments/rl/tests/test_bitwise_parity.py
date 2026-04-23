@@ -53,7 +53,6 @@ from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
-from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
@@ -110,8 +109,18 @@ def build_trainer_model(
         with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
             model = model_spec.model.build()
 
-    model = parallelize_qwen3(
-        model, parallel_dims=parallel_dims, parallelism=parallelism
+    from torchtitan.config import ActivationCheckpointConfig, CompileConfig
+    from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+    model_spec.parallelize_fn(
+        model,
+        parallel_dims=parallel_dims,
+        training=config.trainer.training,
+        model_converters=ModelConvertersContainer.Config(),
+        parallelism=parallelism,
+        compile_config=CompileConfig(),
+        ac_config=ActivationCheckpointConfig(),
+        dump_folder="",
     )
     model.to_empty(device=device_type)
     with torch.no_grad():
@@ -415,7 +424,6 @@ class TestBitwiseParity(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        config.model_spec.parallelize_fn = parallelize_qwen3
         register_model_to_vllm_model_registry(config.model_spec)
 
         # Test runs trainer and generator in the same process, so limit

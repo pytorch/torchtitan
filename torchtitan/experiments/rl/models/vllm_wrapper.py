@@ -191,14 +191,26 @@ class TorchTitanVLLMModelWrapper(Module):
             vllm_config
         )
 
-        # NOTE: We need to apply parallelize within model.__init__ because vllm
-        # doesn't separate model creation and parallelism application and instead
-        # requires parallelization to be done inside model constructor.
-        self.model = self.parallelize_fn(
-            model=self.model,
+        # Apply parallelism using the model's own parallelize function.
+        # Pass no-op defaults for training-only args (FSDP, AC, compile)
+        # so the core function skips those features.
+        from torchtitan.config import (
+            ActivationCheckpointConfig,
+            CompileConfig,
+            TrainingConfig,
+        )
+        from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+        self.parallelize_fn(
+            self.model,
             parallel_dims=self.parallel_dims,
+            training=TrainingConfig(),
+            model_converters=ModelConvertersContainer.Config(),
             parallelism=parallelism,
-            has_position_id=True,  # vLLM always passes positions explicitly
+            compile_config=CompileConfig(),
+            ac_config=ActivationCheckpointConfig(),
+            dump_folder="",
+            inference=True,
         )
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
