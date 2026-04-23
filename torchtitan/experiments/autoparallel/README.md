@@ -23,3 +23,14 @@ Requires installing [git@github.com:meta-pytorch/autoparallel.git](https://githu
 This is a variant of titan's DSv3, which uses a local_map for the expert parallel region. This only supports 2D mesh right now. NOTE: the mesh provided are just to reuse torchtitan's trainer mesh setup code. Autoparallel is not bound to use dp2ep.
 
 `NGPU=2 MODULE=autoparallel.local_map_deepseek_v3 CONFIG=autoparallel_local_map_deepseek_v3_debugmodel ./run_train.sh --parallelism.data_parallel_shard_degree 2 --parallelism.expert_parallel_degree 2`
+
+**DeepSeekv3 local_map with Graph Pipeline Parallelism**
+
+Uses `GraphPipelineStage` for pipeline parallelism with `Interleaved1F1B` schedule. The config defaults to `Interleaved1F1B` so no schedule override is needed.
+
+```bash
+NGPU=8 MODULE=autoparallel.local_map_deepseek_v3 CONFIG=autoparallel_local_map_deepseek_v3_debugmodel ./run_train.sh \
+  --parallelism.pipeline_parallel_degree 2 \
+  --parallelism.data_parallel_shard_degree 4 \
+  --parallelism.expert_parallel_degree 4
+```

@@ -155,6 +155,7 @@ def parallelize_deepseekv3(
         dynamic=True,
         compile=False,
         reshard_after_forward=False,
+        repeated_subgraphs=True,
     )
     _set_moe_mesh(autop.model, spmd_mesh, "ep")
     with autop:

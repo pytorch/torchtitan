@@ -13,8 +13,13 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.experiments.autoparallel.configs import AutoParallelConfig
+from torchtitan.experiments.autoparallel.configs import (
+    AutoParallelCompileConfig,
+    AutoParallelConfig,
+    to_autoparallel_config,
+)
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_16b
 
 from . import model_registry
 
@@ -49,3 +54,11 @@ def autoparallel_local_map_deepseek_v3_debugmodel() -> AutoParallelConfig:
             mode="selective",
         ),
     )
+
+
+def autoparallel_local_map_deepseek_v3_16b_sdpa() -> AutoParallelConfig:
+    config = to_autoparallel_config(
+        deepseek_v3_16b(), model_registry, flavor="16B_sdpa"
+    )
+    config.compile = AutoParallelCompileConfig(enable=True)
+    return config
