@@ -107,6 +107,10 @@ class ShardingSpec:
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
         local_map: If set, wraps forward with ``local_map()``.
+
+    TODO: add ``out_src_shardings`` to declare the output's source placement
+    when integrating with spmd_type (erased types), which requires both src
+    and dst for every redistribute.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
