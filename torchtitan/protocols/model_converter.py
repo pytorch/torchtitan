@@ -45,7 +45,7 @@ class ModelConverter(Protocol):
 
         Returns a callable that takes a key name and returns True if the
         key belongs to this converter. Used by ModelWrapper's
-        ``filter_base_keys()`` to exclude converter-owned keys.
+        ``_partition()`` to separate base and converter keys.
 
         Return None if the converter doesn't introduce new keys.
         """
