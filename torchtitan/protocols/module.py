@@ -183,12 +183,7 @@ class Module(nn.Module, Configurable):
 
         fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
 
-        Legacy parallelism support:
-            CP (applied before ``parallelize``) is captured inside ``local_map``.
-
-        Idempotent: a second call (e.g. after ``init_weights`` overwrites
-        buffers) only re-distributes plain tensors without double-wrapping
-        ``forward``.
+        CP (applied before ``parallelize``) is captured inside ``local_map``.
         """
         # Recurse children first
         queue = list(self.children())
