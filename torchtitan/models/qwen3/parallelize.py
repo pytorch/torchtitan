@@ -100,6 +100,7 @@ def parallelize_qwen3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             pad_multiple=find_pad_multiple(model_converters.converters),
+            inference=inference,
         )
 
     if parallel_dims.cp_enabled:
