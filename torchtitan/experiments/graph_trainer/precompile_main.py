@@ -42,7 +42,6 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     apply_graph_ac,
     parallelize_inputs,
@@ -65,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -309,6 +309,7 @@ def _precompile_aot_fx_trace(
     parallel_dims,
     device,
     tokenizer,
+    compile_time_passes_fn=None,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
@@ -424,7 +425,8 @@ def _precompile_aot_fx_trace(
         compile_time_passes,
     )
 
-    passes = compile_time_passes(traced_result, config)
+    passes_fn = compile_time_passes_fn or compile_time_passes
+    passes = passes_fn(traced_result, config)
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
