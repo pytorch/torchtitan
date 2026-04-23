@@ -260,9 +260,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             trainer_config=config,
         )
         self.model_config = model_config
-        # Sharding specs are already populated on ``model_config`` by
-        # ``Trainer.Config.__post_init__`` (via ``set_sharding_spec_fn``),
-        # which runs before ``Trainer.__init__``.
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
