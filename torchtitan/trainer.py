@@ -27,7 +27,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization import has_quantization
+from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -262,15 +262,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
 
-        has_quant = has_quantization(model_config)
-
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
-            has_quantization=has_quant,
+            has_quantization=has_quantization(model_config),
         )
         color = self.metrics_processor.color
 

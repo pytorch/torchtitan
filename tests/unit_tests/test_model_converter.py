@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 import pytest
 
-from torchtitan.components.quantization import Float8LinearConfig, has_quantization
+from torchtitan.components.quantization import Float8Linear
+from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.linear import Linear
 
@@ -19,7 +20,7 @@ def test_no_float8_by_default():
     assert not has_quantization(model_config)
     # All Linear.Config instances should remain Linear.Config
     for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config):
-        assert not isinstance(lc, Float8LinearConfig)
+        assert not isinstance(lc, Float8Linear.Config)
 
 
 def test_float8_applied_by_model_registry():
@@ -30,10 +31,10 @@ def test_float8_applied_by_model_registry():
     )
     model_config = config.model_spec.model
     assert has_quantization(model_config)
-    # Some Linear.Config instances should be swapped to Float8LinearConfig
+    # Some Linear.Config instances should be swapped to Float8Linear
     converted = [
         fqn
         for fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
-        if isinstance(lc, Float8LinearConfig)
+        if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0

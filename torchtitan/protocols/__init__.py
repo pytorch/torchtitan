@@ -7,14 +7,13 @@
 from torchtitan.config import Configurable
 
 from .model import BaseModel
-from .model_spec import FaultTolerantModelSpec, ModelSpec
+from .model_spec import ModelSpec
 from .module import Module
 from .state_dict_adapter import BaseStateDictAdapter, StateDictAdapter
 
 __all__ = [
     "BaseModel",
     "Configurable",
-    "FaultTolerantModelSpec",
     "ModelSpec",
     "Module",
     "StateDictAdapter",

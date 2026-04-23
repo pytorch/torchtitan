@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .module import Module
 

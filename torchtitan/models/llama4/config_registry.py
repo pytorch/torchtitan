@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import Float8MoEQuant
+from torchtitan.components.quantization import Float8MoEQuantizer
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -68,9 +68,9 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry(
             "debugmodel",
-            moe_comm_backend="torchao",
+            moe_comm_backend="standard",
             quantization=[
-                Float8MoEQuant(
+                Float8MoEQuantizer.Config(
                     model_compile_enabled=(
                         compile_config.enable
                         and "model" in compile_config.components

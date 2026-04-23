@@ -206,8 +206,7 @@ def make_token_dispatcher_config(
 
     Returns the right Config subclass based on comm_backend:
     - None: LocalTokenDispatcher.Config (no EP communication)
-    - "standard"/"torchao": AllToAllTokenDispatcher.Config (standard all-to-all EP).
-      For "torchao", the quantization pass swaps to TorchAOTokenDispatcher.
+    - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
     - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
     if comm_backend is None:
@@ -224,7 +223,7 @@ def make_token_dispatcher_config(
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
-    elif comm_backend in ("standard", "torchao"):
+    elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
@@ -233,7 +232,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
+            "Must be one of None, 'standard', 'deepep', 'hybridep'."
         )
 
 

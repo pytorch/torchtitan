@@ -72,7 +72,7 @@ class Configurable:
 
         def walk(
             self, config_cls: type, *, _prefix: str = ""
-        ) -> Iterator[tuple[str, "Configurable.Config", object, str]]:
+        ) -> Iterator[tuple[str, Config, object, str]]:
             """Yield ``(fqn, config, parent, field_name)`` for every nested config of *config_cls*.
 
             Recursively walks dataclass fields, including items inside lists.

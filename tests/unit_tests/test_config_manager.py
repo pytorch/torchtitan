@@ -124,7 +124,7 @@ class TestConfigManager(unittest.TestCase):
         ]
 
     def test_trainer_config_quantization_default(self):
-        from torchtitan.components.quantization import has_quantization
+        from torchtitan.components.quantization.utils import has_quantization
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(

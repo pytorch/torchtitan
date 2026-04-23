@@ -10,7 +10,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.quantization import QuantizationConfig
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -378,12 +378,12 @@ llama3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    quantization: list[QuantizationConfig] | None = None,
+    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
     if quantization is not None:
         for q in quantization:
-            q.apply(config)
+            q.build().convert(config)
     return ModelSpec(
         name="llama3",
         flavor=flavor,

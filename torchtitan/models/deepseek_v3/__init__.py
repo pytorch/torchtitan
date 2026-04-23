@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.quantization import QuantizationConfig
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -526,7 +526,7 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConfig] | None = None,
+    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
@@ -534,7 +534,7 @@ def model_registry(
     )
     if quantization is not None:
         for q in quantization:
-            q.apply(config)
+            q.build().convert(config)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,
