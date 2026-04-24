@@ -332,6 +332,9 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=is_rdma_available(),
         )
         self.policy_version = version
+        # Invalidate the KV prefix cache so stale values computed with the
+        # old weights are never reused for new generations.
+        self._engine.reset_prefix_cache()
         logger.debug(
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
