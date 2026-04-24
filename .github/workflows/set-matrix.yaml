@@ -15,6 +15,7 @@ on:
         description: 'Check if the workflow is experimental'
         required: false
         type: int
+        default: 0
     outputs:
       matrix:
         description: dynamically set matrix
