@@ -74,10 +74,10 @@ class BaseTokenizer(ABC, Configurable):
         )
         env.globals[
             "raise_exception"
-        ] = raise_exception
+        ] = raise_exception  # pyrefly: ignore [unsupported-operation]
         env.globals[
             "strftime_now"
-        ] = strftime_now
+        ] = strftime_now  # pyrefly: ignore [unsupported-operation]
         env.filters["tojson"] = tojson
         self._chat_template = env.from_string(template)
 
