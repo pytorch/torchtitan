@@ -29,180 +29,77 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import module_filter_fn, swap_token_dispatcher
 
 
-class Float8Linear:
-    """Namespace for Float8-quantized Linear config.
+try:
+    from torchao.float8.float8_linear import Float8Linear as TorchAOFloat8Linear
 
-    The diamond-inherited module class (TorchAOFloat8Linear + Linear) is
-    created lazily on first build to avoid a top-level torchao import.
-    """
-
-    _module_cls: ClassVar[type | None] = None
-
-    @classmethod
-    def _get_module_cls(cls):
-        """Lazily create the diamond-inherited (TorchAOFloat8Linear + Linear) class.
-
-        Diamond inheritance is needed so the built module satisfies the Module
-        protocol (init_states, _param_init). Created lazily to avoid importing
-        torchao at module load time.
+    class Float8Linear(TorchAOFloat8Linear, Linear):
+        """Diamond inheritance (TorchAOFloat8Linear + Linear) so the built module
+        satisfies the Module protocol (init_states, _param_init).
         """
-        if cls._module_cls is None:
-            from torchao.float8.float8_linear import (
-                Float8Linear as TorchAOFloat8Linear,
-            )
 
-            class Float8LinearModule(TorchAOFloat8Linear, Linear):
-                def __init__(self, *args, **kwargs):
-                    TorchAOFloat8Linear.__init__(self, *args, **kwargs)
+        @dataclass(kw_only=True, slots=True)
+        class Config(Linear.Config):
+            """Drop-in replacement for Linear.Config that builds Float8Linear."""
 
-            cls._module_cls = Float8LinearModule
-        return cls._module_cls
+            _is_quantized: ClassVar[bool] = True
+            _torchao_config: object = None
+
+            def build(self, **kwargs):
+                instance = Float8Linear(
+                    self.in_features,
+                    self.out_features,
+                    bias=self.bias,
+                    config=self._torchao_config,
+                )
+                if self.param_init is not None:
+                    instance._param_init = self.param_init
+                return instance
+
+        def __init__(self, *args, **kwargs):
+            TorchAOFloat8Linear.__init__(self, *args, **kwargs)
+
+except ImportError:
+    Float8Linear = None
+
+
+class MXFP8Linear(Linear):
+    """Linear that applies MXFP8 quantization in its constructor."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
-        """Drop-in replacement for Linear.Config that builds Float8Linear."""
+        """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
 
-        _torchao_config: object = None
+        _is_quantized: ClassVar[bool] = True
+        _recipe_name: str = "mxfp8_rceil"
+        _pad_token_groups: bool = True
 
         def build(self, **kwargs):
-            module_cls = Float8Linear._get_module_cls()
-            instance = module_cls(
+            instance = MXFP8Linear(
                 self.in_features,
                 self.out_features,
                 bias=self.bias,
-                config=self._torchao_config,
+                recipe_name=self._recipe_name,
+                pad_token_groups=self._pad_token_groups,
             )
             if self.param_init is not None:
                 instance._param_init = self.param_init
             return instance
 
-
-class MXFP8Linear:
-    """Namespace for MXFP8-quantized Linear config."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        """Builds Linear then applies MXFP8 quantization via quantize_()."""
-
-        _recipe_name: str = "mxfp8_rceil"
-        _pad_token_groups: bool = True
-
-        def build(self, **kwargs):
-            from torchao.prototype.moe_training.config import (
-                MXFP8TrainingOpConfig,
-                MXFP8TrainingRecipe,
-            )
-            from torchao.quantization.quant_api import quantize_
-
-            instance = Linear.Config.build(self, **kwargs)
-            param_init = getattr(instance, "_param_init", None)
-            recipe = MXFP8TrainingRecipe(self._recipe_name)
-            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            mxfp8_op_config.pad_token_groups_for_grouped_mm = self._pad_token_groups
-            quantize_(instance, config=mxfp8_op_config)
-            if param_init is not None:
-                instance._param_init = param_init
-            return instance
-
-
-class Float8GroupedExperts:
-    """Float8-quantized GroupedExperts config factory.
-
-    Dynamically creates Config subclasses that override ``build()`` to apply
-    float8 quantization, preserving model-specific Config fields
-    (e.g. GptOssGroupedExperts.Config.swiglu_limit).
-    """
-
-    _cache: ClassVar[dict[type, type]] = {}
-
-    @classmethod
-    def from_config(cls, config: GroupedExperts.Config) -> GroupedExperts.Config:
-        """Create a quantized copy of the given config.
-
-        GroupedExperts.Config is subclassed by models (e.g. GptOssGroupedExperts
-        adds swiglu_limit), so we can't use a static Config subclass — it would
-        lose model-specific fields and build the wrong module. Instead, we
-        dynamically subclass the actual config type, overriding only build().
-        """
-        base_cls = type(config)
-        if base_cls not in cls._cache:
-
-            @dataclass(kw_only=True, slots=True)
-            class Config(base_cls):
-                _is_quantized: ClassVar[bool] = True
-
-                def build(self, **kwargs):
-                    from torchao.prototype.moe_training.config import (
-                        Float8TrainingOpConfig,
-                    )
-                    from torchao.quantization.quant_api import quantize_
-
-                    instance = base_cls.build(self, **kwargs)
-                    param_init = getattr(instance, "_param_init", None)
-                    quantize_(instance, config=Float8TrainingOpConfig())
-                    if param_init is not None:
-                        instance._param_init = param_init
-                    return instance
-
-            cls._cache[base_cls] = Config
-
-        ConfigCls = cls._cache[base_cls]
-        return ConfigCls(
-            **{f.name: getattr(config, f.name) for f in fields(config)}
+    def __init__(
+        self, in_features, out_features, bias=False, *, recipe_name="mxfp8_rceil", pad_token_groups=True
+    ):
+        super().__init__(in_features, out_features, bias=bias)
+        from torchao.prototype.moe_training.config import (
+            MXFP8TrainingOpConfig,
+            MXFP8TrainingRecipe,
         )
+        from torchao.quantization.quant_api import quantize_
 
+        recipe = MXFP8TrainingRecipe(recipe_name)
+        mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+        mxfp8_op_config.pad_token_groups_for_grouped_mm = pad_token_groups
+        quantize_(self, config=mxfp8_op_config)
 
-class MXFP8GroupedExperts:
-    """MXFP8-quantized GroupedExperts config factory.
-
-    Dynamically creates Config subclasses that override ``build()`` to apply
-    MXFP8 quantization, preserving model-specific Config fields.
-    """
-
-    _cache: ClassVar[dict[type, type]] = {}
-
-    @classmethod
-    def from_config(
-        cls,
-        config: GroupedExperts.Config,
-        *,
-        recipe_name: str = "mxfp8_rceil",
-    ) -> GroupedExperts.Config:
-        """Create a quantized copy of the given config.
-
-        See Float8GroupedExperts.from_config for why dynamic subclassing is needed.
-        """
-        base_cls = type(config)
-        if base_cls not in cls._cache:
-
-            @dataclass(kw_only=True, slots=True)
-            class Config(base_cls):
-                _is_quantized: ClassVar[bool] = True
-                _recipe_name: str = "mxfp8_rceil"
-
-                def build(self, **kwargs):
-                    from torchao.prototype.moe_training.config import (
-                        MXFP8TrainingOpConfig,
-                        MXFP8TrainingRecipe,
-                    )
-                    from torchao.quantization.quant_api import quantize_
-
-                    instance = base_cls.build(self, **kwargs)
-                    param_init = getattr(instance, "_param_init", None)
-                    recipe = MXFP8TrainingRecipe(self._recipe_name)
-                    mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-                    quantize_(instance, config=mxfp8_op_config)
-                    if param_init is not None:
-                        instance._param_init = param_init
-                    return instance
-
-            cls._cache[base_cls] = Config
-
-        ConfigCls = cls._cache[base_cls]
-        return ConfigCls(
-            **{f.name: getattr(config, f.name) for f in fields(config)},
-            _recipe_name=recipe_name,
-        )
 
 
 class QuantizationConverter(Configurable):
@@ -246,7 +143,7 @@ class Float8LinearConverter(QuantizationConverter):
         self.config = config
 
     def convert(self, model_config) -> None:
-        if find_spec("torchao") is None:
+        if Float8Linear is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             )
@@ -343,6 +240,7 @@ class Float8MoEConverter(QuantizationConverter):
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 MoE training."
             )
+
         if not has_cuda_capability(8, 9):
             raise ValueError("Float8 MoE training only supported on SM89 or later.")
 
@@ -352,8 +250,12 @@ class Float8MoEConverter(QuantizationConverter):
                 "enable it with --compile.enable"
             )
 
+        from torchao.prototype.moe_training.config import Float8TrainingOpConfig
+        from torchao.quantization.quant_api import quantize_
+
         # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
         pad_multiple = 16
+        cache: dict[type, type] = {}
 
         for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
             dispatcher_handles_padding = swap_token_dispatcher(config, pad_multiple)
@@ -363,7 +265,25 @@ class Float8MoEConverter(QuantizationConverter):
                     "padding (TorchAOTokenDispatcher or DeepEP hybridep). "
                     "Enable expert parallelism or use a compatible comm backend."
                 )
-            new_config = Float8GroupedExperts.from_config(config)
+
+            base_cls = type(config)
+            if base_cls not in cache:
+
+                @dataclass(kw_only=True, slots=True)
+                class QuantizedConfig(base_cls):
+                    _is_quantized: ClassVar[bool] = True
+
+                    def build(self, **kwargs):
+                        instance = base_cls.build(self, **kwargs)
+                        quantize_(instance, config=Float8TrainingOpConfig())
+                        return instance
+
+                cache[base_cls] = QuantizedConfig
+
+            ConfigCls = cache[base_cls]
+            new_config = ConfigCls(
+                **{f.name: getattr(config, f.name) for f in fields(config)}
+            )
             if isinstance(parent, list):
                 parent[attr] = new_config
             else:
@@ -470,8 +390,18 @@ class MXFP8MoEConverter(QuantizationConverter):
                 "of MXFP8 dynamic quantization."
             )
 
+        from torchao.prototype.moe_training.config import (
+            MXFP8TrainingOpConfig,
+            MXFP8TrainingRecipe,
+        )
+        from torchao.quantization.quant_api import quantize_
+
+        recipe_name = self.config.recipe_name
+
         # MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
         pad_multiple = 32
+        cache: dict[type, type] = {}
+
         for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
             dispatcher_handles_padding = swap_token_dispatcher(config, pad_multiple)
             if not dispatcher_handles_padding:
@@ -480,8 +410,26 @@ class MXFP8MoEConverter(QuantizationConverter):
                     "padding (TorchAOTokenDispatcher or DeepEP hybridep). "
                     "Enable expert parallelism or use a compatible comm backend."
                 )
-            new_config = MXFP8GroupedExperts.from_config(
-                config, recipe_name=self.config.recipe_name
+
+            base_cls = type(config)
+            if base_cls not in cache:
+
+                @dataclass(kw_only=True, slots=True)
+                class QuantizedConfig(base_cls):
+                    _is_quantized: ClassVar[bool] = True
+
+                    def build(self, **kwargs):
+                        instance = base_cls.build(self, **kwargs)
+                        recipe = MXFP8TrainingRecipe(recipe_name)
+                        mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+                        quantize_(instance, config=mxfp8_op_config)
+                        return instance
+
+                cache[base_cls] = QuantizedConfig
+
+            ConfigCls = cache[base_cls]
+            new_config = ConfigCls(
+                **{f.name: getattr(config, f.name) for f in fields(config)}
             )
             if isinstance(parent, list):
                 parent[attr] = new_config
