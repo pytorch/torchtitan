@@ -523,7 +523,9 @@ def _671b(
 
 deepseekv3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_sdpa": partial(_debugmodel, attn_backend="sdpa"),
     "16B": _16b,
+    "16B_sdpa": partial(_16b, attn_backend="sdpa"),
     "236B": _236b,
     "671B": _671b,
 }

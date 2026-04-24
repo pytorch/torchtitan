@@ -57,6 +57,12 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
+def deepseek_v3_debugmodel_sdpa() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel_sdpa")
+    return config
+
+
 def deepseek_v3_debugmodel_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry("debugmodel")
@@ -104,6 +110,12 @@ def deepseek_v3_16b() -> Trainer.Config:
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
     )
+
+
+def deepseek_v3_16b_sdpa() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry("16B_sdpa", moe_comm_backend="standard")
+    return config
 
 
 def deepseek_v3_671b() -> Trainer.Config:
