@@ -68,7 +68,7 @@ def _apply_non_moe_tp_to_decoder(
             use_local_output=True,  # plain tensor needed for _scatter_vision_embeds
         ),
         "norm": NoParallel(),
-        "output": ColwiseParallel(
+        "lm_head": ColwiseParallel(
             input_layouts=Replicate(),
             output_layouts=Shard(-1) if loss_parallel else Replicate(),
             use_local_output=not loss_parallel,

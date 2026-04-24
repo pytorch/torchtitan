@@ -705,7 +705,7 @@ class HFTransformerModel(BaseModel):
         yield "tok_embeddings", self.tok_embeddings
         yield "layers", self.layers
         yield "norm", self.norm
-        yield "output", self.lm_head
+        yield "lm_head", self.lm_head
         yield "rotary_emb", self.rotary_emb
 
     def __setattr__(self, name, value):

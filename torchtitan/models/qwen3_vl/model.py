@@ -630,6 +630,6 @@ class Qwen3VLModel(Qwen3Model):
             self.norm(hidden_states) if self.norm is not None else hidden_states
         )
         output = (
-            self.output(hidden_states) if self.output is not None else hidden_states
+            self.lm_head(hidden_states) if self.lm_head is not None else hidden_states
         )
         return output

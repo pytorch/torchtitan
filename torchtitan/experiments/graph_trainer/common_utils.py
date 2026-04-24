@@ -157,7 +157,7 @@ def get_default_transformer_block_buckets(
     return [
         "tok_embeddings",
         *[f"layers.{i}" for i in range(n_layers)],
-        ["norm", "output"],
+        ["norm", "lm_head"],
     ]
 
 

@@ -209,7 +209,7 @@ def llama3_405b() -> Trainer.Config:
                 Float8LinearConverter.Config(
                     enable_fsdp_float8_all_gather=True,
                     precompute_float8_dynamic_scale_for_fsdp=True,
-                    filter_fqns=["output"],
+                    filter_fqns=["lm_head"],
                 ),
             ],
         ),

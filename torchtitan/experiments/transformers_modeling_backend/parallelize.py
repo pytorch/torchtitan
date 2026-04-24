@@ -154,13 +154,13 @@ def apply_non_moe_tp(
         else:
             root_plan["norm"] = SequenceParallel()
 
-    if hasattr(model, "output"):
+    if hasattr(model, "lm_head"):
         if isinstance(model.lm_head, nn.Identity):
-            root_plan["output"] = NoParallel(
+            root_plan["lm_head"] = NoParallel(
                 local_output_grad_placements=(Replicate(),),
             )
         else:
-            root_plan["output"] = ColwiseParallel(
+            root_plan["lm_head"] = ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
                 use_local_output=not enable_loss_parallel,

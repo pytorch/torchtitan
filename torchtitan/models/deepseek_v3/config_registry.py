@@ -147,7 +147,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         compile=CompileConfig(enable=True, components=["loss"]),
         model_converters=ModelConvertersContainer.Config(
             converters=[
-                Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
+                Float8LinearConverter.Config(filter_fqns=["lm_head", "router.gate"]),
                 Float8GroupedMMConverter.Config(fqns=["experts"]),
             ]
         ),
