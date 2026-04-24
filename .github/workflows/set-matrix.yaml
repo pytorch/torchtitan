@@ -53,7 +53,7 @@ jobs:
 
           # Define ROCm matrix (empty for experimental workflows)
           if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
-            ROCM_MATRIX=""
+            ROCM_MATRIX="[]"
           else
             ROCM_MATRIX=$(cat <<EOF
             {
