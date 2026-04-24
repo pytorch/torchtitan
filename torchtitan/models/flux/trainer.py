@@ -98,12 +98,12 @@ class FluxTrainer(Trainer):
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
-        # pyrefly: ignore [bad-assignment]
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             parallel_dims=self.parallel_dims,
             training=config.training,
+            enable_symm_mem=config.parallelism.enable_fsdp_symm_mem,
         )
 
         if config.validator.enable:
@@ -182,7 +182,6 @@ class FluxTrainer(Trainer):
 
         if self.parallel_dims.dp_enabled:
             batch_mesh = self.parallel_dims.get_mesh("batch")
-            # pyrefly: ignore [bad-assignment]
             global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
             global_valid_tokens = local_valid_tokens.float()
@@ -250,7 +249,6 @@ class FluxTrainer(Trainer):
             )
 
             # Scale loss as we used SUM reduction for mse loss function
-            # pyrefly: ignore [unsupported-operation]
             loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
@@ -274,7 +272,6 @@ class FluxTrainer(Trainer):
         if self.gradient_accumulation_steps > 1:
             raise ValueError("FLUX doesn't support gradient accumulation for now.")
 
-        # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
         loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
