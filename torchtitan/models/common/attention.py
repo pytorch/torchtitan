@@ -152,7 +152,7 @@ class VarlenAttention(Module):
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
             window_size=(-1, 0),
-            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
+            **varlen_kwargs,
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
@@ -194,7 +194,6 @@ class FlexAttention(Module):
         "triton.cudagraphs": False,
     }
 
-    # pyrefly: ignore[no-matching-overload]
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
         options=inductor_configs,
@@ -448,7 +447,6 @@ def create_varlen_metadata_for_document(
     if len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
-        # pyrefly: ignore[bad-assignment]
         max_seqlen = all_seq_lengths.max().item()
 
     return VarlenMetadata(

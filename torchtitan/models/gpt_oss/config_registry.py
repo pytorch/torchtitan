@@ -9,6 +9,7 @@ from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -16,6 +17,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -118,3 +120,16 @@ def gpt_oss_120b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
     )
+
+
+def gpt_oss_20b_fp8_tensorwise() -> Trainer.Config:
+    config = gpt_oss_20b()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+            ),
+        ],
+    )
+    return config

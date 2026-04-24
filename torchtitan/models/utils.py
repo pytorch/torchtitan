@@ -103,7 +103,6 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_i_placements = []
 
         # Find all the device mesh dimensios that shard on dim-i
-        # pyrefly: ignore [bad-argument-type]
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
             if placement.dim == dim:
@@ -183,9 +182,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         Returns:
             Dictionary mapping individual expert keys to their DTensor or plain tensor weights
         """
-        # pyrefly: ignore [missing-attribute]
         device_mesh = grouped_expert_weight.device_mesh
-        # pyrefly: ignore [missing-attribute]
         dtensor_placements = grouped_expert_weight.placements
 
         # Step 1: Extract dimension-0 placement information
@@ -223,7 +220,6 @@ class MoEStateDictAdapter(StateDictAdapter):
                 # Strided shard on non-expert dim, keep in sub-mesh
                 sub_mesh_names.append(name)
                 sub_placements.append(
-                    # pyrefly: ignore [bad-argument-type, unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
