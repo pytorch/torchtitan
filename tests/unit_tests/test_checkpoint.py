@@ -62,14 +62,6 @@ class FakeDataLoader(DataLoader):
         pass
 
 
-class DummyFTManager:
-    """A fake FTManager-like object with enabled=False."""
-
-    def __init__(self):
-        self.enabled = False
-        self.manager = None
-
-
 class DummyFuture:
     def __init__(self):
         self.result = mock.Mock()
@@ -106,7 +98,6 @@ class DummyTrainerConfig:
             initial_load_path=None,
             initial_load_model_only=False,
         )
-        self.fault_tolerance = SimpleNamespace(replica_id=0)
 
 
 class TestCheckpointManager(unittest.TestCase):
@@ -123,7 +114,6 @@ class TestCheckpointManager(unittest.TestCase):
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
         self.data_loader = FakeDataLoader()
-        self.ft_manager = DummyFTManager()
 
         ckpt_cfg = CheckpointManager.Config(
             enable=True,
@@ -137,10 +127,8 @@ class TestCheckpointManager(unittest.TestCase):
             initial_load_path=None,
             initial_load_model_only=False,
         )
-        ft_ns = SimpleNamespace(replica_id=0)
         self.trainer_config = SimpleNamespace(
             checkpoint=ckpt_cfg,
-            fault_tolerance=ft_ns,
             dump_folder=self.test_folder,
         )
 
@@ -189,7 +177,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         w0 = self.model_part.weight.clone()
@@ -223,7 +210,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         manager.save(curr_step=1)
@@ -265,7 +251,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
         manager.save(curr_step=2)
@@ -289,7 +274,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
         self.assertFalse(manager.load(step=-1))
         manager.close()
@@ -314,7 +298,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
         res = manager.load(step=-1)
         expected = os.path.join(ckpt_folder, "step-5")
@@ -345,7 +328,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
         self.assertEqual(mock_save.call_count, 0)
@@ -380,7 +362,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
         manager1.save(curr_step=1, last_step=True)
         path1 = os.path.join(self.test_folder, "step-1")
@@ -401,7 +382,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
         r1 = manager2.load(step=1)
         self.assertTrue(r1)
@@ -457,7 +437,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=checkpoint_config,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         # Initially staging should be False
@@ -489,7 +468,6 @@ class TestCheckpointManager(unittest.TestCase):
         trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
         checkpoint_config = trainer_config.checkpoint
         checkpoint_config.async_mode = "async"
-        ft_manager = DummyFTManager()
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
             dataloader=self.data_loader,
@@ -500,7 +478,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=checkpoint_config,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         # First save schedules async
@@ -515,51 +492,6 @@ class TestCheckpointManager(unittest.TestCase):
         # New future created
         new_future = manager.save_future
         new_future.result.assert_not_called()
-
-    @mock.patch("torch.cuda.Stream")
-    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
-    @mock.patch(
-        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
-    )
-    def test_ft_async_save_calls_async_wait(
-        self,
-        mock_async_save,
-        mock_new_group,
-        mock_cuda_stream,
-    ):
-        """
-        Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
-        """
-        trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
-        checkpoint_config = trainer_config.checkpoint
-        checkpoint_config.async_mode = "async"
-        ft_manager = mock.Mock()
-        ft_manager.manager.return_value = mock.Mock()
-        ft_manager.manager.participating_rank = mock.Mock(return_value=0)
-        ft_manager.enabled = True
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            config=checkpoint_config,
-            sd_adapter=None,
-            base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
-        )
-
-        # Initially no future
-        self.assertIsNone(manager.save_future)
-        manager.save(curr_step=5, last_step=False)
-        self.assertIsNotNone(manager.save_future)
-
-        manager.save_future.result.assert_not_called()
-        prev_future = manager.save_future
-        manager.save(curr_step=6, last_step=False)
-        prev_future.result.assert_called_once()
-        self.assertIsNotNone(manager.save_future)
-        manager.save_future.result.assert_not_called()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
@@ -583,7 +515,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         # Step 1 should not trigger save when enable_first_step_checkpoint=False
@@ -610,7 +541,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         # Step 1 should trigger save due to enable_first_step_checkpoint=True
@@ -657,7 +587,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         manager.save(curr_step=1)
@@ -696,7 +625,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         # Test various save conditions that would normally trigger saves
@@ -724,7 +652,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         manager2.save(curr_step=1)  # Should trigger save now
@@ -766,7 +693,6 @@ class TestCheckpointManager(unittest.TestCase):
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         mock_save.side_effect = fake_save

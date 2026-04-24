@@ -8,11 +8,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-
-from .utils import trunc_normal_
 
 __all__ = ["FeedForward", "compute_ffn_hidden_dim"]
 
@@ -38,28 +36,19 @@ class FeedForward(Module):
 
     Config takes the **final** hidden_dim (no internal 2/3 scaling).
     Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
-    Runtime ``dim`` is passed as a build() kwarg.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        hidden_dim: int
-        bias: bool = False
+        w1: Linear.Config
+        w2: Linear.Config
+        w3: Linear.Config
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.w1 = nn.Linear(dim, config.hidden_dim, bias=config.bias)
-        self.w2 = nn.Linear(config.hidden_dim, dim, bias=config.bias)
-        self.w3 = nn.Linear(dim, config.hidden_dim, bias=config.bias)
+        self.w1 = config.w1.build()
+        self.w2 = config.w2.build()
+        self.w3 = config.w3.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02, **kwargs):
-        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        if self.w1.bias is not None:
-            nn.init.zeros_(self.w1.bias)
-        for linear in (self.w2, self.w3):
-            trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            if linear.bias is not None:
-                nn.init.zeros_(linear.bias)

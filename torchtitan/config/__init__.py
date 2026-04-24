@@ -21,11 +21,13 @@ from .configs import (
     TrainingConfig,
 )
 from .configurable import Configurable
+from .function import Function
 from .manager import ConfigManager
 
 __all__ = [
     "ConfigManager",
     "Configurable",
+    "Function",
     "TORCH_DTYPE_MAP",
     # Config dataclasses
     "ActivationCheckpointConfig",

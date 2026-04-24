@@ -6,12 +6,13 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -30,20 +31,15 @@ class Llama3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
+        pass
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.attention = config.attention.build(dim=dim)
+        self.attention = config.attention.build()
         assert config.feed_forward is not None
-        self.feed_forward = config.feed_forward.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
+        self.feed_forward = config.feed_forward.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
     def forward(
         self,
@@ -58,12 +54,6 @@ class Llama3TransformerBlock(TransformerBlock):
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def init_weights(self, **kwargs):
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
-
 
 class Llama3Model(Decoder):
     """
@@ -76,9 +66,8 @@ class Llama3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 4096
-        n_layers: int = 32
         vocab_size: int = 128256
-        layer: TransformerBlock.Config
+        enable_weight_tying: bool = False
 
         def update_from_config(
             self,
@@ -94,27 +83,63 @@ class Llama3Model(Decoder):
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
             # Sync rope max_seq_len
-            import dataclasses as _dc
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
-
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend == "varlen"
+            if parallelism.context_parallel_degree > 1 and isinstance(
+                self.layers[0].attention.inner_attention, VarlenAttention.Config
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA and FlexAttention."
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
-                    f"Varlen attention is not supported with CP."
+                    "Context Parallel only supports SDPA and FlexAttention. "
+                    "Varlen attention is not supported with CP."
+                )
+
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layers[0].attention.n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
+
+            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
+                raise NotImplementedError(
+                    "Weight tying is not supported with Pipeline Parallel."
                 )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_dense_model_nparams_and_flops(
-                self,
                 model,
-                self.layer.attention.n_heads,
-                2 * (self.dim // self.layer.attention.n_heads),
-                seq_len,
+                n_layers=len(self.layers),
+                n_heads=self.layers[0].attention.n_heads,
+                head_dims=2 * (self.dim // self.layers[0].attention.n_heads),
+                seq_len=seq_len,
+                enable_weight_tying=self.enable_weight_tying,
             )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.enable_weight_tying = config.enable_weight_tying
+
+        if self.enable_weight_tying:
+            self.tok_embeddings.weight = self.output.weight
+
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
+        if self.enable_weight_tying:
+            # Re-tie weights before parameter init so that tok_embeddings.weight
+            # (skipped by skip_param_init) and output.weight point to the same
+            # tensor after output is initialized.
+            assert self.tok_embeddings is not None and self.output is not None
+            self.tok_embeddings.weight = self.output.weight
+
+        super().init_states(buffer_device=buffer_device)

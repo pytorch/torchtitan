@@ -15,7 +15,6 @@ from typing import cast, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
-
 import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
@@ -93,6 +92,18 @@ class FTManager(Configurable):
             pg = ft.ProcessGroupGloo(timeout=process_group_timeout)
         elif config.process_group == "nccl":
             pg = ft.ProcessGroupNCCL(timeout=process_group_timeout)
+        elif config.process_group == "mccl":
+            import torchcomms
+            from torchft.torchcomms import ProcessGroupTorchComms
+
+            comm = torchcomms.new_comm(
+                "mccl",
+                device=torch.device("cuda"),
+                name="mccl_ft",
+                timeout=process_group_timeout,
+                enable_reconfigure=True,
+            )
+            pg = ProcessGroupTorchComms(comm, timeout=process_group_timeout)
         else:
             raise ValueError(f"Unsupported process group: {config.process_group}")
 

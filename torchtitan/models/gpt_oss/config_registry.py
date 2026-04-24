@@ -50,13 +50,18 @@ def gpt_oss_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="none",
-            selective_ac_option="2",
         ),
         validator=Validator.Config(
             freq=5,
             steps=10,
         ),
     )
+
+
+def gpt_oss_debugmodel_ep() -> Trainer.Config:
+    config = gpt_oss_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    return config
 
 
 def gpt_oss_20b() -> Trainer.Config:

@@ -112,16 +112,8 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             enable_cpu_backend=config.training.enable_cpu_offload,
         )
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = config.parallelism
-        self.parallel_dims = parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
+        self.parallel_dims = parallel_dims = ParallelDims.from_config(
+            config.parallelism, world_size
         )
 
         if parallel_dims.dp_enabled:
@@ -234,7 +226,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    m.init_weights(buffer_device=buffer_device)
+                    m.init_states(buffer_device=buffer_device)
                 m.train()
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -251,7 +243,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                model.init_weights(buffer_device=buffer_device)
+                model.init_states(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -287,11 +279,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
-        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
-            parallel_dims,
-            config.training.mixed_precision_param,
-            device_type,
-        )
 
     def close(self) -> None:
         if self.checkpointer:

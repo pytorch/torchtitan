@@ -44,6 +44,5 @@ def autoparallel_llama3_debugmodel() -> AutoParallelConfig:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
     )

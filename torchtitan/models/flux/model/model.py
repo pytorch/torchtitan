@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn, Tensor
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
@@ -18,7 +19,7 @@ from torchtitan.models.flux.model.layers import (
     timestep_embedding,
 )
 from torchtitan.protocols import BaseModel
-from torchtitan.tools.logging import logger
+from torchtitan.protocols.module import ModuleList
 
 
 class FluxModel(BaseModel):
@@ -28,6 +29,8 @@ class FluxModel(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
+        img_in: Linear.Config
+        txt_in: Linear.Config
         in_channels: int = 64
         out_channels: int = 64
         vec_in_dim: int = 768
@@ -42,48 +45,13 @@ class FluxModel(BaseModel):
         qkv_bias: bool = True
         autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
-        # Sub-component configs
-        pe_config: EmbedND.Config = field(
-            default_factory=lambda: EmbedND.Config(
-                dim=128,
-                theta=10_000,
-                axes_dim=(16, 56, 56),
-            )
-        )
-        time_in_config: MLPEmbedder.Config = field(
-            default_factory=lambda: MLPEmbedder.Config(
-                in_dim=256,
-                hidden_dim=3072,
-            )
-        )
-        vector_in_config: MLPEmbedder.Config = field(
-            default_factory=lambda: MLPEmbedder.Config(
-                in_dim=768,
-                hidden_dim=3072,
-            )
-        )
-        double_block_config: DoubleStreamBlock.Config = field(
-            default_factory=lambda: DoubleStreamBlock.Config(
-                hidden_size=3072,
-                num_heads=24,
-                mlp_ratio=4.0,
-                qkv_bias=True,
-            )
-        )
-        single_block_config: SingleStreamBlock.Config = field(
-            default_factory=lambda: SingleStreamBlock.Config(
-                hidden_size=3072,
-                num_heads=24,
-                mlp_ratio=4.0,
-            )
-        )
-        final_layer_config: LastLayer.Config = field(
-            default_factory=lambda: LastLayer.Config(
-                hidden_size=3072,
-                patch_size=1,
-                out_channels=64,
-            )
-        )
+        # Sub-component configs (all required — set by the model registry)
+        pe_config: EmbedND.Config
+        time_in_config: MLPEmbedder.Config
+        vector_in_config: MLPEmbedder.Config
+        final_layer_config: LastLayer.Config
+        double_blocks: list[DoubleStreamBlock.Config]
+        single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             pass
@@ -91,12 +59,54 @@ class FluxModel(BaseModel):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            # TODO(jianiw): Add the number of flops for the autoencoder
             nparams = sum(p.numel() for p in model.parameters())
-            logger.warning(
-                "FLUX model haven't implement get_nparams_and_flops() function"
+
+            # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
+            # layers). This assumes every token passes through every parameter.
+            num_flops_per_token = 6 * nparams
+
+            # Correction 1: DoubleStreamBlocks have symmetric img/txt streams;
+            # each token only passes through one side. Subtract one side's
+            # per-token linear params per block (excluding modulation, which
+            # is per-sample and handled separately below).
+            #
+            # Per-side per-token weight params:
+            #   attn.qkv:  h * 3h       = 3h²
+            #   attn.proj: h * h         =  h²
+            #   mlp:       2 * h * h*r   = 2rh²
+            #   Total: h² * (4 + 2r)
+            db_h = self.double_blocks[0].hidden_size
+            db_r = self.double_blocks[0].mlp_ratio
+            nparams_db_one_side_per_token = int(db_h * db_h * (4 + 2 * db_r))
+            num_flops_per_token -= 6 * nparams_db_one_side_per_token * self.depth
+
+            # Correction 2: Modulation layers operate on vec (per-sample
+            # conditioning from CLIP + timestep), not per-token. The 6*nparams
+            # base counts them as per-token; replace with amortized per-token
+            # cost (once per sample / seq_len tokens).
+            #
+            # Per-sample modulation weight params:
+            #   DoubleStreamBlock: img_mod(6h²) + txt_mod(6h²) = 12h² per block
+            #   SingleStreamBlock: modulation(3h²) per block
+            #   LastLayer: adaLN_modulation(2h²)
+            sb_h = self.single_blocks[0].hidden_size
+            fl_h = self.final_layer_config.hidden_size
+            nparams_mod_per_sample = (
+                12 * db_h * db_h * self.depth
+                + 3 * sb_h * sb_h * self.depth_single_blocks
+                + 2 * fl_h * fl_h
             )
-            return nparams, 1
+            num_flops_per_token -= 6 * nparams_mod_per_sample * (seq_len - 1) // seq_len
+
+            # Add non-parameterized self-attention FLOPs (QK^T and attn*V).
+            # Per PaLM convention: 6 * hidden_size * seq_len per token per
+            # layer (covers 2 matmuls × fwd+bwd × multiply-add).
+            num_flops_per_token += (
+                6 * sb_h * seq_len * self.depth_single_blocks
+                + 6 * db_h * seq_len * self.depth
+            )
+
+            return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()
@@ -117,46 +127,16 @@ class FluxModel(BaseModel):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_heads
         self.pe_embedder = config.pe_config.build()
-        self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
+        self.img_in = config.img_in.build()
         self.time_in = config.time_in_config.build()
         self.vector_in = config.vector_in_config.build()
-        self.txt_in = nn.Linear(config.context_in_dim, self.hidden_size)
+        self.txt_in = config.txt_in.build()
 
-        self.double_blocks = nn.ModuleList(
-            [config.double_block_config.build() for _ in range(config.depth)]
-        )
+        self.double_blocks = ModuleList([cfg.build() for cfg in config.double_blocks])
 
-        self.single_blocks = nn.ModuleList(
-            [
-                config.single_block_config.build()
-                for _ in range(config.depth_single_blocks)
-            ]
-        )
+        self.single_blocks = ModuleList([cfg.build() for cfg in config.single_blocks])
 
         self.final_layer = config.final_layer_config.build()
-
-    def init_weights(self, *, buffer_device=None, **kwargs):
-        # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
-        # initialize Linear Layers: img_in, txt_in
-        nn.init.xavier_uniform_(self.img_in.weight)
-        nn.init.constant_(self.img_in.bias, 0)
-        nn.init.xavier_uniform_(self.txt_in.weight)
-        nn.init.constant_(self.txt_in.bias, 0)
-
-        # Initialize time_in, vector_in (MLPEmbedder)
-        self.time_in.init_weights(init_std=0.02)
-        self.vector_in.init_weights(init_std=0.02)
-
-        # Initialize transformer blocks:
-        for block in self.single_blocks:
-            # pyrefly: ignore [not-callable]
-            block.init_weights()
-        for block in self.double_blocks:
-            # pyrefly: ignore [not-callable]
-            block.init_weights()
-
-        # Zero-out output layers:
-        self.final_layer.init_weights()
 
     def forward(
         self,

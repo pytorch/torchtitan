@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from torchtitan.distributed.pipeline_parallel import generate_llm_fqn_per_model_part
 from torchtitan.experiments.ft.config import FaultTolerance as FTConfig
+from torchtitan.protocols.module import ModuleList
 from torchtitan.tools.logging import logger
 
 
@@ -72,7 +73,7 @@ def module_split(
                     indices_to_keep = {
                         int(idx) for idx in layers_to_keep if idx.isdigit()
                     }
-                    new_layers = nn.ModuleList(
+                    new_layers = ModuleList(
                         [
                             layer
                             for i, layer in enumerate(module_value)

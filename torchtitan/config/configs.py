@@ -8,7 +8,7 @@
 Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
-  - ProfilingConfig                 (in tools/profiling.py)
+  - Profiler.Config                 (in tools/profiler.py)
   - OptimizersContainer.Config      (in components/optimizer.py)
   - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
@@ -129,6 +129,9 @@ class ParallelismConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
+    enable_sequence_parallel: bool = True
+    """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -189,14 +192,6 @@ class ParallelismConfig:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
-    pipeline_parallel_expert_parallel_overlap: bool = True
-    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
-    communication. This is only effective when the pipeline parallel schedule is DualPipeV and
-    pipeline_parallel_degree > 1 and expert_parallel_degree > 1.
-
-    TODO: Does not support activation_checkpoint, set mode="none"
-    """
-
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -243,15 +238,20 @@ class ParallelismConfig:
     Note that this is still an experimental feature.
     """
 
-    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    expert_parallel_comm_backend: Literal["standard", "deepep", "hybridep"] = "standard"
     """
     Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
 
     - "standard": Uses PyTorch all-to-all collectives (default)
-    - "deepep": Uses DeepEP custom kernels for more efficient communication
+    - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
+    - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
 
-    DeepEP requires installation:
+    DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP.
+
+    For HybridEP, SM configuration can be set via environment variables:
+    - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
+    - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
 
 
@@ -259,12 +259,6 @@ class ParallelismConfig:
 class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
-
-    selective_ac_option: str = "2"
-    """
-    Selective activation checkpointing options ['int', 'op'].
-    'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
-    """
 
     per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]
@@ -356,7 +350,7 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    mode: Literal["default", "fake_backend", "local_tensor", "torchcomms"] = "default"
     """
     Communication mode for distributed training.
 
@@ -368,6 +362,7 @@ class CommConfig:
       rank after another. While the performance will be slow, the numerics should be the same.
       This enables us to verify numerics with fewer GPUs. For example, we can directly run 5D
       parallelisms within a single node to reduce the combinations we need to use in integration tests.
+    - "torchcomms": Use torchcomms-based communicators. Requires the torchcomms package to be installed.
 
     NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
     """
@@ -386,6 +381,14 @@ class DebugConfig:
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
+    detect_anomaly: bool = False
+    """Enable torch.autograd anomaly detection to help track down NaN/Inf gradients.
+    Note: incurs significant overhead; for debugging only."""
+
+    batch_invariant: bool = False
+    """Enable batch-invariant mode to use batch-invariant ops in model
+    forward and deterministic NCCL collective reduction order"""
 
     print_config: bool = False
     """Print the job configs to terminal"""

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.protocols.module import Module
 
@@ -200,8 +201,7 @@ class RoPE(Module):
         """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
         return self.cache
 
-    def init_weights(self, **kwargs) -> None:
-        buffer_device = kwargs.get("buffer_device")
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is not None:
             with torch.device(buffer_device):
                 self.cache = self._precompute()
@@ -289,6 +289,43 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _maybe_wrap_positions(
+    positions: torch.Tensor | None,
+    x: torch.Tensor,
+) -> torch.Tensor | None:
+    """Wrap positions as a DTensor deriving mesh and placements from x (xq/xk).
+
+    TODO: In a full DTensor rewrite, positions should be made a DTensor
+    in/right after dataloading, together with inputs and labels.
+
+    When TP uses use_local_output=False (DeepSeek V3, Qwen3, GPT-OSS),
+    x is a DTensor but positions is a plain tensor. The downstream
+    torch.gather requires both operands to be the same type.
+
+    Positions (bsz, seqlen) has fewer dimensions than x (bsz, seqlen,
+    n_heads, head_dim), so we only preserve Shard placements for shared
+    dimensions. Shard dims beyond positions' rank (e.g. Shard(2) for TP
+    on heads) become Replicate.
+    """
+    if (
+        positions is not None
+        and isinstance(x, DTensor)
+        and not isinstance(positions, DTensor)
+    ):
+        ndim = positions.ndim
+        placements = tuple(
+            p if not isinstance(p, Shard) or p.dim < ndim else Replicate()
+            for p in x.placements
+        )
+        positions = DTensor.from_local(
+            positions,
+            x.device_mesh,
+            placements,
+            run_check=False,
+        )
+    return positions
+
+
 # TODO: consolidate apply_rotary_emb_complex and apply_rotary_emb_single_complex
 def apply_rotary_emb_complex(
     xq: torch.Tensor,
@@ -304,6 +341,7 @@ def apply_rotary_emb_complex(
         freqs_cis: (max_seqlen, head_dim // 2) complex
         positions: optional position indices
     """
+    positions = _maybe_wrap_positions(positions, xq)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
@@ -324,6 +362,7 @@ def apply_rotary_emb_single_complex(
         freqs_cis: (max_seqlen, head_dim // 2) complex
         positions: optional position indices
     """
+    positions = _maybe_wrap_positions(positions, x)
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
@@ -342,13 +381,18 @@ def apply_rotary_emb_cos_sin(
     Args:
         xq: (bsz, seqlen, n_heads, head_dim)
         xk: (bsz, seqlen, n_kv_heads, head_dim)
-        rope_cache: (max_seqlen, head_dim * 2) with cos and sin concatenated
+        rope_cache: (max_seqlen, head_dim * 2) with cos and sin concatenated,
+            or (bsz, seqlen, 1, head_dim * 2) if already broadcast-shaped (MRoPE)
         positions: optional position indices
     """
+    positions = _maybe_wrap_positions(positions, xq)
     head_dim = xq.shape[-1]
-    rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
-    cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
-    sin = rope_cache[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
-    xq_out = (xq * cos) + (_rotate_half(xq) * sin)
-    xk_out = (xk * cos) + (_rotate_half(xk) * sin)
+    if rope_cache.ndim != 4:
+        rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
+    cos = rope_cache[..., :head_dim].to(device=xq.device)
+    sin = rope_cache[..., head_dim:].to(device=xq.device)
+    xq_f = xq.float()
+    xk_f = xk.float()
+    xq_out = (xq_f * cos) + (_rotate_half(xq_f) * sin)
+    xk_out = (xk_f * cos) + (_rotate_half(xk_f) * sin)
     return xq_out.type_as(xq), xk_out.type_as(xk)

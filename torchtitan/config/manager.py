@@ -95,26 +95,42 @@ class ConfigManager:
         from torchtitan.models import _supported_models
 
         all_supported = _supported_models | _supported_experiments
-        if module_name not in all_supported:
-            raise ValueError(
-                f"Unknown module '{module_name}'. "
-                f"Supported modules: {sorted(all_supported)}"
-            )
 
-        # Import config_registry module (search models first, then experiments)
         module = None
-        for prefix in ("torchtitan.models", "torchtitan.experiments"):
-            module_path = f"{prefix}.{module_name}.config_registry"
-            try:
-                module = importlib.import_module(module_path)
-                break
-            except ImportError:
-                continue
-        if module is None:
-            raise ImportError(
-                f"Cannot import config_registry for module '{module_name}' "
-                f"from torchtitan.models or torchtitan.experiments"
-            )
+        module_path = None
+
+        # Import config_registry from module based on module specification
+        if module_name in all_supported:
+            # short module from supported module list  (search models first, then experiments)
+            for prefix in ("torchtitan.models", "torchtitan.experiments"):
+                module_path = f"{prefix}.{module_name}.config_registry"
+                try:
+                    module = importlib.import_module(module_path)
+                    break
+                except ImportError:
+                    continue
+            if module is None:
+                raise ImportError(
+                    f"Cannot import config_registry for module '{module_name}' "
+                    f"from torchtitan.models or torchtitan.experiments"
+                )
+        else:
+            # Fully qualified module path: try appending .config_registry first,
+            # then fall back to importing directly (e.g., torchtitan.models.llama3
+            # -> torchtitan.models.llama3.config_registry)
+            for candidate in (f"{module_name}.config_registry", module_name):
+                try:
+                    module = importlib.import_module(candidate)
+                    module_path = candidate
+                    break
+                except ImportError:
+                    continue
+            if module is None:
+                raise ImportError(
+                    f"Cannot import module '{module_name}' or "
+                    f"'{module_name}.config_registry'. "
+                    f"For shorthands, supported modules are: {sorted(all_supported)}"
+                )
 
         # Get the config function
         config_fn = getattr(module, config_name, None)
@@ -145,7 +161,6 @@ class ConfigManager:
             DeprecationWarning,
             stacklevel=2,
         )
-        # pyrefly: ignore [unknown-name]
         result: list[str | tuple[str, Any] | tuple[str, Any, Any]] = []
         b_map = {f.name: f for f in fields(base)}
         c_map = {f.name: f for f in fields(custom)}
@@ -180,7 +195,6 @@ class ConfigManager:
         # pyrefly: ignore [missing-attribute]
         if not os.path.exists(self.config.hf_assets_path):
             logger.warning(
-                # pyrefly: ignore [missing-attribute]
                 f"HF assets path {self.config.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
@@ -238,10 +252,8 @@ if __name__ == "__main__":
 
     try:
 
-        # pyrefly: ignore[missing-import]
         from rich import print as rprint
 
-        # pyrefly: ignore[missing-import]
         from rich.pretty import Pretty
 
         config_manager = ConfigManager()

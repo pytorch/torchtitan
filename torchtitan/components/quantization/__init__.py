@@ -31,6 +31,27 @@ class QuantizationConverter(Configurable):
         _quantization_type: ClassVar[str]
 
 
-# Module level global constants
-FP8_GROUP_ALIGNMENT_SIZE = 16
-MXFP8_GROUP_ALIGNMENT_SIZE = 32
+# Mapping from quantization type to the pad_multiple needed for grouped GEMMs.
+# FP8: 16 byte alignment / 1 byte per elem = 16 elements.
+# MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
+PAD_MULTIPLE_MAP: dict[str, int] = {
+    "float8": 16,
+    "mxfp8": 32,
+}
+
+
+def find_pad_multiple(converters: list) -> int | None:
+    """Return pad_multiple needed for quantized grouped GEMMs, or None.
+
+    Inspects the list of converter configs to determine if any require
+    token group padding (Float8GroupedMMConverter or MXFP8Converter).
+    """
+    from torchtitan.components.quantization.float8 import Float8GroupedMMConverter
+    from torchtitan.components.quantization.mx import MXFP8Converter
+
+    for c in converters:
+        if isinstance(c, Float8GroupedMMConverter.Config):
+            return PAD_MULTIPLE_MAP["float8"]
+        if isinstance(c, MXFP8Converter.Config):
+            return PAD_MULTIPLE_MAP["mxfp8"]
+    return None

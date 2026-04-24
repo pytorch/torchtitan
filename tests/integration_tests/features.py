@@ -32,7 +32,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--profiling.enable_profiling",
+                    "--profiler.enable_profiling",
                     "--metrics.enable_tensorboard",
                 ],
             ],
@@ -53,7 +53,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
                 ],
             ],
             "1D compile with selective op AC",
@@ -67,6 +66,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "2D eager",
             "2d_eager",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.no-enable-sequence-parallel",
+                ],
+            ],
+            "2D eager (SP disabled)",
+            "2d_eager_no_sp",
         ),
         OverrideDefinitions(
             [
@@ -148,6 +157,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                    "--activation_checkpoint.mode full",
                 ],
             ],
             "PP looped zero bubble test",
@@ -159,6 +169,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--activation_checkpoint.mode full",
                 ],
             ],
             "PP zero bubble test (v shaped)",
@@ -282,6 +293,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+                    "--activation_checkpoint.mode full",
                 ],
             ],
             "PP with custom pipeline schedule loaded from CSV file",
@@ -296,6 +308,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Foreach Optimizer Test",
             "optimizer_foreach",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--optimizer.name AdamW --optimizer.implementation fused_opt_states_bf16",
+                ]
+            ],
+            "BF16 Optimizer States Test",
+            "optimizer_bf16_states",
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -507,7 +529,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--module llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
                 ]
             ],
             "FSDP + FLEX + per op SAC",
@@ -520,7 +541,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",
@@ -558,6 +578,56 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Float8 emulation test",
             "float8_emulation",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.mode torchcomms",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+CP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+cp+pp+compile",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.mode torchcomms",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+TP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+tp+pp+compile",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config sft_debugmodel",
+                ],
+            ],
+            "SFT ChatDataset integration test",
+            "sft",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable",
+                    "--checkpoint.create_seed_checkpoint",
+                ],
+            ],
+            "Seed checkpoint creation",
+            "seed_checkpoint",
+            ngpu=1,
+            timeout=30,
         ),
     ]
 

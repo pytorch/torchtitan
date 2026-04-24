@@ -22,14 +22,9 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.manager import FTManager, maybe_semi_sync_training
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchtitan.trainer import Trainer
 
 
@@ -129,6 +124,9 @@ class FaultTolerantTrainer(Trainer):
         )
         model_converters.convert(model)
 
+        # Verify all submodules satisfy the Module protocol
+        model.verify_module_protocol()
+
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
@@ -226,7 +224,7 @@ class FaultTolerantTrainer(Trainer):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(Decoder, m).init_weights(buffer_device=buffer_device)
+                    cast(BaseModel, m).init_states(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -250,7 +248,7 @@ class FaultTolerantTrainer(Trainer):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                cast(BaseModel, model).init_states(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -321,11 +319,6 @@ class FaultTolerantTrainer(Trainer):
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
-        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
-            parallel_dims,
-            config.training.mixed_precision_param,
-            device_type,
-        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -348,7 +341,6 @@ class FaultTolerantTrainer(Trainer):
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
-                maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.seq_len,
                 local_batch_size=config.training.local_batch_size,
@@ -392,18 +384,8 @@ class FaultTolerantTrainer(Trainer):
         self.ft_manager = config.fault_tolerance.build()
 
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = config.parallelism
 
-        return ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
+        return ParallelDims.from_config(config.parallelism, world_size)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -525,26 +507,19 @@ class FaultTolerantTrainer(Trainer):
             else f"replica_{self.ft_manager.replica_id}"
         )
         with (
-            maybe_enable_profiling(
-                config.profiling,
+            config.profiler.build(
                 global_step=self.step,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
-            ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
-                global_step=self.step,
-                base_folder=config.dump_folder,
-                leaf_folder=leaf_folder,
-            ) as memory_profiler,
+            ) as profiler,
             # FT addition: maybe_semi_sync_training context manager
             maybe_semi_sync_training(
                 config.fault_tolerance,
                 ft_manager=self.ft_manager,
                 model=self.model_parts[0],
                 n_layers=(
-                    self.model_config.n_layers
-                    if hasattr(self.model_config, "n_layers")
+                    len(self.model_config.layers)
+                    if hasattr(self.model_config, "layers")
                     else 0
                 ),
                 optimizer=self.optimizers,
@@ -576,10 +551,7 @@ class FaultTolerantTrainer(Trainer):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
-                if memory_profiler:
-                    memory_profiler.step()
+                profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

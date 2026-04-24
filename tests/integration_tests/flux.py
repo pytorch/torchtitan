@@ -38,6 +38,17 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
             "hsdp+cp+validation+inference",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module flux",
+                    "--config flux_debugmodel",
+                    "--compile.enable",
+                ],
+            ],
+            "Flux FSDP+compile",
+            "flux_fsdp+compile",
+        ),
     ]
     return integration_tests_flavors
 
@@ -53,13 +64,15 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
-    random_init_encoder_arg = "--encoder.test_mode --dataloader.encoder.test_mode"
+    random_init_arg = "--tokenizer.test_mode --encoder.random_init"
     clip_encoder_version_arg = (
         "--encoder.clip_encoder tests/assets/flux_test_encoders/clip-vit-large-patch14/"
     )
     t5_encoder_version_arg = (
         "--encoder.t5_encoder tests/assets/flux_test_encoders/t5-v1_1-xxl/"
     )
+    t5_tokenizer_path_arg = "--tokenizer.t5_tokenizer_path tests/assets/tokenizer"
+    clip_tokenizer_path_arg = "--tokenizer.clip_tokenizer_path tests/assets/tokenizer"
     hf_assets_path_arg = "--hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
@@ -78,9 +91,11 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
             )
 
         cmd += " " + dump_folder_arg
-        cmd += " " + random_init_encoder_arg
+        cmd += " " + random_init_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
+        cmd += " " + t5_tokenizer_path_arg
+        cmd += " " + clip_tokenizer_path_arg
         cmd += " " + hf_assets_path_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)

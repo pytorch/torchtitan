@@ -4,39 +4,50 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(kw_only=True, slots=True)
-class Encoder:
+class FluxEncoderConfig:
+    """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
+
     t5_encoder: str = "google/t5-v1_1-small"
-    """T5 encoder to use, HuggingFace model name. This field could be either a local folder path,
-        or a Huggingface repo name."""
+    """HuggingFace model name or local path for the T5 text encoder."""
     clip_encoder: str = "openai/clip-vit-large-patch14"
-    """Clip encoder to use, HuggingFace model name. This field could be either a local folder path,
-        or a Huggingface repo name."""
+    """HuggingFace model name or local path for the CLIP text encoder."""
     autoencoder_path: str = (
         "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
     )
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
-    max_t5_encoding_len: int = 256
-    """Maximum length of the T5 encoding."""
-
-    test_mode: bool = False
-    """Whether to use integration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
+    random_init: bool = False
+    """If True, initialize encoders with random weights instead of loading pretrained weights (for testing only)."""
 
 
-# TODO: maybe consolidate with FluxValidator.Config
 @dataclass(kw_only=True, slots=True)
-class Validation:
+class SamplingConfig:
+    """Shared configuration for image generation sampling (used by both validation and inference)."""
+
     enable_classifier_free_guidance: bool = False
-    """Whether to use classifier-free guidance during sampling"""
+    """Whether to use classifier-free guidance (CFG) during image generation.
+
+    When enabled, the model runs two forward passes per denoising step — one with
+    the text prompt and one without — then interpolates the results using
+    `classifier_free_guidance_scale` to produce images that more closely follow
+    the prompt. This typically yields higher-quality, more prompt-adherent images
+    but doubles the compute cost per sampling step.
+    """
+
     classifier_free_guidance_scale: float = 5.0
-    """Classifier-free guidance scale when sampling"""
+    """Interpolation weight for classifier-free guidance during sampling.
+
+    Higher values steer the output more strongly toward the text prompt, producing
+    sharper and more prompt-adherent images, but may reduce diversity or introduce
+    artifacts. Typical values range from 1.0 (no guidance) to 10.0 (strong guidance).
+    Only takes effect when `enable_classifier_free_guidance` is True.
+    """
+
     denoising_steps: int = 50
-    """How many denoising steps to sample when generating an image"""
-    eval_freq: int = 100
-    """Frequency of evaluation/sampling during training"""
+    """How many denoising steps to sample when generating an image."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -51,3 +62,5 @@ class Inference:
     """Batch size for inference"""
     img_size: int = 256
     """Image size for inference"""
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    """Sampling configuration for image generation"""

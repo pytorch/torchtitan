@@ -1,0 +1,94 @@
+name: RL H100 Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/rl/**'
+      - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'torchtitan/experiments/rl/**'
+      - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+      id-token: write
+      contents: read
+
+jobs:
+  build-test:
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    with:
+      runner: linux.aws.h100.8
+      gpu-arch-type: cuda
+      gpu-arch-version: "13.0"
+      docker-image: torchtitan-ubuntu-20.04-clang12
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        # Install uv for faster dependency resolution
+        pip install uv
+
+        # 1. Install Monarch and TorchStore
+        uv pip install torchmonarch==0.3.0
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+        uv pip install pygtrie portpicker
+
+        # 2. Install batch-invariant ops
+        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
+
+        # 3. Install Flash Attention 3 (required for H100/H200)
+        uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
+
+        # 4. Install PyTorch nightly, vllm, and xformers
+
+        # torchvision must be installed from the nightly channel alongside torch
+        # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
+        uv pip install torch torchvision vllm xformers --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --index-strategy unsafe-best-match
+        uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+
+        # 5. Install torchtitan in editable mode because integration test spawns
+        # python simple_grpo_sum_digits.py as a subprocess
+        uv pip install -e .
+
+        # 6. Download HF model checkpoint for tests
+        MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
+
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Run bitwise parity tests (TP=2, batch-invariant mode)
+        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+
+        # Run batch-invariant E2E RL integration test (TP=2 on 4 GPUs)
+        python -m torchtitan.experiments.rl.tests.integration_tests \
+          $RUNNER_TEMP/artifacts-to-be-uploaded --test_suite h100 --ngpu 4 \
+          --hf_assets_path "$MODEL_PATH"

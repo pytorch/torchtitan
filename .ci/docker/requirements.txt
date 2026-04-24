@@ -1,9 +1,9 @@
 torchdata >= 0.8.0
-datasets >= 3.6.0
+datasets >= 3.6.0, < 4.8.0
 tensorboard
 wandb
 fsspec
-tyro
+tyro >= 1.0.5
 tokenizers >= 0.15.0
 safetensors
 einops

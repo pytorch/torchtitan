@@ -27,6 +27,7 @@ class DummyTokenizer(BaseTokenizer):
     def __init__(self):
         super().__init__()
         self.eos_id = 2
+        self.bos_id = 1
 
     def encode(
         self, text: str, add_bos: bool = False, add_eos: bool = False
@@ -34,7 +35,7 @@ class DummyTokenizer(BaseTokenizer):
         # Simple encoding: convert each character to its ASCII value
         tokens = [ord(c) for c in text]
         if add_bos:
-            tokens.insert(0, 1)  # BOS token
+            tokens.insert(0, self.bos_id)  # BOS token
         if add_eos:
             tokens.append(self.eos_id)
         return tokens
@@ -138,6 +139,45 @@ class TestParallelAwareDataloader(unittest.TestCase):
 
         self.assertEqual(dataloader.batch_size, 8)
         self.assertEqual(dataloader.num_workers, 2)
+
+    def test_positions_matching_sequences(self):
+        tokenizer = DummyTokenizer()
+
+        dl_config = HuggingFaceTextDataLoader.Config(
+            dataset="c4_test",
+            num_workers=0,
+            infinite=False,
+        )
+
+        dataloader = HuggingFaceTextDataLoader(
+            dl_config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=(seq_len := 512),
+            local_batch_size=8,
+        )
+
+        for batch, _ in zip(map(lambda x: x[0], dataloader), range(10)):
+            batch_input_ids = batch["input"]
+            batch_positions = batch["positions"]
+            for input_ids, positions in zip(batch_input_ids, batch_positions):
+                for i, (tok, pos) in enumerate(zip(input_ids, positions)):
+                    # pos is less then seq_len
+                    self.assertLess(pos.item(), seq_len)
+                    self.assertGreaterEqual(pos.item(), 0)
+                    if i == 0:
+                        # First token should always have position 0
+                        self.assertEqual(pos.item(), 0)
+                    if i > 0 and pos.item() > 0:
+                        # Position should increment by 1 for each subsequent token
+                        self.assertEqual(pos.item(), positions[i - 1].item() + 1)
+                    if tok == tokenizer.eos_id and i < len(input_ids) - 1:
+                        # After EOS, positions should reset to 0
+                        self.assertEqual(positions[i + 1].item(), 0)
+                    if tok == tokenizer.bos_id and i > 0:
+                        # BOS token should have position 0
+                        self.assertEqual(pos.item(), 0)
 
 
 if __name__ == "__main__":

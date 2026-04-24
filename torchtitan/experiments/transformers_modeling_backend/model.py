@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import importlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch
 from torch import nn
@@ -16,13 +17,13 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
 
 
-class SliceableModuleDict(nn.ModuleDict):
+class SliceableModuleDict(ModuleDict):
     """
     A ModuleDict that supports slicing like ModuleList.
     Keys are expected to be string representations of integers (e.g., "0", "1", "2").
@@ -49,6 +50,10 @@ class SliceableModuleDict(nn.ModuleDict):
 
     def __len__(self):
         return len(self._modules)
+
+    def init_states(self, **_kwargs) -> None:
+        """No-op: HFTransformerModel handles initialization via HF mechanisms."""
+        pass
 
 
 # Define all possible mappings organized by argument type
@@ -96,6 +101,12 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=attn_implementation, **kwargs
             )
+            # Set param_init before Module.Config.build() accesses it.
+            # PretrainedConfig.__getattribute__ doesn't recognize the
+            # param_init slot inherited from Module.Config.
+            self.param_init = (
+                None  # noqa: this sets Config.param_init, not Module._param_init
+            )
             assert titan_dense_config is not None, "titan_dense_config is required"
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
@@ -105,6 +116,41 @@ class HFTransformerModel(BaseModel):
             self._configure_hf_attention(attn_implementation)
 
             self._initialize_dense_attributes(titan_dense_config)
+
+        def build(self, **kwargs):
+            """Override build() to use _replace() instead of dataclasses.replace().
+
+            dataclasses.replace() re-invokes __init__, which is incompatible
+            with the custom __init__ here (expects titan_dense_config).
+            """
+            clone = self._replace()
+            instance = self._owner(config=clone, **kwargs)
+            if self.param_init is not None:
+                instance._param_init = self.param_init
+            return instance
+
+        def _replace(self, **overrides):
+            """Override to use ``copy.copy()`` instead of ``dataclasses.replace()``.
+
+            ``dataclasses.replace()`` re-invokes ``__init__``, which is
+            incompatible with the custom ``__init__`` here (it expects
+            ``titan_dense_config`` and calls ``PretrainedConfig.__init__``).
+            A shallow copy preserves all dynamically-set HF attributes.
+            """
+            clone = copy.copy(self)
+            for f in fields(self):
+                if f.init:
+                    continue
+                if f.name in overrides:
+                    setattr(clone, f.name, overrides[f.name])
+                elif hasattr(self, f.name):
+                    setattr(clone, f.name, getattr(self, f.name))
+                else:
+                    raise TypeError(
+                        f"{type(self).__name__} field '{f.name}' "
+                        f"(init=False) was not provided via build()"
+                    )
+            return clone
 
         def _initialize_dense_attributes(self, titan_dense_config):
             """Initialize all dense model attributes."""
@@ -225,8 +271,8 @@ class HFTransformerModel(BaseModel):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_dense_model_nparams_and_flops(
-                self,
                 model,
+                n_layers=self.n_layers,
                 n_heads=self.n_heads,
                 head_dims=self.head_dim,
                 seq_len=seq_len,
@@ -378,7 +424,7 @@ class HFTransformerModel(BaseModel):
                 # Initialize weights and biases for q, k, v projections
                 for proj_name in ["q_proj", "k_proj", "v_proj"]:
                     proj = getattr(module, proj_name)
-                    trunc_normal_(proj.weight, mean=0.0, std=0.02)
+                    nn.init.trunc_normal_(proj.weight, mean=0.0, std=0.02)
                     if proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
@@ -387,7 +433,7 @@ class HFTransformerModel(BaseModel):
                 # Handle different names for the output projection layer
                 o_proj = getattr(module, "o_proj", getattr(module, "dense", None))
                 if o_proj is not None:
-                    trunc_normal_(o_proj.weight, mean=0.0, std=init_std)
+                    nn.init.trunc_normal_(o_proj.weight, mean=0.0, std=init_std)
                     if o_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(o_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
@@ -401,20 +447,20 @@ class HFTransformerModel(BaseModel):
 
                 # gate_proj (or fc1) should always use std=0.02 for numerical stability.
                 if gate_proj is not None:
-                    trunc_normal_(gate_proj.weight, mean=0.0, std=0.02)
+                    nn.init.trunc_normal_(gate_proj.weight, mean=0.0, std=0.02)
                     if gate_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(gate_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(gate_proj.bias, -bound, bound)
                 # up_proj and down_proj (or fc2) use the depth-dependent init_std.
                 if up_proj is not None:
-                    trunc_normal_(up_proj.weight, mean=0.0, std=init_std)
+                    nn.init.trunc_normal_(up_proj.weight, mean=0.0, std=init_std)
                     if up_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(up_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(up_proj.bias, -bound, bound)
                 if down_proj is not None:
-                    trunc_normal_(down_proj.weight, mean=0.0, std=init_std)
+                    nn.init.trunc_normal_(down_proj.weight, mean=0.0, std=init_std)
                     if down_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(down_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
@@ -425,7 +471,7 @@ class HFTransformerModel(BaseModel):
             ):  # TODO(3outeille): find a better way to detect lm_head
                 final_out_std = config.hidden_size**-0.5
                 cutoff_factor = 3
-                trunc_normal_(
+                nn.init.trunc_normal_(
                     module.weight,
                     mean=0.0,
                     std=final_out_std,
@@ -443,7 +489,7 @@ class HFTransformerModel(BaseModel):
                 ):
                     final_out_std = config.hidden_size**-0.5
                     cutoff_factor = 3
-                    trunc_normal_(
+                    nn.init.trunc_normal_(
                         module.weight,
                         mean=0.0,
                         std=final_out_std,
@@ -610,7 +656,20 @@ class HFTransformerModel(BaseModel):
         output = self.model.lm_head(output.last_hidden_state)
         return output
 
-    def init_weights(self, *args, **kwargs):
+    def verify_module_protocol(self) -> None:
+        """Skip recursive verification for HuggingFace model internals.
+
+        HF PreTrainedModel submodules are plain nn.Module and cannot
+        conform to the Module protocol. Initialization is handled
+        entirely by HF's own _init_weights mechanism.
+        """
+        pass
+
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
 

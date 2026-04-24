@@ -8,13 +8,14 @@
 DeepEP primitives for MoE Expert Parallel.
 
 Provides low-level functions and autograd wrappers for DeepEP communication.
-Used by DeepEPExpertParallel in expert_parallel.py.
+Used by DeepEPTokenDispatcher in token_dispatcher.py.
 """
 
 from dataclasses import dataclass
 
 import torch
 from torch.distributed import ProcessGroup
+from torch.utils._python_dispatch import _disable_current_modes
 
 try:
     from deep_ep import Buffer  # pyrefly: ignore[missing-import]
@@ -30,7 +31,6 @@ except ImportError as e:
 
 
 # Global buffer (single buffer per process, recreated if group changes)
-# pyrefly: ignore [bad-assignment]
 _buffer: Buffer = None
 
 # Global cache for dispatch handles, keyed by handle_id
@@ -117,7 +117,6 @@ def _dispatch_op_impl(
     recv_num_tokens_per_expert = torch.tensor(
         recv_num_tokens_per_expert_list, dtype=torch.int32, device="cpu"
     )
-    # pyrefly: ignore [bad-return]
     return recv_x, recv_indices, recv_scores, recv_num_tokens_per_expert, handle_id
 
 
@@ -422,18 +421,23 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
-    buffer = get_buffer(group, get_hidden_bytes(hidden_states))
+    # Hide buffer setup from SAC's __torch_dispatch__ via _disable_current_modes().
+    # Buffer.__init__ calls all_gather_object() which triggers aten._to_copy
+    # (CUDA→CPU), a MUST_SAVE op in our SAC policy. These are infrastructure
+    # ops, not model compute, and must not enter SAC's FIFO cache.
+    with _disable_current_modes():
+        buffer = get_buffer(group, get_hidden_bytes(hidden_states))
 
-    # Calculate dispatch layout before actual dispatch
-    (
-        num_tokens_per_rank,
-        num_tokens_per_rdma_rank,
-        num_tokens_per_expert_dispatch,
-        is_token_in_rank,
-        _,
-    ) = buffer.get_dispatch_layout(
-        topk_idx=selected_experts_indices, num_experts=num_experts
-    )
+        # Calculate dispatch layout before actual dispatch
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert_dispatch,
+            is_token_in_rank,
+            _,
+        ) = buffer.get_dispatch_layout(
+            topk_idx=selected_experts_indices, num_experts=num_experts
+        )
 
     # Dispatch tokens to experts
     (

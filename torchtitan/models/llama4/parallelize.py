@@ -8,9 +8,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointWrapper,
-)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
@@ -23,6 +20,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -33,51 +31,32 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.dual_pipe_v import (
-    DualPipeExpertParallel,
-    get_dual_pipe_v_flag,
-)
 from torchtitan.distributed.expert_parallel import (
-    BaseExpertParallel,
-    DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
-    ReordererSequenceParallel,
     TensorParallel,
+)
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
     NoParallel,
 )
-from torchtitan.models.common.moe import moe as moe_module
-from torchtitan.models.llama3.parallelize import (
-    apply_ddp,
-    disable_fsdp_gradient_division,
+from torchtitan.models.common.attention import FusedQKVLinear
+
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+    TorchAOTokenDispatcher,
 )
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops._c10d_functional.all_to_all_single.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
-}
 
 
 def parallelize_llama(
@@ -98,9 +77,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -122,93 +98,73 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        enable_sp = parallelism.enable_sequence_parallel
+
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            enable_sp=enable_sp,
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
-    # Check if using DeepEP for MoE communication
-    if parallelism.expert_parallel_comm_backend == "deepep":
+    # Check if using DeepEP/HybridEP for MoE communication
+    comm_backend = parallelism.expert_parallel_comm_backend
+    if comm_backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
             raise ValueError(
-                "DeepEP requires expert parallelism (ep_degree > 1). "
-                "The DeepEP MoE model code does not support EP=1. "
+                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
                 "Please set expert_parallel_degree > 1 or use standard communication backend."
             )
         if parallel_dims.etp_enabled:
             raise NotImplementedError(
-                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
-        use_deepep = True
-
-        # Import deepep module to register custom ops before accessing them
-        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
-
-        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-        _op_sac_save_list.add(torch.ops.deepep.combine.default)
-    else:
-        use_deepep = False
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(
-            parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
-        )
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            dual_pipe_v=dual_pipe_v,
-            use_deepep=use_deepep,
+            comm_backend=comm_backend,
+            enable_sp=True,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
-    attn_backend = model.config.layer.attention.attn_backend
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            attn_backend,
         )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
     if ac_config.mode != "none":
-        if ac_config.selective_ac_option == "op":
-            logger.info(
-                f"SAC save list contains {len(_op_sac_save_list)} ops: "
-                f"{sorted([str(op) for op in _op_sac_save_list])}"
-            )
         apply_ac(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
             base_folder=dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
 
-    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        # dp_mesh is the mesh for FSDP/HSDP
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    dp_mesh_names = (
+        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    )
+    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+    edp_mesh = None
+    if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
@@ -216,35 +172,22 @@ def parallelize_llama(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            edp_mesh=edp_mesh,
-            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
-        )
+    apply_fsdp(
+        model,
+        dp_mesh,
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
+    )
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
+    logger.info("Applied fully_shard to the model")
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
-    elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
-            model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
-        )
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
 
     return model
 
@@ -252,27 +195,34 @@ def parallelize_llama(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    embed_plan = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=sp_layout,
+        use_local_output=False,
+    )
+
     parallelize_module(
         model,
         tp_mesh,
         {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel(use_local_output=False)
+            if enable_sp
+            else NoParallel(),
             "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
             ),
         },
     )
@@ -300,34 +250,53 @@ def apply_non_moe_tp(
         )
 
     # Apply tensor + sequence parallelism to every transformer block
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
+
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
+            }
         layer_plan = {
-            "attention_norm": SequenceParallel(),
-            # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout is still None as we don't convert freqs_cis to
-            # a DTensor for llama4.
+            "attention_norm": norm_plan,
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None, None, None),
-                desired_input_layouts=(Replicate(), None, None, None),
+                input_layouts=(sp_layout, Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            **qkv_plan,
+            "attention.wo": rowwise_parallel(
+                output_layouts=sp_layout, use_local_output=False
+            ),
+            "ffn_norm": norm_plan,
         }
         # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
                     "feed_forward": prepare_module_input(
-                        input_layouts=(Shard(1),),
+                        input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(use_local_output=False),
+                    "feed_forward.w2": rowwise_parallel(
+                        output_layouts=sp_layout, use_local_output=False
+                    ),
+                    "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )
 
@@ -335,7 +304,6 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -355,7 +323,6 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
-    gradient_divide_factor: int | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -374,79 +341,133 @@ def apply_fsdp(
             - "never" will disable `reshard_after_forward` for all forward passes.
 
     """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled
+    )
 
-    if model.tok_embeddings is not None:
+    if getattr(model, "enable_weight_tying", False):
+        modules = [
+            m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
+        ]
         # pyrefly: ignore [no-matching-overload]
         fully_shard(
-            model.tok_embeddings,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.items():
-        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
-        # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining edp_mesh
-        if transformer_block.moe_enabled and ep_degree > 1:
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = edp_mesh
-
-            # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
-            #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
-            #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
-            #       Even when EP is not used, we may still want to shard the experts
-            #       on non-0 dim. For now it may not be worth the complexity to support
-            #       shard_placement_fn on the outer TransformerBlock-level FSDP.
-            _experts_shard_placement_fn = None
-            assert edp_mesh is not None
-            assert hasattr(transformer_block, "moe")
-            if (
-                edp_mesh["efsdp"].size() * ep_degree
-                > transformer_block.moe.experts.num_experts
-            ):
-                _experts_shard_placement_fn = lambda param: Shard(1)
-
-            fully_shard(
-                transformer_block.moe.experts,
-                **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
-                shard_placement_fn=_experts_shard_placement_fn,
-            )
-
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-
-    # As an optimization, do not reshard_after_forward the last layers by default
-    # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
-        # pyrefly: ignore [no-matching-overload]
-        fully_shard(
-            [model.norm, model.output],
+            modules,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
+    else:
+        if model.tok_embeddings is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                model.tok_embeddings,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+        if model.norm is not None and model.output is not None:
+            # As an optimization, do not reshard_after_forward the last layers by default
+            # since FSDP would prefetch them immediately after the forward pass
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                [model.norm, model.output],
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
+
+    # pyrefly: ignore [missing-attribute]
+    for layer_id, transformer_block in model.layers.items():
+        # NOTE: In an MoE layer, we use shard_placement_fn to apply different
+        # FSDP mesh and shard placement to different parameters:
+        # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
+        # - When EP = 1: all params use the same FSDP mesh, but experts may
+        #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        if transformer_block.moe_enabled:
+            assert hasattr(transformer_block, "moe")
+            expert_params = set(transformer_block.moe.experts.parameters())
+            num_experts = transformer_block.moe.experts.num_experts
+
+            if ep_degree > 1:
+                assert edp_mesh is not None
+                efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
+            else:
+                efsdp_ep_size = fsdp_config["mesh"].size()
+
+            if efsdp_ep_size > num_experts:
+                expert_shard_placement = Shard(1)
+            else:
+                expert_shard_placement = Shard(0)
+
+            # When ep_degree == 1 and no Shard(1) override needed, skip
+            # shard_placement_fn entirely for simplicity
+            if ep_degree == 1 and expert_shard_placement == Shard(0):
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                )
+            elif ep_degree == 1:
+                # ep_degree == 1 but need Shard(1) for experts to avoid padding
+                def _experts_shard_placement_fn(
+                    param: nn.Parameter,
+                    _expert_params: set = expert_params,
+                ) -> Shard | None:
+                    if param in _expert_params:
+                        return Shard(1)
+                    return None
+
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                    shard_placement_fn=_experts_shard_placement_fn,
+                )
+            else:
+                # ep_degree > 1: per-param mesh
+                from torch.distributed.fsdp._fully_shard._fsdp_common import (
+                    FSDPMeshInfo,
+                    ShardPlacementResult,
+                )
+
+                assert edp_mesh is not None
+                edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
+                dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
+
+                def _shard_placement_fn(
+                    param: nn.Parameter,
+                    _expert_params: set = expert_params,
+                    _expert_placement: Shard = expert_shard_placement,
+                    _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+                    _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+                ) -> ShardPlacementResult:
+                    if param in _expert_params:
+                        return ShardPlacementResult(
+                            placement=_expert_placement, mesh_info=_edp_mesh_info
+                        )
+                    else:
+                        return ShardPlacementResult(
+                            placement=Shard(0), mesh_info=_dp_mesh_info
+                        )
+
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                    shard_placement_fn=_shard_placement_fn,
+                )
+        else:
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
     fully_shard(model, **fsdp_config)
 
@@ -473,17 +494,7 @@ def apply_fsdp(
     ):
         if next_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
-            if next_transformer_block.moe_enabled:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_forward_prefetch(
-                    # pyrefly: ignore [missing-attribute]
-                    [next_transformer_block, next_transformer_block.moe.experts]
-                )
-            else:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block]
-                )
+            transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
         elif model.norm is not None and model.output is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_forward_prefetch(
@@ -505,17 +516,7 @@ def apply_fsdp(
     ):
         if prev_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
-            if prev_transformer_block.moe_enabled:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_backward_prefetch(
-                    # pyrefly: ignore [missing-attribute]
-                    [prev_transformer_block, prev_transformer_block.moe.experts]
-                )
-            else:
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block]
-                )
+            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
@@ -527,10 +528,26 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
-    dual_pipe_v: bool = False,
-    use_deepep: bool = False,
+    comm_backend: str = "standard",
+    enable_sp: bool = True,
+    pad_multiple: int | None = None,
 ):
+    """
+    Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
+
+    Args:
+        model: Model containing transformer blocks.
+        tp_mesh: Tensor-parallel device mesh.
+        ep_mesh: Expert-parallel device mesh.
+        etp_mesh: Expert tensor-parallel device mesh.
+        ep_etp_mesh: Combined EP/ETP mesh.
+        comm_backend: MoE communication backend.
+        enable_sp: Whether sequence parallelism is enabled.
+        pad_multiple: Optional token padding multiple for compatible expert kernels.
+    """
     assert ep_mesh is not None or tp_mesh is not None
+
+    sp_layout = Shard(1) if enable_sp else Replicate()
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
@@ -540,27 +557,23 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
-                # input / output sharding on the seqlen dim
-                # all-gather for input, reduce-scatter for output
+                # With SP: all-gather (Shard→Replicate) for input,
+                # reduce-scatter (Partial→Shard) for output.
+                # Without SP: input is already Replicate,
+                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
-                    input_layouts=(Shard(1),),
+                    input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
-                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
                     use_local_input=False,
                     output_layouts=(Partial(),),
-                    desired_output_layouts=(Shard(1),),
+                    desired_output_layouts=(sp_layout,),
+                    use_local_output=False,
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(
                     local_output_grad_placements=(Partial(),),
                 ),
             }
-            if ep_mesh is not None and etp_mesh is None:
-                # If TP is borrowed for EP, then split the tokens across TP ranks so that
-                # the reorderer, the all-to-all comms, and routed experts computation
-                # are effectively running Sequence Parallel (split along the folded bs*slen dim)
-                # pyrefly: ignore [no-matching-overload]
-                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
                 # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
@@ -600,23 +613,45 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            if use_deepep:
+            if comm_backend in ("deepep", "hybridep"):
                 # pyrefly: ignore [missing-attribute]
-                score_before_experts = transformer_block.moe.score_before_experts
-
-                experts_plan = DeepEPExpertParallel(
-                    score_before_experts=score_before_experts,
-                )
-                logger.info("Applying DeepEP to MoE layer")
-            else:
-                # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+                dispatcher = transformer_block.moe.experts.token_dispatcher
+                assert isinstance(dispatcher, DeepEPTokenDispatcher)
+                if comm_backend == "deepep" and pad_multiple is not None:
+                    raise ValueError(
+                        "DeepEP does not support pad_multiple. "
+                        "Use hybridep or standard comm backend instead."
+                    )
+                dispatcher.pad_multiple = pad_multiple
+                logger.info(f"Applying {comm_backend.upper()} to MoE layer")
+            # sp_size and sp_rank are set for sequence-parallel token splitting
+            # when EP borrows from TP (ETP=1).
+            experts_plan = ExpertParallel()
+            # pyrefly: ignore [missing-attribute]
+            dispatcher = transformer_block.moe.experts.token_dispatcher
+            if tp_mesh is not None:
+                if isinstance(dispatcher, AllToAllTokenDispatcher):
+                    dispatcher.sp_size = tp_mesh.size()
+                    # Use _sym_get_coordinate so the rank is a SymInt
+                    # under CooR precompile instead of a concrete int
+                    # that gets baked into the FX graph.
+                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
+            if isinstance(dispatcher, TorchAOTokenDispatcher):
+                assert (
+                    pad_multiple is not None
+                ), "pad_multiple must be set for TorchAOTokenDispatcher"
+                dispatcher.pad_multiple = pad_multiple
         else:
+            # pyrefly: ignore [missing-attribute]
+            dispatcher = transformer_block.moe.experts.token_dispatcher
+            if isinstance(dispatcher, TorchAOTokenDispatcher):
+                raise NotImplementedError(
+                    "Quantized grouped GEMMs (FP8/MXFP8) with Expert Tensor "
+                    "Parallelism (ETP) is not yet supported. "
+                    "Please use EP without ETP."
+                )
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
-
-        if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):
-            experts_plan = DualPipeExpertParallel(experts_plan)
 
         parallelize_module(
             # pyrefly: ignore [missing-attribute]
@@ -624,103 +659,3 @@ def apply_moe_ep_tp(
             device_mesh=experts_mesh,
             parallelize_plan=experts_plan,
         )
-
-
-def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
-    # but it is experimental.
-    torch._dynamo.config.capture_scalar_outputs = True
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.named_children():
-        if transformer_block.moe_enabled:
-            # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
-            # So we must weave compile wrappers around those FSDP hooks to
-            # prevent AC from falling back the whole graph to eager.
-            # TODO: Fix Compile(AC(graph break))
-
-            if isinstance(transformer_block, CheckpointWrapper):
-                # TODO: Make CheckpointWrapper a transparent wrapper
-                # unwrap so that .named_children() works
-                block = transformer_block._checkpoint_wrapped_module
-            else:
-                block = transformer_block
-
-            for attr_name, submod in block.named_children():
-                assert getattr(block, attr_name) == getattr(
-                    transformer_block, attr_name
-                )
-
-                if isinstance(submod, moe_module.MoE):
-                    # avoid graph breaking on the GroupedExperts' FSDP hooks
-                    # by wrapping each submod's forward instead of their __call__
-                    moe = submod
-                    for attr_name, submod in moe.named_children():
-                        if attr_name == "experts":
-                            # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
-                            # https://github.com/pytorch/torchtitan/issues/1940
-                            continue
-                        setattr(
-                            moe,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
-                else:
-                    setattr(
-                        block,
-                        attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
-                    )
-
-        else:
-            # If it's not a MoE layer, there is no FSDP(GroupedExperts)
-            # So we can compile the whole block
-            transformer_block = torch.compile(
-                transformer_block,
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-
-        # pyrefly: ignore [missing-attribute]
-        model.layers.register_module(layer_id, transformer_block)
-
-    # Patch some globals only once (apply_compile is called multiple times for PP setup)
-    already_patched = (
-        "_run_experts_grouped_mm_dynamic"
-        in moe_module._run_experts_grouped_mm.__qualname__
-    )
-    if not already_patched:
-        moe_module._run_experts_grouped_mm = torch.compile(
-            moe_module._run_experts_grouped_mm,
-            backend=compile_config.backend,
-            fullgraph=True,
-        )
-
-        if ep_enabled:
-            compiled_fn = moe_module._run_experts_grouped_mm
-
-            # keep function logic in sync with `already_patched` above
-            def _run_experts_grouped_mm_dynamic(
-                w1: torch.Tensor,
-                w2: torch.Tensor,
-                w3: torch.Tensor,
-                x: torch.Tensor,
-                num_tokens_per_expert: torch.Tensor,
-            ) -> torch.Tensor:
-                # dynamic number of tokens in expert parallel
-                torch._dynamo.mark_dynamic(x, 0)
-                return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
-
-            moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
-
-    # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
-    # https://github.com/pytorch/pytorch/issues/166460
-
-    logger.info("Compiling each TransformerBlock with torch.compile")

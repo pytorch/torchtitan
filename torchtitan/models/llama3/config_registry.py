@@ -19,9 +19,12 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import (
+    ChatDataLoader,
+    HuggingFaceTextDataLoader,
+)
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-from torchtitan.tools.profiling import ProfilingConfig
+from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -54,7 +57,6 @@ def llama3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
         validator=Validator.Config(
             freq=5,
@@ -63,15 +65,21 @@ def llama3_debugmodel() -> Trainer.Config:
     )
 
 
+def llama3_debugmodel_fused_qkv() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.model_spec = model_registry("debugmodel_fused_qkv")
+    return config
+
+
 def llama3_debugmodel_flex_attn() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel_flex_attn")
+    config.model_spec = model_registry("debugmodel", attn_backend="flex")
     return config
 
 
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel_varlen_attn")
+    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
     return config
 
 
@@ -111,7 +119,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -131,7 +139,6 @@ def llama3_8b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
         validator=Validator.Config(
             freq=500,
@@ -143,7 +150,7 @@ def llama3_8b() -> Trainer.Config:
 def llama3_70b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -175,7 +182,7 @@ def llama3_70b() -> Trainer.Config:
 def llama3_405b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-405B",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -212,5 +219,50 @@ def llama3_405b() -> Trainer.Config:
         validator=Validator.Config(
             freq=500,
             steps=1200,
+        ),
+    )
+
+
+def sft_debugmodel() -> Trainer.Config:
+    """SFT debug config with Llama3 debugmodel and local test data."""
+
+    def process_sample(sample):
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
+
+    model_spec = model_registry("debugmodel", attn_backend="flex")
+
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        model_spec=model_spec,
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        dataloader=ChatDataLoader.Config(
+            dataset_path="json",
+            load_dataset_kwargs={
+                "data_files": "tests/assets/sft_test/data.json",
+                "split": "train",
+            },
+            sample_processor=process_sample,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )

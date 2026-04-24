@@ -8,6 +8,7 @@ on:
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:
@@ -60,19 +61,26 @@ jobs:
         pip config --user set global.progress_bar off
 
         start=$(date +%s)
-        if [ "${{ matrix.gpu-arch-type }}" = "rocm" ]; then
-          python -m pip install --force-reinstall --pre \
-            "torch==${{ matrix.torch-version }}" \
-            --index-url ${{ matrix.index-url }}
-        else
-          python -m pip install --force-reinstall --pre \
-            torch --index-url ${{ matrix.index-url }}
+        TORCH_SPEC="torch"
+        if [ -n "${{ matrix.torch-version }}" ]; then
+          TORCH_SPEC="torch==${{ matrix.torch-version }}"
+        fi
+        python -m pip install --force-reinstall --pre \
+          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
         fi
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
 
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        fi
+
         start=$(date +%s)
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
         end=$(date +%s)
         echo "pip install torchao took $((end - start)) seconds"
 
@@ -97,7 +105,7 @@ jobs:
           # But this is more an unknown issue that AMD people may want to
           # figure out the root cause or confirm that this is an expected
           # behavior.
-          LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
+          LOSS_FILE="tests/assets/losses/llama3_rocm_mi350x.txt"
           STEPS=1
         else
           echo "Error: Unknown GPU architecture type: ${{ matrix.gpu-arch-type }}"

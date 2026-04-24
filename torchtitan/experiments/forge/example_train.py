@@ -23,10 +23,6 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchtitan.trainer import Trainer as TitanTrainer
 
 from .engine import ForgeEngine
@@ -124,7 +120,6 @@ class Trainer(ForgeEngine):
                 parallel_dims=self.parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
-                maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.seq_len,
                 local_batch_size=config.training.local_batch_size,
@@ -132,6 +127,8 @@ class Trainer(ForgeEngine):
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
             )
+
+        self.profiler = config.profiler.build()
 
         logger.info(
             "Trainer is initialized with "
@@ -247,14 +244,13 @@ class Trainer(ForgeEngine):
             # Non-PP forward / backward
             with self.train_context():
                 assert len(model_parts) == 1
-                with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    # Compute loss sum (reduction='sum')
-                    loss_sum = self.loss_fn(pred, labels)
+                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                # Compute loss sum (reduction='sum')
+                loss_sum = self.loss_fn(pred, labels)
 
-                    # Scale the loss by the inverse of the total weight denominator before backward
-                    # This ensures gradients are properly normalized across all microbatches
-                    loss = loss_sum / global_valid_tokens
+                # Scale the loss by the inverse of the total weight denominator before backward
+                # This ensures gradients are properly normalized across all microbatches
+                loss = loss_sum / global_valid_tokens
 
                 # need to free pred before bwd to avoid peaking memory
                 del pred
@@ -347,18 +343,10 @@ class Trainer(ForgeEngine):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
-        with (
-            maybe_enable_profiling(
-                config.profiling,
-                global_step=self.step,
-                base_folder=config.dump_folder,
-            ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
-                global_step=self.step,
-                base_folder=config.dump_folder,
-            ) as memory_profiler,
-        ):
+        with self.profiler.active(
+            global_step=self.step,
+            base_folder=config.dump_folder,
+        ) as profiler:
             data_iterator = self.batch_generator(self.dataloader)
             while self.step < config.training.steps:
                 self.step += 1
@@ -380,10 +368,7 @@ class Trainer(ForgeEngine):
                 )
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
-                if memory_profiler:
-                    memory_profiler.step()
+                profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)
@@ -428,7 +413,7 @@ def main(custom_trainer_class: type[Trainer] | None = None) -> None:
 
     try:
         # TODO(local_tensor): Remove this special case once LocalTensor supports
-        # init_weights() and foreach_allgather. In local tensor mode, skip
+        # init_states() and foreach_allgather. In local tensor mode, skip
         # training/checkpointing as the # model is not fully initialized
         # pyrefly: ignore [missing-attribute]
         if config.comm.mode == "local_tensor":

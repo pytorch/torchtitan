@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch.nn as nn
 
@@ -14,34 +14,19 @@ __all__ = ["Embedding"]
 
 
 class Embedding(nn.Embedding, Module):
-    """Configurable nn.Embedding with init_weights support.
+    """Configurable nn.Embedding.
 
     Uses diamond inheritance (nn.Embedding + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
     - All nn.Embedding logic (forward, state_dict, etc.) is reused as-is.
     - The Module protocol is satisfied and ``build()`` is inherited from
       ``Configurable.Config``.
-
-    ``num_embeddings`` and ``embedding_dim`` use ``field(init=False)`` so
-    they are excluded from ``Config.__init__()``.  They are typically supplied
-    via ``build()`` kwargs from the parent model.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        # ``num_embeddings`` and ``embedding_dim`` are usually passed by the
-        # parent modules through build(). Using field(init=False) excludes
-        # them from Config.__init__.
-        num_embeddings: int = field(init=False)
-        embedding_dim: int = field(init=False)
-        init_mean: float = 0.0
-        init_std: float = 1.0
+        num_embeddings: int
+        embedding_dim: int
 
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
-        self.config = config
-
-    def init_weights(self, **kwargs) -> None:
-        nn.init.normal_(
-            self.weight, mean=self.config.init_mean, std=self.config.init_std
-        )

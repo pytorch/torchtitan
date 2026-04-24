@@ -14,7 +14,6 @@ from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
-
 from torchtitan.tools.logging import logger
 
 
@@ -92,6 +91,11 @@ def get_peak_flops(device_name: str) -> float:
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12
+    elif "A6000" in device_name:
+        # data from https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/
+        # quadro-product-literature/proviz-print-nvidia-rtx-a6000-datasheet-us-nvidia-1454980-r9-web%20(1).pdf
+        # NOTE: 309.7 TFLOPS is with sparsity; dense value is half.
+        return 154.85e12
     elif "H100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/h100/
         # NOTE: Specifications are one-half lower without sparsity.
@@ -119,8 +123,9 @@ def get_peak_flops(device_name: str) -> float:
         # GB200 data from https://www.nvidia.com/en-us/data-center/dgx-gb200
         # GB300 data from https://www.nvidia.com/en-us/data-center/dgx-gb300
         return 2.5e15
-    elif "B200" in device_name:
+    elif "B300" in device_name or "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+        # Checked after GB300 to avoid false match on "GB300"
         return 2.25e15
     elif "MI355X" in device_name:
         # MI355X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
@@ -248,9 +253,3 @@ def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
         yield
     finally:
         torch.set_default_dtype(old_dtype)
-
-
-def _round_up(x: int, y: int) -> int:
-    """Round up x to the nearest multiple of y."""
-    x_ceil_div_y = (x + y - 1) // y
-    return x_ceil_div_y * y

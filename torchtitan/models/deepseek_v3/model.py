@@ -4,23 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import math
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    FlexAttentionWrapper,
-    ScaledDotProductAttentionWrapper,
+    LocalMapInnerAttention,
+    ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -37,22 +36,32 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
+        dim: int
+        wq: Linear.Config | None = None
+        wq_a: Linear.Config | None = None
+        wq_b: Linear.Config | None = None
+        wkv_a: Linear.Config
+        wkv_b: Linear.Config
+        wo: Linear.Config
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
+        q_norm: RMSNorm.Config
+        kv_norm: RMSNorm.Config
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        norm_eps: float = 1e-5
-        attn_backend: str = "sdpa"
-        attn_mask_type: str = "causal"
+        inner_attention: LocalMapInnerAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
+        mask_type: str = "causal"
         mscale: float = 1.0
         rope_factor: float = 1.0
         rope_max_seq_len: int = 4096
         rope_original_seq_len: int = 4096
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = dim
+        self.dim = config.dim
         self.n_heads = config.n_heads
         self.q_lora_rank = config.q_lora_rank
         self.kv_lora_rank = config.kv_lora_rank
@@ -62,40 +71,29 @@ class Attention(BaseAttention):
         self.v_head_dim = config.v_head_dim
 
         if self.q_lora_rank == 0:
-            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
+            assert config.wq is not None, "wq is required when q_lora_rank == 0"
+            self.wq = config.wq.build()
         else:
-            self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
-            self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=config.norm_eps)
-            self.wq_b = nn.Linear(
-                self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
-            )
-        self.wkv_a = nn.Linear(
-            self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
-        )
-        self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=config.norm_eps)
-        self.wkv_b = nn.Linear(
-            self.kv_lora_rank,
-            self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-        )
-        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
+            assert (
+                config.wq_a is not None and config.wq_b is not None
+            ), "wq_a and wq_b are required when q_lora_rank > 0"
+            self.wq_a = config.wq_a.build()
+            self.q_norm = config.q_norm.build()
+            self.wq_b = config.wq_b.build()
+
+        # TODO(fegin): revisit
+        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
+        self.wkv_a = config.wkv_a.build()
+        self.kv_norm = config.kv_norm.build()
+        self.wkv_b = config.wkv_b.build()
+        self.wo = config.wo.build()
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if config.rope_max_seq_len > config.rope_original_seq_len:
             mscale = 0.1 * config.mscale * math.log(config.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.attn_backend = config.attn_backend
-        self.inner_attention: nn.Module
-        match self.attn_backend:
-            case "flex":
-                self.inner_attention = FlexAttentionWrapper()
-            case "sdpa":
-                self.inner_attention = ScaledDotProductAttentionWrapper()
-            case "varlen":
-                raise ValueError("Varlen attention is not supported with Deepseek V3.")
-            case _:
-                raise ValueError(f"Unknown attention backend: {self.attn_backend}")
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -130,43 +128,11 @@ class Attention(BaseAttention):
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        match self.attn_backend:
-            case "flex":
-                assert isinstance(attention_masks, BlockMask)
-                output = self.inner_attention(
-                    q, k, v, block_mask=attention_masks, scale=self.softmax_scale
-                )
-            case _:
-                assert attention_masks is None
-                output = self.inner_attention(q, k, v, scale=self.softmax_scale)
-
-        output = output.transpose(1, 2).contiguous()
+        output = self.inner_attention(
+            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
+        ).contiguous()
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
-
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        linear_list = [
-            self.wkv_a,
-            self.wkv_b,
-        ]
-        if self.q_lora_rank > 0:
-            linear_list.extend([self.wq_a, self.wq_b])
-        else:
-            linear_list.append(self.wq)
-
-        for linear in linear_list:
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-
-        self.kv_norm.reset_parameters()
-        if self.q_lora_rank > 0:
-            self.q_norm.reset_parameters()
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
@@ -176,24 +142,21 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        n_dense_layers: int = 1
+        pass
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.attention = config.attention.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.attention = config.attention.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
-        self.moe_enabled = layer_id >= config.n_dense_layers
+        self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            self.moe = config.moe.build()
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
-
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        self.layer_id = layer_id
+            self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -211,19 +174,6 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        assert buffer_device is not None
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        if self.moe_enabled:
-            cast(MoE, self.moe).init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
-
 
 class DeepSeekV3Model(Decoder):
     """
@@ -233,9 +183,7 @@ class DeepSeekV3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 2048
-        n_layers: int = 27
         vocab_size: int = 102400
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -243,6 +191,7 @@ class DeepSeekV3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -251,55 +200,51 @@ class DeepSeekV3Model(Decoder):
                 logger.warning(
                     f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
-            # Sync rope max_seq_len
-            import dataclasses as _dc
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
+            # Sync rope fields to attention for all layers.
+            # Mutate in-place — simpler than replacing each config in the list.
+            for layer_cfg in self.layers:
+                assert isinstance(layer_cfg.attention, Attention.Config)
+                layer_cfg.attention.rope_max_seq_len = seq_len
+                layer_cfg.attention.rope_factor = self.rope.rope_factor
+                layer_cfg.attention.rope_original_seq_len = self.rope.original_seq_len
 
-            # Sync rope fields to attention
-            assert isinstance(self.layer.attention, Attention.Config)
-            self.layer.attention = _dc.replace(
-                self.layer.attention,
-                rope_max_seq_len=seq_len,
-                rope_factor=self.rope.rope_factor,
-                rope_original_seq_len=self.rope.original_seq_len,
-            )
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    if (
+                        layer_cfg.moe.experts.use_grouped_mm
+                        and not has_cuda_capability(9, 0)
+                    ):
+                        logger.warning(
+                            "Failed to use grouped mm, which is only supported on SM90 or later",
+                        )
+                        layer_cfg.moe.experts.use_grouped_mm = False
+                    layer_cfg.moe.router._debug_force_load_balance = (
+                        debug.moe_force_load_balance
+                    )
 
-            assert self.layer.moe is not None
-            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
-                logger.warning(
-                    "Failed to use grouped mm, which is only supported on SM90 or later",
-                )
-                self.layer.moe.use_grouped_mm = False
-
-            if (
-                parallelism.context_parallel_degree > 1
-                and self.layer.attention.attn_backend != "sdpa"
+            if parallelism.context_parallel_degree > 1 and not isinstance(
+                self.layers[0].attention.inner_attention,
+                ScaledDotProductAttention.Config,
             ):
                 raise NotImplementedError(
-                    f"Context Parallel only supports SDPA attention. "
-                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
-                    f"FlexAttention and varlen attention are not supported with CP."
+                    "Context Parallel for DeepSeek V3 only supports "
+                    "ScaledDotProductAttention. Got "
+                    f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
-
-            self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
-
-            # Configure expert parallel communication backend from config
-            if parallelism.expert_parallel_comm_backend == "deepep":
-                from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
-
-                self.layer.moe = DeepEPMoE.Config(**_dc.asdict(self.layer.moe))
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layer.attention, Attention.Config)
+
+            assert isinstance(self.layers[0].attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                self.layer.attention.qk_nope_head_dim
-                + self.layer.attention.qk_rope_head_dim
-                + self.layer.attention.v_head_dim,
+                self.layers[0].attention.n_heads,
+                self.layers[0].attention.qk_nope_head_dim
+                + self.layers[0].attention.qk_rope_head_dim
+                + self.layers[0].attention.v_head_dim,
                 seq_len,
             )

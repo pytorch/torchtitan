@@ -71,3 +71,41 @@ repos:
       name: Pyrefly (type checking)
       pass_filenames: false
       language: system
+      args: ["--remove-unused-ignores"]
+
+
+- repo: local
+  hooks:
+    # Check hyperlinks and external links
+    - id: lychee-link-checker
+      name: lychee-link-checker
+      language: system
+      require_serial: true
+      verbose: true
+      entry: |
+        /bin/bash -c '
+        if ! command -v lychee >/dev/null 2>&1; then
+            echo "--------------------------------------------------------"
+            echo "Warning: Lychee (link checker) not found. Skipping ... "
+            echo ""
+            echo "To enable local link checking, install Lychee:"
+            echo "  - MacOS: brew install lychee"
+            echo "  - Linux/Windows: https://github.com/lycheeverse/lychee"
+            echo "--------------------------------------------------------"
+            exit 0
+        fi
+        lychee "$@"
+        ' --
+      args:
+        - "--quiet"
+        - "--no-progress"
+        - "--exclude-path=(^|/)\\.[^/]+/"
+        - "--root-dir=."
+        - "--accept=200,403,429,503"
+        - "--exclude=http://localhost:.*"
+        - "--exclude=http://127.0.0.1:.*"
+        - "--exclude=tcp://localhost:.*"
+        - "--max-retries=5"
+        - "--retry-wait-time=10"
+        - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      types_or: [markdown, python]

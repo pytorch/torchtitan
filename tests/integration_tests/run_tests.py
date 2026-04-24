@@ -24,8 +24,15 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
-def _run_cmd(cmd):
-    return subprocess.run([cmd], text=True, shell=True)
+def _run_cmd(cmd, timeout=None):
+    return subprocess.run(
+        [cmd],
+        encoding="utf-8",
+        errors="replace",
+        shell=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def run_single_test(
@@ -67,24 +74,37 @@ def run_single_test(
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
             )
 
-        result = _run_cmd(cmd)
-        logger.info(result.stdout)
+        try:
+            result = _run_cmd(cmd, timeout=test_flavor.timeout)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"\nTest timed out after {test_flavor.timeout}s: {test_flavor.test_descr}.\n"
+                f"Command: {cmd}\n"
+            ) from e
+        if result.stdout:
+            logger.info(result.stdout)
         if result.returncode != 0:
-            raise Exception(
-                f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
+            raise RuntimeError(
+                f"\nFailed test flavor: {test_flavor.test_descr}.\n"
+                f"Command: {cmd}\n"
+                f"stderr: {result.stderr}\n"
             )
 
 
 def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
     """Run all integration tests to test the core features of TorchTitan"""
+    exclude_set = set()
+    if hasattr(args, "exclude") and args.exclude:
+        exclude_set = {name.strip() for name in args.exclude.split(",")}
 
     ran_any_test = False
+    failed_tests: list[tuple[str, str]] = []
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
-        if test_flavor.disabled:
+        if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
 
         # Skip the test for ROCm
@@ -101,8 +121,20 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(test_flavor, args.output_dir, module, config)
+            try:
+                run_single_test(test_flavor, args.output_dir, module, config)
+            except Exception as e:
+                logger.error(str(e))
+                failed_tests.append((test_flavor.test_name, str(e)))
             ran_any_test = True
+
+    if failed_tests:
+        failure_summary = "\n".join(
+            f"  {name}: {error}" for name, error in failed_tests
+        )
+        raise RuntimeError(
+            f"{len(failed_tests)} integration test(s) failed:\n{failure_summary}"
+        )
 
     if not ran_any_test:
         available_tests = [t.test_name for t in test_list if not t.disabled]
@@ -154,6 +186,11 @@ def main():
     )
     parser.add_argument(
         "--ngpu", default=8, type=int, help="Maximum number of GPUs to use"
+    )
+    parser.add_argument(
+        "--exclude",
+        default=None,
+        help="Comma-separated list of test names to skip",
     )
     args = parser.parse_args()
 

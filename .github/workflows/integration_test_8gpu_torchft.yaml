@@ -3,13 +3,12 @@ name: TorchFT 8 GPU Integration Test
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/ft/**'
       - 'torchtitan/components/checkpoint.py'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/ft/**'
       - 'torchtitan/components/checkpoint.py'
@@ -63,15 +62,20 @@ jobs:
         pip config --user set global.progress_bar off
 
         python -m pip install torchft-nightly
-        if [ "${{ matrix.gpu-arch-type }}" = "rocm" ]; then
-          python -m pip install --force-reinstall --pre \
-            "torch==${{ matrix.torch-version }}" \
-            --index-url ${{ matrix.index-url }}
-        else
-          python -m pip install --force-reinstall --pre \
-            torch --index-url ${{ matrix.index-url }}
+        TORCH_SPEC="torch"
+        if [ -n "${{ matrix.torch-version }}" ]; then
+          TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
+        python -m pip install --force-reinstall --pre \
+          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        fi
+
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"

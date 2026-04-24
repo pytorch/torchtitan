@@ -18,7 +18,6 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
     get_fixed_block_mask_mod,
-    GQAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -72,47 +71,22 @@ class Llama4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
-        every_n_layers_nope: int | None = None
-        interleave_moe_layer_step: int = 2
         fixed_attn_block_size: int = 8192
 
-    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
+    def __init__(self, config: Config):
         super().__init__()
+        self.attention = config.attention.build()
 
-        # iRoPE: determine per-layer use_rope and fixed_attn_block_size
-        attn_use_rope = True
-        if config.every_n_layers_nope is not None:
-            if config.every_n_layers_nope <= 1:
-                raise ValueError("every_n_layers_nope must be greater than 1")
-            if layer_id % config.every_n_layers_nope == 0:
-                attn_use_rope = False
-
-        # Create per-layer attention config with potentially overridden use_rope
-        if not attn_use_rope:
-            assert isinstance(config.attention, GQAttention.Config)
-            layer_attention = dataclasses.replace(config.attention, use_rope=False)
-        else:
-            layer_attention = config.attention
-
-        self.attention = layer_attention.build(dim=dim)
-
-        # use MoE layer for every interleave_moe_layer_step FFN layers
-        self.moe_enabled = (layer_id + 1) % config.interleave_moe_layer_step == 0
+        self.moe_enabled = config.moe is not None
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            self.moe = config.moe.build()
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
+            self.feed_forward = config.feed_forward.build()
 
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
 
     def forward(
         self,
@@ -130,18 +104,6 @@ class Llama4TransformerBlock(TransformerBlock):
             out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def init_weights(self, **kwargs):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        if self.moe_enabled:
-            self.moe.init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
-
 
 class Llama4Model(Decoder):
     """
@@ -154,9 +116,7 @@ class Llama4Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int = 4096
-        n_layers: int = 32
         vocab_size: int = 202048
-        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -164,6 +124,7 @@ class Llama4Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+
             training = trainer_config.training
             parallelism = trainer_config.parallelism
             debug = trainer_config.debug
@@ -175,12 +136,19 @@ class Llama4Model(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            assert self.layer.moe is not None
-            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
-                logger.warning(
-                    "Failed to use grouped mm, which is only supported on SM90 or later",
-                )
-                self.layer.moe.use_grouped_mm = False
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    if (
+                        layer_cfg.moe.experts.use_grouped_mm
+                        and not has_cuda_capability(9, 0)
+                    ):
+                        logger.warning(
+                            "Failed to use grouped mm, which is only supported on SM90 or later",
+                        )
+                        layer_cfg.moe.experts.use_grouped_mm = False
+                    layer_cfg.moe.router._debug_force_load_balance = (
+                        debug.moe_force_load_balance
+                    )
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -188,16 +156,28 @@ class Llama4Model(Decoder):
                     "(Llama4 requires FlexAttention, which is not supported with CP)."
                 )
 
-            self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layers[0].attention.n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
+                    )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
+
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.layer.attention.n_heads,
-                2 * (self.dim // self.layer.attention.n_heads),
+                self.layers[0].attention.n_heads,
+                2 * (self.dim // self.layers[0].attention.n_heads),
                 seq_len,
             )
 
@@ -208,7 +188,8 @@ class Llama4Model(Decoder):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-        match self.config.layer.attention.attn_mask_type:
+        attn_config = self.config.layers[0].attention
+        match attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -217,13 +198,14 @@ class Llama4Model(Decoder):
                 B = input_batch.shape[0]
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.layer.attention.attn_mask_type}"
+                    f"Unknown attention mask type: {attn_config.mask_type}"
                 )
 
-        assert isinstance(self.config.layer, Llama4TransformerBlock.Config)
+        layer0 = self.config.layers[0]
+        assert isinstance(layer0, Llama4TransformerBlock.Config)
         rope_mask_mod = and_masks(
             *mask_mods,
-            get_fixed_block_mask_mod(self.config.layer.fixed_attn_block_size),
+            get_fixed_block_mask_mod(layer0.fixed_attn_block_size),
         )
         nope_mask_mod = and_masks(*mask_mods)
 

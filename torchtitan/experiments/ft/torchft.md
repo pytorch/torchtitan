@@ -36,12 +36,12 @@ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join
 2. Launch the first TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 TRAIN_FILE=torchtitan.experiments.ft.train MODEL=llama3 CONFIG=llama3_8B ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=0 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
+NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 MODULE=ft.llama3 NGPU=4 TRAIN_FILE=torchtitan.experiments.ft.train CONFIG=llama3_ft_debugmodel ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=0 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
 ```
 3. Launch the second TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 TRAIN_FILE=torchtitan.experiments.ft.train MODEL=llama3 CONFIG=llama3_8B ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=1 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
+NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 MODULE=ft.llama3 NGPU=4 TRAIN_FILE=torchtitan.experiments.ft.train CONFIG=llama3_ft_debugmodel ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=0 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
 ```
 
 ### Explanation

@@ -1,0 +1,82 @@
+name: TODO Debt Tracker
+
+on:
+  # 1. Manual trigger
+  workflow_dispatch:
+
+  # 2. Automatic trigger (Once a day at midnight UTC)
+  schedule:
+    - cron: '0 0 * * *'
+
+  # 3. Triggered if the script or the action configuration is changed
+  push:
+    branches: [main]
+
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/todo_debt_tracker.yaml'
+      - '.github/scripts/todo_debt_tracker.py'
+
+concurrency:
+  group: todo-debt-tracker # Serial execution of simultaneous commits
+
+jobs:
+  check_todos:
+    name: Generate Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # read access to issues and pull-requests to allow the gh api calls to work
+      # against private repositories or to fetch metadata like titles.
+      pull-requests: read
+      issues: write # for updating the issue body
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          # Fetch all history so git blame can identify authors correctly
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Generate TODO Status Report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/todo_debt_tracker.py > report.md
+
+      - name: Update the Issue
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: 2936
+        run: |
+          set -e
+
+          echo "Checking if issue #$ISSUE_NUMBER exists..."
+
+          if ! STATE=$(gh issue view "$ISSUE_NUMBER" --json state --jq '.state' 2>/dev/null); then
+            echo "Error: Issue #$ISSUE_NUMBER does not exist in this repository."
+            exit 1
+          fi
+
+          if [ "$STATE" != "OPEN" ]; then
+            echo "Error: Issue #$ISSUE_NUMBER is currently $STATE. "
+            exit 1
+          fi
+
+          if [ ! -s report.md ]; then
+            echo "Error: report.md is missing or empty."
+            exit 1
+          fi
+
+          if gh issue edit "$ISSUE_NUMBER" --body-file report.md; then
+            echo "Successfully updated issue #$ISSUE_NUMBER"
+          else
+            echo "Failed to update issue #$ISSUE_NUMBER. Check permissions."
+            exit 1
+          fi

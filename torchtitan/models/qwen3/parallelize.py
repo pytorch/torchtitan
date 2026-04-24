@@ -20,6 +20,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -30,37 +31,14 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
-from torchtitan.models.llama3.parallelize import apply_ddp
-from torchtitan.models.llama4.parallelize import (
-    apply_compile,
-    apply_fsdp,
-    apply_moe_ep_tp,
-)
+from torchtitan.distributed.tensor_parallel import NoParallel
+from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
-
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn.default,
-    torch._higher_order_ops.inductor_compiled_code,
-}
 
 
 def parallelize_qwen3(
@@ -81,14 +59,6 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_backend='{attn_backend}'. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -108,28 +78,27 @@ def parallelize_qwen3(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        enable_sp = parallelism.enable_sequence_parallel
+
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not parallelism.disable_loss_parallel,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
-            cp_enabled=parallel_dims.cp_enabled,
+            enable_cp=parallel_dims.cp_enabled,
+            enable_sp=enable_sp,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(
-            parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
-        )
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            dual_pipe_v=dual_pipe_v,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -137,7 +106,6 @@ def parallelize_qwen3(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            attn_backend,
         )
 
     if ac_config.mode != "none":
@@ -145,23 +113,20 @@ def parallelize_qwen3(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
             base_folder=dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config)
 
-    if parallel_dims.fsdp_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    dp_mesh_names = (
+        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    )
+    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+    edp_mesh = None
+    if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
@@ -169,35 +134,22 @@ def parallelize_qwen3(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            edp_mesh=edp_mesh,
-            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
-        )
+    apply_fsdp(
+        model,
+        dp_mesh,
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
+    )
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
+    logger.info("Applied fully_shard to the model")
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
-    elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
-            model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
-        )
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
 
     return model
 
@@ -205,29 +157,36 @@ def parallelize_qwen3(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    loss_parallel: bool,
+    enable_loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
-    cp_enabled: bool,
+    enable_cp: bool,
+    enable_sp: bool = True,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    sp_layout = Shard(1) if enable_sp else Replicate()
+    embed_plan = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=sp_layout,
+        use_local_output=False,
+    )
+
     parallelize_module(
         model,
         tp_mesh,
         {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
+            "tok_embeddings": embed_plan,
+            "norm": SequenceParallel(use_local_output=False)
+            if enable_sp
+            else NoParallel(),
             "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                input_layouts=sp_layout,
+                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
+                use_local_output=not enable_loss_parallel,
             ),
         },
     )
@@ -258,13 +217,38 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    positions_sharding = Replicate() if cp_enabled else None
+    positions_sharding = Replicate() if enable_cp else None
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
+    qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=False)
+
+    # Detect whether fused QKV is used by checking the first layer
+    # pyrefly: ignore [not-callable]
+    first_block = next(iter(model.layers.values()))
+    use_fused_qkv = isinstance(
+        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
+        FusedQKVLinear,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        if use_fused_qkv:
+            qkv_plan = {
+                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
+                "attention.q_norm": qk_norm_plan,
+                "attention.k_norm": qk_norm_plan,
+            }
+        else:
+            qkv_plan = {
+                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
+                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
+                "attention.q_norm": qk_norm_plan,
+                "attention.k_norm": qk_norm_plan,
+            }
         layer_plan = {
-            "attention_norm": SequenceParallel(),
+            "attention_norm": norm_plan,
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None, positions_sharding),
+                input_layouts=(sp_layout, Replicate(), None, positions_sharding),
                 desired_input_layouts=(
                     Replicate(),
                     Replicate(),
@@ -272,13 +256,11 @@ def apply_non_moe_tp(
                     positions_sharding,
                 ),
             ),
-            "attention.wq": colwise_parallel(use_local_output=False),
-            "attention.wk": colwise_parallel(use_local_output=False),
-            "attention.wv": colwise_parallel(use_local_output=False),
-            "attention.q_norm": SequenceParallel(sequence_dim=2),
-            "attention.k_norm": SequenceParallel(sequence_dim=2),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            **qkv_plan,
+            "attention.wo": rowwise_parallel(
+                output_layouts=sp_layout, use_local_output=False
+            ),
+            "ffn_norm": norm_plan,
         }
 
         # pyrefly: ignore [missing-attribute]
@@ -286,12 +268,14 @@ def apply_non_moe_tp(
             layer_plan.update(
                 {
                     "feed_forward": prepare_module_input(
-                        input_layouts=(Shard(1),),
+                        input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(use_local_output=False),
+                    "feed_forward.w2": rowwise_parallel(
+                        output_layouts=sp_layout, use_local_output=False
+                    ),
+                    "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )
 
@@ -299,7 +283,6 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

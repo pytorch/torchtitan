@@ -50,9 +50,9 @@ class TestConfigManager(unittest.TestCase):
             config_manager.parse_args([])
 
     def test_invalid_model_errors(self):
-        """--module with unknown module name raises ValueError."""
+        """--module with unknown module name raises ImportError."""
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="Unknown module"):
+        with pytest.raises(ImportError, match="Cannot import module"):
             config_manager.parse_args(["--module", "nonexistent", "--config", "foo"])
 
     def test_invalid_config_errors(self):
@@ -173,6 +173,47 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
+
+    def test_fqn_module_with_config_registry(self):
+        """--module torchtitan.models.llama3.config_registry works."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "torchtitan.models.llama3.config_registry",
+                "--config",
+                "llama3_debugmodel",
+            ]
+        )
+        assert config.model_spec.name == "llama3"
+        assert config.model_spec.flavor == "debugmodel"
+
+    def test_fqn_module_without_config_registry(self):
+        """--module torchtitan.models.llama3 (auto-appends .config_registry)."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "torchtitan.models.llama3",
+                "--config",
+                "llama3_debugmodel",
+            ]
+        )
+        assert config.model_spec.name == "llama3"
+        assert config.model_spec.flavor == "debugmodel"
+
+    def test_fqn_module_invalid_errors(self):
+        """--module with invalid FQN raises ImportError."""
+        config_manager = ConfigManager()
+        with pytest.raises(ImportError, match="Cannot import module"):
+            config_manager.parse_args(
+                [
+                    "--module",
+                    "torchtitan.models.nonexistent",
+                    "--config",
+                    "foo",
+                ]
+            )
 
 
 if __name__ == "__main__":

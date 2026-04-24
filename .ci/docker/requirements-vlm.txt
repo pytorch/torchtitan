@@ -1,2 +1,4 @@
+av
 einops
 pillow
+torchvision

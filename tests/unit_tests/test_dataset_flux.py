@@ -65,10 +65,14 @@ class TestFluxDataLoader(unittest.TestCase):
                         str(256),
                         "--dataloader.dataset",
                         dataset_name,
-                        "--dataloader.classifier_free_guidance_prob",
+                        "--dataloader.prompt_dropout_prob",
                         "0.447",
-                        "--dataloader.encoder.test_mode",
-                        "--encoder.test_mode",
+                        "--tokenizer.test_mode",
+                        "--tokenizer.t5_tokenizer_path",
+                        "tests/assets/tokenizer",
+                        "--tokenizer.clip_tokenizer_path",
+                        "tests/assets/tokenizer",
+                        "--encoder.random_init",
                         "--encoder.t5_encoder",
                         "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
@@ -76,10 +80,14 @@ class TestFluxDataLoader(unittest.TestCase):
                     ]
                 )
 
+                # Build the tokenizer container from config
+                tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
                     local_batch_size=batch_size,
+                    tokenizer=tokenizer,
                 )
 
                 it = iter(dl)
@@ -91,11 +99,11 @@ class TestFluxDataLoader(unittest.TestCase):
                         len(input_data) == 3
                     )  # (clip_encodings, t5_encodings, prompt)
                     assert labels.shape == (batch_size, 3, 256, 256)
-                    assert input_data["clip_tokens"].shape == (
+                    assert input_data["clip"].shape == (
                         batch_size,
                         77,
                     )
-                    assert input_data["t5_tokens"].shape == (
+                    assert input_data["t5"].shape == (
                         batch_size,
                         256,
                     )
@@ -107,6 +115,7 @@ class TestFluxDataLoader(unittest.TestCase):
                     dp_world_size=world_size,
                     dp_rank=rank,
                     local_batch_size=batch_size,
+                    tokenizer=tokenizer,
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)
@@ -119,10 +128,6 @@ class TestFluxDataLoader(unittest.TestCase):
                     torch.manual_seed(i)
                     input_ids, labels = next(it_resumed)
 
-                    assert torch.equal(
-                        input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
-                    )
-                    assert torch.equal(
-                        input_ids["t5_tokens"], expected_input_ids["t5_tokens"]
-                    )
+                    assert torch.equal(input_ids["clip"], expected_input_ids["clip"])
+                    assert torch.equal(input_ids["t5"], expected_input_ids["t5"])
                     assert torch.equal(labels, expected_labels)

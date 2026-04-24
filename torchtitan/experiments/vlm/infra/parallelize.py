@@ -9,10 +9,8 @@
 
 import torch
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -22,13 +20,9 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
-from torchtitan.models.llama3.parallelize import (
-    _op_sac_save_list,
-    apply_compile,
-    apply_ddp,
-    disable_fsdp_gradient_division,
-)
+from torchtitan.distributed.compile import apply_compile
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -76,7 +70,6 @@ def parallelize_vlm(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, ac_config)
 
@@ -85,41 +78,24 @@ def parallelize_vlm(
         apply_compile(model, compile_config)
         apply_compile(model.encoder, compile_config)
 
-    if parallel_dims.fsdp_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
+    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    apply_fsdp(
+        model,
+        parallel_dims.get_mesh(names),
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+    )
 
-        apply_fsdp(
-            model,
-            parallel_dims.get_mesh(names),
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        )
+    logger.info("Applied fully_shard to the model")
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
+    if parallel_dims.cp_enabled:
+        logger.info("Applied Context Parallel to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
-    elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh is not None and dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
-            model,
-            dp_mesh,
-            enable_compile=compile_config.enable,
-        )
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
 
     return model
 
@@ -155,19 +131,9 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled
+    )
 
     if model.tok_embeddings is not None:
         fully_shard(

@@ -21,7 +21,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
-from torchtitan.models.common.moe.moe import _run_experts_grouped_mm
+from torchtitan.models.common.moe import _run_experts_grouped_mm
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -218,7 +218,6 @@ def monkey_patch_local_map_moe(model, sparse_mesh):
     """
     from torch.distributed._tensor.experimental import local_map
 
-    # from torchtitan.models.common.moe import moe
     global _moe_forward
     _moe_forward = local_map(
         _moe_forward,

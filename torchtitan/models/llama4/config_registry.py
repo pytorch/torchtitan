@@ -8,12 +8,15 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.quantization.float8 import Float8GroupedMMConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
+    CompileConfig,
     ParallelismConfig,
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -49,7 +52,50 @@ def llama4_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
+        ),
+    )
+
+
+def llama4_debugmodel_ep() -> Trainer.Config:
+    config = llama4_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    return config
+
+
+def llama4_debugmodel_fp8() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("debugmodel", moe_comm_backend="torchao"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4_test",
+        ),
+        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=1,
+            expert_tensor_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+        compile=CompileConfig(enable=True, components=["model", "loss"]),
+        model_converters=ModelConvertersContainer.Config(
+            converters=[Float8GroupedMMConverter.Config(fqns=["experts"])]
         ),
     )
 

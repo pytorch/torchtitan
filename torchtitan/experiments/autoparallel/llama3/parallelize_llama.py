@@ -96,7 +96,11 @@ def parallelize_llama(
 
     param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
     reduce_dtype = TORCH_DTYPE_MAP[training.mixed_precision_reduce]
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
     with AutoParallel(
         model,
         input_fn,

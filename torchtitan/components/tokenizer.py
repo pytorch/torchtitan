@@ -14,7 +14,6 @@ from typing import Any
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
-from typing_extensions import override
 
 
 class BaseTokenizer(ABC, Configurable):
@@ -27,6 +26,7 @@ class BaseTokenizer(ABC, Configurable):
 
     def __init__(self):
         self.eos_id = None
+        self._chat_template = None
 
     @abstractmethod
     def encode(self, *args, **kwargs) -> list[int]:
@@ -40,19 +40,79 @@ class BaseTokenizer(ABC, Configurable):
     def get_vocab_size(self) -> int:
         ...
 
+    def set_chat_template(self, template: str) -> None:
+        """Compile and store a Jinja chat template."""
+        import json
+
+        import jinja2
+        import jinja2.ext
+        import jinja2.sandbox
+
+        def raise_exception(msg):
+            raise jinja2.exceptions.TemplateError(msg)
+
+        def tojson(
+            x, ensure_ascii=False, indent=None, separators=None, sort_keys=False
+        ):
+            return json.dumps(
+                x,
+                ensure_ascii=ensure_ascii,
+                indent=indent,
+                separators=separators,
+                sort_keys=sort_keys,
+            )
+
+        def strftime_now(fmt):
+            from datetime import datetime
+
+            return datetime.now().strftime(fmt)
+
+        env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+            trim_blocks=True,
+            lstrip_blocks=True,
+            extensions=[jinja2.ext.loopcontrols],
+        )
+        env.globals[
+            "raise_exception"
+        ] = raise_exception  # pyrefly: ignore [unsupported-operation]
+        env.globals[
+            "strftime_now"
+        ] = strftime_now  # pyrefly: ignore [unsupported-operation]
+        env.filters["tojson"] = tojson
+        self._chat_template = env.from_string(template)
+
+    def apply_chat_template(self, messages: list[dict[str, str]], **kwargs) -> str:
+        """Render messages through the Jinja chat template. Returns formatted text.
+
+        Messages should be a list of dicts with "role" and "content" keys, e.g.
+        [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}].
+
+        Additional template variables (e.g. add_generation_prompt, tools) can be
+        passed as kwargs.
+        """
+        if self._chat_template is None:
+            raise ValueError("No chat template set. Call set_chat_template() first.")
+        return self._chat_template.render(messages=messages, **kwargs)
+
 
 class HuggingFaceTokenizer(BaseTokenizer):
     """
     A tokenizer wrapper that handles BOS/EOS token inference and encoding.
 
     This class loads tokenizer files and automatically infers BOS/EOS tokens from
-    a configuration file (tokenizer_config.json). It provides an encode method that adds
-    BOS/EOS tokens based on whether the underlying tokenizer adds them automatically.
+    a configuration file (tokenizer_config.json) as well as specific formatting related to
+    chat templates. It provides an encode method that adds BOS/EOS tokens based on whether the
+    underlying tokenizer adds them automatically.
 
     Args:
         config (Config): Configurable config (currently empty).
         tokenizer_path (str): Path to directory containing tokenizer files
     """
+
+    # Following HF transformers convention (CHAT_TEMPLATE_FILE in transformers/utils/hub.py),
+    # a standalone Jinja file at the model root takes priority over an inline template in
+    # tokenizer_config.json. Models like GPT-OSS use this pattern.
+    CHAT_TEMPLATE_FILE = "chat_template.jinja"
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenizer.Config):
@@ -80,10 +140,28 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self._hf_config = self._load_config(
             os.path.join(tokenizer_path, "tokenizer_config.json")
         )
+        if self._hf_config is None:
+            logger.warning(
+                "No tokenizer_config.json found at %s. "
+                "Special token inference and chat template auto-loading disabled.",
+                tokenizer_path,
+            )
 
-        # Infer special tokens and adding BOS/EOS behavior
-        self._infer_special_tokens()
+        # Infer special tokens from config (if available) and BOS/EOS behavior
+        if self._hf_config is not None:
+            self._infer_special_tokens()
         self._infer_should_add_bos_eos()
+
+        # Auto-load chat template: standalone .jinja file takes priority
+        # (e.g. GPT-OSS), then fall back to inline in tokenizer_config.json
+        # (e.g. Llama3, Qwen3, DeepSeek V3).
+        if self._hf_config is not None:
+            jinja_path = os.path.join(tokenizer_path, self.CHAT_TEMPLATE_FILE)
+            if os.path.exists(jinja_path):
+                with open(jinja_path) as f:
+                    self.set_chat_template(f.read())
+            elif "chat_template" in self._hf_config:
+                self.set_chat_template(self._hf_config["chat_template"])
 
     def _load_config(self, config_path: str) -> dict | None:
         """Load configuration from JSON file if it exists."""
@@ -157,13 +235,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 tokenizer = Tokenizer(bpe_model)
 
                 # Configure GPT-2 style components for proper space handling
-                # pyrefly: ignore [read-only]
                 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
                     add_prefix_space=False
                 )
-                # pyrefly: ignore [read-only]
                 tokenizer.decoder = decoders.ByteLevel()
-                # pyrefly: ignore [read-only]
                 tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
 
                 return tokenizer
@@ -381,7 +456,6 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         return token_ids
 
-    @override
     def decode(self, *args, **kwargs) -> str:
         """
         Decode token IDs back to text.
@@ -424,3 +498,57 @@ class HuggingFaceTokenizer(BaseTokenizer):
     def id_to_token(self, token_id: int) -> str | None:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
+
+
+class MultiModalTokenizer(HuggingFaceTokenizer):
+    """Single source of truth for multimodal special tokens.
+
+    Requires 5 token strings via config, validates them against the vocabulary
+    at init, and exposes both string and ID attributes (e.g. ``image_token``,
+    ``image_id``). The multimodal data pipeline (``MMDataLoader``) requires
+    ``MultiModalTokenizer`` (not ``HuggingFaceTokenizer``) and reads these
+    attributes directly; the collator packs the IDs into a plain
+    ``dict[str, int]`` that travels through the batch to the model forward.
+    Adding a new VLM means filling in 5 config strings — no subclassing needed.
+
+    # TODO: All 5 fields are currently required. If a future VLM doesn't need
+    # some (e.g. no video, no vision_start/end markers), consider making fields
+    # optional.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(HuggingFaceTokenizer.Config):
+        image_token: str
+        """Token string for image placeholders, e.g. ``"<|image_pad|>"``."""
+
+        video_token: str
+        """Token string for video placeholders, e.g. ``"<|video_pad|>"``."""
+
+        vision_start_token: str
+        """Token string marking the start of a vision sequence."""
+
+        vision_end_token: str
+        """Token string marking the end of a vision sequence."""
+
+        pad_token: str
+        """Token string for padding."""
+
+    # Config field prefixes that follow the {name}_token pattern.
+    TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+
+    def __init__(self, config: Config, *, tokenizer_path: str):
+        super().__init__(config, tokenizer_path=tokenizer_path)
+
+        added_tokens = self.tokenizer.get_added_tokens_decoder()
+        token_to_id = {tok.content: tok_id for tok_id, tok in added_tokens.items()}
+
+        for name in self.TOKEN_FIELDS:
+            token_str: str = getattr(config, f"{name}_token")
+            if token_str not in token_to_id:
+                raise ValueError(
+                    f"Special token '{token_str}' (config field '{name}_token') "
+                    f"not found in tokenizer at '{tokenizer_path}'. "
+                    f"Available added tokens: {list(token_to_id.keys())}"
+                )
+            setattr(self, f"{name}_token", token_str)
+            setattr(self, f"{name}_id", token_to_id[token_str])

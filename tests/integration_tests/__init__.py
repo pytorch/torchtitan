@@ -24,6 +24,7 @@ class OverrideDefinitions:
     ngpu: int = 4
     disabled: bool = False
     skip_rocm_test: bool = False
+    timeout: int | None = None
 
     def __repr__(self):
         return self.test_descr

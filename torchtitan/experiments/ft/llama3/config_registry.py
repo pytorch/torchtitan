@@ -4,16 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.validate import Validator
 from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
+from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.tools.profiling import ProfilingConfig
+from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 
@@ -21,7 +21,7 @@ from . import model_registry
 def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
     return FaultTolerantTrainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
-        profiling=ProfilingConfig(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=10,
             profiler_active=10,
@@ -42,13 +42,12 @@ def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
             steps=100,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=FTCheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
         ),
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(

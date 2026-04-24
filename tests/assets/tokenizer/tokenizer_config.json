@@ -1,21 +1,5 @@
 {
   "added_tokens_decoder": {
-    "128000": {
-      "content": "<|begin_of_text|>",
-      "lstrip": false,
-      "normalized": false,
-      "rstrip": false,
-      "single_word": false,
-      "special": true
-    },
-    "128001": {
-      "content": "<|end_of_text|>",
-      "lstrip": false,
-      "normalized": false,
-      "rstrip": false,
-      "single_word": false,
-      "special": true
-    },
     "1998": {
       "content": "<|image|>",
       "lstrip": false,
@@ -47,6 +31,62 @@
       "rstrip": false,
       "single_word": false,
       "special": true
+    },
+    "2002": {
+      "content": "<|begin_of_text|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2003": {
+      "content": "<|end_of_text|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2004": {
+      "content": "<|endoftext|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2005": {
+      "content": "<|vision_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2006": {
+      "content": "<|vision_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2007": {
+      "content": "<|image_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2008": {
+      "content": "<|video_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
     }
   },
   "bos_token": "<|begin_of_text|>",
@@ -60,6 +100,7 @@
     "input_ids",
     "attention_mask"
   ],
+  "chat_template": "{{ bos_token }}{% for msg in messages %}{{ msg.role }}\n{{ msg.content }}{{ eos_token }}{% endfor %}{% if add_generation_prompt %}assistant\n{% endif %}",
   "model_max_length": 131072,
   "tokenizer_class": "PreTrainedTokenizerFast"
 }

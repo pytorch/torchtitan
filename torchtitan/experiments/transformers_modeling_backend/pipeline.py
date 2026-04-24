@@ -29,6 +29,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
+from torchtitan.protocols.module import Module, ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
@@ -210,7 +211,7 @@ def pipeline_module_split(
                         indices_to_keep = {
                             int(idx) for idx in layers_to_keep if idx.isdigit()
                         }
-                        new_layers = nn.ModuleList(
+                        new_layers = ModuleList(
                             [
                                 layer
                                 for i, layer in enumerate(module_value)
@@ -221,13 +222,14 @@ def pipeline_module_split(
                 else:
                     # No layers from this structure needed, set to empty structure
                     if isinstance(module_value, nn.ModuleDict):
-                        setattr(model, module_name, nn.ModuleDict())
+                        setattr(model, module_name, ModuleDict())
                     elif isinstance(module_value, nn.ModuleList):
-                        setattr(model, module_name, nn.ModuleList())
+                        setattr(model, module_name, ModuleList())
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
                 # Replace with Identity
-                setattr(model, module_name, nn.Identity())
+                Identity = Module.from_nn_module(nn.Identity)
+                setattr(model, module_name, Identity())
 
         stage = PipelineStage(
             model,
@@ -305,10 +307,12 @@ def pipeline_hf_transformers(
     schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-    if hasattr(model_config, "n_layers"):
+    if hasattr(model_config, "layers"):
+        num_layers = len(model_config.layers)
+    elif hasattr(model_config, "n_layers"):
         num_layers = model_config.n_layers
     else:
-        raise ValueError("Model does not have n_layers attribute.")
+        raise ValueError("Model config must have 'layers' or 'n_layers' attribute.")
 
     # You can adjust these weights based on the computational cost of embeddings and output layers
     # Higher weights mean these modules are treated as "heavier" in the distribution

@@ -7,13 +7,16 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import (
+    ChatDataLoader,
+    HuggingFaceTextDataLoader,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -43,7 +46,84 @@ def qwen3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="2",
+        ),
+    )
+
+
+def qwen3_debugmodel_param_groups() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.optimizer = OptimizersContainer.Config(
+        lr=8e-4,
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r"tok_embeddings\.",
+                weight_decay_multiplier=0.0,
+            ),
+            ParamGroupConfig(
+                pattern=r"\.bias$",
+                weight_decay_multiplier=0.0,
+            ),
+            ParamGroupConfig(
+                pattern=r"(?:attention_norm|ffn_norm|norm)\.",
+                weight_decay_multiplier=0.0,
+            ),
+        ],
+    )
+    return config
+
+
+def qwen3_debugmodel_flex() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("debugmodel", attn_backend="flex"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+    )
+
+
+def qwen3_debugmodel_flex_flash() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("debugmodel", attn_backend="flex_flash"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )
 
@@ -70,7 +150,6 @@ def qwen3_0_6b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )
 
@@ -96,7 +175,6 @@ def qwen3_1_7b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
         ),
     )
 
@@ -128,7 +206,6 @@ def qwen3_14b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
-            selective_ac_option="op",
         ),
     )
 
@@ -160,7 +237,34 @@ def qwen3_32b() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
-            selective_ac_option="op",
+        ),
+    )
+
+
+def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("debugmodel_fused_qkv"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )
 
@@ -191,6 +295,60 @@ def qwen3_moe_debug() -> Trainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
-            selective_ac_option="op",
+        ),
+    )
+
+
+def qwen3_moe_debug_ep() -> Trainer.Config:
+    config = qwen3_moe_debug()
+    config.model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+    return config
+
+
+def sft_qwen3_8b_math() -> Trainer.Config:
+    """Qwen3-8B SFT on GSM8K math dataset."""
+
+    def process_sample(sample):
+        answer = sample["answer"]
+        reasoning, final_answer = answer.rsplit("####", 1)
+        return [
+            {"role": "user", "content": sample["question"]},
+            {
+                "role": "assistant",
+                "reasoning_content": reasoning.strip(),
+                "content": final_answer.strip(),
+            },
+        ]
+
+    model_spec = model_registry("8B", attn_backend="varlen")
+    return Trainer.Config(
+        hf_assets_path="./assets/hf/Qwen3-8B",
+        model_spec=model_spec,
+        optimizer=OptimizersContainer.Config(lr=2e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=15,
+            decay_ratio=0.9,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=2048,
+            steps=180,
+        ),
+        dataloader=ChatDataLoader.Config(
+            dataset_path="openai/gsm8k",
+            load_dataset_kwargs={"name": "main", "split": "train"},
+            sample_processor=process_sample,
+        ),
+        metrics=MetricsProcessor.Config(
+            enable_wandb=True,
+        ),
+        checkpoint=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
         ),
     )
