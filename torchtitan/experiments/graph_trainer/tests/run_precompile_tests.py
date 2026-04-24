@@ -36,6 +36,7 @@ class PrecompileTestDefinition:
     test_descr: str
     test_name: str
     ngpu: int = 8
+    disabled: bool = False
 
 
 def _run_cmd(cmd):
@@ -158,6 +159,9 @@ def run_precompile_tests(args):
     ran_any = False
     for test in test_list:
         if args.test_name != "all" and test.test_name != args.test_name:
+            continue
+        if test.disabled:
+            logger.info(f"Skipping disabled test: {test.test_name}")
             continue
         if args.ngpu < test.ngpu:
             logger.info(

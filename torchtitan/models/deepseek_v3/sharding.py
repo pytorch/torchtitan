@@ -38,7 +38,9 @@ def set_deepseek_v3_sharding_config(
     No-op when TP is not enabled.
     """
 
-    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
+    set_decoder_sharding_config(
+        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+    )
     for layer_cfg in config.layers:
         _set_deepseek_v3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
