@@ -71,7 +71,7 @@ repos:
       name: Pyrefly (type checking)
       pass_filenames: false
       language: system
-      args: ["--remove-unused-ignores"]
+      args: ["--remove-unused-ignores", "--summarize-errors"]
 
 
 - repo: local
