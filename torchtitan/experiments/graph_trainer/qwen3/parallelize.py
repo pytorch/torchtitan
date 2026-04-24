@@ -86,7 +86,7 @@ def parallelize_qwen3(
 
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
-        # Config-based sharding: ShardingSpec is populated on the model
+        # Config-based sharding: ShardingConfig is populated on the model
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
