@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import Float8LinearConverter, Float8MoEConverter
+from torchtitan.components.quantization import Float8LinearConverter, Float8GroupedExpertsConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -118,8 +118,11 @@ def deepseek_v3_671b() -> Trainer.Config:
             attn_backend="flex",
             moe_comm_backend="standard",
             quantization=[
-                Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
-                Float8MoEConverter.Config(model_compile_enabled=model_compile_enabled),
+                Float8LinearConverter.Config(
+                    filter_fqns=["output", "router.gate"],
+                    model_compile_enabled=model_compile_enabled,
+                ),
+                Float8GroupedExpertsConverter.Config(model_compile_enabled=model_compile_enabled),
             ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -139,7 +142,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=1,
+            expert_parallel_degree=2,
             expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),

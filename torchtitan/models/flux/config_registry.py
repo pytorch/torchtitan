@@ -193,10 +193,14 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_schnell()
     config.compile = CompileConfig(enable=True)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
     config.model_spec = model_registry(
         "flux-schnell",
         quantization=[
             MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -217,10 +221,14 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_dev()
     config.compile = CompileConfig(enable=True)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
     config.model_spec = model_registry(
         "flux-dev",
         quantization=[
             MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
                 fqns=[
                     "double_blocks",
                     "single_blocks",

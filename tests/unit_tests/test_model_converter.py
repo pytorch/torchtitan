@@ -19,7 +19,7 @@ def test_no_float8_by_default():
     model_config = config.model_spec.model
     assert not has_quantization(model_config)
     # All Linear.Config instances should remain Linear.Config
-    for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config):
+    for _fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
         assert not isinstance(lc, Float8Linear.Config)
 
 
@@ -34,7 +34,7 @@ def test_float8_applied_by_model_registry():
     # Some Linear.Config instances should be swapped to Float8Linear
     converted = [
         fqn
-        for fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
+        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
         if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0

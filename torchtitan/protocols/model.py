@@ -70,7 +70,6 @@ class BaseModel(Module):
         ) -> None:
             pass
 
-
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass

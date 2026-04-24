@@ -27,11 +27,9 @@ class Linear(nn.Linear, Module):
         out_features: int
         bias: bool = False
 
-    def __init__(self, config_or_in_features=None, out_features=None, bias=False, *, config=None):
-        if config is not None:
-            config_or_in_features = config
-        if isinstance(config_or_in_features, Linear.Config):
-            c = config_or_in_features
-            super().__init__(c.in_features, c.out_features, bias=c.bias)
-        else:
-            super().__init__(config_or_in_features, out_features, bias=bias)
+    def __init__(self, config: Config):
+        super().__init__(
+            config.in_features,
+            config.out_features,
+            bias=config.bias,
+        )

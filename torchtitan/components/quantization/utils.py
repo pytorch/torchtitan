@@ -32,11 +32,11 @@ def module_filter_fn(
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-def swap_token_dispatcher(config, pad_multiple: int) -> bool:
+def swap_token_dispatcher(config, pad_multiple: int) -> None:
     """Swap token dispatcher config to support padded grouped GEMMs.
 
-    Returns True if the dispatcher handles padding (TorchAOTokenDispatcher
-    or hybridep), False if TorchAO must pad token groups itself.
+    Requires a dispatcher that handles padding (TorchAOTokenDispatcher or
+    DeepEP hybridep). Raises ValueError if the dispatcher doesn't support it.
     """
     td = config.token_dispatcher
     if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
@@ -48,7 +48,6 @@ def swap_token_dispatcher(config, pad_multiple: int) -> bool:
             score_before_experts=td.score_before_experts,
             pad_multiple=pad_multiple,
         )
-        return True
     elif isinstance(td, DeepEPTokenDispatcher.Config):
         if td.comm_backend == "deepep":
             raise ValueError(
@@ -63,24 +62,27 @@ def swap_token_dispatcher(config, pad_multiple: int) -> bool:
             non_blocking_capacity_factor=td.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )
-        return True
-    return False
+    else:
+        raise ValueError(
+            "MoE quantization requires a token dispatcher that handles "
+            "padding (TorchAOTokenDispatcher or hybridep). "
+            "Enable expert parallelism or use a compatible comm backend."
+        )
 
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    from torchtitan.components.quantization import Float8Linear, MXFP8Linear
-
-    quant_types = (MXFP8Linear.Config,)
-    if Float8Linear is not None:
-        quant_types = (Float8Linear.Config, MXFP8Linear.Config)
+    from torchtitan.components.quantization import (
+        QuantizedLinearConfig,
+        _QuantizedGroupedExpertsConfig,
+    )
 
     has_quant_linear = any(
-        isinstance(lc, quant_types)
-        for _fqn, lc, _parent, _attr in model_config.walk(Linear.Config)
+        isinstance(config, QuantizedLinearConfig)
+        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
     )
     has_quant_moe = any(
-        getattr(type(config), "_is_quantized", False)
-        for _fqn, config, _parent, _attr in model_config.walk(GroupedExperts.Config)
+        isinstance(config, _QuantizedGroupedExpertsConfig)
+        for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
     )
     return has_quant_linear or has_quant_moe

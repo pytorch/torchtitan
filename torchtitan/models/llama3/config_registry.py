@@ -90,9 +90,16 @@ def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
 
 def llama3_debugmodel_float8() -> Trainer.Config:
     config = llama3_debugmodel()
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=[Float8LinearConverter.Config()],
+        quantization=[
+            Float8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled
+            ),
+        ],
     )
     return config
 
@@ -177,6 +184,7 @@ def llama3_70b() -> Trainer.Config:
 
 
 def llama3_405b() -> Trainer.Config:
+    compile_config = CompileConfig(enable=True)
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-405B",
         profiler=Profiler.Config(
@@ -188,7 +196,15 @@ def llama3_405b() -> Trainer.Config:
         ),
         model_spec=model_registry(
             "405B",
-            quantization=[Float8LinearConverter.Config(filter_fqns=["output"])],
+            quantization=[
+                Float8LinearConverter.Config(
+                    filter_fqns=["output"],
+                    model_compile_enabled=(
+                        compile_config.enable
+                        and "model" in compile_config.components
+                    ),
+                ),
+            ],
         ),
         optimizer=OptimizersContainer.Config(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -206,7 +222,7 @@ def llama3_405b() -> Trainer.Config:
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
-        compile=CompileConfig(enable=True),
+        compile=compile_config,
         validator=Validator.Config(
             freq=500,
             steps=1200,
