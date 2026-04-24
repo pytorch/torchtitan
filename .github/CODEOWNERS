@@ -11,4 +11,5 @@
 
 /torchtitan/experiments/forge/ @joecummings @felipemello1 @daniellepintz @tianyu-l @wwwjn @fegin
 
-/torchtitan/experiments/graph_trainer/ @yiming0416 @tianyu-l @SherlockNoMad @xmfan @aditvenk
+/torchtitan/experiments/graph_trainer/ @yiming0416 @tianyu-l @SherlockNoMad @xmfan @aditvenk @sanketpurandare
+/.github/workflows/*graph_trainer* @yiming0416 @tianyu-l @SherlockNoMad @xmfan @aditvenk @sanketpurandare
