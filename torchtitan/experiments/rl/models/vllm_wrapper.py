@@ -25,6 +25,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+from torchtitan.models.qwen3.sharding import set_qwen3_sharding_spec
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation import codegen as _codegen
@@ -205,18 +206,27 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
-
-        # RoPE config from model for cache extension
-        self.rope_config = self.config.rope
-
         # Create ParallelDims and configs from vLLM config at runtime.
         # vLLM config contains the tensor_parallel_size from command-line args
         # and this will be consistent across all worker processes.
         self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
             vllm_config
         )
+
+        # Fill sharding specs on the config BEFORE build so every sub-module
+        # (including VLLMAttentionWrapper) is constructed with its
+        # ShardingConfig / LocalMapConfig attached.
+        set_qwen3_sharding_spec(
+            self.config,
+            loss_parallel=False,
+            enable_sp=parallelism.enable_sequence_parallel,
+        )
+
+        # TODO: Check if it's possible to apply meta init
+        self.model = self.config.build()
+
+        # RoPE config from model for cache extension
+        self.rope_config = self.config.rope
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
@@ -225,7 +235,6 @@ class TorchTitanVLLMModelWrapper(Module):
             model=self.model,
             parallel_dims=self.parallel_dims,
             parallelism=parallelism,
-            has_position_id=True,  # vLLM always passes positions explicitly
         )
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
@@ -366,6 +375,11 @@ class TorchTitanVLLMModelWrapper(Module):
             )
 
         logits = self.model.output(hidden_states)
+
+        # Config-based sharding returns logits as a Replicate DTensor; vLLM
+        # expects a plain tensor.
+        if isinstance(logits, DTensor):
+            logits = logits.to_local()
 
         return logits
 
