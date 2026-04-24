@@ -22,7 +22,6 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -54,18 +53,17 @@ def _apply_non_moe_tp_to_decoder(
     loss_parallel: bool,
     enable_async_tp: bool,
 ):
-    """Apply tensor parallelism to the decoder with full DTensor.
+    """Apply tensor parallelism to the decoder without SequenceParallel.
 
-    Hidden states flow as DTensor(Replicate) between layers. The embedding
-    output is plain tensor (needed for vision scatter before the decoder loop),
-    but each transformer block wraps its input as DTensor via PrepareModuleInput.
-    DeepStack boolean indexing handles DTensor via to_local in the
+    Hidden states flow as DTensor(Replicate) between blocks. No SequenceParallel
+    is used because the VLM needs full-sequence access for vision scatter and
+    DeepStack.
     """
     top_level_plan = {
         "tok_embeddings": RowwiseParallel(
             input_layouts=Replicate(),
             output_layouts=Replicate(),
-            use_local_output=True,  # plain tensor needed for _scatter_vision_embeds
+            use_local_output=False,
         ),
         "norm": NoParallel(),
         "output": ColwiseParallel(
@@ -97,22 +95,6 @@ def _apply_non_moe_tp_to_decoder(
                 "attention.qkv_linear.wk": ColwiseParallel(use_local_output=False),
                 "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
             }
-
-        # Wrap hidden_states as DTensor(Replicate) at block entry, and
-        # convert back to plain tensor at block exit. This keeps DTensor
-        # inside each block (for TP/EP) while returning plain tensors
-        # between blocks for DeepStack boolean indexing.
-        parallelize_module(
-            transformer_block,  # pyrefly: ignore [bad-argument-type]
-            tp_mesh,
-            PrepareModuleInputOutput(
-                input_layouts=(Replicate(), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
-                output_layouts=(Replicate(),),
-                desired_output_layouts=(Replicate(),),
-                use_local_output=True,
-            ),
-        )
 
         layer_plan = {
             "attention_norm": NoParallel(),
@@ -219,13 +201,12 @@ def _apply_tp_to_vision_encoder(
         parallelize_module(transformer_block, tp_mesh, layer_plan)
 
     # TP plan for patch mergers (main + deepstack).
-    # RowwiseParallel uses default use_local_output=True so mergers return
-    # plain tensors — their outputs are used in vision scatter and DeepStack
-    # which operate on plain tensors with boolean masks.
+    # Mergers output DTensor(Replicate) — the model passes padded embeddings
+    # directly to vision scatter and DeepStack.
     merger_plan = {
         "norm": NoParallel(),
         "linear_fc1": ColwiseParallel(use_local_output=False),
-        "linear_fc2": RowwiseParallel(),
+        "linear_fc2": RowwiseParallel(use_local_output=False),
     }
 
     # pyrefly: ignore [bad-argument-type]
@@ -308,8 +289,8 @@ def parallelize_qwen3_vl(
             _apply_tp_to_vision_encoder(model.vision_encoder, tp_mesh)
 
         # Apply TP to decoder without SequenceParallel.
-        # VLM needs full-sequence access between decoder blocks for vision
-        # scatter and DeepStack, so hidden states stay as replicated plain tensors.
+        # Hidden states flow as DTensor(Replicate) between blocks.
+        # VLM needs full-sequence access for vision scatter and DeepStack.
         _apply_non_moe_tp_to_decoder(
             model,
             tp_mesh,
@@ -318,8 +299,8 @@ def parallelize_qwen3_vl(
         )
 
     # Apply MoE parallelism to decoder layers.
-    # enable_sp=False because Qwen3-VL keeps hidden states as plain tensors
-    # (not Shard(1) DTensors) for vision scatter and DeepStack.
+    # enable_sp=False because Qwen3-VL keeps hidden states as Replicate
+    # (not Shard(1)) — no SequenceParallel for vision scatter and DeepStack.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -340,13 +321,17 @@ def parallelize_qwen3_vl(
             base_folder=dump_folder,
         )
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
-            apply_ac(model.vision_encoder, ac_config)
+            apply_ac(
+                # pyrefly: ignore [bad-argument-type]
+                model.vision_encoder,
+                ac_config,
+                model_compile_enabled=model_compile_enabled,
+                base_folder=dump_folder,
+            )
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model, compile_config)
-    if compile_config.enable:
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)
