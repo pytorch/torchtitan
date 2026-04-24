@@ -11,31 +11,31 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
-    norm_spec,
-    rowwise_spec,
-    set_decoder_sharding_spec,
+    norm_config,
+    rowwise_config,
+    set_decoder_sharding_config,
     set_gqa_inner_attention_local_map,
     set_qkv_linear_sharding,
 )
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import ShardingSpec
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
 
-def set_gpt_oss_sharding_spec(
+def set_gpt_oss_sharding_config(
     config: "GptOssModel.Config",
     *,
     loss_parallel: bool,
     enable_sp: bool,
 ) -> None:
-    """Fill ``sharding_spec`` on all GPT-OSS sub-configs.
+    """Fill ``sharding_config`` on all GPT-OSS sub-configs.
 
     No-op when TP is not enabled.
     """
 
-    set_decoder_sharding_spec(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
+    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
@@ -51,14 +51,14 @@ def _set_gpt_oss_layer_sharding(
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
 
-    norm = norm_spec(enable_sp=enable_sp)
-    layer_cfg.attention_norm.sharding_spec = norm
-    layer_cfg.ffn_norm.sharding_spec = norm
+    norm = norm_config(enable_sp=enable_sp)
+    layer_cfg.attention_norm.sharding_config = norm
+    layer_cfg.ffn_norm.sharding_config = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     # Attention: input x gathered to Replicate, freqs_cis always Replicate.
     # sinks parameter is sharded across heads via state_shardings.
-    attention.sharding_spec = ShardingSpec(
+    attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=Shard(0))},
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
@@ -70,7 +70,7 @@ def _set_gpt_oss_layer_sharding(
         },
     )
     set_qkv_linear_sharding(attention.qkv_linear)
-    attention.wo.sharding_spec = rowwise_spec(output_sp=enable_sp)
+    attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
     # GPT-OSS flash attention always returns (output, lse).
     set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)

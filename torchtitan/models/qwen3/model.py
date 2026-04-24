@@ -92,22 +92,29 @@ class Qwen3Model(Decoder):
             **kwargs,
         ) -> None:
 
-            training = trainer_config.training
             parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            # ``training`` and ``debug`` are optional: the RL vLLM generator
+            # passes a minimal trainer_config containing only ``parallelism``
+            # (no RoPE cache extension at this stage; no MoE force-load-balance
+            # at inference time).
+            training = getattr(trainer_config, "training", None)
+            debug = getattr(trainer_config, "debug", None)
 
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
+            if training is not None:
+                seq_len = training.seq_len
+                if seq_len > self.rope.max_seq_len:
+                    logger.warning(
+                        f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                     )
+                # Sync rope max_seq_len
+                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+            if debug is not None:
+                for layer_cfg in self.layers:
+                    if layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
@@ -135,9 +142,9 @@ class Qwen3Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
-            from torchtitan.models.qwen3.sharding import set_qwen3_sharding_spec
+            from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 
-            set_qwen3_sharding_spec(
+            set_qwen3_sharding_config(
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
