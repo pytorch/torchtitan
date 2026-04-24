@@ -11,7 +11,7 @@
 # installation instructions.
 
 # Note: Performance
-# The quantization modules are intended to be ran under `torch.compile`` for competitive performance
+# The quantization modules are intended to be ran under `torch.compile` for competitive performance
 
 from dataclasses import dataclass, field, fields
 from functools import partial
@@ -40,6 +40,12 @@ class Float8Linear:
 
     @classmethod
     def _get_module_cls(cls):
+        """Lazily create the diamond-inherited (TorchAOFloat8Linear + Linear) class.
+
+        Diamond inheritance is needed so the built module satisfies the Module
+        protocol (init_states, _param_init). Created lazily to avoid importing
+        torchao at module load time.
+        """
         if cls._module_cls is None:
             from torchao.float8.float8_linear import (
                 Float8Linear as TorchAOFloat8Linear,
@@ -111,6 +117,13 @@ class Float8GroupedExperts:
 
     @classmethod
     def from_config(cls, config: GroupedExperts.Config) -> GroupedExperts.Config:
+        """Create a quantized copy of the given config.
+
+        GroupedExperts.Config is subclassed by models (e.g. GptOssGroupedExperts
+        adds swiglu_limit), so we can't use a static Config subclass — it would
+        lose model-specific fields and build the wrong module. Instead, we
+        dynamically subclass the actual config type, overriding only build().
+        """
         base_cls = type(config)
         if base_cls not in cls._cache:
 
@@ -154,8 +167,11 @@ class MXFP8GroupedExperts:
         config: GroupedExperts.Config,
         *,
         recipe_name: str = "mxfp8_rceil",
-        pad_token_groups: bool = True,
     ) -> GroupedExperts.Config:
+        """Create a quantized copy of the given config.
+
+        See Float8GroupedExperts.from_config for why dynamic subclassing is needed.
+        """
         base_cls = type(config)
         if base_cls not in cls._cache:
 
@@ -163,7 +179,6 @@ class MXFP8GroupedExperts:
             class Config(base_cls):
                 _is_quantized: ClassVar[bool] = True
                 _recipe_name: str = "mxfp8_rceil"
-                _pad_token_groups: bool = True
 
                 def build(self, **kwargs):
                     from torchao.prototype.moe_training.config import (
@@ -176,9 +191,6 @@ class MXFP8GroupedExperts:
                     param_init = getattr(instance, "_param_init", None)
                     recipe = MXFP8TrainingRecipe(self._recipe_name)
                     mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-                    mxfp8_op_config.pad_token_groups_for_grouped_mm = (
-                        self._pad_token_groups
-                    )
                     quantize_(instance, config=mxfp8_op_config)
                     if param_init is not None:
                         instance._param_init = param_init
@@ -190,7 +202,6 @@ class MXFP8GroupedExperts:
         return ConfigCls(
             **{f.name: getattr(config, f.name) for f in fields(config)},
             _recipe_name=recipe_name,
-            _pad_token_groups=pad_token_groups,
         )
 
 
@@ -249,7 +260,7 @@ class Float8LinearConverter(QuantizationConverter):
             pass
         else:
             raise ValueError(
-                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later."
+                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later. "
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
 
@@ -345,7 +356,13 @@ class Float8MoEConverter(QuantizationConverter):
         pad_multiple = 16
 
         for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
-            swap_token_dispatcher(config, pad_multiple)
+            dispatcher_handles_padding = swap_token_dispatcher(config, pad_multiple)
+            if not dispatcher_handles_padding:
+                raise ValueError(
+                    "Float8 MoE quantization requires a token dispatcher that handles "
+                    "padding (TorchAOTokenDispatcher or DeepEP hybridep). "
+                    "Enable expert parallelism or use a compatible comm backend."
+                )
             new_config = Float8GroupedExperts.from_config(config)
             if isinstance(parent, list):
                 parent[attr] = new_config
@@ -392,7 +409,7 @@ class MXFP8LinearConverter(QuantizationConverter):
 
         assert has_cuda_capability(
             10, 0
-        ), "MXFP8 is only supported on SM100 or architectures"
+        ), "MXFP8 is only supported on SM100 or later architectures"
 
         if not self.config.model_compile_enabled:
             logger.warning(
@@ -445,7 +462,7 @@ class MXFP8MoEConverter(QuantizationConverter):
 
         assert has_cuda_capability(
             10, 0
-        ), "MXFP8 is only supported on SM100 or architectures"
+        ), "MXFP8 is only supported on SM100 or later architectures"
 
         if not self.config.model_compile_enabled:
             logger.warning(
@@ -457,10 +474,14 @@ class MXFP8MoEConverter(QuantizationConverter):
         pad_multiple = 32
         for _fqn, config, parent, attr in model_config.walk(GroupedExperts.Config):
             dispatcher_handles_padding = swap_token_dispatcher(config, pad_multiple)
+            if not dispatcher_handles_padding:
+                raise ValueError(
+                    "MXFP8 MoE quantization requires a token dispatcher that handles "
+                    "padding (TorchAOTokenDispatcher or DeepEP hybridep). "
+                    "Enable expert parallelism or use a compatible comm backend."
+                )
             new_config = MXFP8GroupedExperts.from_config(
-                config,
-                recipe_name=self.config.recipe_name,
-                pad_token_groups=not dispatcher_handles_padding,
+                config, recipe_name=self.config.recipe_name
             )
             if isinstance(parent, list):
                 parent[attr] = new_config
