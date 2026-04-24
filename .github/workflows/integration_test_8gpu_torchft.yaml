@@ -33,7 +33,7 @@ jobs:
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      is-experimental: 1
+      is-experimental: true
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:

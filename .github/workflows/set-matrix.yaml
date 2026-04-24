@@ -14,8 +14,8 @@ on:
       is-experimental:
         description: 'Check if the workflow is experimental'
         required: false
-        type: int
-        default: 0
+        type: boolean
+        default: false
     outputs:
       matrix:
         description: dynamically set matrix
@@ -52,7 +52,7 @@ jobs:
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
           # Define ROCm matrix (empty for experimental workflows)
-          if [[ "${{ inputs.is-experimental }}" == "1" ]]; then
+          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
             ROCM_MATRIX=""
           else
             ROCM_MATRIX=$(cat <<EOF
