@@ -110,7 +110,8 @@ def create_torchtitan_config_from_vllm_config(
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=ep_size,
         expert_tensor_parallel_degree=etp_size,
-        enable_sequence_parallel=False,
+        enable_sequence_parallel=True,
+        disable_loss_parallel=True,
     )
 
     # Build the full device mesh so all dimensions (tp, ep, etp, efsdp, etc.)
@@ -195,9 +196,6 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
-
         # Create ParallelDims and configs from vLLM config at runtime.
         self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
             vllm_config
@@ -234,47 +232,13 @@ class TorchTitanVLLMModelWrapper(Module):
             inference=True,
         )
 
-        # Check which params are DTensor (TP-sharded) vs plain
-        dtensor_params = []
-        plain_params = []
-        for n, p in self.model.named_parameters():
-            if isinstance(p, DTensor):
-                dtensor_params.append(f"{n}:{p.placements}")
-            else:
-                plain_params.append(n)
-        print(
-            f"[INIT] After parallelize: "
-            f"{len(dtensor_params)} DTensor params, {len(plain_params)} plain params",
-            flush=True,
-        )
-        # Show a few MoE-related params
-        moe_params = [(n, p) for n, p in self.model.named_parameters() if "moe" in n or "experts" in n]
-        for n, p in moe_params[:3]:
-            if isinstance(p, DTensor):
-                print(f"[INIT]   MoE DTensor: {n} placement={p.placements} local={p._local_tensor.shape}", flush=True)
-            else:
-                print(f"[INIT]   MoE plain: {n} shape={p.shape} device={p.device}", flush=True)
-
         # Materialize model on GPU — only allocates local shards (not full
         # model) thanks to EP/TP DTensor sharding applied above.
         device_type = vllm_config.device_config.device.type
         self.model.to_empty(device=device_type)
-
-        # Check materialized model size
-        total_bytes = sum(
-            p._local_tensor.numel() * p._local_tensor.element_size()
-            if isinstance(p, DTensor) else p.numel() * p.element_size()
-            for p in self.model.parameters()
-        )
-        meta_params = [n for n, p in self.model.named_parameters()
-                       if p.device.type == "meta" or
-                       (isinstance(p, DTensor) and p._local_tensor.device.type == "meta")]
-        print(
-            f"[INIT] Model materialized: {total_bytes / 1e9:.2f} GB, "
-            f"params={sum(1 for _ in self.model.parameters())}, "
-            f"meta_params={len(meta_params)}: {meta_params[:3]}",
-            flush=True,
-        )
+        # Reinitialize non-persistent buffers (e.g. RoPE cache) that were
+        # lost during meta → to_empty materialization.
+        self.model.init_states(buffer_device=torch.device(device_type))
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
         # may use up to 2x max_seq_len, so use max_model_len which already

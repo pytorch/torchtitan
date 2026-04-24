@@ -566,7 +566,15 @@ def apply_moe_ep_tp(
                     input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
                     use_local_input=False,
-                    output_layouts=(Replicate() if inference else Partial(),),
+                    # With EP + inference: output is Replicate (all-to-all
+                    # combine returns complete result, no SP splitting).
+                    # Otherwise: output is Partial (each rank has partial
+                    # sum from TP-sharded experts or SP token splitting).
+                    output_layouts=(
+                        Replicate()
+                        if (inference and ep_mesh is not None)
+                        else Partial(),
+                    ),
                     desired_output_layouts=(sp_layout,),
                     use_local_output=False,
                 ),
@@ -608,16 +616,9 @@ def apply_moe_ep_tp(
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             assert ep_etp_mesh is None
-            if inference:
-                # For inference without EP, skip expert parallelization.
-                # Expert weights stay full (not TP-sharded) — the MoE
-                # uses grouped_mm which needs full weights per expert.
-                experts_mesh = None
-                experts_plan = None
-            else:
-                experts_mesh = tp_mesh
-                # input Replicate, output Partial
-                experts_plan = TensorParallel()
+            experts_mesh = tp_mesh
+            # input Replicate, output Partial
+            experts_plan = TensorParallel()
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
@@ -663,10 +664,9 @@ def apply_moe_ep_tp(
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
 
-        if experts_mesh is not None and experts_plan is not None:
-            parallelize_module(
-                # pyrefly: ignore [missing-attribute]
-                module=transformer_block.moe.experts,
-                device_mesh=experts_mesh,
-                parallelize_plan=experts_plan,
-            )
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=transformer_block.moe.experts,
+            device_mesh=experts_mesh,
+            parallelize_plan=experts_plan,
+        )

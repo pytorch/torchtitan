@@ -105,10 +105,7 @@ def run_native(model_path: str, tp_size: int):
 
 def run_torchtitan(model_path: str, tp_size: int, enable_ep: bool):
     """Run TorchTitan wrapper inference (with or without EP)."""
-    from dataclasses import replace
-
-    from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-    from torchtitan.experiments.rl.plugin import (
+    from torchtitan.experiments.rl.models.vllm_registry import (
         register_model_to_vllm_model_registry,
         VLLM_MODEL_NAME,
     )
@@ -120,7 +117,6 @@ def run_torchtitan(model_path: str, tp_size: int, enable_ep: bool):
         attn_backend="varlen",
         moe_comm_backend=moe_comm_backend,
     )
-    model_spec = replace(model_spec, parallelize_fn=parallelize_qwen3)
 
     register_model_to_vllm_model_registry(model_spec)
 
@@ -131,7 +127,7 @@ def run_torchtitan(model_path: str, tp_size: int, enable_ep: bool):
         tensor_parallel_size=tp_size,
         enable_expert_parallel=enable_ep,
         distributed_executor_backend="external_launcher",
-        gpu_memory_utilization=0.90,
+        gpu_memory_utilization=0.80,
         enforce_eager=True,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend="CUSTOM",
