@@ -191,6 +191,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         if enable_passes:
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(memory_policy="default"),
             )
             passes = compile_time_passes(traced_result, config)
             traced_result.gm = apply_graph_passes(
