@@ -32,8 +32,6 @@ jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
-    with:
-      is-experimental: true
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
