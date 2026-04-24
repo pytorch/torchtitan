@@ -65,9 +65,10 @@ def parallelize_llama(
     annotate_llama(model)
 
     if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+        model.parallelize(parallel_dims)
+        maybe_enable_async_tp(
+            parallelism, compile_config, parallel_dims.get_mesh("tp")
+        )
 
     if ac_config.mode != "none":
         apply_graph_ac(compile_config, ac_config)

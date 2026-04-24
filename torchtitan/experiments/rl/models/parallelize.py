@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 # RL-specific parallelize function for the qwen3 model.
-# Applies tensor parallelism via config-based sharding. Sharding specs are
-# filled on the config before build (via direct ``set_qwen3_sharding_spec``
+# Applies tensor parallelism via config-based sharding. Sharding configs are
+# filled on the config before build (via direct ``set_qwen3_sharding_config``
 # calls in the RL trainer and vllm_wrapper). This file then just walks the
-# built model and dispatches ``Module.parallelize(tp_mesh)``.
+# built model and dispatches ``Module.parallelize(parallel_dims)``.
 
 import logging
 
@@ -31,9 +31,9 @@ def parallelize_qwen3(
 ):
     """Apply tensor parallelism to the Qwen3 dense model for RL training/inference.
 
-    Expects ``set_qwen3_sharding_spec`` to have already been called on the
-    model's config *before* build, so that ``model.parallelize(tp_mesh)``
-    sees the right ``ShardingSpec`` on every sub-module.
+    Expects ``set_qwen3_sharding_config`` to have already been called on the
+    model's config *before* build, so that ``model.parallelize(parallel_dims)``
+    sees the right ``ShardingConfig`` on every sub-module.
 
     ``compile_config``: if enabled, applies per-layer ``torch.compile`` after TP.
     """
@@ -46,8 +46,7 @@ def parallelize_qwen3(
                 "not supported yet."
             )
 
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
+        model.parallelize(parallel_dims)
 
     if (
         compile_config is not None

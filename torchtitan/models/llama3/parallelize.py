@@ -69,8 +69,7 @@ def parallelize_llama(
 
     if parallelism.full_dtensor:
         validate_config(parallel_dims, model)
-        spmd_mesh = parallel_dims.get_dense_spmd_mesh()
-        model.parallelize(spmd_mesh)
+        model.parallelize(parallel_dims)
     else:
         if parallel_dims.cp_enabled:
             apply_cp_to_forward(
@@ -79,9 +78,10 @@ def parallelize_llama(
                 parallel_dims.get_mesh("cp"),
             )
         if parallel_dims.tp_enabled:
-            tp_mesh = parallel_dims.get_mesh("tp")
-            model.parallelize(tp_mesh)
-            maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+            model.parallelize(parallel_dims)
+            maybe_enable_async_tp(
+                parallelism, compile_config, parallel_dims.get_mesh("tp")
+            )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components

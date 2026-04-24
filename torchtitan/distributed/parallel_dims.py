@@ -29,9 +29,11 @@ class ParallelDims:
     etp: int
     world_size: int
 
+    full_dtensor: bool = False
+
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    _submesh_cache: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
-    _dense_spmd_mesh: DeviceMesh | None = None
 
     @classmethod
     def from_config(
@@ -46,6 +48,7 @@ class ParallelDims:
             ep=parallelism_config.expert_parallel_degree,
             etp=parallelism_config.expert_tensor_parallel_degree,
             world_size=world_size,
+            full_dtensor=parallelism_config.full_dtensor,
         )
 
     def __post_init__(self):
@@ -201,23 +204,6 @@ class ParallelDims:
             "full_dtensor_dense": full_dtensor_dense_mesh,
         }
 
-        # Sliced ``full_dtensor_dense`` containing only enabled dims.
-        # Cached because FSDP2 compares the param's DTensor mesh and the
-        # mesh handed to ``fully_shard`` with object identity, so every
-        # consumer must see the same ``DeviceMesh`` instance.
-        spmd_dims = [
-            name
-            for name, size in (
-                ("dp_replicate", self.dp_replicate),
-                ("dp_shard", self.dp_shard),
-                ("cp", self.cp),
-                ("tp", self.tp),
-            )
-            if size > 1
-        ]
-        if spmd_dims:
-            self._dense_spmd_mesh = full_dtensor_dense_mesh[tuple(spmd_dims)]
-
         self._meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
@@ -301,13 +287,21 @@ class ParallelDims:
 
         if len(dims) == 1:
             return self._meshes[dims[0]]
-        else:
-            for global_mesh in self._global_meshes.values():
-                assert global_mesh.mesh_dim_names is not None
-                if not set(dims).issubset(set(global_mesh.mesh_dim_names)):
-                    continue
-                return global_mesh[tuple(dims)]
-            raise ValueError(f"Invalid mesh name combinations {dims}.")
+
+        # Multi-dim: cache submesh slices by dim tuple. FSDP2 compares the
+        # param's DTensor mesh and the mesh handed to ``fully_shard`` with
+        # object identity, so every consumer must see the same instance.
+        key = tuple(dims)
+        if key in self._submesh_cache:
+            return self._submesh_cache[key]
+        for global_mesh in self._global_meshes.values():
+            assert global_mesh.mesh_dim_names is not None
+            if not set(dims).issubset(set(global_mesh.mesh_dim_names)):
+                continue
+            submesh = global_mesh[key]
+            self._submesh_cache[key] = submesh
+            return submesh
+        raise ValueError(f"Invalid mesh name combinations {dims}.")
 
     def get_mesh(self, dims: str | list[str]) -> DeviceMesh:
         """Get a device mesh by dimension name(s), raising if not available.
@@ -335,20 +329,29 @@ class ParallelDims:
             )
         return mesh
 
-    def get_dense_spmd_mesh(self) -> DeviceMesh:
-        """Return the cached dense SPMD mesh for full DTensor mode.
+    def get_module_mesh(self, dims: list[str]) -> DeviceMesh | None:
+        """Return the mesh a ``Module`` should use for ``distribute_tensor``.
 
-        Contains only enabled dims among ``dp_replicate``, ``dp_shard``,
-        ``cp``, ``tp`` (pp is excluded — FSDP/TP/CP operate per-stage).
+        WORKAROUND: bridges ``full_dtensor`` and legacy modes during the
+        transition. Once all models support ``full_dtensor`` and the legacy
+        path is removed, this method goes away — callers should use
+        ``get_optional_mesh(dims)`` directly.
+
+        - ``full_dtensor=True``: identical to ``get_optional_mesh(dims)``.
+        - ``full_dtensor=False``: filters ``dims`` to ``{tp, ep, etp}`` first
+          (the dims that participate in ``distribute_tensor`` under the
+          legacy path; DP/CP are handled by FSDP / LocalMapConfig
+          out-of-band). Returns ``None`` if no in-band dim remains.
         """
-        if not self._meshes:
-            self.build_mesh()
-        if self._dense_spmd_mesh is None:
-            raise ValueError(
-                "full_dtensor requires at least one of dp_replicate, "
-                "dp_shard, cp, tp to be enabled."
-            )
-        return self._dense_spmd_mesh
+        # Filter to enabled dims; a config may declare dims that aren't active
+        # (e.g. dense config declares dp_replicate but the job sets it to 1).
+        dims = [d for d in dims if self.get_optional_mesh(d) is not None]
+        if not self.full_dtensor:
+            in_band = {"tp", "ep", "etp"}
+            dims = [d for d in dims if d in in_band]
+        if not dims:
+            return None
+        return self.get_optional_mesh(dims)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.

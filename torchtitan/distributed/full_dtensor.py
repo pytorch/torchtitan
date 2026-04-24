@@ -12,7 +12,7 @@ FSDP uses ``DataParallelMeshDims`` to identify which mesh dimensions
 are data-parallel.
 
 TP sharding is handled by ``Module.parallelize(spmd_mesh)`` using
-config-based ``ShardingSpec``.
+config-based ``ShardingConfig``.
 """
 
 import torch
@@ -86,6 +86,15 @@ def get_dp_mesh_dims(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     return DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
+def _dense_spmd_dims(parallel_dims: ParallelDims) -> list[str]:
+    """Canonical dense SPMD dim list, intersected with enabled dims."""
+    return [
+        d
+        for d in ("dp_replicate", "dp_shard", "cp", "tp")
+        if parallel_dims.get_optional_mesh(d) is not None
+    ]
+
+
 def resolve_fsdp_mesh(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -97,7 +106,11 @@ def resolve_fsdp_mesh(
     In standard mode, returns the conventional dp_mesh and None.
     """
     if full_dtensor:
-        spmd_mesh = parallel_dims.get_dense_spmd_mesh()
+        spmd_mesh = parallel_dims.get_optional_mesh(_dense_spmd_dims(parallel_dims))
+        assert spmd_mesh is not None, (
+            "full_dtensor requires at least one of dp_replicate, "
+            "dp_shard, cp, tp to be enabled."
+        )
         dp_mesh_dims = get_dp_mesh_dims(parallel_dims)
         return spmd_mesh, dp_mesh_dims
     else:
@@ -118,7 +131,8 @@ def parallelize_inputs(
     DP dims get Shard(0) (batch), CP gets Shard(1) (sequence), TP gets Replicate.
     Tensor values in extra_kwargs (e.g. positions) use the same placements.
     """
-    mesh = parallel_dims.get_dense_spmd_mesh()
+    mesh = parallel_dims.get_optional_mesh(_dense_spmd_dims(parallel_dims))
+    assert mesh is not None, "parallelize_inputs requires an enabled spmd dim"
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))
