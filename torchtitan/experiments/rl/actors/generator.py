@@ -141,9 +141,6 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
-        vllm_attn_backend: str = "varlen"
-        """Which attention impl to use inside vLLM: 'varlen' or 'flex'."""
-
         def __post_init__(self):
             # VLLMGenerator only supports TP. vLLM handles its own parallelism;
             # we only apply TP via the core parallelize function.
@@ -207,15 +204,17 @@ class VLLMGenerator(Actor, Configurable):
             compile_config=compile_config,
         )
 
-        # Set vLLM attention backend
-        if config.vllm_attn_backend == "flex":
+        from torchtitan.models.common.attention import FlexAttention
+
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        self._use_flex = isinstance(inner_attn, FlexAttention.Config)
+
+        if self._use_flex:
             os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
-            if config.debug.batch_invariant:
-                os.environ["VLLM_BATCH_INVARIANT"] = "1"
         else:
             os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
-            if config.debug.batch_invariant:
-                set_batch_invariance(True)
+
+        set_batch_invariance(config.debug.batch_invariant)
 
         self._set_determinism(config.debug)
 
@@ -243,7 +242,7 @@ class VLLMGenerator(Actor, Configurable):
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.FLEX_ATTENTION
-                if config.vllm_attn_backend == "flex"
+                if self._use_flex
                 else AttentionBackendEnum.CUSTOM,
             ),
             disable_log_stats=True,
