@@ -15,7 +15,7 @@ from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Rep
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
-from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+from torchtitan.protocols.sharding import resolve_placements, ShardingSpec
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -60,14 +60,14 @@ class Module(nn.Module, Configurable):
     """
 
     _param_init: dict[str, Callable] | None = None
-    _sharding_spec: ShardingConfig | None = None
+    _sharding_spec: ShardingSpec | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
-        sharding_spec: ShardingConfig | None = None
+        sharding_spec: ShardingSpec | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
