@@ -6,7 +6,7 @@
 
 """Sharding types for config-based parallelization.
 
-``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_spec()``
+``ShardingSpec`` is set on ``Module.Config`` by ``set_sharding_spec()``
 and read by ``Module.parallelize(mesh)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshDimName``) so they are
 self-documenting and support multi-dim meshes.
@@ -53,7 +53,7 @@ NamedPlacement = dict[MeshDimName, Placement]
 
 
 @dataclass(kw_only=True, slots=True)
-class LocalMapConfig:
+class LocalMapSpec:
     """Spec for modules computing on local tensors.
 
     Wraps forward with ``local_map()``: DTensor -> local before forward,
@@ -78,7 +78,7 @@ class LocalMapConfig:
 
 
 @dataclass(kw_only=True, slots=True)
-class ShardingConfig:
+class ShardingSpec:
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``NamedPlacement`` (``dict[MeshDimName, Placement]``)
@@ -123,7 +123,7 @@ class ShardingConfig:
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_map: LocalMapConfig | None = None
+    local_map: LocalMapSpec | None = None
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
