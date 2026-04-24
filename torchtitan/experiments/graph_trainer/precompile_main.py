@@ -42,7 +42,6 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     apply_graph_ac,
     parallelize_inputs,
@@ -65,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -422,9 +422,24 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
+        joint_transformer_block_bucketing_reordering_pass,
     )
 
     passes = compile_time_passes(traced_result, config)
+
+    # TODO: Remove this filter once upstream manual_overlap_bucketing
+    # supports make_fx-traced graphs where collective group_name args
+    # are FX Node references instead of string literals. The bucketing
+    # and comm_analysis code crashes with
+    # "AttributeError: 'Node' object has no attribute 'size'" or
+    # "assert isinstance(group_name, str)".
+    passes = [
+        p
+        for p in passes
+        if getattr(p, "func", p)
+        is not joint_transformer_block_bucketing_reordering_pass
+    ]
+
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
