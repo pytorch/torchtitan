@@ -143,9 +143,6 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
-        vllm_attn_backend: str = "varlen"
-        """Which attention impl to use inside vLLM: 'varlen' or 'flex'."""
-
         def __post_init__(self):
             # Generator only supports TP. vLLM handles its own parallelism
             # and we only apply TP via the core parallelize function.
@@ -184,15 +181,17 @@ class VLLMGenerator(Actor, Configurable):
         # Register TorchTitan model with vLLM before any engine creation
         register_model_to_vllm_model_registry(model_spec)
 
-        # Set vLLM attention backend
-        if config.vllm_attn_backend == "flex":
+        from torchtitan.models.common.attention import FlexAttention
+
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        self._use_flex = isinstance(inner_attn, FlexAttention.Config)
+
+        if self._use_flex:
             os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
-            if config.debug.batch_invariant:
-                os.environ["VLLM_BATCH_INVARIANT"] = "1"
         else:
             os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
-            if config.debug.batch_invariant:
-                set_batch_invariance(True)
+
+        set_batch_invariance(config.debug.batch_invariant)
 
         self._set_determinism(config.debug)
 
@@ -212,14 +211,12 @@ class VLLMGenerator(Actor, Configurable):
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.FLEX_ATTENTION
-                if config.vllm_attn_backend == "flex"
+                if self._use_flex
                 else AttentionBackendEnum.CUSTOM,
             ),
             disable_log_stats=True,
         )
-        if config.vllm_attn_backend == "flex":
-            engine_kwargs["enable_chunked_prefill"] = False
-        if not has_cuda_capability(9, 0) and config.vllm_attn_backend != "flex":
+        if not has_cuda_capability(9, 0) and not self._use_flex:
             # FA2 requires block_size to be a multiple of 256
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.compile.get_vllm_compilation_config()
