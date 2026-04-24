@@ -18,7 +18,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_qkv_linear_sharding,
 )
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import ShardingSpec
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
@@ -58,7 +58,7 @@ def _set_gpt_oss_layer_sharding(
 
     # Attention: input x gathered to Replicate, freqs_cis always Replicate.
     # sinks parameter is sharded across heads via state_shardings.
-    attention.sharding_spec = ShardingConfig(
+    attention.sharding_spec = ShardingSpec(
         state_shardings={"sinks": dense_param_placement(tp=Shard(0))},
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),

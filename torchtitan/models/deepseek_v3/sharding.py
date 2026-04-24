@@ -19,7 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import ShardingSpec
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
@@ -61,7 +61,7 @@ def _set_deepseek_v3_layer_sharding(
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
-    attention.sharding_spec = ShardingConfig(
+    attention.sharding_spec = ShardingSpec(
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
             "freqs_cis": dense_param_placement(tp=Replicate()),
@@ -74,7 +74,7 @@ def _set_deepseek_v3_layer_sharding(
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through
     # without mixing plain Tensor + DTensor in the matmul.
-    replicate_weight = ShardingConfig(
+    replicate_weight = ShardingSpec(
         state_shardings={"weight": dense_param_placement(tp=Replicate())},
     )
     attention.wkv_a.sharding_spec = replicate_weight
