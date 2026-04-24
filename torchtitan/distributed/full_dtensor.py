@@ -60,30 +60,6 @@ def validate_config(
                 )
 
 
-def get_dense_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
-    """Get the dense SPMD mesh for full DTensor parallelization.
-
-    Uses the ``full_dtensor_dense`` global mesh which has separate ``dp_shard``
-    and ``cp`` dimensions. Disabled dimensions (degree 1) are filtered out.
-
-    The result is cached on the ``ParallelDims`` object so that all callers
-    share the exact same ``DeviceMesh`` object — FSDP2 checks object identity
-    between the param's DTensor mesh and the mesh passed to ``fully_shard``.
-    """
-    if hasattr(parallel_dims, "_spmd_mesh"):
-        return parallel_dims._spmd_mesh  # type: ignore[return-value]
-
-    mesh_names = [
-        n
-        for n in ["dp_replicate", "dp_shard", "cp", "tp"]
-        if parallel_dims.get_optional_mesh(n)
-    ]
-    assert mesh_names, "full_dtensor requires at least one mesh dimension"
-    mesh = parallel_dims.get_mesh(mesh_names)
-    parallel_dims._spmd_mesh = mesh  # type: ignore[attr-defined]
-    return mesh
-
-
 def get_dp_mesh_dims(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     """Build DataParallelMeshDims for dense (non-MoE) parameters.
 
@@ -121,7 +97,7 @@ def resolve_fsdp_mesh(
     In standard mode, returns the conventional dp_mesh and None.
     """
     if full_dtensor:
-        spmd_mesh = get_dense_spmd_mesh(parallel_dims)
+        spmd_mesh = parallel_dims.get_dense_spmd_mesh()
         dp_mesh_dims = get_dp_mesh_dims(parallel_dims)
         return spmd_mesh, dp_mesh_dims
     else:
@@ -142,7 +118,7 @@ def parallelize_inputs(
     DP dims get Shard(0) (batch), CP gets Shard(1) (sequence), TP gets Replicate.
     Tensor values in extra_kwargs (e.g. positions) use the same placements.
     """
-    mesh = get_dense_spmd_mesh(parallel_dims)
+    mesh = parallel_dims.get_dense_spmd_mesh()
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))

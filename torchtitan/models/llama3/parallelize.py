@@ -33,7 +33,6 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.full_dtensor import (
-    get_dense_spmd_mesh,
     resolve_fsdp_mesh,
     validate_config,
 )
@@ -70,12 +69,9 @@ def parallelize_llama(
 
     if parallelism.full_dtensor:
         validate_config(parallel_dims, model)
-        # Full DTensor: use multi-D SPMD mesh. CP is handled declaratively
-        # via LocalMapSpec (K/V Replicate on CP dim), not apply_cp_to_forward.
-        spmd_mesh = get_dense_spmd_mesh(parallel_dims)
+        spmd_mesh = parallel_dims.get_dense_spmd_mesh()
         model.parallelize(spmd_mesh)
     else:
-        # Standard path: CP via forward wrapping, TP via 1-D mesh.
         if parallel_dims.cp_enabled:
             apply_cp_to_forward(
                 # pyrefly: ignore [missing-attribute, not-callable]
@@ -103,8 +99,6 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    # In full DTensor mode, DDP-only (dp_replicate without dp_shard/cp) also
-    # uses the FSDP path with DataParallelMeshDims.
     use_fsdp = parallel_dims.fsdp_enabled or (
         parallelism.full_dtensor and parallel_dims.dp_replicate_enabled
     )

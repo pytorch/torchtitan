@@ -31,6 +31,7 @@ class ParallelDims:
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
+    _dense_spmd_mesh: DeviceMesh | None = None
 
     @classmethod
     def from_config(
@@ -200,6 +201,23 @@ class ParallelDims:
             "full_dtensor_dense": full_dtensor_dense_mesh,
         }
 
+        # Sliced ``full_dtensor_dense`` containing only enabled dims.
+        # Cached because FSDP2 compares the param's DTensor mesh and the
+        # mesh handed to ``fully_shard`` with object identity, so every
+        # consumer must see the same ``DeviceMesh`` instance.
+        spmd_dims = [
+            name
+            for name, size in (
+                ("dp_replicate", self.dp_replicate),
+                ("dp_shard", self.dp_shard),
+                ("cp", self.cp),
+                ("tp", self.tp),
+            )
+            if size > 1
+        ]
+        if spmd_dims:
+            self._dense_spmd_mesh = full_dtensor_dense_mesh[tuple(spmd_dims)]
+
         self._meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
@@ -316,6 +334,21 @@ class ParallelDims:
                 f"Ensure the corresponding parallelism dimension is {enabled_str}."
             )
         return mesh
+
+    def get_dense_spmd_mesh(self) -> DeviceMesh:
+        """Return the cached dense SPMD mesh for full DTensor mode.
+
+        Contains only enabled dims among ``dp_replicate``, ``dp_shard``,
+        ``cp``, ``tp`` (pp is excluded — FSDP/TP/CP operate per-stage).
+        """
+        if not self._meshes:
+            self.build_mesh()
+        if self._dense_spmd_mesh is None:
+            raise ValueError(
+                "full_dtensor requires at least one of dp_replicate, "
+                "dp_shard, cp, tp to be enabled."
+            )
+        return self._dense_spmd_mesh
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
