@@ -114,6 +114,7 @@ def parallelize_llama(
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         dp_mesh_dims=dp_mesh_dims,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     if parallel_dims.dp_replicate_enabled:
@@ -136,6 +137,7 @@ def apply_fsdp(
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
+    enable_symm_mem: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -160,6 +162,8 @@ def apply_fsdp(
             naming contract between ``fully_shard`` and torchtitan is not
             strong enough to infer safely, and an explicit declaration
             avoids silent miscategorization when new mesh axes appear.
+        enable_symm_mem (bool): Whether to enable symmetric-memory FSDP
+            communication.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -219,7 +223,7 @@ def apply_fsdp(
 
     fully_shard(model, **fsdp_config)
 
-    if parallelism.enable_fsdp_symm_mem:
+    if enable_symm_mem:
         enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules

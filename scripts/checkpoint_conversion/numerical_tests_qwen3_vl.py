@@ -117,7 +117,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
                 ],
             }
         ]
-        hf_in = processor.apply_chat_template(  # pyrefly: ignore[missing-attribute]
+        hf_in = processor.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,

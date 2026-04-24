@@ -28,7 +28,7 @@ def _(out: torch.Tensor, index: torch.Tensor, src: torch.Tensor) -> torch.Tensor
 def _backward(
     ctx: torch.autograd.function.FunctionCtx, grad_output: torch.Tensor
 ) -> tuple[torch.Tensor, None, torch.Tensor]:
-    (index,) = ctx.saved_tensors  # pyrefly: ignore[missing-attribute]
+    (index,) = ctx.saved_tensors
     grad_src = torch.gather(grad_output, dim=0, index=index)
     return grad_output, None, grad_src
 
