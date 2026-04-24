@@ -67,7 +67,8 @@ def get_dense_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
     and ``cp`` dimensions. Disabled dimensions (degree 1) are filtered out.
 
     The result is cached on the ``ParallelDims`` object so that all callers
-    share the exact same ``DeviceMesh`` object — FSDP requires object identity.
+    share the exact same ``DeviceMesh`` object — FSDP2 checks object identity
+    between the param's DTensor mesh and the mesh passed to ``fully_shard``.
     """
     if hasattr(parallel_dims, "_spmd_mesh"):
         return parallel_dims._spmd_mesh  # type: ignore[return-value]
@@ -121,7 +122,6 @@ def resolve_fsdp_mesh(
     """
     if full_dtensor:
         spmd_mesh = get_dense_spmd_mesh(parallel_dims)
-        _remove_sdpa_math_backend(model)
         dp_mesh_dims = get_dp_mesh_dims(parallel_dims)
         return spmd_mesh, dp_mesh_dims
     else:
@@ -129,34 +129,6 @@ def resolve_fsdp_mesh(
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
         return parallel_dims.get_mesh(names), None
-
-
-def _remove_sdpa_math_backend(model: nn.Module) -> None:
-    """Remove MATH backend from SDPA modules.
-
-    SDPA MATH backend decomposes into primitive ops that mix plain tensors
-    with DTensors, causing errors. Flash and efficient backends have proper
-    DTensor dispatch rules.
-    """
-    from torch.nn.attention import SDPBackend
-
-    from torchtitan.models.common.attention import ScaledDotProductAttention
-    from torchtitan.tools.logging import logger
-
-    dropped = False
-    for module in model.modules():
-        if isinstance(module, ScaledDotProductAttention):
-            if SDPBackend.MATH in module.sdpa_backends:
-                module.sdpa_backends = [
-                    b for b in module.sdpa_backends if b != SDPBackend.MATH
-                ]
-                dropped = True
-    if dropped:
-        logger.warning(
-            "full_dtensor: dropped SDPBackend.MATH from SDPA modules. "
-            "MATH decomposes to primitive ops that mix plain tensors with "
-            "DTensors, which breaks dispatch. Using flash/efficient backends."
-        )
 
 
 def parallelize_inputs(

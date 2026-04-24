@@ -133,10 +133,7 @@ class ParallelismConfig:
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
     full_dtensor: bool = False
-    """
-    Whether to use full DTensor for input parallelization instead of the default
-    FSDP/TP-based approach. This is experimental.
-    """
+    """Whether to use full DTensor mode. """
 
     pipeline_parallel_degree: int = 1
     """
