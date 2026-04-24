@@ -62,7 +62,7 @@ def llama4_debugmodel_ep() -> Trainer.Config:
 
 
 def llama4_debugmodel_fp8() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True, components=["model", "loss"])
+    compile_config = CompileConfig(enable=False, components=["model", "loss"])
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -94,7 +94,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
             steps=10,
         ),
         parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
+            expert_parallel_degree=2,
             expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
