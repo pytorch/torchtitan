@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class Step:
     """Env transition: reward, done flag, and optional next observation.
 
@@ -22,7 +22,7 @@ class Step:
     observation: str | None = None
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class Completion:
     """A single generated sequence from the generator.
 
@@ -38,7 +38,7 @@ class Completion:
     token_logprobs: list[float]
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class Trajectory:
     """One rollout: a sequence of ``(Completion, Step)`` transitions.
 
@@ -55,7 +55,7 @@ class Trajectory:
         return sum(s.reward for _, s in self.transitions)
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class Episode:
     """Training sample: flattened trajectory + GRPO advantage.
 
@@ -73,7 +73,7 @@ class Episode:
     advantage: float
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class TrainBatch:
     token_ids: torch.Tensor  # [1, total_tokens]
     prompt_lens: list[int]  # [num_episodes]

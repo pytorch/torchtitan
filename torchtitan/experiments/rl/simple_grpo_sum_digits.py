@@ -414,7 +414,14 @@ class RLTrainer(Configurable):
         self.generator.pull_model_state_dict.call(0).get()
 
     def _collect_rollout(self, num_prompts: int) -> list[Trajectory]:
-        """Collect group rollouts: one single use env per prompt, scored and returned"""
+        """Collect group rollouts: one single-use env per prompt, scored and returned.
+
+        ``generate`` returns ``num_prompts * group_size`` completions
+        ordered by ``prompt_idx`` (see ``VLLMGenerator.generate``), so
+        completions for prompt i sit at indices ``[i*group_size, (i+1)*group_size)``.
+        Each env is bound to one problem, so its group of completions
+        all step against the same target.
+        """
         group_size = self.config.generator.sampling.n
         envs = [SumDigitsEnv(self._train_rng) for _ in range(num_prompts)]
         completions = self._get_rank_0_value(
@@ -423,9 +430,10 @@ class RLTrainer(Configurable):
 
         trajectories: list[Trajectory] = []
         for sample_idx, env in enumerate(envs):
+            # Slice out this env's group_size completions and score each against its env.
             group = completions[sample_idx * group_size : (sample_idx + 1) * group_size]
             for c in group:
-                step = env.step(c.text)  # Score the Completion
+                step = env.step(c.text)
                 trajectories.append(
                     Trajectory(sample_idx=sample_idx, transitions=[(c, step)])
                 )

@@ -243,9 +243,9 @@ class VLLMGenerator(Actor, Configurable):
     ) -> list[Completion]:
         """Generate completions for the given prompts.
 
-        Returns a flat list of length ``len(prompts) * sampling.n``,
-        ordered by input prompt index then sample index within a vLLM
-        RequestOutput.
+        Returns a flat list of length ``len(prompts) * sampling.n``
+        ordered by ``prompt_idx``, with ``sampling.n`` consecutive
+        completions per prompt.
 
         Args:
             prompts: List of prompt strings.
