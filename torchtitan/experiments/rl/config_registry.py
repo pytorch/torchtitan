@@ -202,8 +202,6 @@ def rl_grpo_qwen3_moe_debug() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
-                expert_parallel_degree=1,
-                expert_tensor_parallel_degree=1,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -216,8 +214,6 @@ def rl_grpo_qwen3_moe_debug() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
-                expert_parallel_degree=1,
-                expert_tensor_parallel_degree=1,
             ),
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -229,7 +225,12 @@ def rl_grpo_qwen3_moe_debug() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
-    """Debug MoE config with EP on generator (4 GPUs: 2 gen + 2 train)."""
+    """Debug MoE config with EP+TP on generator (4 GPUs: 2 gen + 2 train).
+
+    Generator uses TP=2 for dense layers and EP=2 for MoE experts.
+    The RL loop auto-rebuilds the model spec with AllToAllTokenDispatcher
+    when generator EP > 1.
+    """
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
         num_steps=5,
@@ -243,8 +244,6 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
-                expert_parallel_degree=1,
-                expert_tensor_parallel_degree=1,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -258,12 +257,58 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 expert_parallel_degree=2,
-                expert_tensor_parallel_degree=1,
             ),
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=0.95,
                 max_tokens=50,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
+
+    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
+    Trainer uses TP=4 for all layers.
+
+    Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
+    """
+    return RLTrainer.Config(
+        model_spec=model_registry("30B-A3B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
+        num_steps=10,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=4,
+                disable_loss_parallel=True,
+            ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                expert_parallel_degree=4,
+            ),
+            sampling=SamplingConfig(
+                n=8,
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
             ),
         ),
     )
