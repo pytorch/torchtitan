@@ -88,7 +88,7 @@ class LocalMapInnerAttention(Module):
     TODO: This entire class is a legacy path for models that have not yet
     adopted config-based sharding. Once all models use config-based
     sharding, ``local_map`` will be applied statically by
-    ``Module.parallelize()`` via ``LocalMapSpec``, and this class
+    ``Module.parallelize()`` via ``LocalMapConfig``, and this class
     should be removed — subclasses should inherit from ``Module``
     directly.
     """
