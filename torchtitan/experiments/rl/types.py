@@ -11,15 +11,25 @@ import torch
 
 @dataclass(kw_only=True, slots=True)
 class Step:
-    """Env transition: reward, done flag, and optional next observation.
+    """Env transition: named reward components, done flag, optional next observation.
+
+    ``rewards`` is a dict of component-name to value (e.g.
+    ``{"correctness": 1.0, "format": 0.3}``); envs are free to define
+    any decomposition. Trainers read the scalar ``reward`` property
+    (sum of components); loggers iterate ``rewards.items()`` for
+    per-component reporting without needing to know the keys.
 
     ``observation`` (the next prompt the agent will see) is only
     populated by multi-turn envs. Single-turn envs leave it None.
     """
 
-    reward: float
+    rewards: dict[str, float]
     done: bool
     observation: str | None = None
+
+    @property
+    def reward(self) -> float:
+        return sum(self.rewards.values())
 
 
 @dataclass(kw_only=True, slots=True)

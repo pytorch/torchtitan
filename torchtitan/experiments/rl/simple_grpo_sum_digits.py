@@ -37,10 +37,16 @@ from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.config.manager import ConfigManager
-from torchtitan.experiments.rl.actors.generator import VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.sum_digits import format_reward, SumDigitsEnv
-from torchtitan.experiments.rl.types import Completion, Episode, TrainBatch, Trajectory
+from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
+from torchtitan.experiments.rl.types import (
+    Completion,
+    Episode,
+    Step,
+    TrainBatch,
+    Trajectory,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -121,6 +127,22 @@ class Provisioner:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
 
         return _bootstrap
+
+
+def _mean_rewards(steps: list[Step]) -> dict[str, float]:
+    """Per-component mean reward across a list of Steps."""
+    return {k: sum(s.rewards[k] for s in steps) / len(steps) for k in steps[0].rewards}
+
+
+def _format_rewards(components: dict[str, float]) -> str:
+    return ", ".join(f"{k}={v:+.3f}" for k, v in components.items())
+
+
+def _format_eval(result: dict) -> str:
+    return (
+        f"mean_reward={result['mean_reward']:+.3f} "
+        f"({_format_rewards(result['components'])})"
+    )
 
 
 def _log_samples(items: list[Episode] | list[Completion]) -> None:
@@ -433,9 +455,9 @@ class RLTrainer(Configurable):
             # Slice out this env's group_size completions and score each against its env.
             group = completions[sample_idx * group_size : (sample_idx + 1) * group_size]
             for c in group:
-                step = env.step(c.text)
+                step_result = env.step(c.text)
                 trajectories.append(
-                    Trajectory(sample_idx=sample_idx, transitions=[(c, step)])
+                    Trajectory(sample_idx=sample_idx, transitions=[(c, step_result)])
                 )
         return trajectories
 
@@ -468,61 +490,40 @@ class RLTrainer(Configurable):
         return episodes
 
     async def evaluate(self, num_samples: int = 20) -> dict:
-        """Run evaluation on held-out prompts.
+        """Run evaluation on held-out prompts using greedy sampling.
 
-        Uses the generator's default (training) sampling config and
-        scores the first sample per prompt -- preserves the
-        pre-refactor eval signal.
-
-        TODO: report both greedy (temperature=0, n=1) and pass@k
-        (training temp, n=k) so mode-sharpening vs. coverage
-        regressions are both visible. A single-sample score hides
-        both signals.
-
-        Args:
-            num_samples: Number of eval prompts to generate.
-
-        Returns:
-            Dict with accuracy, correct, total, format_rate, format_ok.
-        """
+        TODO: investigate using pass@k"""
         eval_rng = random.Random(99)
         envs = [SumDigitsEnv(eval_rng) for _ in range(num_samples)]
+        greedy = SamplingConfig(
+            n=1,
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=self.config.generator.sampling.max_tokens,
+        )
         completions = self._get_rank_0_value(
-            self.generator.generate.call([env.prompt for env in envs]).get()
+            self.generator.generate.call(
+                [env.prompt for env in envs], sampling_config=greedy
+            ).get()
         )
 
-        # Score the first completion per prompt via the env. Completions come
-        # back in prompt_idx order, length num_samples * n.
-        group_size = self.config.generator.sampling.n
-        correct = 0
-        format_ok = 0
-        for i, env in enumerate(envs):
-            c = completions[i * group_size]
-            step = env.step(c.text)
-            # Correct iff reward includes the +1.0 correctness component.
-            correct += int(step.reward >= 1.0)
-            format_ok += int(format_reward(c.text) > 0)
+        steps = [env.step(completions[i].text) for i, env in enumerate(envs)]
 
         if self.config.log_samples:
             _log_samples(completions)
 
-        result = {
-            "accuracy": correct / num_samples,
-            "correct": correct,
+        components = _mean_rewards(steps)
+        return {
+            "mean_reward": sum(components.values()),
+            "components": components,
             "total": num_samples,
-            "format_rate": format_ok / num_samples,
-            "format_ok": format_ok,
         }
-        logger.info(
-            f"Eval: Accuracy={result['accuracy']:.0%} ({correct}/{num_samples}) "
-            f"Format={result['format_rate']:.0%} ({format_ok}/{num_samples})"
-        )
-        return result
 
     async def train(self):
         num_steps = self.config.num_steps
         logger.info(f"Pre-training eval; then {num_steps} steps of RL training")
         pre_eval = await self.evaluate()
+        logger.info(f"Pre:  {_format_eval(pre_eval)}")
 
         for step in range(num_steps):
             step_start = time.perf_counter()
@@ -554,13 +555,13 @@ class RLTrainer(Configurable):
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_sync:.3f}s")
 
             # --- Logging --- #
-            token_lens = [len(ep.token_ids) for ep in episodes]
-            rewards = [ep.reward for ep in episodes]
+            steps = [t.transitions[0][1] for t in trajectories]
+            components = _mean_rewards(steps)
+            avg_tokens = sum(len(ep.token_ids) for ep in episodes) / len(episodes)
             logger.info(
                 f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
-                f"Reward: {sum(rewards) / len(rewards):+.3f} | "
-                f"Correct: {sum(1 for r in rewards if r >= 1.0):>2}/{len(rewards)} | "
-                f"Avg tokens: {sum(token_lens) / len(token_lens):>3.0f} | "
+                f"Reward: {sum(components.values()):+.3f} ({_format_rewards(components)}) | "
+                f"Avg tokens: {avg_tokens:>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
                 f"max={metrics['logprob_diff_max']:.4e} | "
                 f"Time: {time.perf_counter() - step_start:.1f}s"
@@ -573,10 +574,7 @@ class RLTrainer(Configurable):
         logger.info("Post-training eval")
         post_eval = await self.evaluate()
         logger.info(
-            f"Pre:  acc={pre_eval['accuracy']:.0%} ({pre_eval['correct']}/{pre_eval['total']}) "
-            f"format={pre_eval['format_rate']:.0%} ({pre_eval['format_ok']}/{pre_eval['total']})\n"
-            f"Post: acc={post_eval['accuracy']:.0%} ({post_eval['correct']}/{post_eval['total']}) "
-            f"format={post_eval['format_rate']:.0%} ({post_eval['format_ok']}/{post_eval['total']})"
+            f"Summary:\n  Pre:  {_format_eval(pre_eval)}\n  Post: {_format_eval(post_eval)}"
         )
 
 
