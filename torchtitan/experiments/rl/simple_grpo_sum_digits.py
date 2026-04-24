@@ -184,6 +184,9 @@ class RLTrainer(Configurable):
         where ``group_size`` is ``generator.sampling.n`` (completions per prompt).
         """
 
+        num_eval_samples: int = 20
+        """Number of held-out prompts scored greedily (temp=0, n=1) in each eval."""
+
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
 
@@ -489,10 +492,11 @@ class RLTrainer(Configurable):
                 )
         return episodes
 
-    async def evaluate(self, num_samples: int = 20) -> dict:
+    async def evaluate(self) -> dict:
         """Run evaluation on held-out prompts using greedy sampling.
 
         TODO: investigate using pass@k"""
+        num_samples = self.config.num_eval_samples
         eval_rng = random.Random(99)
         envs = [SumDigitsEnv(eval_rng) for _ in range(num_samples)]
         greedy = SamplingConfig(
