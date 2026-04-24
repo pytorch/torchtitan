@@ -1,5 +1,8 @@
 exclude: 'build'
 
+fail_fast: false
+show_diff_on_failure: true
+
 default_language_version:
     python: python3
 
