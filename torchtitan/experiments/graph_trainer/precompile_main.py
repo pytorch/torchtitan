@@ -195,7 +195,25 @@ def _common_setup(config):
 
     logger.info("Model parallelized and materialized")
 
-    tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+    # Build tokenizer only when needed (flex/varlen attention masks).
+    # Skipping it avoids requiring HF tokenizer assets on disk when
+    # precompiling with standard causal attention.
+    tokenizer = None
+    if isinstance(model_config, Decoder.Config) and model_config.layers:
+        inner_attention = getattr(
+            model_config.layers[0].attention, "inner_attention", None
+        )
+        if inner_attention is not None:
+            from torchtitan.models.common.attention import (
+                FlexAttention,
+                VarlenAttention,
+            )
+
+            if isinstance(
+                inner_attention,
+                (FlexAttention.Config, VarlenAttention.Config),
+            ):
+                tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
     return (
         model,
