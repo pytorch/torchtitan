@@ -42,9 +42,9 @@ class GeneratorCompileConfig:
     NOTE: inductor will offer the best performance, but will impact numerics - use eager for
     bitwise identical results."""
 
-    cudagraph_mode: Literal["none", "piecewise", "full", "full_and_piecewise"] = (
-        "piecewise"
-    )
+    cudagraph_mode: Literal[
+        "none", "piecewise", "full", "full_and_piecewise"
+    ] = "piecewise"
     """CUDA graph capture mode for vLLM.
     Piecewise capture supports dynamic sizes and splits cudagraphs around non capturable
       ops like attention

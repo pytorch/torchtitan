@@ -32,11 +32,49 @@ from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
 from torchtitan.models.qwen3 import model_registry
 
 
-def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train)."""
+def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-0.6B with varlen attention (6 GPUs: 4 gen + 2 train)."""
+    return RLTrainer.Config(
+        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=10,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+            ),
+            compile=CompileConfig(enable=True, backend="aot_eager"),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     spec = model_registry("0.6B", attn_backend="flex")
     for layer_cfg in spec.model.layers:
-        layer_cfg.attention.inner_attention.kernel_options["SPLIT_KV"] = 1
         layer_cfg.attention.inner_attention.kernel_options["FORCE_USE_FLEX_ATTENTION"] = True
     group_size = 8
     return RLTrainer.Config(
@@ -62,12 +100,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=False),
-            debug=_BATCH_INVARIANT_DEBUG,
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            gpu_memory_limit=0.7,
             compile=GeneratorCompileConfig(
                 backend="eager",
                 cudagraph_mode="piecewise",
@@ -78,6 +114,55 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             sampling=SamplingConfig(
                 n=group_size,
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+            vllm_attn_backend="flex",
+        ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
+    for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
+    """
+    spec = model_registry("0.6B", attn_backend="flex")
+    for layer_cfg in spec.model.layers:
+        layer_cfg.attention.inner_attention.kernel_options["FORCE_USE_FLEX_ATTENTION"] = True
+        layer_cfg.attention.inner_attention.kernel_options["SPLIT_KV"] = 1
+        layer_cfg.attention.inner_attention.kernel_options["BLOCK_M"] = 16
+        layer_cfg.attention.inner_attention.kernel_options["BLOCK_N"] = 16
+    return RLTrainer.Config(
+        model_spec=spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=10,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+            ),
+            compile=CompileConfig(enable=False),
+            debug=_BATCH_INVARIANT_DEBUG,
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -231,7 +316,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     """On-policy GRPO config for Qwen3-0.6B under same parallelism (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.

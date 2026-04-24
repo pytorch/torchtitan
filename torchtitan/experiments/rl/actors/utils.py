@@ -8,16 +8,9 @@ import itertools
 
 import torch
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import (
-    _DEFAULT_SPARSE_BLOCK_SIZE,
-    and_masks,
-    BlockMask,
-)
-from torchtitan.models.common.attention import (
-    create_attention_mask,
-    get_causal_mask_mod,
-    VarlenMetadata,
-)
+from torch.nn.attention.flex_attention import _DEFAULT_SPARSE_BLOCK_SIZE, BlockMask
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import create_attention_mask, VarlenMetadata
 
 
 def _align_to(length: int, alignment: int) -> int:
@@ -30,52 +23,64 @@ def create_flex_block_mask(
     device: torch.device,
     block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE,
 ) -> tuple[BlockMask, list[int]]:
+    original_seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    maybe_padded_seq_lens = seq_lens
+    maybe_padded_seq_lens_tensor = original_seq_lens_tensor
 
-    block_size_ = block_size if isinstance(block_size, int) else block_size[0]
-    padded_seq_lens = [_align_to(sl, block_size_) for sl in seq_lens]
-    total_padded = sum(padded_seq_lens)
-
-    padded_lens_t = torch.tensor(padded_seq_lens, dtype=torch.int32, device=device)
-    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
-
-    doc_ids = torch.repeat_interleave(
-        torch.arange(len(padded_seq_lens), dtype=torch.int32, device=device),
-        padded_lens_t,
-    )
-
-    seq_offsets = F.pad(padded_lens_t[:-1].cumsum(0), (1, 0))
-    local_pos = torch.arange(
-        total_padded, dtype=torch.int32, device=device
-    ) - torch.repeat_interleave(seq_offsets, padded_lens_t)
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        q_doc = doc_ids[q_idx]
-        kv_doc = doc_ids[kv_idx]
-        q_local = local_pos[q_idx]
-        kv_local = local_pos[kv_idx]
-        q_len = seq_lens_t[q_doc]
-        return (
-            (q_doc == kv_doc)  # same sequence
-            & (q_local < q_len)  # not padding
-            & (kv_local < q_len)  # not padding
-            & (kv_local <= q_local)  # causal
+    if is_in_batch_invariant_mode():
+        block_size_ = block_size if isinstance(block_size, int) else block_size[0]
+        maybe_padded_seq_lens = [_align_to(sl, block_size_) for sl in seq_lens]
+        maybe_padded_seq_lens_tensor = torch.tensor(
+            maybe_padded_seq_lens, dtype=torch.int32, device=device
         )
+
+    total = sum(maybe_padded_seq_lens)
+    doc_ids = torch.repeat_interleave(
+        torch.arange(len(seq_lens), dtype=torch.int32, device=device),
+        maybe_padded_seq_lens_tensor,
+    )
+    offsets = F.pad(maybe_padded_seq_lens_tensor[:-1].cumsum(0), (1, 0))
+    local_pos = torch.arange(
+        total, dtype=torch.int32, device=device
+    ) - torch.repeat_interleave(offsets, maybe_padded_seq_lens_tensor)
+
+    if is_in_batch_invariant_mode():
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            q_doc = doc_ids[q_idx]
+            q_local = local_pos[q_idx]
+            kv_local = local_pos[kv_idx]
+            q_len = original_seq_lens_tensor[q_doc]
+            return (
+                (q_doc == doc_ids[kv_idx])
+                & (q_local < q_len)
+                & (kv_local < q_len)
+                & (kv_local <= q_local)
+            )
+
+    else:
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            return (doc_ids[q_idx] == doc_ids[kv_idx]) & (
+                local_pos[kv_idx] <= local_pos[q_idx]
+            )
 
     block_mask = create_attention_mask(
         mask_mod,
         B=1,
         H=None,
-        Q_LEN=total_padded,
-        KV_LEN=total_padded,
+        Q_LEN=total,
+        KV_LEN=total,
         BLOCK_SIZE=block_size,
+        separate_full_blocks=not is_in_batch_invariant_mode(),
     )
-    return block_mask, padded_seq_lens
+    return block_mask, maybe_padded_seq_lens
 
 
 def pad_to_block_aligned(
     flat: torch.Tensor,
     seq_lens: list[int],
-    padded_seq_lens: list[int],
+    maybe_padded_seq_lens: list[int],
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pad packed sequences to block-aligned lengths.
@@ -84,7 +89,7 @@ def pad_to_block_aligned(
     """
     parts, pos_parts = [], []
     offset = 0
-    for sl, psl in zip(seq_lens, padded_seq_lens):
+    for sl, psl in zip(seq_lens, maybe_padded_seq_lens):
         padded = torch.zeros(psl, dtype=flat.dtype, device=device)
         padded[:sl] = flat[offset : offset + sl]
         parts.append(padded)
@@ -96,12 +101,12 @@ def pad_to_block_aligned(
 def unpad_from_block_aligned(
     padded: torch.Tensor,
     seq_lens: list[int],
-    padded_seq_lens: list[int],
+    maybe_padded_seq_lens: list[int],
 ) -> torch.Tensor:
     """Extract original-length slices from a block-padded ``(1, total_padded, ...)`` tensor."""
     parts = []
     offset = 0
-    for sl, psl in zip(seq_lens, padded_seq_lens):
+    for sl, psl in zip(seq_lens, maybe_padded_seq_lens):
         parts.append(padded[0, offset : offset + sl])
         offset += psl
     return torch.cat(parts).unsqueeze(0)
