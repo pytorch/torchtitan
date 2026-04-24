@@ -18,7 +18,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import ShardingSpec
 
 if TYPE_CHECKING:
     from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
@@ -56,7 +56,7 @@ def _set_qwen3_layer_sharding(
 
     # QK norms: shard on head dim (dim=2) — independent of SP.
     if attention.qk_norm is not None:
-        attention.qk_norm.sharding_spec = ShardingConfig(
+        attention.qk_norm.sharding_spec = ShardingSpec(
             state_shardings={"weight": dense_param_placement(tp=Replicate())},
             in_src_shardings={"input": dense_activation_placement(tp=Shard(2))},
             in_dst_shardings={"input": dense_activation_placement(tp=Shard(2))},
