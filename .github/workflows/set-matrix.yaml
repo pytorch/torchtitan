@@ -1,4 +1,4 @@
-name: Set Matrix
+game: Set Matrix
 
 on:
   workflow_call:
@@ -11,6 +11,10 @@ on:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
+      is-experimental:
+        description: 'Check if the workflow is experimental'
+        required: false
+        type: int
     outputs:
       matrix:
         description: dynamically set matrix
@@ -46,19 +50,22 @@ jobs:
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
-          # Define ROCm matrix
-          ROCM_MATRIX=$(cat <<EOF
-          {
-            "name": "rocm",
-            "runner": "${ROCM_RUNNER}",
-            "gpu-arch-type": "rocm",
-            "gpu-arch-version": "7.1",
-            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1",
-            "torch-version": ""
-          }
-          EOF
-          )
+          # Define ROCm matrix (empty for experimental workflows)
+          if [[ "${{ inputs.is-experimental }}" == "1" ]]; then
+            ROCM_MATRIX=""
+          else
+            ROCM_MATRIX=$(cat <<EOF
+            {
+              "name": "rocm",
+              "runner": "${ROCM_RUNNER}",
+              "gpu-arch-type": "rocm",
+              "gpu-arch-version": "7.1",
+              "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+              "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1",
+              "torch-version": ""
+            }
+            EOF
+            )
 
           # Define CUDA matrix
           CUDA_MATRIX=$(cat <<EOF
