@@ -215,7 +215,7 @@ class TorchTitanVLLMModelWrapper(Module):
 
         # Fill sharding specs on the config BEFORE build so every sub-module
         # (including VLLMAttentionWrapper) is constructed with its
-        # ShardingConfig / LocalMapConfig attached.
+        # ShardingSpec / LocalMapSpec attached.
         set_qwen3_sharding_spec(
             self.config,
             loss_parallel=False,
