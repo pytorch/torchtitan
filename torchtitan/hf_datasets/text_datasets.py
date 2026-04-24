@@ -211,8 +211,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
             data_state = state_dict["data"]
             # HuggingFace IterableDataset sync epoch
             saved_epoch = data_state.get("epoch", 0)
-            if saved_epoch != self._data.epoch:
-                self._data.set_epoch(saved_epoch)
+            self._data.set_epoch(saved_epoch)
             self._data.load_state_dict(data_state)
 
     def state_dict(self):
@@ -537,8 +536,7 @@ class ChatDataset(IterableDataset, Stateful):
             data_state = state_dict["data"]
             # HuggingFace IterableDataset sync epoch
             saved_epoch = data_state.get("epoch", 0)
-            if saved_epoch != self._data.epoch:
-                self._data.set_epoch(saved_epoch)
+            self._data.set_epoch(saved_epoch)
             self._data.load_state_dict(data_state)
 
 
