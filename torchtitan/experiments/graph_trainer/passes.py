@@ -37,7 +37,13 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
-from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_layer_id,
+    _is_backward_node,
+    _MODULE_FQN,
+    _NOT_IN_LAYERS,
+)
+from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
@@ -53,12 +59,6 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
-
-_NOT_IN_LAYERS = -1
-
-
-def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("autograd_backward", False)
 
 
 def compile_time_passes(
@@ -76,23 +76,28 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime
     """
-    # from torchtitan.experiments.graph_trainer.common_utils import (
-    #     get_default_transformer_block_buckets,
-    # )
+    from torchtitan.experiments.graph_trainer.common_utils import (
+        get_default_transformer_block_buckets,
+    )
     from torchtitan.models.common.attention import FlexAttention
 
-    # n_layers = len(config.model_spec.model.layers)
+    memory_policy_fn = {
+        "default": _make_default_memory_policy,
+        "eager": _make_eager_memory_policy,
+    }[config.compile.memory_policy]()
+
+    n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        selective_activation_remat_pass,
-        # TODO: bucketing is failing for DSv3, allgather prefetching
-        # for Llama3 is not working.
-        # functools.partial(
-        #     joint_transformer_block_bucketing_reordering_pass,
-        #     fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
-        # ),
+        # TODO: uncomment after sorting out common tagging API between offload and sac
+        # cpu_offload_pass,
+        functools.partial(selective_activation_remat_pass, policy_fn=memory_policy_fn),
+        functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
+        ),
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
@@ -253,10 +258,21 @@ def joint_transformer_block_bucketing_reordering_pass(
     def _make_module_fqn_stack_fn(
         *, bwd: bool
     ) -> Callable[[torch.fx.Node], list[tuple[str, type]]]:
-        """Create a module_stack_fn that filters nodes by forward/backward direction."""
+        """Create a module_stack_fn that filters nodes by forward/backward direction.
+
+        Recomputed nodes (from SAC remat) have autograd_backward=False
+        (copied from their original forward node) but serve the backward
+        pass. We identify them by the ``_recomputed`` name suffix and
+        route them to the backward bucketing pass.
+        """
 
         def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
-            is_bwd = node.meta.get("autograd_backward", False)
+            # TODO: Workaround — recomputed nodes should carry
+            # autograd_backward=True but remat_using_tags_for_fwd_loss_bwd_graph
+            # copies metadata from the original forward node. Fix upstream to
+            # tag recomputed nodes with autograd_backward=True.
+            is_recomputed = node.name.endswith("_recomputed")
+            is_bwd = node.meta.get("autograd_backward", False) or is_recomputed
             if is_bwd != bwd:
                 return []
             fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
@@ -274,7 +290,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         module_stack_fn=_make_module_fqn_stack_fn(bwd=False),
     )
 
-    # Backward backward pass: bucket and reorder backward collectives
+    # Backward pass: bucket and reorder backward collectives.
     manual_overlap_bucketing(
         gm,
         module_bucket_plans=fsdp_manual_buckets,
@@ -283,6 +299,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     )
 
     gm.recompile()
+
     return gm
 
 
@@ -610,54 +627,83 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
-def _get_layer_id(node: torch.fx.Node) -> int:
-    """Extract the layer index from the node's module_fqn metadata.
+def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
+    """Create a SAC policy function from a set of op targets to save."""
+    if save_ops is None:
+        save_ops = _get_save_ops()
+        # TODO: Temporary workaround — saving FSDP all_gathers prevents
+        # re-communication during backward recomputation. Without this,
+        # recomputed all_gather nodes in the backward region cause
+        # manual_overlap_bucketing to produce incorrect prefetch ordering.
+        # The proper fix has two parts:
+        # 1. Allow users to configure reshard_after_forward behavior
+        #    (equivalent to eager FSDP's parallelism.fsdp_reshard_after_forward)
+        #    which controls whether parameters are resharded after forward.
+        # 2. Fix manual_overlap_bucketing to handle recomputed all_gathers
+        #    in the backward region correctly.
+        save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
 
-    Nodes under ``layers.<N>`` return ``N``.
-    All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        if node.target in save_ops:
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return policy_fn
+
+
+def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
+    """Eager-compatible SAC policy that alternates mm ops between save/recompute.
+
+    Matches the behavior of torchtitan.distributed.activation_checkpoint:
+    every second mm/linear op is marked PREFER_RECOMPUTE instead of MUST_SAVE.
     """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
-    parts = fqn.split(".")
-    if parts[0] == "layers" and len(parts) >= 2:
-        try:
-            return int(parts[1])
-        except ValueError:
-            pass
-    return _NOT_IN_LAYERS
+    if save_ops is None:
+        save_ops = _get_save_ops()
+    mm_ops = {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
+    mm_count = 0
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        nonlocal mm_count
+        if node.target in mm_ops:
+            mm_count += 1
+            if node.target in save_ops and mm_count % 2 == 0:
+                return CheckpointPolicy.PREFER_RECOMPUTE
+        if node.target in save_ops:
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return policy_fn
 
 
 def apply_sac_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    op_list_to_save: set | None = None,
+    policy_fn: Callable[[torch.fx.Node], CheckpointPolicy] | None = None,
 ) -> torch.fx.GraphModule:
     """Apply selective activation checkpointing on the joint graph.
 
-    Annotates forward ``call_function`` nodes with a ``CheckpointPolicy``:
+    Annotates forward ``call_function`` nodes with a ``CheckpointPolicy``
+    determined by ``policy_fn``. After tagging, a boundary pass forces
+    ``MUST_SAVE`` on recomputable nodes whose output crosses a layer
+    boundary (layer N → layer N+1), since recomputing them would require
+    rerunning the entire preceding layer.
 
-    - Ops in ``op_list_to_save`` → ``MUST_SAVE`` (outputs kept for backward).
-    - All other ops → ``PREFER_RECOMPUTE`` (outputs may be discarded and
-      recomputed during backward).
-    - ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
-
-    After tagging, a boundary pass forces ``MUST_SAVE`` on recomputable nodes
-    whose output crosses a layer boundary (layer N → layer N+1), since
-    recomputing them would require rerunning the entire preceding layer.
+    ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
 
     The model must have been annotated with ``annotate_module_fqns`` before
     tracing so that nodes carry ``module_fqn`` metadata.
 
     Args:
         gm: The joint forward-backward graph module.
-        op_list_to_save: Op targets whose outputs should be saved.
-            Defaults to ``_get_save_ops()`` if None.
+        policy_fn: Callable that takes a node and returns a CheckpointPolicy.
+            Defaults to ``_make_default_memory_policy()`` if None.
 
     Returns:
         The annotated graph module
     """
-    if op_list_to_save is None:
-        op_list_to_save = _get_save_ops()
+    if policy_fn is None:
+        policy_fn = _make_default_memory_policy()
 
     layer_stats: dict[int, dict[str, int]] = defaultdict(
         lambda: {"save": 0, "recompute": 0}
@@ -690,14 +736,13 @@ def apply_sac_pass(
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
         # because the alternating heuristic is arbitrary.
-        save = node.target in op_list_to_save
-        node.meta["recompute"] = (
-            CheckpointPolicy.MUST_SAVE if save else CheckpointPolicy.PREFER_RECOMPUTE
+        node.meta["recompute"] = policy_fn(node)
+        key = (
+            "save"
+            if node.meta["recompute"] == CheckpointPolicy.MUST_SAVE
+            else "recompute"
         )
-        if save:
-            layer_stats[layer_id]["save"] += 1
-        else:
-            layer_stats[layer_id]["recompute"] += 1
+        layer_stats[layer_id][key] += 1
 
     # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
     # feeds into a node in a higher layer, saving it is cheaper than
@@ -739,7 +784,10 @@ def apply_sac_pass(
 
 
 def selective_activation_remat_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    policy_fn: Callable[[torch.fx.Node], CheckpointPolicy] | None = None,
 ) -> torch.fx.GraphModule:
     """Apply graph-based SAC to a traced fwd+loss+bwd graph.
 
@@ -755,7 +803,7 @@ def selective_activation_remat_pass(
         remat_using_tags_for_fwd_loss_bwd_graph,
     )
 
-    apply_sac_pass(gm)
+    apply_sac_pass(gm, policy_fn=policy_fn)
     return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
@@ -989,4 +1037,5 @@ AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
+    "cpu_offload": cpu_offload_pass,
 }
