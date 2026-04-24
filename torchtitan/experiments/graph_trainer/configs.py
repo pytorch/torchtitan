@@ -75,6 +75,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     path.
     """
 
+    comms_bucket_reorder_strategy: str = "aten"
+    """Autoparallel comms reordering strategy. Options: "aten", "inductor", "none"."""
+
 
 def to_graph_trainer_config(
     base_config: Trainer.Config,

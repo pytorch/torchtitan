@@ -131,6 +131,7 @@ def joint_graph_builder(
     compile_config: CompileConfig | None = None,
     serializable: bool = False,
     on_compile: Callable[[Any, TreeSpec | None], None] | None = None,
+    pre_built_jwd: JointWithDescriptors | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -147,17 +148,24 @@ def joint_graph_builder(
         serializable: If True, compile with serialization support
         on_compile: Optional callback invoked after compilation with
             (compiled_fn, out_spec)
+        pre_built_jwd: Optional pre-built JointWithDescriptors from
+            AutoParallelGraph. When provided, skips export_joint and uses
+            this directly.
     """
     assert isinstance(model_args, tuple)
 
-    # get joint graph
-    (joint_with_descriptors, tracing_context,) = export_joint(
-        model,
-        model_args,
-        model_kwargs,
-        dump_folder=dump_folder,
-        precompile=serializable,
-    )
+    if pre_built_jwd is not None:
+        joint_with_descriptors = pre_built_jwd
+        tracing_context = None
+    else:
+        # get joint graph
+        (joint_with_descriptors, tracing_context,) = export_joint(
+            model,
+            model_args,
+            model_kwargs,
+            dump_folder=dump_folder,
+            precompile=serializable,
+        )
 
     # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
@@ -166,7 +174,8 @@ def joint_graph_builder(
                 joint_with_descriptors.graph_module
             )
 
-    with tracing(tracing_context):
+    tracing_ctx = tracing(tracing_context) if tracing_context else contextlib.nullcontext()
+    with tracing_ctx:
         fn = aot_compile_joint_with_descriptors(
             joint_with_descriptors,
             fw_compiler=fw_compiler,
@@ -266,8 +275,9 @@ class CompiledModule(Module):
             if self.precompiled_fn is not None:
                 self.joint_graph_module = self.precompiled_fn
             else:
+                pre_built_jwd = getattr(self.inner, "_joint_with_descriptors", None)
                 self.joint_graph_module = self.joint_graph_builder(
-                    self.inner, dt_args, dt_kwargs
+                    self.inner, dt_args, dt_kwargs, pre_built_jwd=pre_built_jwd
                 )
 
         # calling the line below returns control to torchtitan's runner
