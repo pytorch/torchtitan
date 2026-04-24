@@ -67,6 +67,7 @@ jobs:
             }
             EOF
             )
+          fi
 
           # Define CUDA matrix
           CUDA_MATRIX=$(cat <<EOF
