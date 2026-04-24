@@ -145,7 +145,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
             num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
         ),
         rope=RoPE.Config(

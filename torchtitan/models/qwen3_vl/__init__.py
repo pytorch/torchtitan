@@ -246,7 +246,7 @@ def _debugmodel() -> Qwen3VLModel.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -297,7 +297,7 @@ def _debugmodel_moe(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -350,7 +350,7 @@ def _2b() -> Qwen3VLModel.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -399,7 +399,7 @@ def _8b() -> Qwen3VLModel.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -453,7 +453,7 @@ def _30b_a3b(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -507,7 +507,7 @@ def _235b_a22b(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
