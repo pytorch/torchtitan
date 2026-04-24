@@ -8,22 +8,32 @@ from __future__ import annotations
 
 import random
 import re
+from dataclasses import dataclass
 
+from torchtitan.config import Configurable
 from torchtitan.experiments.rl.types import Step
 
 
-class SumDigitsEnv:
+class SumDigitsEnv(Configurable):
     """Single-turn, single-use env for one sum-of-digits problem.
 
-    The constructor pulls the problem (2-4 integers in [10, 99]) from
-    the shared ``rng``. Each construction advances the generator, so
-    successive envs get fresh problems; reproducibility lives in the
-    caller's RNG state, not in per-env seeds.
-
-    ``step(completion)``
-    returns +1.0 for a correct ``[ANSWER] <target>`` tag plus a +0.3
-    format bonus for any ``[ANSWER] <number>`` tag (applied independently).
+    Construct via ``SumDigitsEnv.Config(seed=...).build(idx=<i>)``. The
+    problem is a pure function of ``(config.seed, idx)``: same inputs
+    always produce the same prompt and target. No RNG state is shared
+    between envs; ``idx`` is the only knob that varies across envs in
+    a batch.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        correctness_reward: float = 1.0
+        """Reward for a response containing ``[ANSWER] <target>``."""
+
+        format_reward: float = 0.3
+        """Reward bonus for any ``[ANSWER] <number>`` tag in the response."""
+
+        seed: int = 42
+        """Seed mixed with ``idx`` to deterministically generate problems."""
 
     SYSTEM_PROMPT = """\
 You are a helpful assistant. Solve the problem step by step.
@@ -38,10 +48,9 @@ Assistant: Break each number into digits:
 Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
 [ANSWER] 28"""
 
-    CORRECT_REWARD = 1.0
-    FORMAT_REWARD = 0.3
-
-    def __init__(self, rng: random.Random):
+    def __init__(self, config: Config, idx: int = 0):
+        self._config = config
+        rng = random.Random(f"{config.seed}:{idx}")
         n = rng.randint(2, 4)
         numbers = [rng.randint(10, 99) for _ in range(n)]
         self._target = sum(int(d) for num in numbers for d in str(num))
@@ -58,13 +67,11 @@ Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
         )
 
     def _correctness_reward(self, completion: str) -> float:
-        """``CORRECT_REWARD`` if the last ``[ANSWER] <n>`` tag matches the target."""
         matches = re.findall(r"\[ANSWER\]\s*(-?\d+)", completion)
         correct = bool(matches) and int(matches[-1]) == self._target
-        return self.CORRECT_REWARD if correct else 0.0
+        return self._config.correctness_reward if correct else 0.0
 
     def _format_reward(self, completion: str) -> float:
-        """``FORMAT_REWARD`` if the response contains any ``[ANSWER] <n>`` tag."""
         if re.search(r"\[ANSWER\]\s*-?\d+", completion):
-            return self.FORMAT_REWARD
+            return self._config.format_reward
         return 0.0

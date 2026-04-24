@@ -8,7 +8,7 @@ This directory contains code for RL training using TorchTitan model definitions 
 The integration consists of the following components:
 
 1. **vLLM Model Wrapper** (`models/vllm_wrapper.py`): Adapts TorchTitan models for vLLM's inference engine
-2. **RL Training Loop** (`simple_grpo_sum_digits.py`): GRPO-based RL training with Monarch actors
+2. **RL Training Loop** (`grpo_sync.py`): GRPO-based RL training with Monarch actors
 
 
 ## Key features available
@@ -72,7 +72,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torch
 
 7. Run simple GRPO RL loop to learn sum digits task. This also serves as an end-to-end smoke test that your environment is set up correctly.
 ```bash
-python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config rl_grpo_qwen3_0_6b
+python torchtitan/experiments/rl/grpo_sync.py --module rl --config rl_grpo_qwen3_0_6b
 ```
 
 **NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.
@@ -100,7 +100,7 @@ If you want to run true on-policy mode in TorchTitan RL and debug generator/trai
 Now we only support logprob bitwise parity when trainer and generator are under the same parallelism.
 Example:
 ```bash
-python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config  rl_grpo_qwen3_0_6b_batch_invariant
+python torchtitan/experiments/rl/grpo_sync.py --module rl --config  rl_grpo_qwen3_0_6b_batch_invariant
 ```
 
 This config sets `DebugConfig(batch_invariant=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).

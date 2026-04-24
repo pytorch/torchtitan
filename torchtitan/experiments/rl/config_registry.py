@@ -25,7 +25,8 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.simple_grpo_sum_digits import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.grpo_sync import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -37,7 +38,11 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_prompts_per_step=5,
-        num_eval_samples=20,
+        num_validation_samples=20,
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -80,7 +85,11 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
         num_prompts_per_step=5,
-        num_eval_samples=20,
+        num_validation_samples=20,
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -123,7 +132,11 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
         num_prompts_per_step=5,
-        num_eval_samples=20,
+        num_validation_samples=20,
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -165,7 +178,11 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
         model_spec=model_registry("debugmodel", attn_backend="varlen"),
         num_steps=5,
         num_prompts_per_step=5,
-        num_eval_samples=20,
+        num_validation_samples=20,
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -211,7 +228,11 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_prompts_per_step=5,
-        num_eval_samples=20,
+        num_validation_samples=20,
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(

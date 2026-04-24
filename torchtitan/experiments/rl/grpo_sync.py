@@ -16,7 +16,7 @@ This demonstrates:
    in the controller.
 
 Command to run:
-python3 torchtitan/experiments/rl/simple_grpo_sum_digits.py \
+python3 torchtitan/experiments/rl/grpo_sync.py \
     --module rl --config rl_grpo_qwen3_0_6b \
     --hf_assets_path=<path_to_model_checkpoint>
 """
@@ -25,7 +25,6 @@ import asyncio
 import logging
 import math
 import os
-import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -39,7 +38,6 @@ from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
 from torchtitan.experiments.rl.types import (
     Completion,
     Episode,
@@ -138,7 +136,7 @@ def _format_rewards(components: dict[str, float]) -> str:
     return ", ".join(f"{k}={v:+.3f}" for k, v in components.items())
 
 
-def _format_eval(result: dict) -> str:
+def _format_validation(result: dict) -> str:
     return (
         f"mean_reward={result['mean_reward']:+.3f} "
         f"({_format_rewards(result['components'])})"
@@ -184,11 +182,17 @@ class RLTrainer(Configurable):
         where ``group_size`` is ``generator.sampling.n`` (completions per prompt).
         """
 
-        num_eval_samples: int = 20
-        """Number of held-out prompts scored greedily (temp=0, n=1) in each eval."""
+        num_validation_samples: int = 20
+        """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
+
+        env: Configurable.Config = field(default=None)  # type: ignore[assignment]
+        """Env config for training rollouts."""
+
+        validation_env: Configurable.Config = field(default=None)  # type: ignore[assignment]
+        """Env config for validation rollouts."""
 
         log_samples: bool = False
-        """Log first completion per episode during training and eval."""
+        """Log first completion per episode during training and validation."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
@@ -223,7 +227,6 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        self._train_rng = random.Random(42)
         self._proc_meshes = []
 
     async def cleanup(self):
@@ -438,17 +441,16 @@ class RLTrainer(Configurable):
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
-    def _collect_rollout(self, num_prompts: int) -> list[Trajectory]:
+    def _collect_rollout(self, step: int, num_prompts: int) -> list[Trajectory]:
         """Collect group rollouts: one single-use env per prompt, scored and returned.
 
         ``generate`` returns ``num_prompts * group_size`` completions
         ordered by ``prompt_idx`` (see ``VLLMGenerator.generate``), so
         completions for prompt i sit at indices ``[i*group_size, (i+1)*group_size)``.
-        Each env is bound to one problem, so its group of completions
-        all step against the same target.
         """
         group_size = self.config.generator.sampling.n
-        envs = [SumDigitsEnv(self._train_rng) for _ in range(num_prompts)]
+        base = step * num_prompts
+        envs = [self.config.env.build(idx=base + i) for i in range(num_prompts)]
         completions = self._get_rank_0_value(
             self.generator.generate.call([env.prompt for env in envs]).get()
         )
@@ -492,13 +494,11 @@ class RLTrainer(Configurable):
                 )
         return episodes
 
-    async def evaluate(self) -> dict:
-        """Run evaluation on held-out prompts using greedy sampling.
-
-        TODO: investigate using pass@k"""
-        num_samples = self.config.num_eval_samples
-        eval_rng = random.Random(99)
-        envs = [SumDigitsEnv(eval_rng) for _ in range(num_samples)]
+    async def validate(self) -> dict:
+        """Run validation on held-out prompts using greedy sampling.
+        TODO: investigate using pass@k."""
+        num_samples = self.config.num_validation_samples
+        envs = [self.config.validation_env.build(idx=i) for i in range(num_samples)]
         greedy = SamplingConfig(
             n=1,
             temperature=0.0,
@@ -525,15 +525,15 @@ class RLTrainer(Configurable):
 
     async def train(self):
         num_steps = self.config.num_steps
-        logger.info(f"Pre-training eval; then {num_steps} steps of RL training")
-        pre_eval = await self.evaluate()
-        logger.info(f"Pre:  {_format_eval(pre_eval)}")
+        logger.info(f"Pre-training validation; then {num_steps} steps of RL training")
+        pre_validation = await self.validate()
+        logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
-            trajectories = self._collect_rollout(self.config.num_prompts_per_step)
+            trajectories = self._collect_rollout(step, self.config.num_prompts_per_step)
             episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
@@ -575,10 +575,11 @@ class RLTrainer(Configurable):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
-        logger.info("Post-training eval")
-        post_eval = await self.evaluate()
+        logger.info("Post-training validation")
+        post_validation = await self.validate()
         logger.info(
-            f"Summary:\n  Pre:  {_format_eval(pre_eval)}\n  Post: {_format_eval(post_eval)}"
+            f"Summary:\n  Pre:  {_format_validation(pre_validation)}\n"
+            f"  Post: {_format_validation(post_validation)}"
         )
 
 
