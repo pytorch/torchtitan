@@ -120,6 +120,51 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
         return joint_with_descriptors
 
 
+def export_joint_for_pp(
+    model: torch.nn.Module,
+    model_args: tuple,
+    model_kwargs: dict | None = None,
+    joint_custom_passes: list[Callable] | None = None,
+    dump_folder: str | None = None,
+    compile_config: CompileConfig | None = None,
+) -> JointWithDescriptors:
+    """Export joint graph with custom passes applied for graph PP.
+
+    Traces the model, applies inductor decomposition and joint custom passes,
+    and returns the JointWithDescriptors ready for GraphPipelineStage.
+    No partitioning or compilation — those are GraphPPRunner's responsibility.
+    """
+    if model_kwargs is None:
+        model_kwargs = {}
+
+    joint_with_descriptors, _tracing_context = export_joint(
+        model, model_args, model_kwargs, dump_folder=dump_folder
+    )
+
+    if compile_config is not None:
+        joint_pass_names = getattr(compile_config, "joint_passes", [])
+        if "inductor_decomposition" in joint_pass_names:
+            from torchtitan.experiments.graph_trainer.passes import (
+                inductor_decomposition_pass,
+            )
+
+            decomp_pass = functools.partial(
+                inductor_decomposition_pass,
+                joint_with_descriptors=joint_with_descriptors,
+            )
+            if joint_custom_passes is None:
+                joint_custom_passes = []
+            joint_custom_passes = [decomp_pass] + joint_custom_passes
+
+    if joint_custom_passes is not None:
+        for joint_custom_pass in joint_custom_passes:
+            joint_with_descriptors.graph_module = joint_custom_pass(
+                joint_with_descriptors.graph_module
+            )
+
+    return joint_with_descriptors
+
+
 def joint_graph_builder(
     model: torch.nn.Module,
     model_args: tuple,

@@ -59,13 +59,28 @@ class GraphTrainer(Trainer):
     def __init__(self, config):
         super().__init__(config)
 
-        if self.config.compile.mode == "aot_fx_trace" and self.parallel_dims.pp_enabled:
-            raise ValueError(
-                "aot_fx_trace compile mode does not support Pipeline Parallel"
-            )
-
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+
+    def train_step(self, *args, **kwargs):
+        """Handle SymFloat grad_norm from fx.Interpreter execution.
+
+        When graph PP executes subgraphs via fx.Interpreter, gradient
+        operations may return SymFloat instead of regular Tensor, which
+        breaks metrics formatting.
+        """
+        original_log = self.metrics_processor.log
+
+        def patched_log(step, avg_loss, max_loss, grad_norm, **kw):
+            if isinstance(grad_norm, (torch.SymFloat, torch.SymInt)):
+                grad_norm = float("inf")
+            return original_log(step, avg_loss, max_loss, grad_norm, **kw)
+
+        self.metrics_processor.log = patched_log
+        try:
+            super().train_step(*args, **kwargs)
+        finally:
+            self.metrics_processor.log = original_log
 
     def forward_backward_step(
         self,

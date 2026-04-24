@@ -310,3 +310,219 @@ def apply_compile(
         raise ValueError(
             f"Unknown compile mode: {mode}. Must be 'jit', 'aot', or 'aot_fx_trace'."
         )
+
+
+def graph_pp_pipeline_llm(
+    model: nn.Module,
+    *,
+    parallel_dims,
+    training,
+    model_converters,
+    parallelism,
+    compile_config,
+    ac_config,
+    dump_folder: str,
+    device: torch.device,
+    model_config,
+    parallelize_fn,
+    loss_fn,
+):
+    """Unified graph PP pipeline for both manual SPMD and autoparallel.
+
+    Splits the model into per-stage chunks, applies parallelisms via
+    parallelize_fn (which may be manual SPMD or AutoParallelGraph), exports
+    joint graphs for each stage, and creates a GraphPPRunner.
+
+    Returns the same 4-tuple as pipeline_llm:
+        (runner, model_parts, has_first_stage, has_last_stage)
+    """
+    from torch.distributed.pipelining.schedules import (
+        get_schedule_class,
+        ScheduleDualPipeV,
+        ScheduleZBVZeroBubble,
+    )
+
+    from torchtitan.distributed.pipeline_parallel import (
+        build_pipeline_schedule,
+        generate_llm_fqn_per_model_part,
+        get_pipeline_metadata,
+        pipeline_module_split,
+    )
+    from torchtitan.experiments.graph_trainer.graph_pp import (
+        GraphPipelineStage,
+        GraphPPRunner,
+        ModelWithLoss,
+    )
+    from torchtitan.experiments.graph_trainer.graph_pp.common import (
+        get_shape_inference_fns,
+    )
+    from torchtitan.experiments.graph_trainer.graph_utils import export_joint_for_pp
+
+    pp_mesh = parallel_dims.get_mesh("pp")
+
+    num_virtual_stages, num_layers, input_weight, output_weight = (
+        get_pipeline_metadata(parallel_dims, parallelism, model_config)
+    )
+    module_names_per_stage = parallelism.module_fqns_per_model_part
+    if module_names_per_stage is None:
+        module_names_per_stage = generate_llm_fqn_per_model_part(
+            num_virtual_stages, num_layers, input_weight, output_weight,
+        )
+
+    stages, model_parts = pipeline_module_split(
+        model,
+        pp_mesh,
+        parallelism.pipeline_parallel_schedule,
+        device,
+        module_names_per_stage,
+    )
+
+    no_compile_config = dataclasses.replace(compile_config, enable=False)
+    for i, m in enumerate(model_parts):
+        m = parallelize_fn(
+            m,
+            parallel_dims=parallel_dims,
+            training=training,
+            model_converters=model_converters,
+            parallelism=parallelism,
+            compile_config=no_compile_config,
+            ac_config=ac_config,
+            dump_folder=dump_folder,
+        )
+        model_parts[i] = m
+        stages[i].submod = m
+
+    # Determine graph PP passes
+    graph_pp_passes = []
+    if parallel_dims.fsdp_enabled:
+        graph_pp_passes.append("split_fsdp_collectives")
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
+    if schedule_class in (ScheduleDualPipeV, ScheduleZBVZeroBubble):
+        graph_pp_passes.append("split_dI_dW")
+
+    # Build compilers + joint custom passes
+    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
+    )
+    joint_custom_passes = get_joint_custom_passes_from_config(
+        parallel_dims, compile_config, fsdp_reshard_after_forward
+    )
+    compiler_passes = get_compiler_passes_from_config(
+        model_parts[0], compile_config, parallel_dims
+    )
+    fw_compiler, bw_compiler = make_compiler_with_passes(
+        compiler_passes, dump_folder=dump_folder
+    )
+
+    num_stages = len(module_names_per_stage)
+    (
+        shape_fn_first_stage,
+        shape_fn_intermediate,
+        shape_fn_last_stage_output,
+    ) = get_shape_inference_fns(model_config, training, parallelism, has_loss=True)
+
+    register_blockmask_pytree_node()
+
+    microbatch_size = parallelism.pipeline_parallel_microbatch_size
+    dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+    spmd_batch_size = microbatch_size * dp_degree
+
+    graph_stages = []
+    for i, (stage, m) in enumerate(zip(stages, model_parts)):
+        is_last = stage.is_last
+
+        if is_last and loss_fn is not None:
+            m = ModelWithLoss(m, loss_fn)
+            model_parts[i] = m
+
+        # Get joint graph: either pre-built (autoparallel) or trace now (manual SPMD)
+        jwd = getattr(m, "_joint_with_descriptors", None)
+        if jwd is None:
+            if stage.is_first:
+                example_args = (
+                    torch.randint(
+                        0,
+                        model_config.vocab_size,
+                        (spmd_batch_size, training.seq_len),
+                        device=device,
+                    ),
+                )
+            elif is_last:
+                example_args = (
+                    torch.randn(
+                        spmd_batch_size,
+                        training.seq_len,
+                        model_config.dim,
+                        device=device,
+                        dtype=torch.bfloat16,
+                        requires_grad=True,
+                    ),
+                    torch.randint(
+                        0,
+                        model_config.vocab_size,
+                        (spmd_batch_size, training.seq_len),
+                        device=device,
+                    ),
+                )
+            else:
+                example_args = (
+                    torch.randn(
+                        spmd_batch_size,
+                        training.seq_len,
+                        model_config.dim,
+                        device=device,
+                        dtype=torch.bfloat16,
+                        requires_grad=True,
+                    ),
+                )
+
+            dt_args, dt_kwargs = parallelize_inputs(parallel_dims, example_args, {})
+            jwd = export_joint_for_pp(
+                m, dt_args, dt_kwargs,
+                joint_custom_passes=list(joint_custom_passes),
+                compile_config=compile_config,
+            )
+
+        graph_stage = GraphPipelineStage(
+            submodule=m,
+            graph_callables=None,
+            graph_meta=None,
+            stage_index=stage.stage_index,
+            num_stages=num_stages,
+            device=device,
+            input_args=(
+                shape_fn_first_stage()
+                if stage.is_first
+                else shape_fn_intermediate()
+            ),
+            output_args=(
+                shape_fn_last_stage_output()
+                if is_last
+                else shape_fn_intermediate()
+            ),
+            group=pp_mesh.get_group("pp"),
+        )
+        graph_stage.joint_graph = jwd
+        graph_stages.append(graph_stage)
+
+        logger.info(
+            "PP stage_idx %d: joint graph ready for %s",
+            stage.stage_index,
+            module_names_per_stage[stage.stage_index],
+        )
+
+    pp_schedule = build_pipeline_schedule(
+        parallelism=parallelism,
+        local_batch_size=training.local_batch_size,
+        stages=graph_stages,
+        loss_fn=None,
+        backward_requires_autograd=False,
+        scale_grads=False,
+    )
+
+    runner = GraphPPRunner(pp_schedule)
+
+    has_first_stage = any(s.is_first for s in graph_stages)
+    has_last_stage = any(s.is_last for s in graph_stages)
+
+    return runner, model_parts, has_first_stage, has_last_stage
