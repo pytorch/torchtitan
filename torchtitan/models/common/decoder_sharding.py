@@ -198,7 +198,9 @@ def set_dense_ffn_sharding(
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
-def set_decoder_sharding_config(config, *, loss_parallel: bool, enable_sp: bool) -> None:
+def set_decoder_sharding_config(
+    config, *, loss_parallel: bool, enable_sp: bool
+) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     ``output``, and the root ``freqs_cis`` buffer.
 
