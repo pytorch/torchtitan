@@ -8,10 +8,10 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import (
-    LocalMapConfig,
+    LocalMapSpec,
     MeshDimName,
     NamedPlacement,
-    ShardingConfig,
+    ShardingSpec,
 )
 
 DP_REPLICATE = MeshDimName.DP_REPLICATE
@@ -58,9 +58,9 @@ def dense_activation_placement(
     }
 
 
-def colwise_spec() -> ShardingConfig:
+def colwise_spec() -> ShardingSpec:
     """ColwiseParallel: weight Shard(0), output Shard(-1)."""
-    return ShardingConfig(
+    return ShardingSpec(
         state_shardings={
             "weight": dense_param_placement(tp=Shard(0)),
             "bias": dense_param_placement(tp=Shard(0)),
@@ -69,14 +69,14 @@ def colwise_spec() -> ShardingConfig:
     )
 
 
-def rowwise_spec(*, output_sp: bool = False) -> ShardingConfig:
+def rowwise_spec(*, output_sp: bool = False) -> ShardingSpec:
     """RowwiseParallel: weight Shard(1), bias Replicate (no-op if bias absent).
 
     ``output_sp=True``  -> output ``Shard(1)`` (reduce-scatter into SP region).
     ``output_sp=False`` -> output ``Replicate()`` (all-reduce).
     """
     out_tp: Placement = Shard(1) if output_sp else Replicate()
-    return ShardingConfig(
+    return ShardingSpec(
         state_shardings={
             "weight": dense_param_placement(tp=Shard(1)),
             "bias": dense_param_placement(tp=Replicate()),
@@ -85,7 +85,7 @@ def rowwise_spec(*, output_sp: bool = False) -> ShardingConfig:
     )
 
 
-def norm_spec(*, enable_sp: bool) -> ShardingConfig:
+def norm_spec(*, enable_sp: bool) -> ShardingSpec:
     """Norm sharding.
 
     ``enable_sp=True``: SequenceParallel — weight Replicate, activations
@@ -97,8 +97,8 @@ def norm_spec(*, enable_sp: bool) -> ShardingConfig:
     """
     state = {"weight": dense_param_placement(tp=Replicate())}
     if not enable_sp:
-        return ShardingConfig(state_shardings=state)
-    return ShardingConfig(
+        return ShardingSpec(state_shardings=state)
+    return ShardingSpec(
         state_shardings=state,
         in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
         in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
@@ -139,7 +139,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         f"got {type(attention_cfg).__name__}"
     )
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
-    attention_cfg.sharding_spec = ShardingConfig(
+    attention_cfg.sharding_spec = ShardingSpec(
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
             "rope_cache": dense_param_placement(tp=Replicate()),
@@ -156,7 +156,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
 def set_gqa_inner_attention_local_map(
     inner_attention_cfg, *, return_lse: bool = False
 ) -> None:
-    """Install a ``LocalMapConfig`` on an inner-attention config.
+    """Install a ``LocalMapSpec`` on an inner-attention config.
 
     q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
     TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
@@ -168,8 +168,8 @@ def set_gqa_inner_attention_local_map(
     """
     qkv_placements: NamedPlacement = {TP: Shard(2)}
     num_outputs = 2 if return_lse else 1
-    inner_attention_cfg.sharding_spec = ShardingConfig(
-        local_map=LocalMapConfig(
+    inner_attention_cfg.sharding_spec = ShardingSpec(
+        local_map=LocalMapSpec(
             in_placements=(qkv_placements, qkv_placements, qkv_placements),
             out_placements=(qkv_placements,) * num_outputs,
             in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
@@ -189,7 +189,7 @@ def set_dense_ffn_sharding(
     should match the layout that the layer's attention block emits so the
     FFN's input wrap is a no-op redistribute when placements already agree.
     """
-    feed_forward_cfg.sharding_spec = ShardingConfig(
+    feed_forward_cfg.sharding_spec = ShardingSpec(
         in_src_shardings={"x": dense_activation_placement(tp=attn_x_placement)},
         in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
     )
@@ -214,10 +214,10 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
     loss_tp: Placement = Shard(-1) if loss_parallel else Replicate()
 
     # freqs_cis buffer on the decoder root: Replicate on all dims.
-    config.sharding_spec = ShardingConfig(
+    config.sharding_spec = ShardingSpec(
         state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
     )
-    config.tok_embeddings.sharding_spec = ShardingConfig(
+    config.tok_embeddings.sharding_spec = ShardingSpec(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
@@ -225,7 +225,7 @@ def set_decoder_sharding_spec(config, *, loss_parallel: bool, enable_sp: bool) -
     )
     config.norm.sharding_spec = norm_spec(enable_sp=enable_sp)
 
-    config.output.sharding_spec = ShardingConfig(
+    config.output.sharding_spec = ShardingSpec(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},

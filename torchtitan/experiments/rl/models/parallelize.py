@@ -33,7 +33,7 @@ def parallelize_qwen3(
 
     Expects ``set_qwen3_sharding_spec`` to have already been called on the
     model's config *before* build, so that ``model.parallelize(tp_mesh)``
-    sees the right ``ShardingConfig`` on every sub-module.
+    sees the right ``ShardingSpec`` on every sub-module.
 
     ``compile_config``: if enabled, applies per-layer ``torch.compile`` after TP.
     """

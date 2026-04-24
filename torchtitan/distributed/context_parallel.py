@@ -47,7 +47,7 @@ def apply_cp_to_forward(
     (FlexAttention) or wraps inputs as CP-sharded DTensors (SDPA).
     Once all models adopt config-based sharding with full DTensor,
     CP redistribution should be expressed declaratively via
-    ShardingConfig and this function should be removed.
+    ShardingSpec and this function should be removed.
 
     Args:
         attention_modules: Sequence of inner attention modules to apply CP to.
