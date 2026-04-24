@@ -24,6 +24,7 @@ from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfi
 from torchtitan.models.common.moe import _run_experts_grouped_mm
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import device_type
 
 
 def create_functional_router_forward(
@@ -306,7 +307,7 @@ def parallelize_deepseekv3(
                 0,
                 model.config.vocab_size,
                 (global_batch_size, training.seq_len),
-                device=torch.accelerator.current_accelerator(),
+                device=torch.device(device_type),
             ),
         )
 
