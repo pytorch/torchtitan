@@ -35,7 +35,9 @@ def set_llama3_sharding_config(
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
     ``loss_parallel`` controls whether the output projection is vocab-parallel.
     """
-    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
+    set_decoder_sharding_config(
+        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+    )
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 

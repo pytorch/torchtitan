@@ -11,7 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Replicate
+from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
@@ -84,9 +84,8 @@ class Module(nn.Module, Configurable):
 
         # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``),
         # replacing any DTensor entry with a plain tensor. Restore DTensor-ness
-        # by wrapping the freshly computed global tensor as Replicate (every
-        # rank runs this init and produces the same value) and redistributing
-        # to the original placements — works for Replicate / Shard / Partial.
+        # by re-distributing the freshly computed global tensor to the original
+        # placements. ``distribute_tensor`` supports Replicate / Shard / Partial.
         dtensor_meta = {
             name: (buf.device_mesh, buf.placements)
             for name, buf in self._buffers.items()
@@ -97,13 +96,10 @@ class Module(nn.Module, Configurable):
             new_buf = self._buffers.get(name)
             if new_buf is None or isinstance(new_buf, DTensor):
                 continue
-            replicated = DTensor.from_local(
-                new_buf, mesh, (Replicate(),) * mesh.ndim, run_check=False
-            )
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
-                replicated.redistribute(mesh, list(placements)),
+                distribute_tensor(new_buf, mesh, list(placements)),
                 persistent=persistent,
             )
 
@@ -211,7 +207,9 @@ class Module(nn.Module, Configurable):
         for name, param in self.named_parameters(recurse=False):
             if name not in sharding_config.state_shardings:
                 continue
-            placements = resolve_placements(sharding_config.state_shardings[name], mesh_dim_names)
+            placements = resolve_placements(
+                sharding_config.state_shardings[name], mesh_dim_names
+            )
             self.register_parameter(
                 name,
                 nn.Parameter(distribute_tensor(param, mesh, list(placements))),
@@ -220,7 +218,9 @@ class Module(nn.Module, Configurable):
         for name, buffer in self.named_buffers(recurse=False):
             if name not in sharding_config.state_shardings or buffer is None:
                 continue
-            placements = resolve_placements(sharding_config.state_shardings[name], mesh_dim_names)
+            placements = resolve_placements(
+                sharding_config.state_shardings[name], mesh_dim_names
+            )
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -277,7 +277,10 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
-        if sharding_config.in_dst_shardings is None and sharding_config.in_src_shardings is None:
+        if (
+            sharding_config.in_dst_shardings is None
+            and sharding_config.in_src_shardings is None
+        ):
             return args, kwargs
 
         # Use pre-cached positional arg names (populated in parallelize()) to
@@ -332,7 +335,9 @@ class Module(nn.Module, Configurable):
         if sharding_config.out_dst_shardings is None:
             return outputs
         assert mesh.mesh_dim_names is not None
-        desired = resolve_placements(sharding_config.out_dst_shardings, mesh.mesh_dim_names)
+        desired = resolve_placements(
+            sharding_config.out_dst_shardings, mesh.mesh_dim_names
+        )
         if isinstance(outputs, DTensor) and outputs.placements != desired:
             outputs = outputs.redistribute(placements=desired, async_op=True)
         return outputs
