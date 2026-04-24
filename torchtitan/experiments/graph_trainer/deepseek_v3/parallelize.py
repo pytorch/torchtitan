@@ -92,9 +92,7 @@ def parallelize_deepseekv3(
         # Config-based sharding: ShardingConfig is populated on the model
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(parallel_dims)
-        maybe_enable_async_tp(
-            parallelism, compile_config, parallel_dims.get_mesh("tp")
-        )
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(

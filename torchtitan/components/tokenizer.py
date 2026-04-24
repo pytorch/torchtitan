@@ -72,12 +72,8 @@ class BaseTokenizer(ABC, Configurable):
             lstrip_blocks=True,
             extensions=[jinja2.ext.loopcontrols],
         )
-        env.globals[
-            "raise_exception"
-        ] = raise_exception
-        env.globals[
-            "strftime_now"
-        ] = strftime_now
+        env.globals["raise_exception"] = raise_exception
+        env.globals["strftime_now"] = strftime_now
         env.filters["tojson"] = tojson
         self._chat_template = env.from_string(template)
 

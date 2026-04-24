@@ -378,7 +378,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
             state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
-            with torch.compiler._patch_autograd_grad():
+            with torch.compiler._patch_engine_backward():
                 result = fn(state_for_fn, *user_list)
 
             flat_outs, output_spec = pytree.tree_flatten(result)

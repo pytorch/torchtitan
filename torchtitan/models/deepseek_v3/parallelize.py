@@ -49,15 +49,14 @@ def parallelize_deepseekv3(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
+            # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
 
     if parallel_dims.tp_enabled:
         model.parallelize(parallel_dims)
-        maybe_enable_async_tp(
-            parallelism, compile_config, parallel_dims.get_mesh("tp")
-        )
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Check if using DeepEP/HybridEP for MoE communication
     comm_backend = parallelism.expert_parallel_comm_backend

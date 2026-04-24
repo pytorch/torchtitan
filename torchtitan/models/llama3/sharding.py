@@ -45,7 +45,9 @@ def set_llama3_sharding_config(
     ``full_dtensor`` extends the inner-attention ``LocalMapConfig`` to also
     carry DP/CP placements so q/k/v flow as DTensors on the multi-D SPMD mesh.
     """
-    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=enable_sp)
+    set_decoder_sharding_config(
+        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+    )
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, full_dtensor=full_dtensor
