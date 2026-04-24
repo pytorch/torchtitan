@@ -15,7 +15,7 @@ from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Rep
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
-from torchtitan.protocols.sharding import resolve_placements, ShardingSpec
+from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -36,13 +36,13 @@ class Module(nn.Module, Configurable):
     """
 
     _param_init: dict[str, Callable] | None = None
-    _sharding_spec: ShardingSpec | None = None
+    _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
-        sharding_spec: ShardingSpec | None = None
+        sharding_config: ShardingConfig | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -51,8 +51,8 @@ class Module(nn.Module, Configurable):
             instance = Configurable.Config.build(self, **kwargs)
             if self.param_init is not None:
                 instance._param_init = self.param_init
-            if self.sharding_spec is not None:
-                instance._sharding_spec = self.sharding_spec
+            if self.sharding_config is not None:
+                instance._sharding_config = self.sharding_config
             return instance
 
     def init_states(
@@ -176,7 +176,7 @@ class Module(nn.Module, Configurable):
     def parallelize(self, mesh: DeviceMesh) -> None:
         """Parallelize this module and all Module children recursively.
 
-        For each module with a ``sharding_spec``:
+        For each module with a ``sharding_config``:
 
         1. ``distribute_tensor`` on params and buffers per ``state_shardings``.
         2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
@@ -198,29 +198,29 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper
                 queue.extend(child.children())
 
-        spec = self._sharding_spec
-        if spec is None:
+        sharding_config = self._sharding_config
+        if sharding_config is None:
             return
 
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named dims"
         mesh_dim_names = mesh.mesh_dim_names
 
-        # Distribute parameters and buffers per state_shardings. Every spec
+        # Distribute parameters and buffers per state_shardings. Every sharding_config
         # must declare a placement for every mesh dim; ``resolve_placements``
         # raises otherwise.
         for name, param in self.named_parameters(recurse=False):
-            if name not in spec.state_shardings:
+            if name not in sharding_config.state_shardings:
                 continue
-            placements = resolve_placements(spec.state_shardings[name], mesh_dim_names)
+            placements = resolve_placements(sharding_config.state_shardings[name], mesh_dim_names)
             self.register_parameter(
                 name,
                 nn.Parameter(distribute_tensor(param, mesh, list(placements))),
             )
 
         for name, buffer in self.named_buffers(recurse=False):
-            if name not in spec.state_shardings or buffer is None:
+            if name not in sharding_config.state_shardings or buffer is None:
                 continue
-            placements = resolve_placements(spec.state_shardings[name], mesh_dim_names)
+            placements = resolve_placements(sharding_config.state_shardings[name], mesh_dim_names)
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -233,10 +233,10 @@ class Module(nn.Module, Configurable):
         self._cache_pos_arg_names()
 
         fn = self.forward
-        if spec.local_map is not None:
+        if sharding_config.local_map is not None:
             # Resolve each NamedPlacement to a positional tuple for the
             # current mesh.
-            lm = spec.local_map
+            lm = sharding_config.local_map
             in_placements = tuple(
                 resolve_placements(p, mesh_dim_names) for p in lm.in_placements
             )
@@ -274,10 +274,10 @@ class Module(nn.Module, Configurable):
            (declares the source placement of the incoming tensor).
         2. If DTensor placements != ``in_dst_shardings``, redistribute.
         """
-        spec = self._sharding_spec
-        assert spec is not None
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
 
-        if spec.in_dst_shardings is None and spec.in_src_shardings is None:
+        if sharding_config.in_dst_shardings is None and sharding_config.in_src_shardings is None:
             return args, kwargs
 
         # Use pre-cached positional arg names (populated in parallelize()) to
@@ -290,8 +290,8 @@ class Module(nn.Module, Configurable):
 
         assert mesh.mesh_dim_names is not None
         mesh_dim_names = mesh.mesh_dim_names
-        in_dst_shardings = spec.in_dst_shardings or {}
-        in_src_shardings = spec.in_src_shardings or {}
+        in_dst_shardings = sharding_config.in_dst_shardings or {}
+        in_src_shardings = sharding_config.in_src_shardings or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
@@ -326,13 +326,13 @@ class Module(nn.Module, Configurable):
         config-based sharding. out_dst_shardings would also need to become
         a nested structure.
         """
-        spec = self._sharding_spec
-        assert spec is not None
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
 
-        if spec.out_dst_shardings is None:
+        if sharding_config.out_dst_shardings is None:
             return outputs
         assert mesh.mesh_dim_names is not None
-        desired = resolve_placements(spec.out_dst_shardings, mesh.mesh_dim_names)
+        desired = resolve_placements(sharding_config.out_dst_shardings, mesh.mesh_dim_names)
         if isinstance(outputs, DTensor) and outputs.placements != desired:
             outputs = outputs.redistribute(placements=desired, async_op=True)
         return outputs

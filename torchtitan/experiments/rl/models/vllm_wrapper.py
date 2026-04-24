@@ -22,10 +22,11 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
+from types import SimpleNamespace
+
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
-from torchtitan.models.qwen3.sharding import set_qwen3_sharding_spec
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation import codegen as _codegen
@@ -127,6 +128,9 @@ def create_torchtitan_config_from_vllm_config(
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=1,
         expert_tensor_parallel_degree=1,
+        # vLLM inference doesn't compute loss; the sharding config's output
+        # layer should NOT be vocab-parallel.
+        disable_loss_parallel=True,
     )
 
     logger.info(
@@ -213,13 +217,15 @@ class TorchTitanVLLMModelWrapper(Module):
             vllm_config
         )
 
-        # Fill sharding specs on the config BEFORE build so every sub-module
+        # Fill sharding configs on the config BEFORE build so every sub-module
         # (including VLLMAttentionWrapper) is constructed with its
-        # ShardingSpec / LocalMapSpec attached.
-        set_qwen3_sharding_spec(
-            self.config,
-            loss_parallel=False,
-            enable_sp=parallelism.enable_sequence_parallel,
+        # ShardingConfig / LocalMapConfig attached. Uses the model-agnostic
+        # ``update_from_config`` hook. vLLM inference doesn't need RoPE
+        # cache extension here (that happens explicitly below via
+        # ``max_model_len``) nor MoE force-load-balance, so ``training`` and
+        # ``debug`` are omitted.
+        self.config.update_from_config(
+            trainer_config=SimpleNamespace(parallelism=parallelism)
         )
 
         # TODO: Check if it's possible to apply meta init

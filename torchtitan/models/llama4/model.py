@@ -169,9 +169,9 @@ class Llama4Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
-            from torchtitan.models.llama4.sharding import set_llama4_sharding_spec
+            from torchtitan.models.llama4.sharding import set_llama4_sharding_config
 
-            set_llama4_sharding_spec(
+            set_llama4_sharding_config(
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
