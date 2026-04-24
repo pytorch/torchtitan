@@ -1,0 +1,57 @@
+python benchmarkingdatasets.py sample_datasets_aumovio_full.yaml
+
+Creating Dataset 'sys100' took 0.02s for 263902833 samples
+Creating Dataset 'sys100_val' took 0.00s for 590747 samples
+Creating Dataset 'conti_drive' took 0.01s for 5882068 samples
+
+Created Datasets
+
+speed: sys100= n/a  s/it, sys100_val= n/a  s/it, conti_drive= n/a  s/it:   0%|                                                                              | 0/120 [00:00<?, ?it/s]An item of dataset 'sys100' contains:
+  - 'radar': torch.Size([7, 64, 64]) (torch.float32)
+  - 'txt': A fisheye photo from a high centered fro... (<class 'str'>)
+  - 'timestamp': torch.Size([]) (torch.int64)
+  - 'velocity': torch.Size([]) (torch.float32)
+  - 'yaw_rate': torch.Size([]) (torch.float32)
+  - 'dopplerRange': torch.Size([]) (torch.float32)
+  - 'rad2cam': torch.Size([3, 4]) (torch.float32)
+  - 'h5_time': torch.Size([]) (torch.float32)
+  - 'img_time': torch.Size([]) (torch.float32)
+  - 'undistort_time': torch.Size([]) (torch.float32)
+  - 'gamma_time': torch.Size([]) (torch.float32)
+  - 'total_time': torch.Size([]) (torch.float32)
+  - 'jpg': torch.Size([3, 512, 1024]) (torch.float32)
+  - 'real_hw': torch.Size([2]) (torch.int64)
+  - 'aspect': torch.Size([2]) (torch.float32)
+  - 'fovs': torch.Size([2]) (torch.float32)
+
+An item of dataset 'sys100_val' contains:
+  - 'radar': torch.Size([7, 64, 64]) (torch.float32)
+  - 'txt': A fisheye photo from a high centered fro... (<class 'str'>)
+  - 'timestamp': torch.Size([]) (torch.int64)
+  - 'velocity': torch.Size([]) (torch.float32)
+  - 'yaw_rate': torch.Size([]) (torch.float32)
+  - 'dopplerRange': torch.Size([]) (torch.float32)
+  - 'rad2cam': torch.Size([3, 4]) (torch.float32)
+  - 'h5_time': torch.Size([]) (torch.float32)
+  - 'img_time': torch.Size([]) (torch.float32)
+  - 'undistort_time': torch.Size([]) (torch.float32)
+  - 'gamma_time': torch.Size([]) (torch.float32)
+  - 'total_time': torch.Size([]) (torch.float32)
+  - 'jpg': torch.Size([3, 512, 1024]) (torch.float32)
+  - 'real_hw': torch.Size([2]) (torch.int64)
+  - 'aspect': torch.Size([2]) (torch.float32)
+  - 'fovs': torch.Size([2]) (torch.float32)
+
+An item of dataset 'conti_drive' contains:
+  - 'jpg': torch.Size([3, 512, 1024]) (torch.float32)
+  - 'txt': A photo from a centered front-facing cam... (<class 'str'>)
+  - 'aspect': torch.Size([2]) (torch.float32)
+  - 'fovs': torch.Size([2]) (torch.float32)
+  - 'fps': 17.0 (<class 'numpy.float32'>)
+
+speed: sys100=0.957 s/it, sys100_val=1.028 s/it, conti_drive=1.588 s/it: 100%|████████████████████████████████████████████████████████████████████| 120/120 [00:56<00:00,  2.11it/s]
+Waiting for ffmpeg to finish encoding '/p/project1/nxtaim-1/neuhoefer1/CleanStableDiffusion/DataConsolidation/benchmarking_video_qt28_veryslow.mp4'...
+final speeds: (note that processes might benefit from idle other CPUs during benchmarking for shorter wall time)
+ -      sys100:  0.957 s/it ( 0.536 s walltime/it,  0.957 s/it/frame) for  1 frames
+ -  sys100_val:  1.028 s/it ( 0.397 s walltime/it,  1.028 s/it/frame) for  1 frames
+ - conti_drive:  1.588 s/it ( 0.414 s walltime/it,  1.588 s/it/frame) for  1 frames

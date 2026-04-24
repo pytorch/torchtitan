@@ -1,0 +1,163 @@
+# This YAML file defines the list of datasets based on the project internally 
+# public samples of each partners full dataset.
+# This is for proper benchmarking executable by every partner. 
+# A partner specific config file should be added to reference the partner's full
+# dataset for training and validation and example can be seen in
+# sample_datasets_aumovio_full.yaml.
+datasets:
+  - aumovio:
+      target: src.aumovio.sys100dataset.Sys100Dataset # returns single frames per batch [B, C, H, W] but 'jpg' + 'radar'
+      params:
+        source: /p/data1/nxtaim/proprietary_samples/continental_sys100
+        source_is_summary_csv: False
+        out_img_size: [512, 1024] # raw fisheye 1896, 3584
+        extract_video: True        
+        undistort: False #True
+        project_radar: True
+        plot_radar: False
+        fovs: [110, 75]
+        return_metadata: False
+        toy_radar_data: False
+        max_files: null
+  - avl:
+      target: src.avl.avl_dataset.HDF5ImageDataset # returns multiple frames per batch [B, N, C, H, W]
+      params:
+        h5_folder: /p/data1/nxtaim/proprietary_samples/avl/AvlTest_2022-04-06_07-00-49_2011_562134/
+        dataset_names:  # List of dataset (topic) names to use, or leave empty/null for all
+          #- camera_0
+          #- camera_1
+          - back
+          - front
+        transform:
+          target: src.avl.avl_dataset.build_transform
+          params:
+            tf_cfg:
+              resize: [512, 1024]
+              to_tensor: true
+        normalize: true
+        aug: resize_center
+        size: 512
+        scale_min: 0.15
+        scale_max: 0.5
+        num_frames: 2
+        frame_rate: 10
+  - denso:
+      target: src.denso.denso_dataloader.DNVideoClipDataset
+      params:
+        dataset_folder: /p/data1/nxtaim/proprietary_samples/denso/
+        clip_length: 4
+        stride: 2
+        resize: [512, 1024]
+        load_odom: True
+  - dspace:
+      target: src.dspace.sample_dataset.DSpaceSampleDataset
+      params:
+        source: /p/data1/nxtaim/proprietary_samples/dspace_h5
+        source_is_summary_csv: False
+        out_img_size: [512, 1024]
+  - ipg:
+      target: src.ipg.ipgdataset.IPGDataset
+      params:
+        source: /p/data1/nxtaim/proprietary_samples/ipg 
+        source_is_summary_csv: False
+        out_img_size: [512, 1024]
+  - fzi:
+      target: src.fzi.dataset.MultiModalDataset
+      params:
+        root_dir: /p/data1/nxtaim/proprietary_samples/fzi
+        config:
+          # FZI Dataset configuration
+          # vailable cameras: front_medium, rear_wide, front_wide, front_tele, right_forward, left_forward, right_rearward, left_rearward, (top_trafficlight)
+          mandatory_cameras:    # samples must have an “original” frame
+          #  - front_medium
+            - front_wide
+          #  - front_tele
+          #  - right_forward
+          #  - left_forward
+          #  - right_rearward
+          #  - left_rearward
+            - rear_wide
+          #optional_cameras:     # we’ll still load these if we can, but won’t drop samples
+          # Camera image preprocessing, default resizes and then crops to 1024 x 576
+          camera_transform: default #gpu
+          camera_width: 1024
+          camera_height: 576
+          load_lidar: true
+          lidar_tolerance_sec: 0.06   # half the frame period by default
+          load_radar: true
+          #available radars: radar_front_left, radar_front_right, radar_rear_center
+          radar_ids: 
+          - radar_front_left
+          #- radar_rear_center
+          #- radar_front_right
+          radar_tolerance_sec: 0.03
+          # camera intrinsics and transformations
+          load_static_info: true
+          mandatory_columns: # samples missing any of these will be dropped. Only set to mandatory if a sample without that data is worthless!
+            - pcd_file_path # set this if frames without lidar are worthless
+          optional_columns: # samples missing these will still be kept
+            - steering_angle
+            - velocity_x
+            - indicating_left
+            - indicating_right
+            - velocity # km/h
+            - velocity_x # m/s
+            - ins_odom_twist_linear_x # fallback velocity (m/s)
+            - ins_gps_latitude
+            - ins_gps_longitude
+            - ins_imu_angular_velocity_z # fallback yaw-rate (rad/s)
+            - velocity_angular_z # rad/s
+          metadata_columns:
+            - road_type
+            - weather
+          video_decoder: cv2 #"tc": torchcodec on cuda/GPU, "cv2": opencv
+          # Sequence settings  (each row in parquet is 1 ⁄ 20 s  -> 20 Hz)
+          sequence_len: 3 # how many ticks per sample
+          # rows to skip between ticks
+          #  20: 1 Hz, so a 10-row sequence = 10 s clip
+          #  1: 20 Hz (consecutive frames)
+          #  5: 4 Hz, etc.
+          sequence_step: 2
+          batch_size: 1
+          num_workers: 4
+          shuffle: true
+          seed: 42
+          notes: "example config"
+  - mb_tld:
+      target: src.mb.traffic_light_dataset.TrafficLightDataset
+      params:
+        video_dir: /p/data1/nxtaim/proprietary_samples/mbag/tld_samples
+        frame_interval: 2
+        frame_step: 2
+        size: [512, 1024]
+  - mb_ecp:
+      target: src.mb.ecp_dataset.ECPDataset
+      params:
+        video_dir: /p/data1/nxtaim/proprietary_samples/mbag/ecp_samples
+        frame_interval: 2
+        frame_step: 2
+        size: [512, 1024]
+  - mb_aw_videos:
+      target: src.mb.aw_dataset.AWDataset
+      params:
+        video_dir: /p/data1/nxtaim/proprietary_samples/mbag/aw_samples/videos
+        start_map_idx: 0
+        frame_interval: 50
+        frame_step: 2
+#  - mb_aw_lidar:
+#      target: src.mb.aw_lidar_dataloader.AWLidarDataset
+#      params:
+#        lidar_dir: /p/data1/nxtaim/proprietary_samples/mbag/aw_samples/pointclouds
+#        interval: 50
+#        step: 5
+#        points: 55000
+  - valeo_preprocessed:
+      target: src.valeo.valeo_dataset.ValeoDatasetPreprocessed
+      params:
+      # This 'config' key is crucial. It must match the argument in __init__.
+        config:
+          # This nested block creates the DatasetConfig object first.
+          target: src.valeo.valeo_dataset.DatasetConfig
+          params:
+            base_path: /p/data1/nxtaim/proprietary_samples/valeo/bin/20210915_141538_rec_converted/
+            reference_sensor_id: "HDL64E_ID_4"

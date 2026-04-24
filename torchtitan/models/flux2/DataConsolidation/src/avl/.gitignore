@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+.DS_Store
+
+temp
+data
+processed_data
+logs
+src
+.lock
+.toml

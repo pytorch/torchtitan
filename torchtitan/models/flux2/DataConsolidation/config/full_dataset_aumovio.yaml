@@ -1,0 +1,42 @@
+# adapted from https://github.com/Stability-AI/stablediffusion/blob/main/configs/stable-diffusion/v2-inference.yaml
+datasets:
+  - sys100:
+      target: src.aumovio.sys100dataset.Sys100Dataset # returns single frames per batch [B, C, H, W] but 'jpg' + 'radar'
+      params:
+        source: /p/data1/nxtaim/proprietary/continental/sys100/SYS100_Dataset.csv
+        source_is_summary_csv: True
+        out_img_size: [512, 1024] # raw fisheye 1896, 3584
+        extract_video: True        
+        undistort: False #True
+        project_radar: True
+        plot_radar: False
+        fovs: [110, 75]
+        return_metadata: False
+        toy_radar_data: False
+        max_files: null
+  - sys100_val:
+      target: src.aumovio.sys100dataset.Sys100Dataset # returns single frames per batch [B, C, H, W] but 'jpg' + 'radar'
+      params:
+        source: /p/data1/nxtaim/proprietary/continental/sys100_validation/SYS100_Validation_Dataset.csv
+        source_is_summary_csv: True
+        out_img_size: [512, 1024] # raw fisheye 1896, 3584
+        extract_video: True        
+        undistort: False #True
+        project_radar: True
+        plot_radar: False
+        fovs: [110, 75]
+        return_metadata: False
+        toy_radar_data: False
+        max_files: null
+  - conti_drive:
+      target: src.videodataset.VideoDataset
+      params:
+        source: "/p/data1/nxtaim/proprietary/continental/conti_drive_dataset/ContiDriveDataset_TrainingSequences.csv"
+        source_is_summary_csv: True
+        out_img_size: [512, 1024]
+        extract_function: "cv2"
+        valid_file_ending: ".mp4"
+        recursive: True
+        subsampling_step: 10
+        random_subsampling: True
+        Conti_Continuous_Adaptation: True

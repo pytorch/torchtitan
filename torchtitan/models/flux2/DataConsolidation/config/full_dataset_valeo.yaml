@@ -1,0 +1,12 @@
+# adapted from https://github.com/Stability-AI/stablediffusion/blob/main/configs/stable-diffusion/v2-inference.yaml
+datasets:
+  - valeo_preprocessed:
+      target: src.valeo.valeo_dataset.ValeoDatasetPreprocessed
+      params:
+      # This 'config' key is crucial. It must match the argument in __init__.
+        config:
+          # This nested block creates the DatasetConfig object first.
+          target: src.valeo.valeo_dataset.DatasetConfig
+          params:
+            base_path: /p/data1/nxtaim/proprietary/valeo/dataset_exported/
+            reference_sensor_id: "HDL64E_ID_4"

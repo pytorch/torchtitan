@@ -1,0 +1,23 @@
+# The additionally required packages to the stuff loaded in the modules
+pip
+einops==0.8.1
+decord==0.6.0
+omegaconf==2.3.0
+natsort==8.4.0
+numpy==1.26.4
+#torch==2.5.1
+#torchvision==0.20.1
+#torchmetrics==1.6.1
+#torch-fidelity==0.3.0
+#open-clip-torch==2.0.2
+#xformers==0.0.29.post1
+pyarrow==22.0.0
+h5py==3.15.1
+
+fire==0.7.1 # dspace
+transformers==4.57.1 # dspace
+open3d==0.19.0 # hella demo
+orjson==3.11.4 #>=3.11.3 valeo
+polars==1.35.2 #>=1.34.0 valeo
+rerun-sdk==0.23.1 #>=0.25.1 valeo
+av==16.0.1 # valeo

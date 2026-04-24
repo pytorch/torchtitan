@@ -1,0 +1,372 @@
+python benchmarkingdatasets.py
+
+0 valid, 0 error files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 364.09it/s]
+Creating Dataset 'aumovio' took 0.01s for 187 samples
+Creating Dataset 'avl' took 0.01s for 1188 samples
+Found 1 videos
+Total clips: 57 (clip_length=4, stride=2), total length= 0.0031666666666666666 hours
+Creating Dataset 'denso' took 0.04s for 57 samples
+1 valid, 0 error files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00,  5.40it/s]
+Creating Dataset 'dspace' took 0.14s for 400 samples
+2 valid, 0 error files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:00<00:00,  6.39it/s]
+Creating Dataset 'ipg' took 0.12s for 923 samples
+Scanning for recordings
+4it [00:00, 16.34it/s]
+Building global sample index
+Found 5 runs with in total 24561 samples.
+Creating Dataset 'fzi' took 0.44s for 24561 samples
+Gathering video data and metadata...
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:02<00:00,  1.16s/it]
+Creating Dataset 'mb_tld' took 2.14s for 396 samples
+Gathering video data and metadata...
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 12.94it/s]
+Creating Dataset 'mb_ecp' took 0.02s for 338 samples
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  3.29it/s]
+Found 1 over all. Usable videos found 1. Assorted 0
+Creating Dataset 'mb_aw_videos' took 0.13s for 100 samples
+Deep scanning /p/data1/nxtaim/proprietary_samples/valeo/bin/20210915_141538_rec_converted for recordings...
+Indexing Dataset: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:01<00:00,  1.07s/it]
+Creating Dataset 'valeo_preprocessed' took 0.60s for 43 samples
+
+Created Datasets
+
+speed: aumovio= n/a  s/it, avl= n/a  s/it, denso= n/a  s/it, dspace= n/a  s/it, ipg= n/a  s/it, fzi= n/a  s/it, mb_tld= n/a  s/it, mb_ecp= n/a  s/it, mb_aw_videos= n/a  s/it, valeo_prAn item of dataset 'aumovio' contains:
+  - 'radar': torch.Size([7, 64, 64]) (torch.float32)
+  - 'txt': A fisheye photo from a high centered fro... (<class 'str'>)
+  - 'timestamp': torch.Size([]) (torch.int64)
+  - 'velocity': torch.Size([]) (torch.float32)
+  - 'yaw_rate': torch.Size([]) (torch.float32)
+  - 'dopplerRange': torch.Size([]) (torch.float32)
+  - 'rad2cam': torch.Size([3, 4]) (torch.float32)
+  - 'h5_time': torch.Size([]) (torch.float32)
+  - 'img_time': torch.Size([]) (torch.float32)
+  - 'undistort_time': torch.Size([]) (torch.float32)
+  - 'gamma_time': torch.Size([]) (torch.float32)
+  - 'total_time': torch.Size([]) (torch.float32)
+  - 'jpg': torch.Size([3, 512, 1024]) (torch.float32)
+  - 'real_hw': torch.Size([2]) (torch.int64)
+  - 'aspect': torch.Size([2]) (torch.float32)
+  - 'fovs': torch.Size([2]) (torch.float32)
+
+An item of dataset 'avl' contains:
+  - 'images': torch.Size([2, 3, 512, 512]) (torch.float32)
+
+An item of dataset 'denso' contains:
+  - 'frames': torch.Size([4, 3, 512, 1024]) (torch.float32)
+  - 'video_idx': 0 (<class 'int'>)
+  - 'start_frame': 56 (<class 'int'>)
+  - 'folder_name': 20221005_111331 (<class 'str'>)
+  - 'fps': 10.0 (<class 'float'>)
+  - 'odom': [[ 1.66496122e+09  5.13952493e+01  1.208... (<class 'numpy.ndarray'>)
+
+An item of dataset 'dspace' contains:
+  - 'jpg': torch.Size([3, 512, 1024]) (torch.float32)
+  - 'txt': A photo from a front left facing camera ... (<class 'str'>)
+  - 'drive_sequence_id': 20230112082056000001 (<class 'int'>)
+  - 'filename': Image_saver_front_left_20230112_082056_f... (<class 'str'>)
+
+An item of dataset 'ipg' contains:
+  - 'jpg': torch.Size([3, 512, 1024]) (torch.float32)
+  - 'variation': 
+  |  - 'time': dawn (<class 'str'>)
+  |  - 'weather': rain (<class 'str'>)
+  |  - 'traffic': uncommon (<class 'str'>)
+  |  - 'camera': front (<class 'str'>)
+  - 'fovs': (60.0, 33.75) (<class 'tuple'>)
+  - 'aspect': 1.7777777777777777 (<class 'numpy.float64'>)
+
+An item of dataset 'fzi' contains:
+  - 'timestamps': torch.Size([3]) (torch.float64)
+  - 'static_info': 
+  |  - '/sensors/camera/front_medium/camera_info': 
+     |  - 'D': [-0.252447, 0.094938, 0.001035, 0.000979... (<class 'list'>)
+     |  - 'K': [1750.97742, 0.0, 971.72039, 0.0, 1748.2... (<class 'list'>)
+     |  - 'P': [1614.61267, 0.0, 975.26354, 0.0, 0.0, 1... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/front_medium (<class 'str'>)
+        |  - 'seq': 12583 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 649996169 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 1200 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 1920 (<class 'int'>)
+  |  - '/sensors/camera/front_tele/camera_info': 
+     |  - 'D': [-0.258021, 0.854794, -0.001013, 0.00135... (<class 'list'>)
+     |  - 'K': [3480.27628, 0.0, 952.66455, 0.0, 3476.6... (<class 'list'>)
+     |  - 'P': [3426.38794, 0.0, 953.15189, 0.0, 0.0, 3... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/front_tele (<class 'str'>)
+        |  - 'seq': 12584 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 650002662 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 1200 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 1920 (<class 'int'>)
+  |  - '/sensors/camera/front_wide/camera_info': 
+     |  - 'D': [-0.104935, 0.024959, 9.1e-05, -0.000523... (<class 'list'>)
+     |  - 'K': [995.16412, 0.0, 1308.98738, 0.0, 996.02... (<class 'list'>)
+     |  - 'P': [969.81946, 0.0, 1313.6971, 0.0, 0.0, 98... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/front_wide (<class 'str'>)
+        |  - 'seq': 12292 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 650291590 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 2048 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 2592 (<class 'int'>)
+  |  - '/sensors/camera/left_forward/camera_info': 
+     |  - 'D': [-0.13834, 0.057909, -9.9e-05, -0.00062,... (<class 'list'>)
+     |  - 'K': [1069.70568, 0.0, 968.83663, 0.0, 1068.9... (<class 'list'>)
+     |  - 'P': [984.55969, 0.0, 966.87464, 0.0, 0.0, 10... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/left_forward (<class 'str'>)
+        |  - 'seq': 12517 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 698375082 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 1200 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 1920 (<class 'int'>)
+  |  - '/sensors/camera/left_rearward/camera_info': 
+     |  - 'D': [-0.148783, 0.074319, -0.000854, -0.0006... (<class 'list'>)
+     |  - 'K': [1070.57035, 0.0, 945.94558, 0.0, 1072.5... (<class 'list'>)
+     |  - 'P': [997.68823, 0.0, 944.65617, 0.0, 0.0, 10... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/left_rearward (<class 'str'>)
+        |  - 'seq': 12564 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 699581578 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 1200 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 1920 (<class 'int'>)
+  |  - '/sensors/camera/rear_wide/camera_info': 
+     |  - 'D': [-0.104122, 0.024559, 1.8e-05, -0.000483... (<class 'list'>)
+     |  - 'K': [985.69426, 0.0, 1305.38588, 0.0, 986.39... (<class 'list'>)
+     |  - 'P': [910.19214, 0.0, 1300.63225, 0.0, 0.0, 9... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/rear_wide (<class 'str'>)
+        |  - 'seq': 12211 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 649768078 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 2048 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 2592 (<class 'int'>)
+  |  - '/sensors/camera/right_forward/camera_info': 
+     |  - 'D': [-0.136364, 0.058196, -3.5e-05, 0.000435... (<class 'list'>)
+     |  - 'K': [1064.39443, 0.0, 959.86298, 0.0, 1064.8... (<class 'list'>)
+     |  - 'P': [981.74744, 0.0, 960.75597, 0.0, 0.0, 10... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/right_forward (<class 'str'>)
+        |  - 'seq': 12194 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 700007595 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 1200 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 1920 (<class 'int'>)
+  |  - '/sensors/camera/right_rearward/camera_info': 
+     |  - 'D': [-0.138623, 0.060477, -0.00044, -0.00027... (<class 'list'>)
+     |  - 'K': [1075.74704, 0.0, 948.68767, 0.0, 1075.5... (<class 'list'>)
+     |  - 'P': [992.68597, 0.0, 946.69894, 0.0, 0.0, 10... (<class 'list'>)
+     |  - 'R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,... (<class 'list'>)
+     |  - 'binning_x': 0 (<class 'int'>)
+     |  - 'binning_y': 0 (<class 'int'>)
+     |  - 'distortion_model': plumb_bob (<class 'str'>)
+     |  - 'header': 
+        |  - 'frame_id': sensors/camera/right_rearward (<class 'str'>)
+        |  - 'seq': 12532 (<class 'int'>)
+        |  - 'stamp': 
+           |  - 'nsecs': 749751575 (<class 'int'>)
+           |  - 'secs': 1748280867 (<class 'int'>)
+     |  - 'height': 1200 (<class 'int'>)
+     |  - 'roi': 
+        |  - 'do_rectify': False (<class 'bool'>)
+        |  - 'height': 0 (<class 'int'>)
+        |  - 'width': 0 (<class 'int'>)
+        |  - 'x_offset': 0 (<class 'int'>)
+        |  - 'y_offset': 0 (<class 'int'>)
+     |  - 'width': 1920 (<class 'int'>)
+  |  - 'tf_static': [{'transforms': [{'child_frame_id': 'bas... (<class 'list'>)
+  - 'vehicle_data': [{'camera_front_wide_frame_number': 303.... (<class 'list'>)
+  - 'camera_front_wide': torch.Size([3, 3, 576, 1024]) (torch.float32)
+  - 'camera_rear_wide': torch.Size([3, 3, 576, 1024]) (torch.float32)
+  - 'lidar': [array([[-48.980877  ,  12.58005   ,  10... (<class 'list'>)
+  - 'radar_front_left': [array([], shape=(0, 7), dtype=float32),... (<class 'list'>)
+
+An item of dataset 'mb_tld' contains:
+  - 'images': torch.Size([2, 2, 3, 512, 1024]) (torch.uint8)
+  - 'metadata': 
+  |  - 'lat': [50.950219, 50.950219, 50.950219] (<class 'list'>)
+  |  - 'lon': [6.957859, 6.957859, 6.957859] (<class 'list'>)
+  |  - 'vel': [4.027777671813965, 3.8611111640930176, ... (<class 'list'>)
+  |  - 'yawRate': [0.01081900019198656, 0.0092484997585415... (<class 'list'>)
+  |  - 'video_group_paths': ['/p/data1/nxtaim/proprietary_samples/mb... (<class 'list'>)
+  |  - 'start_frame_idx': 127 (<class 'numpy.int64'>)
+  |  - 'frame_interval': 2 (<class 'int'>)
+  |  - 'frame_step': 2 (<class 'int'>)
+  |  - 'aspect_ratio': 2.0 (<class 'float'>)
+  |  - 'orig_width': 1024 (<class 'int'>)
+  |  - 'orig_height': 512 (<class 'int'>)
+
+An item of dataset 'mb_ecp' contains:
+  - 'images': torch.Size([4, 2, 3, 512, 1024]) (torch.uint8)
+  - 'metadata': 
+  |  - 'header': [{'seq': 38874, 'stamp': {'secs': 149354... (<class 'list'>)
+  |  - 'fVx': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fAx': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fAy': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fRadius': [599.0, 599.0, 599.0] (<class 'list'>)
+  |  - 'fYawrate': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fStwAng': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fStWheelRate': [-0.0, -0.0, -0.0] (<class 'list'>)
+  |  - 'bDriverIsBraking': [0, 0, 0] (<class 'list'>)
+  |  - 'bKickdown': [0, 0, 0] (<class 'list'>)
+  |  - 'nBlinkerStatus': [0, 0, 0] (<class 'list'>)
+  |  - 'fGasPedal': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'bWiperOutsideParkPosition': [0, 0, 0] (<class 'list'>)
+  |  - 'nFsmState': [0, 0, 0] (<class 'list'>)
+  |  - 'L_m': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'L_p': [-0.20000000298023224, -0.20000000298023... (<class 'list'>)
+  |  - 'fAsollTemp': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fAsollAR': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVSetz': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'bARAktiv': [0, 0, 0] (<class 'list'>)
+  |  - 'fRelObjDist': [-10000.0, -10000.0, -10000.0] (<class 'list'>)
+  |  - 'fRelObjVel': [-10000.0, -10000.0, -10000.0] (<class 'list'>)
+  |  - 'fRelObjAcc': [-10000.0, -10000.0, -10000.0] (<class 'list'>)
+  |  - 'fEPSSteeringAngle': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fEPSLimitedMotorTorque': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fEPSTorsionBarTorque': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVehSpdDisp': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVeh_Accel_X': [-0.3199999928474426, -0.319999992847442... (<class 'list'>)
+  |  - 'fVeh_Accel_Y': [0.3199999928474426, 0.3199999928474426,... (<class 'list'>)
+  |  - 'fVehYawRate_Raw': [0.14000000059604645, 0.0, 0.10999999940... (<class 'list'>)
+  |  - 'fVehYawRate_Offset': [0.07999999821186066, 0.0799999982118606... (<class 'list'>)
+  |  - 'fStW_AnglHP': [-10000.0, -10000.0, -10000.0] (<class 'list'>)
+  |  - 'fStw_Angl': [-1.399999976158142, -1.399999976158142,... (<class 'list'>)
+  |  - 'fStW_AnglSpd': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fPSIP1': [-10000.0, -10000.0, -10000.0] (<class 'list'>)
+  |  - 'fPSIPP1': [-10000.0, -10000.0, -10000.0] (<class 'list'>)
+  |  - 'fSCAy': [0.019999980926513672, 0.019999980926513... (<class 'list'>)
+  |  - 'fSCAx': [-0.13999998569488525, -0.13999998569488... (<class 'list'>)
+  |  - 'nWhlPlsCnt_FL': [60, 60, 60] (<class 'list'>)
+  |  - 'nWhlPlsCnt_FR': [151, 151, 151] (<class 'list'>)
+  |  - 'nWhlPlsCnt_RL': [62, 62, 62] (<class 'list'>)
+  |  - 'nWhlPlsCnt_RR': [171, 171, 171] (<class 'list'>)
+  |  - 'fWhlRPM_FL': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fWhlRPM_FR': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fWhlRPM_RL': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fWhlRPM_RR': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'VehAccel_Y_Offset': [0.30000001192092896, 0.3000000119209289... (<class 'list'>)
+  |  - 'fVehLevelStateFrontInM': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVehLevelStateRearInM': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVehLevelStateFL': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVehLevelStateFR': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVehLevelStateRL': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'fVehLevelStateRR': [0.0, 0.0, 0.0] (<class 'list'>)
+  |  - 'tALDWLaneInfo': [{'ALDW_LaneLtrlDist': 2.614999771118164... (<class 'list'>)
+  |  - 'video_group_paths': ['/p/data1/nxtaim/proprietary_samples/mb... (<class 'list'>)
+  |  - 'start_frame_idx': 89 (<class 'numpy.int64'>)
+  |  - 'frame_interval': 2 (<class 'int'>)
+  |  - 'frame_step': 2 (<class 'int'>)
+  |  - 'aspect_ratio': 2.0 (<class 'float'>)
+  |  - 'orig_width': 1024 (<class 'int'>)
+  |  - 'orig_height': 512 (<class 'int'>)
+
+An item of dataset 'mb_aw_videos' contains:
+  - 'images': torch.Size([1, 50, 3, 1024, 1920]) (torch.float32)
+  - 'metadata': 
+  |  - 'video_path': /p/data1/nxtaim/proprietary_samples/mbag... (<class 'str'>)
+  |  - 'start_frame_idx': 6100 (<class 'int'>)
+  |  - 'frame_interval': 50 (<class 'int'>)
+  |  - 'frame_step': 2 (<class 'int'>)
+  |  - 'aspect_ratio': 1.875 (<class 'float'>)
+  |  - 'orig_width': 1920 (<class 'int'>)
+  |  - 'orig_height': 1024 (<class 'int'>)
+
+An item of dataset 'valeo_preprocessed' contains:
+  - 'jpg': torch.Size([3, 512, 512]) (torch.float32)
+  - 'txt': A photorealistic image from a front-faci... (<class 'str'>)
+
+speed: aumovio=0.892 s/it, avl=0.507 s/it, denso=0.660 s/it, dspace=0.812 s/it, ipg=1.858 s/it, fzi=13.079 s/it, mb_tld=0.652 s/it, mb_ecp=0.858 s/it, mb_aw_videos=36.148 s/it, valeo_preprocessed=1.922 s/it: 100%|█| 400/4
+Waiting for ffmpeg to finish encoding '/p/project1/nxtaim-1/neuhoefer1/CleanStableDiffusion/benchmarking_video_qt28_veryslow.mp4'...
+final speeds: (note that processes might benefit from idle other CPUs during benchmarking for shorter wall time)
+ -            aumovio:  0.892 s/it ( 0.171 s walltime/it,  0.892 s/it/frame) for  1 frames
+ -                avl:  0.507 s/it ( 0.131 s walltime/it,  0.254 s/it/frame) for  2 frames
+ -              denso:  0.660 s/it ( 0.186 s walltime/it,  0.165 s/it/frame) for  4 frames
+ -             dspace:  0.812 s/it ( 0.112 s walltime/it,  0.812 s/it/frame) for  1 frames
+ -                ipg:  1.858 s/it ( 0.300 s walltime/it,  1.858 s/it/frame) for  1 frames
+ -                fzi: 13.079 s/it ( 1.929 s walltime/it,  2.180 s/it/frame) for  6 frames
+ -             mb_tld:  0.652 s/it ( 0.160 s walltime/it,  0.163 s/it/frame) for  4 frames
+ -             mb_ecp:  0.858 s/it ( 0.265 s walltime/it,  0.107 s/it/frame) for  8 frames
+ -       mb_aw_videos: 36.148 s/it ( 3.317 s walltime/it,  0.723 s/it/frame) for 50 frames
+ - valeo_preprocessed:  1.922 s/it ( 0.252 s walltime/it,  1.922 s/it/frame) for  1 frames
+(DataConsolidation) [neuhoefer1@jwlogin21 DataConsolidation]$ 

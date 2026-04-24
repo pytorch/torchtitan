@@ -1,0 +1,12 @@
+[submodule "src/fzi"]
+	path = src/fzi
+	url = https://github.com/nxtAIM/fzi_dataloader.git
+[submodule "src/mb"]
+	path = src/mb
+	url = https://github.com/nxtAIM/mb_dataloaders
+[submodule "src/valeo"]
+	path = src/valeo
+	url = https://github.com/nxtAIM/valeo_dataloader
+[submodule "src/denso"]
+	path = src/denso
+	url = https://github.com/nxtAIM/denso_dataloader

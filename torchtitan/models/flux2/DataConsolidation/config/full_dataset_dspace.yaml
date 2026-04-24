@@ -1,0 +1,10 @@
+# Adapted by JonasNeuhoefer, not an official member of dSpace
+datasets:
+  - h5vds:
+      target: DataConsolidation.src.dspace.h5vds_dataset.H5VDSDataset
+      params:
+        vds_path: "/p/data1/nxtaim/proprietary/dspace/train/train_merged_vds.h5"
+  - h5vds_val:
+      target: DataConsolidation.src.dspace.h5vds_dataset.H5VDSDataset
+      params:
+        vds_path: "/p/data1/nxtaim/proprietary/dspace/val/val_merged_vds.h5"

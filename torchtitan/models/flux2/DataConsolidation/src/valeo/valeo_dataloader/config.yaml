@@ -1,0 +1,24 @@
+test_dataloader:
+  target: torch.utils.data.DataLoader
+  params:
+    dataset:
+      # Target the new HDF5-based dataset class
+      target: valeo_dataset.ValeoDatasetPreprocessed
+      params:
+        config:
+          # This nested structure is required by the dataset's __init__ method
+          target: valeo_dataset.DatasetConfig
+          params:
+            # IMPORTANT: Make sure this path points to your dataset directory
+            #base_path: /p/data1/nxtaim/proprietary_samples/valeo/20210915_141538_rec_converted/
+            base_path: /p/data1/nxtaim/proprietary/valeo/dataset_exported/DONE_20210517_Aschaffenburg/DONE_20210517_Aschaffenburg_Converted/bin/20210517_135314_rec_converted/
+            reference_sensor_id: "HDL64E_ID_4"
+    
+    # Use a small batch size for testing
+    batch_size: 4
+    
+    # Set num_workers to 0 for easy, single-process debugging.
+    # You can set it to > 0 later to test for multi-processing issues.
+    num_workers: 3
+    
+    shuffle: True

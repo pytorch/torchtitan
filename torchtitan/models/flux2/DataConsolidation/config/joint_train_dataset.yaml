@@ -1,0 +1,81 @@
+train_dataloader:
+  target: torch.utils.data.DataLoader
+  params:
+    dataset:
+      target: DataConsolidation.src.multidataset.MultiDataset
+      params:
+        keys:
+          - jpg
+          - txt
+        datasets:
+          # dSpace dataset should be around 6 million frames
+          - target: DataConsolidation.src.dspace.h5vds_dataset.H5VDSDataset
+            params:
+              vds_path: "/p/data1/nxtaim/proprietary/dspace/train/train_merged_vds.h5"
+          # Valeo dataset should be around 5 million frames
+          - target: DataConsolidation.src.valeo.valeo_dataset.ValeoDatasetPreprocessed
+            params:
+            # This 'config' key is crucial. It must match the argument in __init__.
+              config:
+                # This nested block creates the DatasetConfig object first.
+                target: DataConsolidation.src.valeo.valeo_dataset.DatasetConfig
+                params:
+                  base_path: /p/data1/nxtaim/proprietary/valeo/dataset_exported/
+                  reference_sensor_id: "HDL64E_ID_4"
+          # Aumovio dataset downsampled to about 8.5 million frames
+          - target: DataConsolidation.src.aumovio.sys100dataset.Sys100Dataset
+            params:
+              source: /p/data1/nxtaim/proprietary/continental/sys100/SYS100_Dataset.csv
+              source_is_summary_csv: True
+              out_img_size: [512, 1024] # raw fisheye 1896, 3584
+              extract_video: True
+              undistort: False
+              project_radar: True
+              plot_radar: False
+              fovs: [110, 75]
+              return_metadata: False
+              toy_radar_data: False
+              max_files: null
+              target_dataset_size: 8500000
+    batch_size: 1
+    shuffle: True
+    num_workers: 6
+    pin_memory: True
+    prefetch_factor: 4
+    persistent_workers: True
+
+validation_dataloader:
+  target: torch.utils.data.DataLoader
+  params:
+    dataset:
+      target: DataConsolidation.src.multidataset.MultiDataset
+      params:
+        keys:
+          - jpg
+          - txt
+        datasets:
+          # dSpace dataset should be around 6 million frames
+          - target: DataConsolidation.src.dspace.h5vds_dataset.H5VDSDataset
+            params:
+              vds_path: "/p/data1/nxtaim/proprietary/dspace/train/val_merged_vds.h5"
+          # Aumovio dataset downsampled to about 8.5 million frames
+          - target: DataConsolidation.src.aumovio.sys100dataset.Sys100Dataset
+            params:
+              source: /p/data1/nxtaim/proprietary/continental/sys100/SYS100_Validation_Dataset.csv
+              source_is_summary_csv: True
+              out_img_size: [512, 1024] # raw fisheye 1896, 3584
+              extract_video: True
+              undistort: False
+              project_radar: True
+              plot_radar: False
+              fovs: [110, 75]
+              return_metadata: False
+              toy_radar_data: False
+              max_files: null
+              target_dataset_size: 500
+    batch_size: 3
+    shuffle: True
+    num_workers: 6
+    pin_memory: True
+    prefetch_factor: 4
+    persistent_workers: True
