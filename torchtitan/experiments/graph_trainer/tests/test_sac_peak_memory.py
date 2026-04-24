@@ -25,7 +25,7 @@ from torchtitan.trainer import Trainer
 DTYPE = torch.bfloat16
 BATCH_SIZE = 2
 SEQ_LEN = 2048
-MAX_PEAK_MEMORY_RATIO = 1.25
+MAX_PEAK_MEMORY_RATIO = 1.10
 DEBUGMODEL = "debugmodel"
 
 
@@ -116,6 +116,9 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             GraphTrainer,
             activation_checkpoint_mode="selective",
         )
+        # Use eager-compatible SAC policy (alternating mm save/recompute)
+        # to match the eager AC path's memory behavior.
+        traced_trainer.config.compile.memory_policy = "eager"
 
         # Warm up both paths so allocator and one-time tracing setup do not skew
         # the measured peak memory.

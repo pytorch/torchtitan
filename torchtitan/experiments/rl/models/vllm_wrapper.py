@@ -13,6 +13,8 @@ TorchTitan models for vLLM.
 
 import dataclasses
 
+from types import SimpleNamespace
+
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -21,8 +23,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-
-from types import SimpleNamespace
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
