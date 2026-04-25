@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import Qwen3VLModel
@@ -35,14 +36,28 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen3VLModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
+        self.fuse_qkv = isinstance(
+            model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
+        )
+
+        if self.fuse_qkv:
+            qkv_map = {
+                "model.language_model.layers.{}.self_attn.q_proj.weight": None,
+                "model.language_model.layers.{}.self_attn.k_proj.weight": None,
+                "model.language_model.layers.{}.self_attn.v_proj.weight": None,
+            }
+        else:
+            qkv_map = {
+                "model.language_model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+                "model.language_model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+                "model.language_model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
+            }
 
         self.from_hf_map = {
             # ===== Language Model =====
             "model.language_model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention
-            "model.language_model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.language_model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.language_model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+            **qkv_map,  # pyrefly: ignore [invalid-argument]
             "model.language_model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.language_model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
             "model.language_model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
@@ -96,9 +111,25 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             "model.visual.deepstack_merger_list.{}.linear_fc2.bias": "vision_encoder.deepstack_merger_list.{}.linear_fc2.bias",
         }
 
+    def _get_attention_dims(self) -> tuple[int, int, int]:
+        """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        attn = self.model_config.layers[0].attention
+        n_heads = attn.n_heads
+        n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
+        head_dim = (
+            attn.head_dim
+            if attn.head_dim is not None
+            else self.model_config.dim // n_heads
+        )
+        return n_heads, n_kv_heads, head_dim
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3-VL format."""
-        to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
+        if self.fuse_qkv:
+            to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
+            n_heads, n_kv_heads, head_dim = self._get_attention_dims()
+        else:
+            to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
         # Collect MoE w1/w3 per layer to fuse into gate_up_proj
@@ -134,10 +165,34 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             # Indexed key: contains a layer/block/merger index (e.g. ".0.")
             elif re.search(r"\.\d+\.", tt_key):
                 tt_abstract_key = re.sub(r"(\d+)", "{}", tt_key, count=1)
-                if tt_abstract_key not in to_hf_map:
-                    continue
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", tt_key).group(0)
+
+                # Handle fused QKV: split wqkv into separate q/k/v projections
+                if (
+                    self.fuse_qkv
+                    and tt_abstract_key
+                    == "layers.{}.attention.qkv_linear.wqkv.weight"
+                ):
+                    wq, wk, wv = self.fused_to_separate_qkv(
+                        value,
+                        n_heads,  # pyrefly: ignore [unbound-name]
+                        n_kv_heads,  # pyrefly: ignore [unbound-name]
+                        head_dim,  # pyrefly: ignore [unbound-name]
+                    )
+                    hf_state_dict[
+                        f"model.language_model.layers.{layer_num}.self_attn.q_proj.weight"
+                    ] = wq
+                    hf_state_dict[
+                        f"model.language_model.layers.{layer_num}.self_attn.k_proj.weight"
+                    ] = wk
+                    hf_state_dict[
+                        f"model.language_model.layers.{layer_num}.self_attn.v_proj.weight"
+                    ] = wv
+                    continue
+
+                if tt_abstract_key not in to_hf_map:
+                    continue
                 hf_key = to_hf_map[tt_abstract_key].format(layer_num)
                 hf_state_dict[hf_key] = value
 
@@ -175,6 +230,11 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert HuggingFace Qwen3-VL state dict to torchtitan format."""
         tt_state_dict = {}
+        # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
+        pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
+
+        if self.fuse_qkv:
+            n_heads, n_kv_heads, head_dim = self._get_attention_dims()
 
         # HF Qwen3-VL ties lm_head.weight with embed_tokens.weight,
         # so lm_head.weight may not be stored in the checkpoint.
@@ -194,6 +254,31 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                 hf_abstract_key = re.sub(r"(\d+)", "{}", hf_key, count=1)
                 # pyrefly: ignore [missing-attribute]
                 idx = re.search(r"\d+", hf_key).group(0)
+
+                # Handle fused QKV: collect q/k/v and fuse when all 3 are ready
+                if self.fuse_qkv and hf_abstract_key in (
+                    "model.language_model.layers.{}.self_attn.q_proj.weight",
+                    "model.language_model.layers.{}.self_attn.k_proj.weight",
+                    "model.language_model.layers.{}.self_attn.v_proj.weight",
+                ):
+                    if idx not in pending_qkv:
+                        pending_qkv[idx] = {}
+                    proj = hf_abstract_key.split(".")[-2]  # q_proj, k_proj, v_proj
+                    pending_qkv[idx][proj] = value
+                    if len(pending_qkv[idx]) == 3:
+                        fused = self.separate_to_fused_qkv(
+                            pending_qkv[idx]["q_proj"],
+                            pending_qkv[idx]["k_proj"],
+                            pending_qkv[idx]["v_proj"],
+                            n_heads,  # pyrefly: ignore [unbound-name]
+                            n_kv_heads,  # pyrefly: ignore [unbound-name]
+                            head_dim,  # pyrefly: ignore [unbound-name]
+                        )
+                        tt_state_dict[
+                            f"layers.{idx}.attention.qkv_linear.wqkv.weight"
+                        ] = fused
+                        del pending_qkv[idx]
+                    continue
 
                 # Handle fused gate_up_proj: split and transpose
                 # HF gate_up_proj: [E, dim, 2*hidden_dim] -> split -> transpose each to [E, hidden_dim, dim]
@@ -240,5 +325,10 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                 if hf_key == "model.visual.patch_embed.proj.weight":
                     tt_value = value.reshape(value.shape[0], -1)
                 tt_state_dict[tt_key] = tt_value
+
+        if self.fuse_qkv and pending_qkv:
+            raise ValueError(
+                f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
+            )
 
         return tt_state_dict
