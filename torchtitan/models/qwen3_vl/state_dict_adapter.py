@@ -171,8 +171,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                 # Handle fused QKV: split wqkv into separate q/k/v projections
                 if (
                     self.fuse_qkv
-                    and tt_abstract_key
-                    == "layers.{}.attention.qkv_linear.wqkv.weight"
+                    and tt_abstract_key == "layers.{}.attention.qkv_linear.wqkv.weight"
                 ):
                     wq, wk, wv = self.fused_to_separate_qkv(
                         value,
