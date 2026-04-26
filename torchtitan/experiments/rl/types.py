@@ -9,45 +9,81 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass
-class Episode:
+@dataclass(kw_only=True, slots=True)
+class Step:
+    """Env transition: named reward components, done flag, optional next observation.
+
+    ``rewards`` is a dict of component-name to value (e.g.
+    ``{"correctness": 1.0, "format": 0.3}``); envs are free to define
+    any decomposition. Trainers read the scalar ``reward`` property
+    (sum of components); loggers iterate ``rewards.items()`` for
+    per-component reporting without needing to know the keys.
+
+    ``observation`` (the next prompt the agent will see) is only
+    populated by multi-turn envs. Single-turn envs leave it None.
     """
-    A single prompt + completion pair with reward and advantage.
 
-    The generator creates Episodes (with group_id, no reward yet).
-    The grader fills in the reward.
-    The controller computes advantages across episodes sharing a group_id.
-    The trainer consumes the final Episodes with advantages set.
+    rewards: dict[str, float]
+    done: bool
+    observation: str | None = None
 
-    Attributes:
-        policy_version: Version of policy that produced this episode.
-        prompt_token_ids: Token IDs for the prompt.
-        text: Decoded completion text.
-        token_ids: Completion token IDs.
-        token_log_probs: Per-token log probabilities from the generator.
-        expected_answer: Expected answer for reward computation.
-            Passed to Episode by the generator — the generator
-            does not read this field.
-        reward: Scalar reward assigned by the grader.
-        group_id: Identifies which group this episode belongs to.
-            Episodes with the same group_id share a prompt and have
-            their advantages normalized together.
-        advantage: Advantage value computed by the controller (GRPO:
-            reward minus group mean reward).
+    @property
+    def reward(self) -> float:
+        return sum(self.rewards.values())
+
+
+@dataclass(kw_only=True, slots=True)
+class Completion:
+    """A single generated sequence from the generator.
+
+    Pure generation artifact - no reward, no advantage. ``prompt_idx``
+    is the position of the source prompt in the input ``prompts`` list.
     """
 
     policy_version: int
+    prompt_idx: int
     prompt_token_ids: list[int]
     text: str
     token_ids: list[int]
-    token_log_probs: list[float]
-    expected_answer: str = ""
-    reward: float = 0.0
-    group_id: str = ""
-    advantage: float = 0.0
+    token_logprobs: list[float]
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
+class Trajectory:
+    """One rollout: a sequence of ``(Completion, Step)`` transitions.
+
+    Single-turn tasks produce trajectories with one transition. The
+    Completion carries the generator's token-level metadata; the Step
+    carries the env's reward and done flag.
+    """
+
+    sample_idx: int
+    transitions: list[tuple[Completion, Step]]
+
+    @property
+    def total_reward(self) -> float:
+        return sum(s.reward for _, s in self.transitions)
+
+
+@dataclass(kw_only=True, slots=True)
+class Episode:
+    """Training sample: flattened trajectory + GRPO advantage.
+
+    Flat shape (rather than composition) because the trainer collate
+    path and logging read these fields directly.
+    """
+
+    policy_version: int
+    prompt_idx: int
+    prompt_token_ids: list[int]
+    text: str
+    token_ids: list[int]
+    token_logprobs: list[float]
+    reward: float
+    advantage: float
+
+
+@dataclass(kw_only=True, slots=True)
 class TrainBatch:
     token_ids: torch.Tensor  # [1, total_tokens]
     prompt_lens: list[int]  # [num_episodes]

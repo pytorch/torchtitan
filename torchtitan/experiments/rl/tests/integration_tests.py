@@ -36,7 +36,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--config rl_grpo_qwen3_0_6b",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.num_samples_per_prompt 2",
+                    "--generator.sampling.n 2",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--trainer.compile.no-enable",
@@ -55,7 +55,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--config rl_grpo_qwen3_0_6b",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.num_samples_per_prompt 2",
+                    "--generator.sampling.n 2",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                 ],
@@ -106,7 +106,7 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/simple_grpo_sum_digits.py",
+            "torchtitan/experiments/rl/grpo.py",
             f"--dump_folder {dump_folder}",
         ]
         if hf_assets_path:
