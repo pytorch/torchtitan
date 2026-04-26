@@ -1,0 +1,4054 @@
+{
+  "output_name": "llama3_8B",
+  "rank": 3,
+  "num_state_inputs": 292,
+  "state_fqns": [
+    "tok_embeddings.weight",
+    "layers.0.attention.wq.weight",
+    "layers.0.attention.wk.weight",
+    "layers.0.attention.wv.weight",
+    "layers.0.attention.wo.weight",
+    "layers.0.feed_forward.w1.weight",
+    "layers.0.feed_forward.w2.weight",
+    "layers.0.feed_forward.w3.weight",
+    "layers.0.attention_norm.weight",
+    "layers.0.ffn_norm.weight",
+    "layers.1.attention.wq.weight",
+    "layers.1.attention.wk.weight",
+    "layers.1.attention.wv.weight",
+    "layers.1.attention.wo.weight",
+    "layers.1.feed_forward.w1.weight",
+    "layers.1.feed_forward.w2.weight",
+    "layers.1.feed_forward.w3.weight",
+    "layers.1.attention_norm.weight",
+    "layers.1.ffn_norm.weight",
+    "layers.2.attention.wq.weight",
+    "layers.2.attention.wk.weight",
+    "layers.2.attention.wv.weight",
+    "layers.2.attention.wo.weight",
+    "layers.2.feed_forward.w1.weight",
+    "layers.2.feed_forward.w2.weight",
+    "layers.2.feed_forward.w3.weight",
+    "layers.2.attention_norm.weight",
+    "layers.2.ffn_norm.weight",
+    "layers.3.attention.wq.weight",
+    "layers.3.attention.wk.weight",
+    "layers.3.attention.wv.weight",
+    "layers.3.attention.wo.weight",
+    "layers.3.feed_forward.w1.weight",
+    "layers.3.feed_forward.w2.weight",
+    "layers.3.feed_forward.w3.weight",
+    "layers.3.attention_norm.weight",
+    "layers.3.ffn_norm.weight",
+    "layers.4.attention.wq.weight",
+    "layers.4.attention.wk.weight",
+    "layers.4.attention.wv.weight",
+    "layers.4.attention.wo.weight",
+    "layers.4.feed_forward.w1.weight",
+    "layers.4.feed_forward.w2.weight",
+    "layers.4.feed_forward.w3.weight",
+    "layers.4.attention_norm.weight",
+    "layers.4.ffn_norm.weight",
+    "layers.5.attention.wq.weight",
+    "layers.5.attention.wk.weight",
+    "layers.5.attention.wv.weight",
+    "layers.5.attention.wo.weight",
+    "layers.5.feed_forward.w1.weight",
+    "layers.5.feed_forward.w2.weight",
+    "layers.5.feed_forward.w3.weight",
+    "layers.5.attention_norm.weight",
+    "layers.5.ffn_norm.weight",
+    "layers.6.attention.wq.weight",
+    "layers.6.attention.wk.weight",
+    "layers.6.attention.wv.weight",
+    "layers.6.attention.wo.weight",
+    "layers.6.feed_forward.w1.weight",
+    "layers.6.feed_forward.w2.weight",
+    "layers.6.feed_forward.w3.weight",
+    "layers.6.attention_norm.weight",
+    "layers.6.ffn_norm.weight",
+    "layers.7.attention.wq.weight",
+    "layers.7.attention.wk.weight",
+    "layers.7.attention.wv.weight",
+    "layers.7.attention.wo.weight",
+    "layers.7.feed_forward.w1.weight",
+    "layers.7.feed_forward.w2.weight",
+    "layers.7.feed_forward.w3.weight",
+    "layers.7.attention_norm.weight",
+    "layers.7.ffn_norm.weight",
+    "layers.8.attention.wq.weight",
+    "layers.8.attention.wk.weight",
+    "layers.8.attention.wv.weight",
+    "layers.8.attention.wo.weight",
+    "layers.8.feed_forward.w1.weight",
+    "layers.8.feed_forward.w2.weight",
+    "layers.8.feed_forward.w3.weight",
+    "layers.8.attention_norm.weight",
+    "layers.8.ffn_norm.weight",
+    "layers.9.attention.wq.weight",
+    "layers.9.attention.wk.weight",
+    "layers.9.attention.wv.weight",
+    "layers.9.attention.wo.weight",
+    "layers.9.feed_forward.w1.weight",
+    "layers.9.feed_forward.w2.weight",
+    "layers.9.feed_forward.w3.weight",
+    "layers.9.attention_norm.weight",
+    "layers.9.ffn_norm.weight",
+    "layers.10.attention.wq.weight",
+    "layers.10.attention.wk.weight",
+    "layers.10.attention.wv.weight",
+    "layers.10.attention.wo.weight",
+    "layers.10.feed_forward.w1.weight",
+    "layers.10.feed_forward.w2.weight",
+    "layers.10.feed_forward.w3.weight",
+    "layers.10.attention_norm.weight",
+    "layers.10.ffn_norm.weight",
+    "layers.11.attention.wq.weight",
+    "layers.11.attention.wk.weight",
+    "layers.11.attention.wv.weight",
+    "layers.11.attention.wo.weight",
+    "layers.11.feed_forward.w1.weight",
+    "layers.11.feed_forward.w2.weight",
+    "layers.11.feed_forward.w3.weight",
+    "layers.11.attention_norm.weight",
+    "layers.11.ffn_norm.weight",
+    "layers.12.attention.wq.weight",
+    "layers.12.attention.wk.weight",
+    "layers.12.attention.wv.weight",
+    "layers.12.attention.wo.weight",
+    "layers.12.feed_forward.w1.weight",
+    "layers.12.feed_forward.w2.weight",
+    "layers.12.feed_forward.w3.weight",
+    "layers.12.attention_norm.weight",
+    "layers.12.ffn_norm.weight",
+    "layers.13.attention.wq.weight",
+    "layers.13.attention.wk.weight",
+    "layers.13.attention.wv.weight",
+    "layers.13.attention.wo.weight",
+    "layers.13.feed_forward.w1.weight",
+    "layers.13.feed_forward.w2.weight",
+    "layers.13.feed_forward.w3.weight",
+    "layers.13.attention_norm.weight",
+    "layers.13.ffn_norm.weight",
+    "layers.14.attention.wq.weight",
+    "layers.14.attention.wk.weight",
+    "layers.14.attention.wv.weight",
+    "layers.14.attention.wo.weight",
+    "layers.14.feed_forward.w1.weight",
+    "layers.14.feed_forward.w2.weight",
+    "layers.14.feed_forward.w3.weight",
+    "layers.14.attention_norm.weight",
+    "layers.14.ffn_norm.weight",
+    "layers.15.attention.wq.weight",
+    "layers.15.attention.wk.weight",
+    "layers.15.attention.wv.weight",
+    "layers.15.attention.wo.weight",
+    "layers.15.feed_forward.w1.weight",
+    "layers.15.feed_forward.w2.weight",
+    "layers.15.feed_forward.w3.weight",
+    "layers.15.attention_norm.weight",
+    "layers.15.ffn_norm.weight",
+    "layers.16.attention.wq.weight",
+    "layers.16.attention.wk.weight",
+    "layers.16.attention.wv.weight",
+    "layers.16.attention.wo.weight",
+    "layers.16.feed_forward.w1.weight",
+    "layers.16.feed_forward.w2.weight",
+    "layers.16.feed_forward.w3.weight",
+    "layers.16.attention_norm.weight",
+    "layers.16.ffn_norm.weight",
+    "layers.17.attention.wq.weight",
+    "layers.17.attention.wk.weight",
+    "layers.17.attention.wv.weight",
+    "layers.17.attention.wo.weight",
+    "layers.17.feed_forward.w1.weight",
+    "layers.17.feed_forward.w2.weight",
+    "layers.17.feed_forward.w3.weight",
+    "layers.17.attention_norm.weight",
+    "layers.17.ffn_norm.weight",
+    "layers.18.attention.wq.weight",
+    "layers.18.attention.wk.weight",
+    "layers.18.attention.wv.weight",
+    "layers.18.attention.wo.weight",
+    "layers.18.feed_forward.w1.weight",
+    "layers.18.feed_forward.w2.weight",
+    "layers.18.feed_forward.w3.weight",
+    "layers.18.attention_norm.weight",
+    "layers.18.ffn_norm.weight",
+    "layers.19.attention.wq.weight",
+    "layers.19.attention.wk.weight",
+    "layers.19.attention.wv.weight",
+    "layers.19.attention.wo.weight",
+    "layers.19.feed_forward.w1.weight",
+    "layers.19.feed_forward.w2.weight",
+    "layers.19.feed_forward.w3.weight",
+    "layers.19.attention_norm.weight",
+    "layers.19.ffn_norm.weight",
+    "layers.20.attention.wq.weight",
+    "layers.20.attention.wk.weight",
+    "layers.20.attention.wv.weight",
+    "layers.20.attention.wo.weight",
+    "layers.20.feed_forward.w1.weight",
+    "layers.20.feed_forward.w2.weight",
+    "layers.20.feed_forward.w3.weight",
+    "layers.20.attention_norm.weight",
+    "layers.20.ffn_norm.weight",
+    "layers.21.attention.wq.weight",
+    "layers.21.attention.wk.weight",
+    "layers.21.attention.wv.weight",
+    "layers.21.attention.wo.weight",
+    "layers.21.feed_forward.w1.weight",
+    "layers.21.feed_forward.w2.weight",
+    "layers.21.feed_forward.w3.weight",
+    "layers.21.attention_norm.weight",
+    "layers.21.ffn_norm.weight",
+    "layers.22.attention.wq.weight",
+    "layers.22.attention.wk.weight",
+    "layers.22.attention.wv.weight",
+    "layers.22.attention.wo.weight",
+    "layers.22.feed_forward.w1.weight",
+    "layers.22.feed_forward.w2.weight",
+    "layers.22.feed_forward.w3.weight",
+    "layers.22.attention_norm.weight",
+    "layers.22.ffn_norm.weight",
+    "layers.23.attention.wq.weight",
+    "layers.23.attention.wk.weight",
+    "layers.23.attention.wv.weight",
+    "layers.23.attention.wo.weight",
+    "layers.23.feed_forward.w1.weight",
+    "layers.23.feed_forward.w2.weight",
+    "layers.23.feed_forward.w3.weight",
+    "layers.23.attention_norm.weight",
+    "layers.23.ffn_norm.weight",
+    "layers.24.attention.wq.weight",
+    "layers.24.attention.wk.weight",
+    "layers.24.attention.wv.weight",
+    "layers.24.attention.wo.weight",
+    "layers.24.feed_forward.w1.weight",
+    "layers.24.feed_forward.w2.weight",
+    "layers.24.feed_forward.w3.weight",
+    "layers.24.attention_norm.weight",
+    "layers.24.ffn_norm.weight",
+    "layers.25.attention.wq.weight",
+    "layers.25.attention.wk.weight",
+    "layers.25.attention.wv.weight",
+    "layers.25.attention.wo.weight",
+    "layers.25.feed_forward.w1.weight",
+    "layers.25.feed_forward.w2.weight",
+    "layers.25.feed_forward.w3.weight",
+    "layers.25.attention_norm.weight",
+    "layers.25.ffn_norm.weight",
+    "layers.26.attention.wq.weight",
+    "layers.26.attention.wk.weight",
+    "layers.26.attention.wv.weight",
+    "layers.26.attention.wo.weight",
+    "layers.26.feed_forward.w1.weight",
+    "layers.26.feed_forward.w2.weight",
+    "layers.26.feed_forward.w3.weight",
+    "layers.26.attention_norm.weight",
+    "layers.26.ffn_norm.weight",
+    "layers.27.attention.wq.weight",
+    "layers.27.attention.wk.weight",
+    "layers.27.attention.wv.weight",
+    "layers.27.attention.wo.weight",
+    "layers.27.feed_forward.w1.weight",
+    "layers.27.feed_forward.w2.weight",
+    "layers.27.feed_forward.w3.weight",
+    "layers.27.attention_norm.weight",
+    "layers.27.ffn_norm.weight",
+    "layers.28.attention.wq.weight",
+    "layers.28.attention.wk.weight",
+    "layers.28.attention.wv.weight",
+    "layers.28.attention.wo.weight",
+    "layers.28.feed_forward.w1.weight",
+    "layers.28.feed_forward.w2.weight",
+    "layers.28.feed_forward.w3.weight",
+    "layers.28.attention_norm.weight",
+    "layers.28.ffn_norm.weight",
+    "layers.29.attention.wq.weight",
+    "layers.29.attention.wk.weight",
+    "layers.29.attention.wv.weight",
+    "layers.29.attention.wo.weight",
+    "layers.29.feed_forward.w1.weight",
+    "layers.29.feed_forward.w2.weight",
+    "layers.29.feed_forward.w3.weight",
+    "layers.29.attention_norm.weight",
+    "layers.29.ffn_norm.weight",
+    "layers.30.attention.wq.weight",
+    "layers.30.attention.wk.weight",
+    "layers.30.attention.wv.weight",
+    "layers.30.attention.wo.weight",
+    "layers.30.feed_forward.w1.weight",
+    "layers.30.feed_forward.w2.weight",
+    "layers.30.feed_forward.w3.weight",
+    "layers.30.attention_norm.weight",
+    "layers.30.ffn_norm.weight",
+    "layers.31.attention.wq.weight",
+    "layers.31.attention.wk.weight",
+    "layers.31.attention.wv.weight",
+    "layers.31.attention.wo.weight",
+    "layers.31.feed_forward.w1.weight",
+    "layers.31.feed_forward.w2.weight",
+    "layers.31.feed_forward.w3.weight",
+    "layers.31.attention_norm.weight",
+    "layers.31.ffn_norm.weight",
+    "norm.weight",
+    "output.weight",
+    "freqs_cis"
+  ],
+  "input_specs": [
+    {
+      "index": 0,
+      "dtype": "torch.float32",
+      "shape": [
+        16032,
+        4096
+      ]
+    },
+    {
+      "index": 1,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 2,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 3,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 4,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 5,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 6,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 7,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 8,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 9,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 10,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 11,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 12,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 13,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 14,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 15,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 16,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 17,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 18,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 19,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 20,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 21,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 22,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 23,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 24,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 25,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 26,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 27,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 28,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 29,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 30,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 31,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 32,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 33,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 34,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 35,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 36,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 37,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 38,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 39,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 40,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 41,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 42,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 43,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 44,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 45,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 46,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 47,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 48,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 49,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 50,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 51,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 52,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 53,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 54,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 55,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 56,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 57,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 58,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 59,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 60,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 61,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 62,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 63,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 64,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 65,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 66,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 67,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 68,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 69,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 70,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 71,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 72,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 73,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 74,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 75,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 76,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 77,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 78,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 79,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 80,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 81,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 82,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 83,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 84,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 85,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 86,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 87,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 88,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 89,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 90,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 91,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 92,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 93,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 94,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 95,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 96,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 97,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 98,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 99,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 100,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 101,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 102,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 103,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 104,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 105,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 106,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 107,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 108,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 109,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 110,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 111,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 112,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 113,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 114,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 115,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 116,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 117,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 118,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 119,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 120,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 121,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 122,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 123,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 124,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 125,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 126,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 127,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 128,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 129,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 130,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 131,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 132,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 133,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 134,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 135,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 136,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 137,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 138,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 139,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 140,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 141,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 142,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 143,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 144,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 145,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 146,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 147,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 148,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 149,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 150,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 151,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 152,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 153,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 154,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 155,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 156,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 157,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 158,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 159,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 160,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 161,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 162,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 163,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 164,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 165,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 166,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 167,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 168,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 169,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 170,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 171,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 172,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 173,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 174,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 175,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 176,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 177,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 178,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 179,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 180,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 181,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 182,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 183,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 184,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 185,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 186,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 187,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 188,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 189,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 190,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 191,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 192,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 193,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 194,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 195,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 196,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 197,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 198,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 199,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 200,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 201,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 202,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 203,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 204,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 205,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 206,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 207,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 208,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 209,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 210,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 211,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 212,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 213,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 214,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 215,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 216,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 217,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 218,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 219,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 220,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 221,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 222,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 223,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 224,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 225,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 226,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 227,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 228,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 229,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 230,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 231,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 232,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 233,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 234,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 235,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 236,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 237,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 238,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 239,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 240,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 241,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 242,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 243,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 244,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 245,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 246,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 247,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 248,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 249,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 250,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 251,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 252,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 253,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 254,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 255,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 256,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 257,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 258,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 259,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 260,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 261,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 262,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 263,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 264,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 265,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 266,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 267,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 268,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 269,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 270,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 271,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 272,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 273,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 274,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 275,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 276,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 277,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 278,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 279,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 280,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 281,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 282,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 283,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 284,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 285,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 286,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 287,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 288,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 289,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 290,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 291,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 292,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 293,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 294,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 295,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 296,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 297,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 298,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 299,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 300,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 301,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 302,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 303,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 304,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 305,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 306,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 307,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 308,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 309,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 310,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 311,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 312,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 313,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 314,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 315,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 316,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 317,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 318,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 319,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 320,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 321,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 322,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 323,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 324,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 325,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 326,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 327,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 328,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 329,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 330,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 331,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 332,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 333,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 334,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 335,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 336,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 337,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 338,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 339,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 340,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 341,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 342,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 343,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 344,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 345,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 346,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 347,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 348,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 349,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 350,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 351,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 352,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 353,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 354,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 355,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 356,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 357,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 358,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 359,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 360,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 361,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 362,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 363,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 364,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 365,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 366,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 367,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 368,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 369,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 370,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 371,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 372,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 373,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 374,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 375,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 376,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 377,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 378,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 379,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 380,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 381,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 382,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 383,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 384,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 385,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 386,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 387,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 388,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 389,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 390,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 391,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 392,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 393,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 394,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 395,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 396,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 397,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 398,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 399,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 400,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 401,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 402,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 403,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 404,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 405,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 406,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 407,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 408,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 409,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 410,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 411,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 412,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 413,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 414,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 415,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 416,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 417,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 418,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 419,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 420,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 421,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 422,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 423,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 424,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 425,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 426,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 427,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 428,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 429,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 430,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 431,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 432,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 433,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 434,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 435,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 436,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 437,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 438,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 439,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 440,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 441,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 442,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 443,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 444,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 445,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 446,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 447,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 448,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 449,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 450,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 451,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 452,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 453,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 454,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 455,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 456,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 457,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 458,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 459,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 460,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 461,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 462,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 463,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 464,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 465,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 466,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 467,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 468,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 469,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 470,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 471,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 472,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 473,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 474,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 475,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 476,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 477,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 478,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 479,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 480,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 481,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 482,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 483,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 484,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 485,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 486,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 487,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 488,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 489,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 490,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 491,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 492,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 493,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 494,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 495,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 496,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 497,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 498,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 499,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 500,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 501,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 502,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 503,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 504,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 505,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 506,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 507,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 508,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 509,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 510,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 511,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 512,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 513,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 514,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 515,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 516,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 517,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 518,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 519,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 520,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 521,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 522,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 523,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 524,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 525,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 526,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 527,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 528,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 529,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 530,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 531,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 532,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 533,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 534,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 535,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 536,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 537,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 538,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 539,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 540,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 541,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 542,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 543,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 544,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 545,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 546,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 547,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 548,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 549,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 550,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 551,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 552,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 553,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 554,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 555,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 556,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 557,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 558,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 559,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 560,
+      "dtype": "torch.float32",
+      "shape": [
+        512,
+        4096
+      ]
+    },
+    {
+      "index": 561,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 562,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 563,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 564,
+      "dtype": "torch.float32",
+      "shape": [
+        128,
+        4096
+      ]
+    },
+    {
+      "index": 565,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 566,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        2048
+      ]
+    },
+    {
+      "index": 567,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 568,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 569,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 570,
+      "dtype": "torch.float32",
+      "shape": [
+        1024,
+        7168
+      ]
+    },
+    {
+      "index": 571,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 572,
+      "dtype": "torch.float32",
+      "shape": [
+        1792,
+        4096
+      ]
+    },
+    {
+      "index": 573,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 574,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 575,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 576,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 577,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 578,
+      "dtype": "torch.float32",
+      "shape": [
+        1024
+      ]
+    },
+    {
+      "index": 579,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 580,
+      "dtype": "torch.float32",
+      "shape": [
+        16032,
+        4096
+      ]
+    },
+    {
+      "index": 581,
+      "type": "DeviceMesh",
+      "value": "DeviceMesh((fsdp=4, tp=2), 'cuda', stride=(2, 1))"
+    },
+    {
+      "index": 582,
+      "dtype": "torch.complex64",
+      "shape": [
+        8192,
+        64
+      ]
+    },
+    {
+      "index": 583,
+      "dtype": "torch.int64",
+      "shape": [
+        1,
+        8192
+      ]
+    },
+    {
+      "index": 584,
+      "dtype": "torch.int64",
+      "shape": [
+        1,
+        8192
+      ]
+    },
+    {
+      "index": 585,
+      "type": "float",
+      "value": 32768.0
+    }
+  ],
+  "num_inputs": 586,
+  "num_flops_per_token": 57914449920,
+  "model_param_count": 8030261248,
+  "seq_len": 8192,
+  "local_batch_size": 1,
+  "world_size": 8
+}
