@@ -380,6 +380,7 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     try:
+        # pyrefly: ignore [missing-import, missing-module-attribute]
         from deep_ep import HybridEPBuffer
     except ImportError as e:
         raise ImportError(
