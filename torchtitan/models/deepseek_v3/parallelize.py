@@ -15,6 +15,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -46,9 +47,6 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -99,10 +97,6 @@ def parallelize_deepseekv3(
             )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        from torchtitan.components.quantization import find_pad_multiple
-
-        pad_multiple = find_pad_multiple(model_converters.converters)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -110,8 +104,8 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-            hybridep_non_blocking_expert_capacity_factor=parallelism.hybridep_non_blocking_expert_capacity_factor,
-            pad_multiple=pad_multiple,
+            enable_sp=parallelism.enable_sequence_parallel,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if parallel_dims.cp_enabled:
@@ -187,7 +181,7 @@ def apply_non_moe_tp(
     embed_plan = RowwiseParallel(
         input_layouts=Replicate(),
         output_layouts=sp_layout,
-        use_local_output=enable_sp,
+        use_local_output=False,
     )
 
     parallelize_module(
@@ -195,7 +189,9 @@ def apply_non_moe_tp(
         tp_mesh,
         {
             "tok_embeddings": embed_plan,
-            "norm": SequenceParallel() if enable_sp else NoParallel(),
+            "norm": SequenceParallel(use_local_output=False)
+            if enable_sp
+            else NoParallel(),
             "output": ColwiseParallel(
                 input_layouts=sp_layout,
                 output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
@@ -220,14 +216,13 @@ def apply_non_moe_tp(
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     positions_sharding = Replicate() if enable_cp else None
-    norm_plan = SequenceParallel() if enable_sp else NoParallel()
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
     rowwise_output_plan = rowwise_parallel(
-        output_layouts=sp_layout, use_local_output=enable_sp
+        output_layouts=sp_layout, use_local_output=False
     )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
-        # pyrefly: ignore [no-matching-overload]
         layer_plan = {
             "attention_norm": norm_plan,
             "attention": prepare_module_input(
@@ -273,9 +268,9 @@ def apply_non_moe_tp(
                         input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(use_local_output=False),
                     "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )
 

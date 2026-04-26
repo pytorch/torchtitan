@@ -76,7 +76,7 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_flex"),
+        model_spec=model_registry("debugmodel", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -104,7 +104,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_flex_flash"),
+        model_spec=model_registry("debugmodel", attn_backend="flex_flash"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -241,6 +241,34 @@ def qwen3_32b() -> Trainer.Config:
     )
 
 
+def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_registry("debugmodel_fused_qkv"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=8,
+            seq_len=2048,
+            steps=10,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+    )
+
+
 def qwen3_moe_debug() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
@@ -271,6 +299,12 @@ def qwen3_moe_debug() -> Trainer.Config:
     )
 
 
+def qwen3_moe_debug_ep() -> Trainer.Config:
+    config = qwen3_moe_debug()
+    config.model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+    return config
+
+
 def sft_qwen3_8b_math() -> Trainer.Config:
     """Qwen3-8B SFT on GSM8K math dataset."""
 
@@ -286,7 +320,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             },
         ]
 
-    model_spec = model_registry("8B_varlen")
+    model_spec = model_registry("8B", attn_backend="varlen")
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,
