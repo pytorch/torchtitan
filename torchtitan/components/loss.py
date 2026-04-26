@@ -309,7 +309,9 @@ class ChunkedCELoss(BaseLoss):
         last_idx = len(h_chunks) - 1
         for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
             if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(True, recurse=False)
+                lm_head.set_requires_gradient_sync(
+                    True, recurse=False
+                )  # pyrefly: ignore [not-callable]
 
             logits = lm_head(h_chunk)
 
@@ -368,7 +370,9 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         return loss.detach().clone()
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None]:
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None]:  # pyrefly: ignore [bad-override]
         (accumulated_grad,) = ctx.saved_tensors
         # Return accumulated_grad as the gradient for hidden_states.
         # Autograd then propagates this through hidden_states' existing

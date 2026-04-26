@@ -92,4 +92,4 @@ if __name__ == "__main__":
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
-    inference(config)
+    inference(config)  # pyrefly: ignore [bad-argument-type]

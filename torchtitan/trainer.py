@@ -420,7 +420,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     assert (
                         lm_head is not None
                     ), "Last PP stage must have lm_head for ChunkedCELoss"
-                    self.loss_fn.set_lm_head(lm_head)
+                    self.loss_fn.set_lm_head(
+                        lm_head
+                    )  # pyrefly: ignore [bad-argument-type]
             else:
                 lm_head = self.model_parts[-1].lm_head
                 assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
