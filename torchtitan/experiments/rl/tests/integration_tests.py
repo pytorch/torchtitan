@@ -106,7 +106,7 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/grpo_sync.py",
+            "torchtitan/experiments/rl/grpo.py",
             f"--dump_folder {dump_folder}",
         ]
         if hf_assets_path:

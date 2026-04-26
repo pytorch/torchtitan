@@ -17,11 +17,10 @@ from torchtitan.experiments.rl.types import Step
 class SumDigitsEnv(Configurable):
     """Single-turn, single-use env for one sum-of-digits problem.
 
-    Construct via ``SumDigitsEnv.Config(seed=...).build(idx=<i>)``. The
-    problem is a pure function of ``(config.seed, idx)``: same inputs
-    always produce the same prompt and target. No RNG state is shared
-    between envs; ``idx`` is the only knob that varies across envs in
-    a batch.
+    Construct via ``SumDigitsEnv.Config(seed=...).build(step=<s>, group_idx=<i>)``.
+    The problem is a pure function of ``(config.seed, step, group_idx)``: same
+    inputs always produce the same prompt and target. No RNG state is shared
+    between envs.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -33,7 +32,7 @@ class SumDigitsEnv(Configurable):
         """Reward bonus for any ``[ANSWER] <number>`` tag in the response."""
 
         seed: int = 42
-        """Seed mixed with ``idx`` to deterministically generate problems."""
+        """Seed mixed with ``(step, group_idx)`` to deterministically generate problems."""
 
     SYSTEM_PROMPT = """\
 You are a helpful assistant. Solve the problem step by step.
@@ -48,9 +47,9 @@ Assistant: Break each number into digits:
 Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
 [ANSWER] 28"""
 
-    def __init__(self, config: Config, idx: int = 0):
+    def __init__(self, config: Config, *, step: int = 0, group_idx: int = 0):
         self._config = config
-        rng = random.Random(f"{config.seed}:{idx}")
+        rng = random.Random(f"{config.seed}:{step}:{group_idx}")
         n = rng.randint(2, 4)
         numbers = [rng.randint(10, 99) for _ in range(n)]
         self._target = sum(int(d) for num in numbers for d in str(num))

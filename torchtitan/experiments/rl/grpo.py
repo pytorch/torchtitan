@@ -16,7 +16,7 @@ This demonstrates:
    in the controller.
 
 Command to run:
-python3 torchtitan/experiments/rl/grpo_sync.py \
+python3 torchtitan/experiments/rl/grpo.py \
     --module rl --config rl_grpo_qwen3_0_6b \
     --hf_assets_path=<path_to_model_checkpoint>
 """
@@ -441,29 +441,20 @@ class RLTrainer(Configurable):
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
-    def _collect_rollout(self, step: int, num_prompts: int) -> list[Trajectory]:
-        """Collect group rollouts: one single-use env per prompt, scored and returned.
-
-        ``generate`` returns ``num_prompts * group_size`` completions
-        ordered by ``prompt_idx`` (see ``VLLMGenerator.generate``), so
-        completions for prompt i sit at indices ``[i*group_size, (i+1)*group_size)``.
-        """
-        group_size = self.config.generator.sampling.n
-        base = step * num_prompts
-        envs = [self.config.env.build(idx=base + i) for i in range(num_prompts)]
+    def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
+        """Collect group rollouts: one single-use env per group, scored and returned."""
+        envs = [
+            self.config.env.build(step=step, group_idx=i) for i in range(num_groups)
+        ]
         completions = self._get_rank_0_value(
             self.generator.generate.call([env.prompt for env in envs]).get()
         )
-
         trajectories: list[Trajectory] = []
-        for sample_idx, env in enumerate(envs):
-            # Slice out this env's group_size completions and score each against its env.
-            group = completions[sample_idx * group_size : (sample_idx + 1) * group_size]
-            for c in group:
-                step_result = env.step(c.text)
-                trajectories.append(
-                    Trajectory(sample_idx=sample_idx, transitions=[(c, step_result)])
-                )
+        for c in completions:
+            step_result = envs[c.prompt_idx].step(c.text)
+            trajectories.append(
+                Trajectory(sample_idx=c.prompt_idx, transitions=[(c, step_result)])
+            )
         return trajectories
 
     @staticmethod
@@ -498,7 +489,10 @@ class RLTrainer(Configurable):
         """Run validation on held-out prompts using greedy sampling.
         TODO: investigate using pass@k."""
         num_samples = self.config.num_validation_samples
-        envs = [self.config.validation_env.build(idx=i) for i in range(num_samples)]
+        envs = [
+            self.config.validation_env.build(step=0, group_idx=i)
+            for i in range(num_samples)
+        ]
         greedy = SamplingConfig(
             n=1,
             temperature=0.0,
@@ -525,6 +519,7 @@ class RLTrainer(Configurable):
 
     async def train(self):
         num_steps = self.config.num_steps
+        num_groups = self.config.num_prompts_per_step
         logger.info(f"Pre-training validation; then {num_steps} steps of RL training")
         pre_validation = await self.validate()
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
@@ -533,7 +528,7 @@ class RLTrainer(Configurable):
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
-            trajectories = self._collect_rollout(step, self.config.num_prompts_per_step)
+            trajectories = self._collect_rollouts(num_groups, step=step)
             episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
