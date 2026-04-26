@@ -17,8 +17,14 @@ from .model import GraphTrainerDeepSeekV3Model
 from .parallelize import parallelize_deepseekv3
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    base = deepseekv3_configs[flavor]()
+def model_registry(
+    flavor: str,
+    attn_backend: str = "sdpa",
+    moe_comm_backend: str | None = None,
+) -> ModelSpec:
+    base = deepseekv3_configs[flavor](
+        attn_backend=attn_backend, moe_comm_backend=moe_comm_backend
+    )
     config = GraphTrainerDeepSeekV3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )

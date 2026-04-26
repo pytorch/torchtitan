@@ -32,7 +32,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--profiling.enable_profiling",
+                    "--profiler.enable_profiling",
                     "--metrics.enable_tensorboard",
                 ],
             ],

@@ -89,7 +89,10 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
-        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        # Keep an unshuffled reference so map-style datasets can be re-shuffled
+        # deterministically on re-loop and on checkpoint resume.
+        self._original_data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        self._data = self._original_data
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
@@ -167,13 +170,19 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 # Reset offset for the next iteration
                 self._sample_idx = 0
                 self._epoch += 1
-                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
-                # Ensures re-looping a dataset loaded from a checkpoint works correctly
-                if not isinstance(self._data, Dataset):
-                    if hasattr(self._data, "set_epoch") and hasattr(
-                        self._data, "epoch"
-                    ):
-                        self._data.set_epoch(self._data.epoch + 1)
+                logger.warning(
+                    f"Dataset {self.dataset_name} is being re-looped "
+                    f"(epoch {self._epoch})"
+                )
+                # Ensures re-looping a dataset loaded from a checkpoint works correctly.
+                # Map-style datasets replay the same order unless we shuffle per epoch;
+                # iterable-style datasets honor set_epoch and re-shuffle internally.
+                if isinstance(self._data, Dataset):
+                    self._data = cast(
+                        Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                    )
+                elif hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
+                    self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
         self._inputs_buffer = state_dict["inputs_buffer"]
@@ -183,9 +192,20 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 "RoPE positions may be incorrect with block_causal attention."
             )
         self._positions_buffer = state_dict.get("positions_buffer", [])
+        # Older checkpoints predate per-epoch shuffle on re-loop; default to 0
+        # so resuming those runs stays numerically identical (epoch 0 is never
+        # shuffled).
+        self._epoch = state_dict.get("epoch", 0)
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
+            # Replay the same per-epoch shuffle so _data matches the order
+            # observed at checkpoint time. Epoch 0 stays unshuffled, which
+            # preserves bit-identical resume for single-epoch training runs.
+            if self._epoch > 0:
+                self._data = cast(
+                    Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                )
         else:
             assert "data" in state_dict
             self._data.load_state_dict(state_dict["data"])
@@ -525,7 +545,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)
 
         chat_ds = ChatDataset(
-            dataset=dataset,  # pyrefly: ignore [bad-argument-type]
+            dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
             seq_len=seq_len,

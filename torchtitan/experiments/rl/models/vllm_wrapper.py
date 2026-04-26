@@ -27,6 +27,7 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+from vllm.compilation import codegen as _codegen
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -52,6 +53,32 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 
 
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
+
+
+# NOTE: Monkeypatch vLLM's _node_ref to handle DTensor placement types
+# whose repr() uses unqualified class names not available in the generated
+# code's exec namespace (which only has `import torch`).
+_original_node_ref = _codegen._node_ref
+
+# TODO: Followup with core vLLM fix
+# https://github.com/pytorch/torchtitan/issues/3067
+def _patched_node_ref(arg):
+    try:
+        from torch.distributed.tensor.placement_types import Partial, Placement
+
+        if isinstance(arg, Placement):
+            cls = type(arg)
+            # Partial.__repr__ leaves reduce_op unquoted (e.g. "Partial(sum)")
+            # which would resolve to the builtin sum, not the string "sum".
+            if isinstance(arg, Partial):
+                return f"{cls.__module__}.{cls.__name__}({arg.reduce_op!r})"
+            return f"{cls.__module__}.{repr(arg)}"
+    except ImportError:
+        pass
+    return _original_node_ref(arg)
+
+
+_codegen._node_ref = _patched_node_ref
 
 
 def create_torchtitan_config_from_vllm_config(
