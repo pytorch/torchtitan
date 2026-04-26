@@ -359,13 +359,6 @@ def apply_fsdp(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
-        if model.lm_head is not None:
-            # pyrefly: ignore [no-matching-overload]
-            fully_shard(
-                model.lm_head,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
