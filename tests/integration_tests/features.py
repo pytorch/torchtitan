@@ -453,6 +453,17 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.enable-fsdp-symm-mem",
+                ],
+            ],
+            "FSDP symmetric memory",
+            "fsdp_symm_mem",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--checkpoint.enable",
                     "--training.steps 10",
                 ],
