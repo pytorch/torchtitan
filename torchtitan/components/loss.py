@@ -45,6 +45,8 @@ class BaseLoss(Configurable):
     Subclasses set ``self.fn`` to their raw loss function in ``__init__``.
     """
 
+    fn: LossFunction
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
@@ -122,11 +124,14 @@ class GradAccumulator:
         seq_dim: int = 1,
         dtype: torch.dtype,
     ):
-        from torch.distributed.tensor import DTensor
+        from torch.distributed.device_mesh import DeviceMesh
+        from torch.distributed.tensor import DTensor, Placement
 
         self.num_chunks = num_chunks
         self.seq_dim = seq_dim
         self._next_idx = 0
+        self._device_mesh: DeviceMesh | None = None
+        self._placements: tuple[Placement, ...] | None = None
 
         # Track DTensor metadata for transparent wrap-back in result()
         if isinstance(reference, DTensor):
@@ -134,8 +139,6 @@ class GradAccumulator:
             self._placements = reference.placements
             local = reference.to_local()
         else:
-            self._device_mesh = None
-            self._placements = None
             local = reference
 
         self._buffer = torch.zeros_like(local, dtype=dtype)
@@ -319,6 +322,7 @@ class ChunkedCELoss(BaseLoss):
 
             # Collect this chunk's gradient and free it before the next
             # chunk to keep only one chunk's activations in memory.
+            assert h_chunk.grad is not None
             grad_accumulator.add(h_chunk.grad)
             h_chunk.grad = None
 
@@ -352,7 +356,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         hidden_states: torch.Tensor,
         accumulated_grad: torch.Tensor,
