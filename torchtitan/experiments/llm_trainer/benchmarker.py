@@ -32,6 +32,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ from statistics import median
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
@@ -128,7 +130,41 @@ def _load_metadata(meta_path):
         return json.load(f)
 
 
-def _create_inputs_from_metadata(meta, device):
+def _reconstruct_device_mesh(
+    mesh_spec: str, parallel_dims: ParallelDims
+) -> DeviceMesh | str:
+    """Reconstruct a DeviceMesh from its stringified metadata form."""
+    mesh_match = re.search(r"DeviceMesh\(\(([^)]*)\)", mesh_spec)
+    if mesh_match is None:
+        return mesh_spec
+
+    mesh_dims = []
+    for dim_name in mesh_match.group(1).split(","):
+        dim_name = dim_name.strip()
+        if not dim_name:
+            continue
+        dim_name = dim_name.split("=", 1)[0].strip()
+        if dim_name == "loss_mesh":
+            dim_name = "loss"
+        mesh_dims.append(dim_name)
+
+    if not mesh_dims:
+        return mesh_spec
+
+    # Ensure the world mesh exists before resolving any submeshes.
+    if parallel_dims._world_mesh is None:
+        parallel_dims.build_mesh()
+
+    if mesh_dims == ["world"]:
+        return parallel_dims._world_mesh
+
+    try:
+        return parallel_dims.get_mesh(mesh_dims)
+    except Exception:
+        return mesh_spec
+
+
+def _create_inputs_from_metadata(meta, device, parallel_dims):
     """Create deterministic random tensors matching the metadata specs."""
     torch.manual_seed(42)
     inputs = []
@@ -142,6 +178,8 @@ def _create_inputs_from_metadata(meta, device):
                 inputs.append(torch.randint(0, 1000, shape, dtype=dtype, device=device))
             else:
                 inputs.append(torch.zeros(shape, dtype=dtype, device=device))
+        elif spec.get("type") == "DeviceMesh":
+            inputs.append(_reconstruct_device_mesh(spec["value"], parallel_dims))
         else:
             inputs.append(spec["value"])
     return inputs
@@ -157,22 +195,25 @@ def _load_graph_module(filepath):
     return mod.GraphModule()
 
 
-def _run_validation_steps(model, inputs, num_state, num_steps, lr):
+def _run_validation_steps(model, inputs, num_steps, lr):
     """Run model for num_steps training steps with SGD updates.
 
-    Returns a list of per-step loss values. The state inputs (first
-    num_state entries) are cloned and updated with gradients each step;
-    data inputs are reused unchanged.
+    Returns a list of per-step loss values.
+
+    Flattened DTensor graphs currently interleave non-tensor mesh inputs with
+    tensor state inputs, and the metadata does not preserve a usable positional
+    mapping for "state vs. user data". We therefore infer the mutable state
+    tensor inputs from the model outputs themselves: every tensor output after
+    the loss is treated as a gradient for the earliest tensor inputs.
     """
-    state = [
+    current_inputs = [
         inp.clone() if isinstance(inp, torch.Tensor) else inp
-        for inp in inputs[:num_state]
+        for inp in inputs
     ]
-    data = list(inputs[num_state:])
+    state_tensor_positions = None
 
     losses = []
     for step in range(num_steps):
-        current_inputs = list(state) + data
         with torch.no_grad():
             outputs = model(*current_inputs)
 
@@ -181,15 +222,25 @@ def _run_validation_steps(model, inputs, num_state, num_steps, lr):
 
         losses.append(outputs[0].item())
 
-        grads = outputs[1:]
-        for i in range(min(len(grads), num_state)):
-            g = grads[i]
-            if (
-                isinstance(g, torch.Tensor)
-                and isinstance(state[i], torch.Tensor)
-                and g.shape == state[i].shape
-            ):
-                state[i] = state[i] - lr * g
+        grad_tensors = [out for out in outputs[1:] if isinstance(out, torch.Tensor)]
+        if state_tensor_positions is None:
+            state_tensor_positions = []
+            for input_idx, inp in enumerate(current_inputs):
+                if isinstance(inp, torch.Tensor):
+                    state_tensor_positions.append(input_idx)
+                    if len(state_tensor_positions) == len(grad_tensors):
+                        break
+
+            if len(state_tensor_positions) != len(grad_tensors):
+                raise RuntimeError(
+                    "Unable to align tensor state inputs with gradient outputs: "
+                    f"{len(state_tensor_positions)=}, {len(grad_tensors)=}"
+                )
+
+        for input_idx, grad in zip(state_tensor_positions, grad_tensors, strict=True):
+            state_tensor = current_inputs[input_idx]
+            if grad.shape == state_tensor.shape:
+                current_inputs[input_idx] = state_tensor - lr * grad
 
     return losses
 
@@ -313,7 +364,7 @@ def main():
     print(f"  Candidate: {candidate_path}")
 
     print("\nCreating inputs...")
-    inputs = _create_inputs_from_metadata(meta, device)
+    inputs = _create_inputs_from_metadata(meta, device, parallel_dims)
     num_tensor_inputs = sum(1 for x in inputs if isinstance(x, torch.Tensor))
     print(f"  {len(inputs)} inputs ({num_tensor_inputs} tensors)")
 
@@ -329,21 +380,16 @@ def main():
         torch.cuda.synchronize()
         print("  Done.")
 
-    num_state = meta["num_state_inputs"]
     num_steps = bench_args.num_validation_steps
     val_lr = bench_args.validation_lr
 
     print(f"\n--- Validation ({num_steps} training steps, lr={val_lr}) ---")
 
     print("  Running optimized model...")
-    opt_losses = _run_validation_steps(
-        optimized_gm, inputs, num_state, num_steps, val_lr
-    )
+    opt_losses = _run_validation_steps(optimized_gm, inputs, num_steps, val_lr)
 
     print("  Running candidate model...")
-    cand_losses = _run_validation_steps(
-        candidate_gm, inputs, num_state, num_steps, val_lr
-    )
+    cand_losses = _run_validation_steps(candidate_gm, inputs, num_steps, val_lr)
 
     print(f"\n  {'Step':>6}  {'Optimized Loss':>15}  {'Candidate Loss':>15}")
     print(f"  {'----':>6}  {'-' * 15}  {'-' * 15}")
