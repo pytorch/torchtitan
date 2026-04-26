@@ -46,7 +46,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 45
+      timeout: 60
       script: |
         set -eux
 
@@ -120,6 +120,22 @@ jobs:
 
          echo "Checking FSDP8 loss from a new run v.s. FSDP8 loss from text file parity"
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+
+        # MoE loss comparison: verify Qwen3 MoE with FSDP+EP deterministic losses match reference
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_ep_cuda.txt"
+        elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_ep_rocm_mi350x.txt"
+        fi
+
+        echo "Exporting Qwen3 MoE FSDP+EP losses (no seed checkpoint for EP compatibility)"
+        python3 scripts/loss_compare.py . . \
+          --baseline-module=qwen3 --baseline-config=qwen3_moe_debug_ep \
+          --baseline-options="--parallelism.data_parallel_shard_degree=4 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2 --parallelism.expert_tensor_parallel_degree=1" \
+          --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
+          --export-result="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison/result.txt" \
+          --steps=100 --no-seed-checkpoint
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
