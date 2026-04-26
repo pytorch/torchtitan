@@ -34,6 +34,7 @@ class ScaleBiasForward(torch.autograd.Function):
         return bias
 
     @staticmethod
+    # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
         # Don't scale the gradient - pass it through as-is
         return grad_output, None
@@ -60,12 +61,15 @@ def _run_experts_for_loop(
     tp_degree: int = 1,
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
+    # pyrefly: ignore [bad-assignment]
     num_tokens_per_expert = num_tokens_per_expert.tolist()
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
+    # pyrefly: ignore [bad-assignment]
     x = torch.split(
         x[: sum(num_tokens_per_expert)],
+        # pyrefly: ignore [bad-argument-type]
         split_size_or_sections=num_tokens_per_expert,
         dim=0,
     )
@@ -157,8 +161,11 @@ class GptOssGroupedExperts(Module):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             mlp1_weight = self.mlp1_weight.to_local()
+            # pyrefly: ignore [missing-attribute]
             mlp1_bias = self.mlp1_bias.to_local()
+            # pyrefly: ignore [missing-attribute]
             mlp2_weight = self.mlp2_weight.to_local()
+            # pyrefly: ignore [missing-attribute]
             mlp2_bias = self.mlp2_bias.to_local()
         else:
             mlp1_weight = self.mlp1_weight
@@ -170,7 +177,9 @@ class GptOssGroupedExperts(Module):
         tp_degree = 1
         if isinstance(self.mlp1_weight, DTensor):
             mesh_dim_names = self.mlp1_weight.device_mesh.mesh_dim_names
+            # pyrefly: ignore[not-iterable]
             if "tp" in mesh_dim_names:
+                # pyrefly: ignore [missing-attribute]
                 tp_dim_idx = mesh_dim_names.index("tp")
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 

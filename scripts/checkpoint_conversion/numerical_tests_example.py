@@ -160,6 +160,7 @@ if __name__ == "__main__":
         for baseline, outputs in zip(baseline_outputs, conversion_outputs):
             total_loss += loss_fn(baseline, outputs)
         avg_loss = total_loss / len(test_set)
+        # pyrefly: ignore [missing-attribute]
         avg_losses[test_name] = avg_loss.item()
 
     for test_name, avg_loss in avg_losses.items():

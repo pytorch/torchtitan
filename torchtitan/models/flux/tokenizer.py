@@ -58,7 +58,7 @@ class FluxTokenizerContainer(BaseTokenizer):
         Returns:
             A dict with keys "clip" and "t5", each mapping to a torch.Tensor.
         """
-        return {
+        return {  # pyrefly: ignore [bad-return]
             "clip": self.clip_tokenizer.encode(text),
             "t5": self.t5_tokenizer.encode(text),
         }
@@ -113,6 +113,7 @@ class FluxTestTokenizer(BaseTokenizer):
     def get_vocab_size(self) -> int:
         return self.tiktokenizer.vocab_size
 
+    # pyrefly: ignore [bad-override]
     def encode(self, text: str | list[str]) -> torch.Tensor:
         """
         Use TikTokenizer to encode the text into tokens, and then pad and chunk the tokens to max_length.
@@ -164,10 +165,12 @@ class FluxTokenizer(BaseTokenizer):
         self.is_clip = "clip" in model_path.lower()
 
         if self.is_clip:
+            # pyrefly: ignore [bad-assignment]
             self._tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(
                 model_path, max_length=max_length, **hf_kwargs
             )
         else:
+            # pyrefly: ignore [bad-assignment]
             self._tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
                 model_path, max_length=max_length, **hf_kwargs
             )
@@ -175,6 +178,7 @@ class FluxTokenizer(BaseTokenizer):
     def get_vocab_size(self) -> int:
         return self._tokenizer.vocab_size
 
+    # pyrefly: ignore [bad-override]
     def encode(
         self,
         s: str | list[str],

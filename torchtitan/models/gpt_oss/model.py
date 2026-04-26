@@ -163,8 +163,10 @@ class GptOssTransformerBlock(TransformerBlock):
         """
         # Extract the appropriate mask for this layer
         if self.use_sliding_attention:
+            # pyrefly: ignore [missing-attribute]
             layer_mask = attention_masks.get("sliding_window_mask", None)
         else:
+            # pyrefly: ignore [missing-attribute]
             layer_mask = attention_masks.get("basic_mask", None)
         assert layer_mask is not None
 

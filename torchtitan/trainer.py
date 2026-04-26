@@ -739,6 +739,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             loss = self.forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
+                # pyrefly: ignore [bad-argument-type]
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())

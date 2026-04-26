@@ -186,4 +186,5 @@ class MultiModalCollator:
             },
         }
 
+        # pyrefly: ignore [bad-return]
         return input_dict, labels

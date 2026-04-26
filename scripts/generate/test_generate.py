@@ -47,6 +47,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         },
     )
 
+    # pyrefly: ignore [missing-attribute]
     for _, transformer_block in model.layers.items():
         layer_plan = {
             "attention.qkv_linear.wq": ColwiseParallel(),
@@ -61,6 +62,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

@@ -197,6 +197,7 @@ class Validator(BaseValidator):
             ).expand(inputs.shape)
 
         try:
+            # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = cast(
                 BaseModel, model_parts[0]
             ).get_attention_masks(

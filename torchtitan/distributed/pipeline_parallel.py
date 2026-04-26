@@ -249,7 +249,9 @@ def build_pipeline_schedule(
             f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
+    # pyrefly: ignore [bad-instantiation]
     schedule = schedule_class(
+        # pyrefly: ignore [bad-argument-type]
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
@@ -269,6 +271,7 @@ def build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
+        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
