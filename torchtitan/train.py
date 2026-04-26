@@ -39,8 +39,8 @@ def main() -> None:
         trainer = config.build()  # pyrefly: ignore [missing-attribute]
 
         if (
-            config.checkpoint.create_seed_checkpoint
-        ):  # pyrefly: ignore [missing-attribute]
+            config.checkpoint.create_seed_checkpoint  # pyrefly: ignore[missing-attribute]
+        ):
             assert (
                 int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."

@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
 import torch
 import torch.nn as nn
-
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
 
@@ -37,12 +37,12 @@ def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     )
 
 
-class BaseLoss(Configurable):
-    """Base class for all loss functions.
+class BaseLoss(ABC, Configurable):
+    """Abstract base class for all loss functions.
 
     Provides compile support and a unified ``__call__`` signature:
     ``(pred, labels, global_valid_tokens) -> scaled_loss``.
-    Subclasses set ``self.fn`` to their raw loss function in ``__init__``.
+    Subclasses must implement ``__init__`` and set ``self.fn``.
     """
 
     fn: LossFunction
@@ -50,6 +50,10 @@ class BaseLoss(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
+
+    @abstractmethod
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        ...
 
     def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
         if (
@@ -309,9 +313,9 @@ class ChunkedCELoss(BaseLoss):
         last_idx = len(h_chunks) - 1
         for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
             if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(
+                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
                     True, recurse=False
-                )  # pyrefly: ignore [not-callable]
+                )
 
             logits = lm_head(h_chunk)
 
@@ -370,9 +374,9 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         return loss.detach().clone()
 
     @staticmethod
-    def backward(
+    def backward(  # pyrefly: ignore[bad-override]
         ctx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None]:  # pyrefly: ignore [bad-override]
+    ) -> tuple[torch.Tensor, None, None]:
         (accumulated_grad,) = ctx.saved_tensors
         # Return accumulated_grad as the gradient for hidden_states.
         # Autograd then propagates this through hidden_states' existing

@@ -602,23 +602,22 @@ class HFTransformerModel(BaseModel):
             )
 
     @property
-    def output(self):
+    def lm_head(self):
         """Returns the model's output layer, handling different Hugging Face model structures."""
         if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
             return self.model.lm_head
         else:
-            # Add more cases here if needed for other model architectures
             raise AttributeError(
-                "Could not find output (lm_head) in the model. Please check the model structure."
+                "Could not find lm_head in the model. Please check the model structure."
             )
 
-    @output.setter
-    def output(self, value):
+    @lm_head.setter
+    def lm_head(self, value):
         if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
             self.model.lm_head = value
         else:
             raise AttributeError(
-                "Could not find output (lm_head) in the model. Please check the model structure."
+                "Could not find lm_head in the model. Please check the model structure."
             )
 
     @property
