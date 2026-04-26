@@ -93,7 +93,6 @@ def run_single_test(
 
 def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
     """Run all integration tests to test the core features of TorchTitan"""
-
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}

@@ -8,42 +8,35 @@ from __future__ import annotations
 
 import random
 import re
+from dataclasses import dataclass
 
-import torch
+from torchtitan.config import Configurable
+from torchtitan.experiments.rl.types import Step
 
 
-def extract_answer(text: str) -> int | None:
-    """Extract a numeric answer from model output.
+class SumDigitsEnv(Configurable):
+    """Single-turn, single-use env for one sum-of-digits problem.
 
-    Tries in order:
-    1. [ANSWER] <number> tag
-    2. "the answer is" / "answer:" patterns
-    3. Last number in text
+    Construct via ``SumDigitsEnv.Config(seed=...).build(step=<s>, group_idx=<i>)``.
+    The problem is a pure function of ``(config.seed, step, group_idx)``: same
+    inputs always produce the same prompt and target. No RNG state is shared
+    between envs.
     """
-    # 1. [ANSWER] tag (last match, model may self-correct)
-    answer_match = re.findall(r"\[ANSWER\]\s*(-?\d+)", text)
-    if answer_match:
-        return int(answer_match[-1])
 
-    # 2. Natural language patterns
-    patterns = [
-        r"(?:the answer is|answer is|answer:)\s*(-?\d+)",
-        r"=\s*(-?\d+)\.?\s*(?:The answer|$)",
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        if matches:
-            return int(matches[-1])
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        correctness_reward: float = 1.0
+        """Reward for a response containing ``[ANSWER] <target>``."""
 
-    # 3. Last number in text
-    numbers = re.findall(r"-?\d+", text)
-    return int(numbers[-1]) if numbers else None
+        format_reward: float = 0.3
+        """Reward bonus for any ``[ANSWER] <number>`` tag in the response."""
 
+        seed: int = 42
+        """Seed mixed with ``(step, group_idx)`` to deterministically generate problems."""
 
-_SYSTEM_PROMPT = """\
+    SYSTEM_PROMPT = """\
 You are a helpful assistant. Solve the problem step by step.
 When you have your final answer, state it as [ANSWER] <number>.
-Do not write anything after the answer.
 
 Example:
 User: What is the total digit sum of [12, 345, 67]?
@@ -54,53 +47,30 @@ Assistant: Break each number into digits:
 Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
 [ANSWER] 28"""
 
-
-class SumDigitsTask:
-    """Generates sum-of-digits tasks with sequences of 2-4 integers (10-99)."""
-
-    def __init__(self, seed: int = 42):
-        self.seed = seed
-        self._rng = random.Random(seed)
-
-    def create_question(self) -> tuple[str, str]:
-        """Return a (question, answer) pair."""
-        n = self._rng.randint(2, 4)
-        numbers = [self._rng.randint(10, 99) for _ in range(n)]
-        answer = sum(int(d) for num in numbers for d in str(num))
+    def __init__(self, config: Config, *, step: int = 0, group_idx: int = 0):
+        self._config = config
+        rng = random.Random(f"{config.seed}:{step}:{group_idx}")
+        n = rng.randint(2, 4)
+        numbers = [rng.randint(10, 99) for _ in range(n)]
+        self._target = sum(int(d) for num in numbers for d in str(num))
         question = f"What is the total digit sum of {numbers}?"
-        return question, str(answer)
+        self.prompt = f"{self.SYSTEM_PROMPT}\n\n{question}"
 
-    def get_system_prompt(self) -> str:
-        return _SYSTEM_PROMPT
+    def step(self, completion: str) -> Step:
+        return Step(
+            rewards={
+                "correctness": self._correctness_reward(completion),
+                "format": self._format_reward(completion),
+            },
+            done=True,
+        )
 
-    def reward_function(
-        self,
-        completions: list[str],
-        expected_answer: str = "",
-    ) -> torch.Tensor:
-        """Compute rewards for sum digits task.
+    def _correctness_reward(self, completion: str) -> float:
+        matches = re.findall(r"\[ANSWER\]\s*(-?\d+)", completion)
+        correct = bool(matches) and int(matches[-1]) == self._target
+        return self._config.correctness_reward if correct else 0.0
 
-        Args:
-            completions: List of completion strings for one prompt (len=group_size)
-            expected_answer: Expected answer string for this prompt
-
-        Returns:
-            Tensor of rewards (+1.0 correct, -1.0 wrong, +0.2 format bonus)
-        """
-        expected = int(expected_answer) if expected_answer else 0
-        rewards = []
-        for completion in completions:
-            extracted = extract_answer(completion)
-            is_correct = extracted == expected
-            reward = 1.0 if is_correct else -1.0
-            # Format bonus: only if correct, exactly one [ANSWER] tag, and generation stops after it
-            answer_tags = re.findall(r"\[ANSWER\]", completion)
-            if (
-                is_correct
-                and len(answer_tags) == 1
-                and re.search(r"\[ANSWER\]\s*-?\d+\s*$", completion)
-            ):
-                reward += 0.2
-            rewards.append(reward)
-
-        return torch.tensor(rewards, dtype=torch.float32)
+    def _format_reward(self, completion: str) -> float:
+        if re.search(r"\[ANSWER\]\s*-?\d+", completion):
+            return self._config.format_reward
+        return 0.0
