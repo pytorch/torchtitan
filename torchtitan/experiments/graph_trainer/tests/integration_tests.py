@@ -355,9 +355,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "JIT FSDP+EP",
             "jit_fsdp+ep",
             ngpu=8,
-            skip_xpu_test=True,
             disabled=_JIT_AOT_DISABLED,
-        ),
+        ),_``
         OverrideDefinitions(
             [
                 [
@@ -373,7 +372,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "JIT FSDP+TP+EP+ETP",
             "jit_fsdp+tp+ep+etp",
             ngpu=8,
-            skip_xpu_test=True,
             disabled=_JIT_AOT_DISABLED,
         ),
         OverrideDefinitions(
@@ -389,7 +387,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "JIT FSDP+CP",
             "jit_fsdp+cp",
             ngpu=8,
-            skip_xpu_test=True,
             disabled=_JIT_AOT_DISABLED,
         ),
         OverrideDefinitions(
@@ -406,7 +403,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "jit_deepseekv3_auto_bucketing",
             ngpu=8,
-            skip_xpu_test=True,
+
 
         ),
         # === AOT mode tests ===
@@ -425,7 +422,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "AOT deepseek_v3 FSDP+TP+EP",
             "aot_deepseekv3_fsdp_tp_ep",
             ngpu=8,
-            skip_xpu_test=True,
             disabled=_JIT_AOT_DISABLED,
         ),
         OverrideDefinitions(
@@ -443,7 +439,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "AOT deepseek_v3 FSDP+TP+EP+FlexAttention",
             "aot_deepseekv3_fsdp_tp_ep_flexattention",
             ngpu=8,
-            skip_xpu_test=True,
             disabled=_JIT_AOT_DISABLED,
         ),
         OverrideDefinitions(
@@ -462,7 +457,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "AOT deepseek_v3 inductor_decomposition",
             "aot_deepseekv3_inductor_decomposition",
             ngpu=8,
-            skip_xpu_test=True,
             disabled=_JIT_AOT_DISABLED,
         ),
         # TODO: DSv3 + cudagraph AOT tests are not included because MoE
@@ -488,7 +482,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep",
             ngpu=8,
-            skip_xpu_test=True,
         ),
         OverrideDefinitions(
             [
@@ -505,7 +498,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
             ngpu=8,
-            skip_xpu_test=True,
         ),
     ]
 

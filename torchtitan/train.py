@@ -27,7 +27,6 @@ def main() -> None:
     config_manager = ConfigManager()
     config = config_manager.parse_args()
     trainer: Trainer | None = None
-    exit_code = 0
 
     try:
         # TODO(local_tensor): Remove this special case once LocalTensor supports
@@ -54,28 +53,15 @@ def main() -> None:
             logger.info("Created seed checkpoint")
         else:
             trainer.train()
-
     except Exception:
-        exit_code = 1
+        if trainer:
+            trainer.close()
         raise
-
-    finally:
-        try:
-            if trainer is not None:
-                trainer.close()
-        except Exception as e:
-            logger.exception("trainer.close() failed: %s", e)
-            exit_code = 1
-
-        try:
-            if torch.distributed.is_initialized():
-                torch.distributed.destroy_process_group()
-                logger.info("Process group destroyed")
-        except Exception as e:
-            logger.exception("destroy_process_group() failed: %s", e)
-            exit_code = 1
-
-        os._exit(exit_code)
+    else:
+        trainer.close()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        logger.info("Process group destroyed")
 
 
 if __name__ == "__main__":
