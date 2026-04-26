@@ -464,6 +464,19 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module llama3 --config llama3_debugmodel_float8",
+                    "--parallelism.enable-fsdp-symm-mem",
+                ],
+            ],
+            "FSDP symmetric memory with Float8 all-gather",
+            "fsdp_symm_mem_float8_all_gather",
+            ngpu=2,
+            skip_rocm_test=True,
+            required_packages=("torchao",),
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.enable-fsdp-symm-mem",
