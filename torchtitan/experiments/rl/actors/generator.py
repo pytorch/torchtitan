@@ -112,7 +112,7 @@ class VLLMGenerator(Actor, Configurable):
 
     Maintains a vLLM engine synchronized with the Trainer via weight
     sync. ``generate()`` produces a flat list of Completions; reward
-    and advantage computation live in the controller and Grader.
+    and advantage computation live in the controller.
 
     Args:
         config: Generator-specific configuration.
@@ -243,9 +243,9 @@ class VLLMGenerator(Actor, Configurable):
     ) -> list[Completion]:
         """Generate completions for the given prompts.
 
-        Returns a flat list of length ``len(prompts) * sampling.n``,
-        ordered by input prompt index then sample index within a vLLM
-        RequestOutput.
+        Returns a flat list of length ``len(prompts) * sampling.n``
+        ordered by ``prompt_idx``, with ``sampling.n`` consecutive
+        completions per prompt.
 
         Args:
             prompts: List of prompt strings.
