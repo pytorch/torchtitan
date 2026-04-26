@@ -107,7 +107,9 @@ class GroupedExperts(Module):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             w1 = self.w1.to_local()
+            # pyrefly: ignore [missing-attribute]
             w2 = self.w2.to_local()
+            # pyrefly: ignore [missing-attribute]
             w3 = self.w3.to_local()
         else:
             w1 = self.w1

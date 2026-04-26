@@ -179,6 +179,7 @@ class FluxValidator(Validator):
                     enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
                     denoising_steps=self.config.sampling.denoising_steps,
                     classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
+                    # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,

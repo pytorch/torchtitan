@@ -208,6 +208,7 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
