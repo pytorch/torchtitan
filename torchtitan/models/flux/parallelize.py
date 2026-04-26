@@ -234,7 +234,7 @@ def parallelize_encoders(
     # pyrefly: ignore [no-matching-overload]
     fully_shard(t5_model.hf_module, **fsdp_config)
 
-    if parallelism.enable_fsdp_symm_mem:
+    if enable_symm_mem:
         enable_fsdp_symm_mem(t5_model.hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
