@@ -318,16 +318,15 @@ def _16b(
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
 ) -> DeepSeekV3Model.Config:
-def _debugmodel_flex_attn() -> DeepSeekV3Model.Config:
-    dim = 256
-    n_layers = 6
-    vocab_size = 2048
+    dim = 2048
+    n_layers = 27
+    vocab_size = 102400
     n_heads = 16
-    moe_hidden_dim = 256
+    moe_hidden_dim = 1408
     num_shared_experts = 2
-    dense_hidden_dim = 1024
+    dense_hidden_dim = 10944
     rope_dim = 64
-    num_experts = 8
+    num_experts = 64
     n_dense_layers = 1
 
     layers = _build_dsv3_layers(
@@ -345,11 +344,11 @@ def _debugmodel_flex_attn() -> DeepSeekV3Model.Config:
         moe_hidden_dim=moe_hidden_dim,
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
-        router_top_k=3,
+        router_top_k=6,
         router_score_func="softmax",
         score_before_experts=False,
-        inner_attention=FlexAttention.Config(),
-        mask_type="block_causal",
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -376,6 +375,8 @@ def _debugmodel_flex_attn() -> DeepSeekV3Model.Config:
         ),
         layers=layers,
     )
+
+
 def _236b(
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
