@@ -76,6 +76,14 @@ def apply_fsdp(
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
+
+    Args:
+        model (nn.Module): The model to apply data parallelism to.
+        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+        param_dtype (torch.dtype): The data type to use for model parameters.
+        reduce_dtype (torch.dtype): The data type to use for reduction operations.
+        cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
+        enable_symm_mem (bool): Whether to enable symmetric-memory FSDP communication.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
