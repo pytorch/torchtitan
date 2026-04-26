@@ -3,13 +3,11 @@ name: GraphTrainer 8 GPU H100 Integration Tests
 on:
   push:
     branches: [ main ]
-    tags:
-      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [labeled, synchronize]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
@@ -31,7 +29,7 @@ permissions:
 
 jobs:
   build-test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.aws.h100.8
@@ -68,7 +66,11 @@ jobs:
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
 
-        # Run bitwise deterministic guardrail test (includes H100-only hardcoded-hash tests)
+        # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
+        NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep
+
+        # Run bitwise deterministic and SAC peak-memory guardrail tests
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_sac_peak_memory.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

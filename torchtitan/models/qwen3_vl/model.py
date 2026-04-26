@@ -84,7 +84,6 @@ class Qwen3VLModel(Qwen3Model):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
-                # pyrefly: ignore [missing-attribute]
                 n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
@@ -153,7 +152,6 @@ class Qwen3VLModel(Qwen3Model):
         # each frame is treated like an image in the MRoPE code below
         # Temporal position comes from frame ordering in the sequence
         if grid_thw_videos is not None:
-            # pyrefly: ignore [no-matching-overload]
             grid_thw_videos = torch.repeat_interleave(
                 grid_thw_videos, grid_thw_videos[:, 0], dim=0
             )
@@ -226,7 +224,6 @@ class Qwen3VLModel(Qwen3Model):
 
                 # Process [text tokens][vision tokens] pairs within this document
                 pair_cursor = doc_start
-                # pyrefly: ignore [bad-assignment, no-matching-overload]
                 for vision_start in doc_vision_starts:
                     if sample_tokens[vision_start] == image_token_id:
                         # pyrefly: ignore [unsupported-operation]
@@ -329,7 +326,6 @@ class Qwen3VLModel(Qwen3Model):
             mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
             mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
-        # pyrefly: ignore [bad-return]
         return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
 
     def _get_vision_embeds(
@@ -352,7 +348,6 @@ class Qwen3VLModel(Qwen3Model):
         """
         # Cast pixel values (float32 from data pipeline) to match the vision
         # encoder's param_dtype set by FSDP2's MixedPrecisionPolicy
-        # pyrefly: ignore [bad-assignment]
         pixel_values = pixel_values.to(
             self.vision_encoder.patch_embed.proj.weight.dtype
         )
@@ -410,13 +405,9 @@ class Qwen3VLModel(Qwen3Model):
                 f"Vision token ID: {vision_token_id}"
             )
 
-        # pyrefly: ignore [bad-argument-type]
         vision_mask_expanded = vision_mask.unsqueeze(-1).expand_as(inputs_embeds)
-        # pyrefly: ignore [bad-assignment]
         inputs_embeds = inputs_embeds.masked_scatter(
-            # pyrefly: ignore [bad-argument-type]
             vision_mask_expanded,
-            # pyrefly: ignore [bad-argument-type]
             vision_embeds,
         )
         return inputs_embeds, True
@@ -453,6 +444,13 @@ class Qwen3VLModel(Qwen3Model):
                 f"DeepStack size mismatch: {num_mask_positions} vision mask positions "
                 f"but {num_vision_embeds} vision embeddings."
             )
+
+        # TODO(@shuhuayu): Replace boolean indexing with DTensor-compatible ops
+        # so this clone() is no longer needed.
+        # clone() is needed because hidden_states may be a view (from
+        # PrepareModuleInputOutput's to_local()) and the in-place boolean
+        # scatter below conflicts with autograd's custom backward on views.
+        hidden_states = hidden_states.clone()
 
         hidden_states[vision_pos_masks] = (
             hidden_states[vision_pos_masks] + vision_embeds
@@ -552,7 +550,6 @@ class Qwen3VLModel(Qwen3Model):
             vision_pos_masks = video_mask
             deepstack_vision_embeds = deepstack_video_embeds
 
-        # pyrefly: ignore [bad-return]
         return inputs_embeds, vision_pos_masks, deepstack_vision_embeds
 
     def forward(  # pyrefly: ignore [bad-override, bad-param-name-override]

@@ -8,8 +8,7 @@ This directory contains code for RL training using TorchTitan model definitions 
 The integration consists of the following components:
 
 1. **vLLM Model Wrapper** (`models/vllm_wrapper.py`): Adapts TorchTitan models for vLLM's inference engine
-2. **RL Training Loop** (`simple_grpo_sum_digits.py`): GRPO-based RL training with Monarch actors
-3. **Inference Script** (`inference_example.py`): Standalone inference using the vLLM engine
+2. **RL Training Loop** (`grpo.py`): GRPO-based RL training with Monarch actors (single-turn only for now)
 
 
 ## Key features available
@@ -71,16 +70,9 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torch
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
-7. Run inference with torchtitan model definition:
+7. Run simple GRPO RL loop to learn sum digits task. This also serves as an end-to-end smoke test that your environment is set up correctly.
 ```bash
-torchrun --nproc_per_node=4 torchtitan/experiments/rl/inference_example.py
-```
-
-**NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
-
-8. Run simple GRPO RL loop to learn sum digits task
-```bash
-python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config rl_grpo_qwen3_0_6b
+python torchtitan/experiments/rl/grpo.py --module rl --config rl_grpo_qwen3_0_6b
 ```
 
 **NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.
@@ -97,7 +89,7 @@ Batch-invariant mode guarantees that a model's output for a given input is **ide
 
 When enabled, batch-invariant mode will:
 - Replaces `mm`, `addmm`, `log_softmax`, and `mean.dim` with Triton kernels that use a fixed tile iteration order (via [batch_invariant_ops](https://github.com/thinking-machines-lab/batch_invariant_ops))
-- Forces NCCL to use Ring all-reduce with a single channel for deterministic inter-GPU collectives
+- Forces deterministic NCCL collectives (single channel, simple protocol, tree allreduce) matching vLLM's settings
 - Disables reduced-precision reductions and TF32 to prevent batch-size-dependent rounding
 - Forces `num_splits=1` in flash attention to prevent non-deterministic split-k reductions
 
@@ -108,7 +100,7 @@ If you want to run true on-policy mode in TorchTitan RL and debug generator/trai
 Now we only support logprob bitwise parity when trainer and generator are under the same parallelism.
 Example:
 ```bash
-python torchtitan/experiments/rl/simple_grpo_sum_digits.py --module rl --config  rl_grpo_qwen3_0_6b_batch_invariant
+python torchtitan/experiments/rl/grpo.py --module rl --config  rl_grpo_qwen3_0_6b_batch_invariant
 ```
 
 This config sets `DebugConfig(batch_invariant=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).

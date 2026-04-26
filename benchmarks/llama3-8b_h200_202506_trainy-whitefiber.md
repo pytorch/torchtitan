@@ -33,7 +33,7 @@ Runs were invoked with the following, where `NUM_NODES` was `4` and `8`.
     --quantize.linear.float8.enable_fsdp_float8_all_gather \
     --quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp \
     --quantize.linear.float8.force_recompute_fp8_weight_in_bwd \
-    --profiling.profile_freq 1000000
+    --profiler.profile_freq 1000000
     --training.steps 2000
 ```
 

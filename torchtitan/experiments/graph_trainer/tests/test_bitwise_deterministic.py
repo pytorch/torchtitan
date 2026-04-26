@@ -14,6 +14,7 @@ Requires a CUDA GPU. Run with:
 """
 
 import copy
+import tempfile
 import unittest
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -22,10 +23,10 @@ import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
+from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
@@ -36,7 +37,11 @@ from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
 from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
+from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
+    build_minimal_trainer,
+)
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
@@ -57,42 +62,6 @@ def _set_deterministic(seed: int = SEED) -> None:
 _TOKENIZER_PATH = "./tests/assets/tokenizer"
 
 
-def _build_trainer(
-    model: nn.Module,
-    model_config,
-    trainer_cls: type,
-    *,
-    enable_passes: bool = True,
-) -> Trainer:
-    """Build a minimal Trainer/GraphTrainer for single-GPU non-distributed testing.
-
-    Uses object.__new__ to bypass __init__ because the full Trainer constructor
-    requires a distributed environment, job config, and checkpoint manager that
-    are unnecessary for single-GPU numerical verification. The attributes set
-    below are the minimal set required by forward_backward_step().
-    """
-    trainer = object.__new__(trainer_cls)
-    trainer.model_parts = [model]
-    trainer.loss_fn = cross_entropy_loss
-    trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context(False)
-    trainer.model_config = model_config
-    trainer.device = torch.device("cuda")
-    trainer.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-
-    if trainer_cls is GraphTrainer:
-        trainer.config = SimpleNamespace(
-            compile=SimpleNamespace(
-                mode="aot_fx_trace",
-                enable_passes=enable_passes,
-            )
-        )
-        trainer._fwd_bwd_step_module = None
-        trainer._traced_step = None
-
-    return trainer
-
-
 @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
 class BitwiseDeterministicBase(unittest.TestCase):
     """Base class for bitwise determinism tests.
@@ -103,12 +72,28 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_registry: Callable
     annotate_model: Callable
     model_flavor: str
+    attn_backend: str = "sdpa"
 
     def setUp(self):
-        if not hasattr(self, "model_registry"):
-            self.skipTest("Base class")
+        # Disable max_autotune for FlexAttention to ensure bitwise-identical
+        # results between eager (torch.compile) and traced (regional_inductor)
+        # paths. max_autotune causes kernel config divergence between the two.
+        self._orig_inductor_configs = FlexAttention.inductor_configs
+        self._orig_compiled_flex_attn = FlexAttention._compiled_flex_attn
+        FlexAttention.inductor_configs = {
+            **self._orig_inductor_configs,
+            "max_autotune": False,
+            "coordinate_descent_tuning": False,
+        }
+        FlexAttention._compiled_flex_attn = torch.compile(
+            flex_attention,
+            options=FlexAttention.inductor_configs,
+        )
+
         _set_deterministic()
-        model_spec = self.model_registry(self.model_flavor)
+        model_spec = self.model_registry(
+            self.model_flavor, attn_backend=self.attn_backend
+        )
         self.model_config = model_spec.model
         vocab_size = self.model_config.vocab_size
         with torch.device("meta"):
@@ -122,7 +107,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.labels = torch.randint(0, vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
 
     def tearDown(self):
-        pass
+        FlexAttention.inductor_configs = self._orig_inductor_configs
+        FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
     def _run_steps(
         self, model: nn.Module, trainer_cls: type, *, enable_passes: bool = True
@@ -131,8 +117,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Annotate after deepcopy: annotate_fn wrappers capture bound methods
         # that don't rebind correctly through copy.deepcopy.
         self.annotate_model(model)
-        trainer = _build_trainer(
-            model, self.model_config, trainer_cls, enable_passes=enable_passes
+        trainer = build_minimal_trainer(
+            model,
+            self.model_config,
+            trainer_cls,
+            compile_enable_passes=enable_passes,
+            tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         )
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -146,6 +136,115 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 labels=self.labels,
                 global_valid_tokens=global_valid_tokens,
             )
+            optimizer.step()
+
+        return loss.detach().clone(), hash_model(model), hash_gradient(model)
+
+    def _run_steps_with_precompile(
+        self, model: nn.Module, *, enable_passes: bool = True
+    ) -> tuple[torch.Tensor, str, str]:
+        """Run steps using the precompile save/load path.
+
+        Traces the model, saves the FX graph artifact to a temp dir,
+        loads it back, then runs forward-backward-optimizer steps using
+        the loaded artifact — identical to what happens during
+        torchrun training with --compile.precompile_artifact_dir.
+        """
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            run_traced_train_step,
+            trace_train_step,
+        )
+        from torchtitan.experiments.graph_trainer.passes import (
+            apply_graph_passes,
+            compile_time_passes,
+            construct_default_graph_passes,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_fx_trace_load,
+            precompile_fx_trace_save,
+        )
+        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+        from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
+
+        self.annotate_model(model)
+        loss_fn = cross_entropy_loss
+        fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+
+        global_valid_tokens = torch.tensor(
+            BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
+        )
+        extra_inputs: dict[str, torch.Tensor] = {}
+        extra_kwargs: dict[str, torch.Tensor] = {}
+
+        # Step 1: Trace the graph
+        traced_result = trace_train_step(fwd_bwd_fn)(
+            model,
+            self.inputs,
+            self.labels,
+            global_valid_tokens,
+            extra_inputs,
+            extra_kwargs,
+        )
+
+        # Step 2: Apply compile-time passes (cleanup + regional_inductor)
+        # before saving, so compiled Triton kernels are baked in
+        if enable_passes:
+            config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(memory_policy="default"),
+            )
+            passes = compile_time_passes(traced_result, config)
+            traced_result.gm = apply_graph_passes(
+                traced_result.gm,
+                traced_result.example_inputs,
+                passes,
+            )
+
+        # Step 3: Save and load (serialize/deserialize roundtrip)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            precompile_fx_trace_save(traced_result, storage)
+
+            loaded_result = precompile_fx_trace_load(storage, expected_fingerprint="")
+
+        # Step 4: Apply load-time passes (cudagraph)
+        if enable_passes:
+            load_config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(
+                    precompile_artifact_dir="precompiled",
+                    enable_cudagraph=True,
+                ),
+            )
+            passes = construct_default_graph_passes(loaded_result, load_config)
+            loaded_result.gm = apply_graph_passes(
+                loaded_result.gm,
+                loaded_result.example_inputs,
+                passes,
+            )
+
+        # Step 4: Run training steps using the loaded artifact
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        for _ in range(NUM_STEPS):
+            optimizer.zero_grad()
+            outputs = run_traced_train_step(
+                loaded_result,
+                model,
+                self.inputs,
+                self.labels,
+                global_valid_tokens,
+                extra_inputs,
+                extra_kwargs,
+            )
+            loss = outputs[0]
+            grads = outputs[1:]
+            params = [
+                p
+                for _, p in model.named_parameters(remove_duplicate=False)
+                if p.requires_grad
+            ]
+            for param, grad in zip(params, grads):
+                param.grad = grad
             optimizer.step()
 
         return loss.detach().clone(), hash_model(model), hash_gradient(model)
@@ -190,11 +289,11 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """15134607def7232e128240d553c8ee7021a7edbc2ed44d86e927ba61e490b865""",
+            """22b2fc47c014ae4ff5e51da4d32868f869c08fe847772a54ba9931f6a8f7c198""",
         )
         assert_expected_inline(
             grad_hash,
-            """66bbbbc98b4c1635e42a133ac1fbd499a2b8633ca879f4121cf206708c21dbdf""",
+            """a40e4a743e8b631f713fa1b0e8008c548b8723a5a9be43e94de8ba3e09d0b689""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -203,6 +302,24 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        _set_deterministic()
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        _set_deterministic()
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_precompile_vs_eager(self):
+        """Precompiled aot_fx_trace produces bitwise identical results to eager."""
+        _set_deterministic()
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        _set_deterministic()
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_eager, run_precompile, "eager vs precompile: ")
 
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
@@ -240,12 +357,25 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        _set_deterministic()
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        _set_deterministic()
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
-# TODO: max_autotune=True causes multiple issues for FlexAttn bitwise tests:
-# kernel config divergence between eager and traced paths, and triton shared
-# memory OOMs for large head dims (DSv3). Investigate after stabilizing
-# max_autotune with regional_inductor.
-@unittest.skip("max_autotune breaks FlexAttn bitwise tests")
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_precompile_vs_eager(self):
+        """Precompiled aot_fx_trace produces bitwise identical results to eager."""
+        _set_deterministic()
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        _set_deterministic()
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_eager, run_precompile, "eager vs precompile: ")
+
+
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
@@ -254,7 +384,8 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(llama3_model_registry)
-    model_flavor = "debugmodel_flex_attn"
+    model_flavor = "debugmodel"
+    attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
 
     @unittest.skipUnless(
@@ -271,11 +402,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """714c6b36b72327f2f11da003a219b6ff84f83e785464133f729e4f82c1913232""",
+            """ebf72718629a5feccaf49bce350f954cc791d8f186b42068b6ce7487db6444bb""",
         )
         assert_expected_inline(
             grad_hash,
-            """2eb6e999ebe213e69f8e85ecabea46ab59be81f0981847c7c8e69765be0d6678""",
+            """b24229db4f090d65088fd3fe9159f82258cfecc17d412eab8662334a3da7c74c""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -285,7 +416,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
-@unittest.skip("max_autotune breaks FlexAttn bitwise tests")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
@@ -294,7 +424,8 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(dsv3_model_registry)
-    model_flavor = "debugmodel_flex_attn"
+    model_flavor = "debugmodel"
+    attn_backend = "flex"
     annotate_model = staticmethod(annotate_deepseekv3)
 
     @unittest.skipUnless(
@@ -311,11 +442,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """09bb71bafdd888cf46c5f5c7ccddb5441266f843f9a2255d1569121613035be9""",
+            """2dcc779af7bc5aeae2d39eff3898180a8156549b2f1582d77e8db237689e0c67""",
         )
         assert_expected_inline(
             grad_hash,
-            """8bb6e647c3edaa229cc65872086ccc5c4e1b7f1647bb01da4506ab777a64a0db""",
+            """b3f5b911dea6c9d36f508b08300220d7f39f142a7c34a49b7ef2543abb2065dc""",
         )
 
     # TODO: OOMs during flex_attention compilation on A100 GPUs.
