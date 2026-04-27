@@ -319,7 +319,7 @@ def _precompile_aot_fx_trace(
     )
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
-    loss_fn = model_spec.build_loss_fn(compile_config, parallel_dims=parallel_dims)
+    loss_fn = config.loss.build(compile_config=compile_config)
 
     fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
 
