@@ -9,11 +9,12 @@ import unittest
 
 from copy import deepcopy
 
+import torch
 from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import ChatDataset
+from torchtitan.hf_datasets.text_datasets import ChatDataLoader, ChatDataset
 
 # Path to the test tokenizer and fixture data
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -313,19 +314,19 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
         self.assertEqual(state["epoch"], 0)
 
         # Restore and verify the dataset can produce valid packed batches
-        chat_ds2 = ChatDataset(
+        chat_ds_resumed = ChatDataset(
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=seq_len,
             infinite=False,
         )
-        chat_ds2.load_state_dict(state)
+        chat_ds_resumed.load_state_dict(state)
 
-        self.assertEqual(chat_ds2._sample_idx, state["sample_idx"])
-        self.assertEqual(chat_ds2._epoch, state["epoch"])
+        self.assertEqual(chat_ds_resumed._sample_idx, state["sample_idx"])
+        self.assertEqual(chat_ds_resumed._epoch, state["epoch"])
 
-        remaining = list(chat_ds2)
+        remaining = list(chat_ds_resumed)
         self.assertGreater(len(remaining), 0, "Restored dataset should produce batches")
         for batch, labels in remaining:
             self.assertEqual(batch["input"].shape[0], seq_len)
@@ -333,41 +334,68 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             self.assertEqual(labels.shape[0], seq_len)
 
     def test_yield_same_data_multi_epoch(self):
-        tokenizer = _load_tokenizer()
-        ds = _load_dataset()
-        seq_len = 128
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=seq_len,
-            infinite=True,
-        )
-
-        # Consume at least 2 epochs
-        it = iter(chat_ds)
-        for i in range(25):
-            next(it)
-
-        state = deepcopy(chat_ds.state_dict())
-
-        # Restore
-        chat_ds2 = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=seq_len,
-            infinite=True,
-        )
-        chat_ds2.load_state_dict(state)
-
-        # verify yield gives same input data
-        # test assertion seveal times in order to empty potential input buffer.
-        it2 = iter(chat_ds2)
-        for _ in range(10):
-            self.assertEqual(
-                next(it)[0]["input"].tolist(), next(it2)[0]["input"].tolist()
+        def _build_dataloader(streaming, batch_size, seq_len, world_size, rank):
+            tokenizer_config = HuggingFaceTokenizer.Config()
+            dl_config = ChatDataLoader.Config(
+                dataset_path="json",
+                load_dataset_kwargs={
+                    "data_files": _DATA_PATH,
+                    "split": "train",
+                    "streaming": streaming,
+                },
+                sample_processor=_process_sample,
+                infinite=True,
             )
+
+            return dl_config.build(
+                dp_world_size=world_size,
+                dp_rank=rank,
+                tokenizer=tokenizer_config.build(tokenizer_path=_TOKENIZER_PATH),
+                seq_len=seq_len,
+                local_batch_size=batch_size,
+            )
+
+        for streaming in [True, False]:
+            for world_size in [2, 4]:
+                for rank in range(world_size):
+                    batch_size = 1
+                    seq_len = 128
+                    dl = _build_dataloader(
+                        streaming, batch_size, seq_len, world_size, rank
+                    )
+
+                    # Consume at least 2 epochs
+                    it = iter(dl)
+                    for _ in range(8):
+                        next(it)
+
+                    state = deepcopy(dl.state_dict())
+                    # Restore
+                    dl_resumed = _build_dataloader(
+                        streaming, batch_size, seq_len, world_size, rank
+                    )
+                    dl_resumed.load_state_dict(state)
+                    # verify yield gives same input data
+                    # test assertion seveal times in order to empty potential input buffer.
+                    it_resumed = iter(dl_resumed)
+
+                    expected, expected_labels = next(it)
+                    input_ids, labels = next(it_resumed)
+                    for _ in range(3):
+                        expected_input_ids, expected_labels = next(it)
+                        input_ids, labels = next(it_resumed)
+                        assert torch.equal(
+                            input_ids["input"], expected_input_ids["input"]
+                        )
+                        assert torch.equal(
+                            input_ids["positions"],
+                            expected_input_ids["positions"],
+                        )
+                        assert torch.equal(labels, expected_labels)
+                        self.assertEqual(
+                            next(it)[0]["input"].tolist(),
+                            next(it_resumed)[0]["input"].tolist(),
+                        )
 
 
 class TestChatDatasetInfiniteLooping(unittest.TestCase):

@@ -97,6 +97,10 @@ class Qwen3Model(Decoder):
             # passes a minimal trainer_config containing only ``parallelism``
             # (no RoPE cache extension at this stage; no MoE force-load-balance
             # at inference time).
+
+            # TODO: This method is used by more than just training. We should
+            # refactor this method such that the logic and naming are meaningful
+            # for both training and RL use cases.
             training = getattr(trainer_config, "training", None)
             debug = getattr(trainer_config, "debug", None)
 
