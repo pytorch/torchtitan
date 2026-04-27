@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -153,6 +154,25 @@ def _apply_non_moe_tp_to_decoder(
             device_mesh=tp_mesh,
             # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
+        )
+
+        # qwen3_vl is not yet migrated to config-based sharding, so the
+        # inner_attention's forward is not auto-wrapped by Module.parallelize.
+        # The other TP layers above use ``use_local_output=False``, so q/k/v
+        # arrive at the kernel as TP DTensors. Wrap forward with ``local_map``
+        # to convert to local before the FlexAttention/SDPA/Varlen kernel and
+        # back to DTensor afterwards. q/k/v are (bs, seq, heads, head_dim) with
+        # heads sharded on TP -> Shard(2).
+        # pyrefly: ignore [missing-attribute]
+        inner_attn = transformer_block.attention.inner_attention
+        qkv_placements = (Shard(2),)
+        inner_attn.forward = local_map(
+            inner_attn.forward,
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,),
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+            device_mesh=tp_mesh,
+            redistribute_inputs=True,
         )
 
     if enable_async_tp:
