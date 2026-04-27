@@ -10,8 +10,6 @@ from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Shard
-from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -45,7 +43,6 @@ __all__ = [
     "BaseQKVLinear",
     "FusedQKVLinear",
     "GQAttention",
-    "LocalMapInnerAttention",
     "QKVLinear",
     "ScaledDotProductAttention",
     "VarlenAttention",
@@ -74,94 +71,13 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-class LocalMapInnerAttention(Module):
-    """Base class for inner attention with DTensor support.
-
-    When q, k, v are DTensors (e.g., from TP with ``use_local_output=False``),
-    overrides ``__call__`` to wrap ``nn.Module.__call__`` with ``local_map``.
-    This converts TP DTensors to local **before** any ``forward_pre_hook``
-    (e.g., CP's ``sdpa_input_fn``) fires, and wraps outputs back to TP
-    DTensors **after** all ``forward_hook``s complete.
-
-    Placements and device mesh are inferred from the input DTensors.
-    """
-
+class VarlenAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         pass
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self._local_map_fn: Callable | None = None
-
-    def __call__(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        if isinstance(q, DTensor):
-            assert isinstance(k, DTensor) and isinstance(
-                v, DTensor
-            ), "q, k, v should all be DTensors"
-            # All placements must be Shard. We set
-            # out_placements and in_grad_placements equal to
-            # in_placements below. This is only valid for attention
-            # as qkv are sharded on the n_heads dim. CP is handled
-            # independently by _ContextParallel hooks inside
-            # nn.Module.__call__.
-            assert q.placements == k.placements == v.placements, (
-                f"q, k, v must have the same placements, "
-                f"but got q={q.placements}, k={k.placements}, v={v.placements}"
-            )
-            for i, p in enumerate(q.placements):
-                assert isinstance(p, Shard), (
-                    f"LocalMapInnerAttention requires Shard placements "
-                    f"(n_heads dim), but got {p} at position {i}"
-                )
-            # Ensure all Shard placements use the same tensor dim
-            # pyrefly: ignore [missing-attribute]
-            shard_dims = {p.dim for p in q.placements}
-            assert len(shard_dims) == 1, (
-                f"All Shard placements must shard on the same dim, "
-                f"but got dims {shard_dims}"
-            )
-            # return_lse=True (e.g. gpt_oss attention sinks) produces
-            # 2 outputs instead of 1, requiring different out_placements.
-            return_lse = kwargs.get("return_lse", False)
-            out_placements = (
-                (q.placements, q.placements) if return_lse else (q.placements,)
-            )
-            if self._local_map_fn is None:
-                self._local_map_fn = local_map(
-                    super().__call__,
-                    in_placements=(q.placements, k.placements, v.placements),
-                    out_placements=out_placements,
-                    in_grad_placements=(q.placements, k.placements, v.placements),
-                    device_mesh=q.device_mesh,
-                )
-            # pyrefly: ignore [bad-argument-count]
-            return self._local_map_fn(q, k, v, **kwargs)
-        return super().__call__(q, k, v, **kwargs)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-
-class VarlenAttention(LocalMapInnerAttention):
-    @dataclass(kw_only=True, slots=True)
-    class Config(LocalMapInnerAttention.Config):
-        pass
-
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
 
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -170,7 +86,6 @@ class VarlenAttention(LocalMapInnerAttention):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
 
-    # pyrefly: ignore [bad-param-name-override, bad-override]
     def forward(
         self,
         xq: torch.Tensor,
@@ -246,7 +161,7 @@ class VarlenAttention(LocalMapInnerAttention):
         return out.to(xq.dtype)
 
 
-class FlexAttention(LocalMapInnerAttention):
+class FlexAttention(Module):
     """Inner attention using ``flex_attention`` with torch.compile and CP support.
 
     Each backend handles its own layout transpose: ``forward()`` transposes from
@@ -259,7 +174,7 @@ class FlexAttention(LocalMapInnerAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalMapInnerAttention.Config):
+    class Config(Module.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
@@ -286,10 +201,9 @@ class FlexAttention(LocalMapInnerAttention):
     )
 
     def __init__(self, config: Config) -> None:
-        super().__init__(config)
+        super().__init__()
         self.kernel_options = config.kernel_options
 
-    # pyrefly: ignore [bad-override]
     def forward(
         self,
         q: torch.Tensor,
@@ -331,7 +245,7 @@ class FlexAttention(LocalMapInnerAttention):
         return out.transpose(1, 2)
 
 
-class ScaledDotProductAttention(LocalMapInnerAttention):
+class ScaledDotProductAttention(Module):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
     Each backend handles its own layout transpose: ``forward()`` transposes from
@@ -344,7 +258,7 @@ class ScaledDotProductAttention(LocalMapInnerAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalMapInnerAttention.Config):
+    class Config(Module.Config):
         pass
 
     sdpa_backends: list[SDPBackend] = []
@@ -352,12 +266,11 @@ class ScaledDotProductAttention(LocalMapInnerAttention):
     def __init__(self, config: Config) -> None:
         if config is None:
             config = ScaledDotProductAttention.Config()
-        super().__init__(config)
+        super().__init__()
         if not self.sdpa_backends:
             self.sdpa_backends = [
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
-                SDPBackend.MATH,
             ]
 
     def forward(
@@ -549,13 +462,13 @@ class BaseAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
-        inner_attention: LocalMapInnerAttention.Config
+        inner_attention: Module.Config
         mask_type: str
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
-            assert isinstance(self.inner_attention, LocalMapInnerAttention.Config), (
-                f"inner_attention must be a LocalMapInnerAttention.Config, "
+            assert isinstance(self.inner_attention, Module.Config), (
+                f"inner_attention must be a Module.Config, "
                 f"got {type(self.inner_attention)}"
             )
             assert self.mask_type in [
@@ -688,7 +601,7 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
-        inner_attention: LocalMapInnerAttention.Config
+        inner_attention: Module.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
 

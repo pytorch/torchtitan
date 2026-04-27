@@ -245,6 +245,11 @@ class PolicyTrainer(Actor, Configurable):
             model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
 
+        # Fill sharding configs on the config BEFORE build via the
+        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
+        # ``torchtitan.Trainer``'s call, so we invoke it directly).
+        model_spec.model.update_from_config(trainer_config=config)
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
