@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -24,6 +25,7 @@ from . import model_registry
 
 def llama4_debugmodel() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
@@ -64,6 +66,7 @@ def llama4_debugmodel_ep() -> Trainer.Config:
 
 def llama4_debugmodel_fp8() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel", moe_comm_backend="torchao"),
@@ -102,6 +105,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
 
 def llama4_17bx128e() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-4-Maverick-17B-128E",
         model_spec=model_registry("17bx128e"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -130,6 +134,7 @@ def llama4_17bx128e() -> Trainer.Config:
 
 def llama4_17bx16e() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-4-Scout-17B-16E",
         model_spec=model_registry("17bx16e"),
         dataloader=HuggingFaceTextDataLoader.Config(

@@ -105,6 +105,13 @@ def build_trainer_model(
         distinct_seed_mesh_dims=["pp"],
     )
 
+    # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
+    # parallelism-driven config mutations) on the model config BEFORE build,
+    # so each Module is constructed with its ShardingConfig / LocalMapConfig.
+    # Without this the trainer side would run un-parallelized while the vLLM
+    # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
+    model_spec.model.update_from_config(trainer_config=config.trainer)
+
     # Build on meta device, parallelize, then materialize
     with torch.device("meta"):
         with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
