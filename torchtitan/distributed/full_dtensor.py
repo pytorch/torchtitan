@@ -7,7 +7,7 @@
 """Full DTensor infrastructure for SPMD-style parallelization.
 
 When ``parallelism.full_dtensor`` is enabled, all model parameters,
-buffers, and inputs become DTensors on a multi-axis SPMD mesh.
+buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
 FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
 

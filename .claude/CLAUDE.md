@@ -66,13 +66,17 @@ You should NEVER use `--debug.deterministic_warn_only`.
   E.g. if torchao calls it `Float8Linear`, use `Float8Linear` not `Float8Config`.
 - Use `num_` prefix for counts (e.g. `num_expert_groups` not `n_expert_groups`)
   when not directly matching an upstream API.
-- **`axis` for `DeviceMesh`, `dim` for tensors.** In any name we own — variables,
-  parameters, attributes, helpers, comments, docstrings, error messages — use
-  ``axis``/``axes`` for a ``DeviceMesh`` axis and reserve ``dim``/``dimension``
-  for tensor dimensions. The lone exception is when calling into PyTorch
-  upstream API (``DeviceMesh.mesh_dim_names``, ``DataParallelMeshDims``, etc.):
-  match upstream spelling exactly at the call site, then assign into a locally
-  named ``mesh_axis_names`` if the value flows through our code.
+- **`axis` names a specific mesh axis; `dim` is for tensors and mesh shape.**
+  In any name we own — variables, parameters, attributes, helpers, comments,
+  docstrings, error messages — use ``axis``/``axes`` when referring to a
+  specific ``DeviceMesh`` axis (TP axis, ``dp_shard`` axis, the list of axes
+  a spec references). Use ``dim``/``dimensional`` for the mesh's *shape*
+  ("1D mesh", "multi-dimensional SPMD mesh") and for tensor dimensions; bare
+  ``dim`` on its own should refer to a tensor dimension. The exception is
+  when calling into PyTorch upstream APIs (``DeviceMesh.mesh_dim_names``,
+  ``DataParallelMeshDims``, etc.): match the upstream spelling at the call
+  site, then assign into a locally named ``mesh_axis_names`` if the value
+  flows through our code.
 
 ### Code Placement
 - Put code in the **most general applicable location**:
@@ -86,7 +90,7 @@ You should NEVER use `--debug.deterministic_warn_only`.
 - **`ValueError`** for user-facing errors (bad config, invalid input).
 - **`assert`** only for internal invariants that indicate programmer error.
 - Always validate mesh axes, tensor placements, and config values explicitly
-  in distributed code — don't assume a 1-axis mesh or specific placements.
+  in distributed code — don't assume a 1D mesh or specific placements.
 - When a code path silently skips user configuration, **emit a warning**.
 
 ### Parameters and Config

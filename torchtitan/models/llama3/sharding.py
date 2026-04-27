@@ -58,7 +58,7 @@ def _build_inner_attn_local_map_config(full_dtensor: bool) -> LocalMapConfig:
     sequence-sharding on CP while K/V are Replicate so DTensor all-gathers
     them across CP ranks.
 
-    Non-full_dtensor path: parallelize is called with a 1-axis TP mesh, so
+    Non-full_dtensor path: parallelize is called with a 1D TP mesh, so
     declaring only ``{TP: Shard(2)}`` matches (strict resolve iterates
     mesh axes only).
     """

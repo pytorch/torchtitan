@@ -185,7 +185,7 @@ class ParallelDims:
 
         # Full DTensor dense mesh: separate dp_shard and cp axes.
         # The non-full-dtensor path pre-flattens dp_shard*cp into a single
-        # ``fsdp`` axis so FSDP2's 1-axis API works directly. The full DTensor
+        # ``fsdp`` axis so FSDP2's 1D API works directly. The full DTensor
         # path keeps them separate so ``DataParallelMeshDims(shard=("dp_shard",
         # "cp"))`` can declare both as data-parallel while CP activations
         # stay sharded on the distinct ``cp`` axis. The two meshes can't be
