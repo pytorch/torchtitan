@@ -157,7 +157,7 @@ def get_default_transformer_block_buckets(
     return [
         "tok_embeddings",
         *[f"layers.{i}" for i in range(n_layers)],
-        ["norm", "output"],
+        ["norm", "lm_head"],
     ]
 
 
@@ -170,7 +170,7 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     # [TODO](ruisizhang123) add EP support for transformer block bucketing
     module_list = [
         model.tok_embeddings,
-        [model.norm, model.output],
+        [model.norm, model.lm_head],
     ]
     for layer_id, transformer_block in model.layers.items():
         module_list.append(transformer_block)
