@@ -73,11 +73,6 @@ def parallelize_qwen3(
             pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
-    # Skip FSDP, AC, and compile for inference. FSDP is incompatible
-    # with torch.inference_mode() and unnecessary for inference.
-    if inference:
-        return model
-
     if ac_config.mode != "none":
         apply_ac(
             model,
@@ -89,6 +84,11 @@ def parallelize_qwen3(
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model, compile_config)
+
+    # Skip FSDP for inference. FSDP's forward hooks are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if inference:
+        return model
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

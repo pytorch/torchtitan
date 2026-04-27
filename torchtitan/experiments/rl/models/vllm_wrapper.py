@@ -127,6 +127,7 @@ def create_torchtitan_config_from_vllm_config(
         expert_parallel_degree=1,
         expert_tensor_parallel_degree=1,
         disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
+        enable_sequence_parallel=False,
     )
 
     logger.info(
@@ -206,27 +207,38 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
+        # Create ParallelDims and configs from vLLM config at runtime.
+        self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
+            vllm_config
+        )
+
+        # Fill sharding configs on the config BEFORE build so every sub-module
+        # is constructed with its ShardingConfig attached (required by the
+        # declarative model.parallelize() API).
+        # TODO: Refactor update_from_config to accept ParallelismConfig
+        # directly instead of requiring a trainer_config wrapper.
+        from types import SimpleNamespace
+
+        from torchtitan.config import DebugConfig, TrainingConfig
+
+        if hasattr(self.config, "update_from_config"):
+            self.config.update_from_config(
+                trainer_config=SimpleNamespace(
+                    training=TrainingConfig(),
+                    parallelism=parallelism,
+                    debug=DebugConfig(),
+                )
+            )
+
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
 
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
 
-        # Create ParallelDims and configs from vLLM config at runtime.
-        # vLLM config contains the tensor_parallel_size from command-line args
-        # and this will be consistent across all worker processes.
-        self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
-            vllm_config
-        )
-
         # Apply parallelism using the model's own parallelize function.
-        # Pass no-op defaults for training-only args (FSDP, AC, compile)
-        # so the core function skips those features.
-        from torchtitan.config import (
-            ActivationCheckpointConfig,
-            CompileConfig,
-            TrainingConfig,
-        )
+        # AC and compile are explicitly disabled; inference=True skips FSDP.
+        from torchtitan.config import ActivationCheckpointConfig, CompileConfig
         from torchtitan.protocols.model_converter import ModelConvertersContainer
 
         self.parallelize_fn(
@@ -235,8 +247,8 @@ class TorchTitanVLLMModelWrapper(Module):
             training=TrainingConfig(),
             model_converters=ModelConvertersContainer.Config(),
             parallelism=parallelism,
-            compile_config=CompileConfig(),
-            ac_config=ActivationCheckpointConfig(),
+            compile_config=CompileConfig(enable=False),
+            ac_config=ActivationCheckpointConfig(mode="none"),
             dump_folder="",
             inference=True,
         )
@@ -379,6 +391,10 @@ class TorchTitanVLLMModelWrapper(Module):
             )
 
         logits = self.model.lm_head(hidden_states)
+
+        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        if isinstance(logits, DTensor):
+            logits = logits.to_local()
 
         return logits
 
