@@ -183,12 +183,12 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
         )
 
-        # Full DTensor dense mesh: separate dp_shard and cp dims.
+        # Full DTensor dense mesh: separate dp_shard and cp axes.
         # The non-full-dtensor path pre-flattens dp_shard*cp into a single
-        # ``fsdp`` dim so FSDP2's 1-D API works directly. The full DTensor
+        # ``fsdp`` axis so FSDP2's 1-axis API works directly. The full DTensor
         # path keeps them separate so ``DataParallelMeshDims(shard=("dp_shard",
         # "cp"))`` can declare both as data-parallel while CP activations
-        # stay sharded on the distinct ``cp`` dim. The two meshes can't be
+        # stay sharded on the distinct ``cp`` axis. The two meshes can't be
         # unified because the ``fsdp`` flatten loses the CP boundary.
         full_dtensor_dense_mesh = unflatten_mesh(
             self._world_mesh,
@@ -288,7 +288,7 @@ class ParallelDims:
         if len(dims) == 1:
             return self._meshes[dims[0]]
 
-        # Multi-dim: cache submesh slices by dim tuple. FSDP2 compares the
+        # Multi-axis: cache submesh slices by axis tuple. FSDP2 compares the
         # param's DTensor mesh and the mesh handed to ``fully_shard`` with
         # object identity, so every consumer must see the same instance.
         key = tuple(dims)
@@ -329,29 +329,29 @@ class ParallelDims:
             )
         return mesh
 
-    def get_module_mesh(self, dims: list[str]) -> DeviceMesh | None:
+    def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Return the mesh a ``Module`` should use for ``distribute_tensor``.
 
         WORKAROUND: bridges ``full_dtensor`` and legacy modes during the
         transition. Once all models support ``full_dtensor`` and the legacy
         path is removed, this method goes away — callers should use
-        ``get_optional_mesh(dims)`` directly.
+        ``get_optional_mesh(axes)`` directly.
 
-        - ``full_dtensor=True``: identical to ``get_optional_mesh(dims)``.
-        - ``full_dtensor=False``: filters ``dims`` to ``{tp, ep, etp}`` first
-          (the dims that participate in ``distribute_tensor`` under the
+        - ``full_dtensor=True``: identical to ``get_optional_mesh(axes)``.
+        - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep, etp}`` first
+          (the axes that participate in ``distribute_tensor`` under the
           legacy path; DP/CP are handled by FSDP / LocalMapConfig
-          out-of-band). Returns ``None`` if no in-band dim remains.
+          out-of-band). Returns ``None`` if no in-band axis remains.
         """
-        # Filter to enabled dims; a config may declare dims that aren't active
+        # Filter to enabled axes; a config may declare axes that aren't active
         # (e.g. dense config declares dp_replicate but the job sets it to 1).
-        dims = [d for d in dims if self.get_optional_mesh(d) is not None]
+        axes = [a for a in axes if self.get_optional_mesh(a) is not None]
         if not self.full_dtensor:
             in_band = {"tp", "ep", "etp"}
-            dims = [d for d in dims if d in in_band]
-        if not dims:
+            axes = [a for a in axes if a in in_band]
+        if not axes:
             return None
-        return self.get_optional_mesh(dims)
+        return self.get_optional_mesh(axes)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.

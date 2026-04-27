@@ -7,8 +7,8 @@
 """Full DTensor infrastructure for SPMD-style parallelization.
 
 When ``parallelism.full_dtensor`` is enabled, all model parameters,
-buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
-FSDP uses ``DataParallelMeshDims`` to identify which mesh dimensions
+buffers, and inputs become DTensors on a multi-axis SPMD mesh.
+FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
 
 TP sharding is handled by ``Module.parallelize(spmd_mesh)`` using
@@ -60,22 +60,24 @@ def validate_config(
                 )
 
 
-def get_dp_mesh_dims(parallel_dims: ParallelDims) -> DataParallelMeshDims:
-    """Build DataParallelMeshDims for dense (non-MoE) parameters.
+def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
+    """Build ``DataParallelMeshDims`` for dense (non-MoE) parameters.
 
-    Uses ``dp_shard`` and ``cp`` as separate shard dimensions rather than
-    the flattened ``fsdp`` from the non-full-dtensor path.
+    Uses ``dp_shard`` and ``cp`` as separate shard axes rather than
+    the flattened ``fsdp`` axis from the non-full-dtensor path. The
+    return type still spells ``Dims`` because that's the upstream class
+    name; everything we own here uses ``axes``.
     """
-    shard_dims: list[str] = []
+    shard_axes: list[str] = []
     if parallel_dims.dp_shard_enabled:
-        shard_dims.append("dp_shard")
+        shard_axes.append("dp_shard")
     if parallel_dims.cp_enabled:
-        shard_dims.append("cp")
+        shard_axes.append("cp")
 
-    if len(shard_dims) > 1:
-        shard: str | tuple[str, ...] | None = tuple(shard_dims)
-    elif shard_dims:
-        shard = shard_dims[0]
+    if len(shard_axes) > 1:
+        shard: str | tuple[str, ...] | None = tuple(shard_axes)
+    elif shard_axes:
+        shard = shard_axes[0]
     else:
         shard = None
 
@@ -86,12 +88,12 @@ def get_dp_mesh_dims(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     return DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
-def _dense_spmd_dims(parallel_dims: ParallelDims) -> list[str]:
-    """Canonical dense SPMD dim list, intersected with enabled dims."""
+def _dense_spmd_axes(parallel_dims: ParallelDims) -> list[str]:
+    """Canonical dense SPMD axis list, intersected with enabled axes."""
     return [
-        d
-        for d in ("dp_replicate", "dp_shard", "cp", "tp")
-        if parallel_dims.get_optional_mesh(d) is not None
+        a
+        for a in ("dp_replicate", "dp_shard", "cp", "tp")
+        if parallel_dims.get_optional_mesh(a) is not None
     ]
 
 
@@ -106,13 +108,13 @@ def resolve_fsdp_mesh(
     In standard mode, returns the conventional dp_mesh and None.
     """
     if full_dtensor:
-        spmd_mesh = parallel_dims.get_optional_mesh(_dense_spmd_dims(parallel_dims))
+        spmd_mesh = parallel_dims.get_optional_mesh(_dense_spmd_axes(parallel_dims))
         assert spmd_mesh is not None, (
             "full_dtensor requires at least one of dp_replicate, "
             "dp_shard, cp, tp to be enabled."
         )
-        dp_mesh_dims = get_dp_mesh_dims(parallel_dims)
-        return spmd_mesh, dp_mesh_dims
+        dp_mesh_axes = get_dp_mesh_axes(parallel_dims)
+        return spmd_mesh, dp_mesh_axes
     else:
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -128,11 +130,11 @@ def parallelize_inputs(
 ) -> tuple[DTensor, DTensor]:
     """Convert inputs, labels, and extra kwargs to DTensors on the SPMD mesh.
 
-    DP dims get Shard(0) (batch), CP gets Shard(1) (sequence), TP gets Replicate.
+    DP axes get Shard(0) (batch), CP gets Shard(1) (sequence), TP gets Replicate.
     Tensor values in extra_kwargs (e.g. positions) use the same placements.
     """
-    mesh = parallel_dims.get_optional_mesh(_dense_spmd_dims(parallel_dims))
-    assert mesh is not None, "parallelize_inputs requires an enabled spmd dim"
+    mesh = parallel_dims.get_optional_mesh(_dense_spmd_axes(parallel_dims))
+    assert mesh is not None, "parallelize_inputs requires an enabled spmd axis"
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))

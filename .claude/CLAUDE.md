@@ -66,6 +66,13 @@ You should NEVER use `--debug.deterministic_warn_only`.
   E.g. if torchao calls it `Float8Linear`, use `Float8Linear` not `Float8Config`.
 - Use `num_` prefix for counts (e.g. `num_expert_groups` not `n_expert_groups`)
   when not directly matching an upstream API.
+- **`axis` for `DeviceMesh`, `dim` for tensors.** In any name we own — variables,
+  parameters, attributes, helpers, comments, docstrings, error messages — use
+  ``axis``/``axes`` for a ``DeviceMesh`` axis and reserve ``dim``/``dimension``
+  for tensor dimensions. The lone exception is when calling into PyTorch
+  upstream API (``DeviceMesh.mesh_dim_names``, ``DataParallelMeshDims``, etc.):
+  match upstream spelling exactly at the call site, then assign into a locally
+  named ``mesh_axis_names`` if the value flows through our code.
 
 ### Code Placement
 - Put code in the **most general applicable location**:
@@ -78,8 +85,8 @@ You should NEVER use `--debug.deterministic_warn_only`.
 ### Assertions and Error Handling
 - **`ValueError`** for user-facing errors (bad config, invalid input).
 - **`assert`** only for internal invariants that indicate programmer error.
-- Always validate mesh dimensions, tensor placements, and config values explicitly
-  in distributed code — don't assume 1D mesh or specific placements.
+- Always validate mesh axes, tensor placements, and config values explicitly
+  in distributed code — don't assume a 1-axis mesh or specific placements.
 - When a code path silently skips user configuration, **emit a warning**.
 
 ### Parameters and Config

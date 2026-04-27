@@ -15,12 +15,8 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
-from torchtitan.protocols.sharding import (
-    LocalMapConfig,
-    MeshDimName,
-    NamedPlacement,
-    ShardingConfig,
-)
+from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
@@ -37,7 +33,7 @@ def set_llama3_sharding_config(
 
     Specs are populated unconditionally — the mesh actually passed to
     ``Module.parallelize()`` at runtime determines which declarations
-    apply. Declarations for mesh dims that aren't enabled (e.g. ``TP``
+    apply. Declarations for mesh axes that aren't enabled (e.g. ``TP``
     placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
@@ -57,14 +53,14 @@ def set_llama3_sharding_config(
 def _build_inner_attn_local_map_config(full_dtensor: bool) -> LocalMapConfig:
     """Build LocalMapConfig for inner attention.
 
-    q/k/v are (bs, seq, heads, head_dim). TP shards on heads (dim 2).
-    Under full DTensor: q/k/v are batch-sharded on DP dims; Q keeps
+    q/k/v are (bs, seq, heads, head_dim). TP shards on heads (tensor dim 2).
+    Under full DTensor: q/k/v are batch-sharded on DP axes; Q keeps
     sequence-sharding on CP while K/V are Replicate so DTensor all-gathers
     them across CP ranks.
 
-    Non-full_dtensor path: parallelize is called with a 1-D TP mesh, so
+    Non-full_dtensor path: parallelize is called with a 1-axis TP mesh, so
     declaring only ``{TP: Shard(2)}`` matches (strict resolve iterates
-    mesh dims only).
+    mesh axes only).
     """
     q: NamedPlacement
     kv: NamedPlacement
@@ -72,8 +68,8 @@ def _build_inner_attn_local_map_config(full_dtensor: bool) -> LocalMapConfig:
         q = dense_activation_placement(tp=Shard(2))
         kv = dense_activation_placement(tp=Shard(2), cp=Replicate())
     else:
-        q = {MeshDimName.TP: Shard(2)}
-        kv = {MeshDimName.TP: Shard(2)}
+        q = {MeshAxisName.TP: Shard(2)}
+        kv = {MeshAxisName.TP: Shard(2)}
 
     return LocalMapConfig(
         in_placements=(q, kv, kv),
@@ -104,7 +100,7 @@ def _set_llama3_layer_sharding(
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
 
     # Inner attention: local_map to convert DTensors to local tensors.
-    # Under full DTensor, placements include DP/CP dims (K/V all-gathered on CP).
+    # Under full DTensor, placements include DP/CP axes (K/V all-gathered on CP).
     layer_cfg.attention.inner_attention.sharding_config = ShardingConfig(
         local_map=_build_inner_attn_local_map_config(full_dtensor),
     )
