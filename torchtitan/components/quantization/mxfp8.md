@@ -66,9 +66,7 @@ model_spec = model_registry(
   * `"mxfp8_rceil"` (default): MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
   * `"mxfp8_cublas"`: Use the cuBLAS-based MXFP8 recipe for best performance on B200 GPUs.
   * `"mxfp8_cublas_rceil"`: Uses round-ceiling mode for scale calculation.
-* `fqns`: List of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations. Any module that matches the FQN will be converted, if it has (1) experts represented as 3d nn.Parameter instances (which is the case for TorchTitan MoEs), and (2) a `torch._grouped_mm` op performs the actual routed expert computation using those 3d expert weights.
-  * You can specify multiple FQNs to target different MoE layers in your model.
-  * If empty, all Linear modules are converted.
+* `fqns` (optional): List of fully qualified names to filter which Linear modules to convert. Only `Linear.Config` entries whose FQN contains a match are swapped to `MXFP8Linear.Config`. If empty, all Linear modules are converted.
 * `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model (required for competitive performance).
 
 **Hardware Requirements:**

@@ -19,15 +19,16 @@ def test_no_float8_by_default():
     model_config = config.model_spec.model
     assert not has_quantization(model_config)
     # All Linear.Config instances should remain Linear.Config
-    for _fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
-        assert not isinstance(lc, Float8Linear.Config)
+    if Float8Linear is not None:
+        for _fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
+            assert not isinstance(lc, Float8Linear.Config)
 
 
 def test_float8_applied_by_model_registry():
     pytest.importorskip("torchao")
     config_manager = ConfigManager()
     config = config_manager.parse_args(
-        ["--module", "llama3", "--config", "llama3_debugmodel_float8"]
+        ["--module", "llama3", "--config", "llama3_debugmodel_float8_emulate"]
     )
     model_config = config.model_spec.model
     assert has_quantization(model_config)
