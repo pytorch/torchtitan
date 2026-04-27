@@ -229,18 +229,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        # build tokenizer
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-
-        # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
-            snapshot_every_n_steps=config.checkpoint.interval * self.gradient_accumulation_steps,
-        )
 
         # build model (using meta init)
         model_config = model_spec.model
@@ -447,6 +435,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        # build tokenizer
+        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+        # build dataloader
+        self.dataloader = config.dataloader.build(
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
+            tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
+            snapshot_every_n_steps=config.checkpoint.interval * self.gradient_accumulation_steps,
+        )
+
+        # build checkpointer
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
