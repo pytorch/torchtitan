@@ -78,7 +78,6 @@ class Float8LinearConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
-    def convert(self, model_config) -> None:
         if Float8Linear is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
@@ -109,9 +108,10 @@ class Float8LinearConverter(QuantizationConverter):
                 "Failed to use Float8 with recipe lookup because the torchao version "
                 "is too old, please install torchao v0.9.0 or later and try again",
             )
+            self.enabled = False
             return
 
-        torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(cfg.recipe_name)
+        self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(cfg.recipe_name)
         logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
 
         # short-term solution for https://github.com/pytorch/pytorch/issues/150859
@@ -131,7 +131,7 @@ class Float8LinearConverter(QuantizationConverter):
                     "with dims too small to benefit from float8 training. "
                     "See docs/float8.md for more info."
                 )
-                filter_fn = _auto_filter_for_recipe(
+                self.filter_fn = _auto_filter_for_recipe(
                     cfg.recipe_name, filter_fqns=clean_fqns
                 )
             except ImportError:
@@ -139,19 +139,24 @@ class Float8LinearConverter(QuantizationConverter):
                     "Using default module_filter_fn for float8 model conversion. "
                     "To use _auto_filter_for_recipe, please install torchao nightly build."
                 )
-                filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
+                self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
         else:
-            filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
+            self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
 
-        # Walk config tree and swap Linear.Config → Float8Linear.Config
+        self.enabled = True
+
+    def convert(self, model_config) -> None:
+        if not self.enabled:
+            return
+
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
-            if filter_fn(linear_config, fqn):
+            if self.filter_fn(linear_config, fqn):
                 new_config = Float8Linear.Config(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
-                    _torchao_config=torchao_config,
+                    _torchao_config=self.torchao_config,
                 )
                 if isinstance(parent, list):
                     parent[attr] = new_config
@@ -174,7 +179,6 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
-    def convert(self, model_config) -> None:
         if find_spec("torchao") is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 MoE training."
@@ -189,6 +193,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 "enable it with --compile.enable"
             )
 
+    def convert(self, model_config) -> None:
         from torchao.prototype.moe_training.config import Float8TrainingOpConfig
         from torchao.quantization.quant_api import quantize_
 

@@ -66,12 +66,12 @@ class MXFP8LinearConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
-    def convert(self, model_config) -> None:
         if find_spec("torchao") is None:
             raise ImportError(
-                "torchao is not installed. Please install it to use MXFP8 quantization."
+                "torchao is not installed. Please install it to use MXFP8 linear layers."
             )
 
+        # Can be removed if we enable the emulated versions
         assert has_cuda_capability(
             10, 0
         ), "MXFP8 is only supported on SM100 or later architectures"
@@ -82,6 +82,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                 "of MXFP8 dynamic quantization."
             )
 
+    def convert(self, model_config) -> None:
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
@@ -121,7 +122,6 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
-    def convert(self, model_config) -> None:
         if find_spec("torchao") is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use MXFP8 MoE training."
@@ -137,6 +137,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
                 "of MXFP8 dynamic quantization."
             )
 
+    def convert(self, model_config) -> None:
         from torchao.prototype.moe_training.config import (
             MXFP8TrainingOpConfig,
             MXFP8TrainingRecipe,
