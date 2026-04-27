@@ -6,7 +6,6 @@
 
 from dataclasses import fields
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.qwen3 import qwen3_configs
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
@@ -34,7 +33,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
     )

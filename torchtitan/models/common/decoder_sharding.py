@@ -223,7 +223,7 @@ def set_decoder_sharding_config(
     )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
-    config.output.sharding_config = ShardingConfig(
+    config.lm_head.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},

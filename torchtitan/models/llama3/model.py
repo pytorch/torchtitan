@@ -136,7 +136,7 @@ class Llama3Model(Decoder):
         self.enable_weight_tying = config.enable_weight_tying
 
         if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.output.weight
+            self.tok_embeddings.weight = self.lm_head.weight
 
     def init_states(
         self,
@@ -147,7 +147,7 @@ class Llama3Model(Decoder):
             # Re-tie weights before parameter init so that tok_embeddings.weight
             # (skipped by skip_param_init) and output.weight point to the same
             # tensor after output is initialized.
-            assert self.tok_embeddings is not None and self.output is not None
-            self.tok_embeddings.weight = self.output.weight
+            assert self.tok_embeddings is not None and self.lm_head is not None
+            self.tok_embeddings.weight = self.lm_head.weight
 
         super().init_states(buffer_device=buffer_device)
