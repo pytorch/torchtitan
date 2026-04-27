@@ -198,17 +198,17 @@ class Module(nn.Module, Configurable):
         if sharding_config is None:
             return
 
-        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named dims"
-        mesh_dim_names = mesh.mesh_dim_names
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+        mesh_axis_names = mesh.mesh_dim_names
 
         # Distribute parameters and buffers per state_shardings. Every sharding_config
-        # must declare a placement for every mesh dim; ``resolve_placements``
+        # must declare a placement for every mesh axis; ``resolve_placements``
         # raises otherwise.
         for name, param in self.named_parameters(recurse=False):
             if name not in sharding_config.state_shardings:
                 continue
             placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_dim_names
+                sharding_config.state_shardings[name], mesh_axis_names
             )
             self.register_parameter(
                 name,
@@ -219,7 +219,7 @@ class Module(nn.Module, Configurable):
             if name not in sharding_config.state_shardings or buffer is None:
                 continue
             placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_dim_names
+                sharding_config.state_shardings[name], mesh_axis_names
             )
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
@@ -238,13 +238,13 @@ class Module(nn.Module, Configurable):
             # current mesh.
             lm = sharding_config.local_map
             in_placements = tuple(
-                resolve_placements(p, mesh_dim_names) for p in lm.in_placements
+                resolve_placements(p, mesh_axis_names) for p in lm.in_placements
             )
             out_placements = tuple(
-                resolve_placements(p, mesh_dim_names) for p in lm.out_placements
+                resolve_placements(p, mesh_axis_names) for p in lm.out_placements
             )
             in_grad_placements = tuple(
-                resolve_placements(p, mesh_dim_names) for p in lm.in_grad_placements
+                resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements
             )
             fn = local_map(
                 fn,
@@ -292,7 +292,7 @@ class Module(nn.Module, Configurable):
         new_kwargs.update(kwargs)
 
         assert mesh.mesh_dim_names is not None
-        mesh_dim_names = mesh.mesh_dim_names
+        mesh_axis_names = mesh.mesh_dim_names
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
 
@@ -302,12 +302,12 @@ class Module(nn.Module, Configurable):
 
             # Step 1: Annotate plain tensor as DTensor using in_src_shardings.
             if not isinstance(value, DTensor) and name in in_src_shardings:
-                layout = resolve_placements(in_src_shardings[name], mesh_dim_names)
+                layout = resolve_placements(in_src_shardings[name], mesh_axis_names)
                 value = DTensor.from_local(value, mesh, layout, run_check=False)
 
             # Step 2: Redistribute to desired placement if needed.
             if name in in_dst_shardings and isinstance(value, DTensor):
-                desired = resolve_placements(in_dst_shardings[name], mesh_dim_names)
+                desired = resolve_placements(in_dst_shardings[name], mesh_axis_names)
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 

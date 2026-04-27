@@ -6,7 +6,8 @@ globs: torchtitan/distributed/**
 # Distributed Code Rules
 
 ## Assert Mesh and Placements Explicitly
-- Never assume a 1D mesh. Always assert on mesh dimensions before using them.
+- Never assume a 1-axis mesh. Always assert on mesh axes before using them.
+  (Use ``axis``/``axes`` for ``DeviceMesh``; reserve ``dim`` for tensors.)
 - Validate tensor placements (Replicate, Shard, Partial) explicitly.
 - When enforcing a field is not None for plain tensor inputs, do so with a clear
   error message.

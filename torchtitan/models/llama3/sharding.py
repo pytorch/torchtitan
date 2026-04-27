@@ -30,7 +30,7 @@ def set_llama3_sharding_config(
 
     Specs are populated unconditionally — the mesh actually passed to
     ``Module.parallelize()`` at runtime determines which declarations
-    apply. Declarations for mesh dims that aren't enabled (e.g. ``TP``
+    apply. Declarations for mesh axes that aren't enabled (e.g. ``TP``
     placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
