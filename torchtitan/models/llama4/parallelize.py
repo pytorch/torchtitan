@@ -12,16 +12,12 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
     parallelize_module,
-    PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
-    SequenceParallel,
 )
 
 from torchtitan.components.quantization import find_pad_multiple
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -32,7 +28,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
@@ -47,8 +43,6 @@ from torchtitan.distributed.tensor_parallel import (
     maybe_enable_async_tp,
     NoParallel,
 )
-from torchtitan.models.common.attention import FusedQKVLinear
-
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
@@ -84,30 +78,19 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+    # runs inside the local_map boundary on local tensors.
+    if parallel_dims.cp_enabled:
+        apply_cp_to_forward(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+        )
+
     tp_mesh = None
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
-        enable_sp = parallelism.enable_sequence_parallel
-
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_non_moe_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_sp=enable_sp,
-        )
+        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     # Check if using DeepEP/HybridEP for MoE communication
@@ -134,13 +117,6 @@ def parallelize_llama(
             comm_backend=comm_backend,
             enable_sp=True,
             pad_multiple=find_pad_multiple(model_converters.converters),
-        )
-
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute, not-callable]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
         )
 
     model_compile_enabled = (
@@ -190,127 +166,6 @@ def parallelize_llama(
         logger.info("Applied CPU Offloading to the model")
 
     return model
-
-
-def apply_non_moe_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    enable_loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
-    enable_sp: bool = True,
-):
-    """Apply tensor parallelism."""
-    # 1. Parallelize the embedding and shard its outputs (which are the first
-    # transformer block's inputs)
-    # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Parallelize the final linear output layer
-    sp_layout = Shard(1) if enable_sp else Replicate()
-    embed_plan = RowwiseParallel(
-        input_layouts=Replicate(),
-        output_layouts=sp_layout,
-        use_local_output=False,
-    )
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": embed_plan,
-            "norm": SequenceParallel(use_local_output=False)
-            if enable_sp
-            else NoParallel(),
-            "output": ColwiseParallel(
-                input_layouts=sp_layout,
-                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
-                use_local_output=not enable_loss_parallel,
-            ),
-        },
-    )
-
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears with tensorwise scaling.
-    if enable_float8_tensorwise_tp:
-        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
-        from torchao.float8.float8_tensor_parallel import (
-            Float8ColwiseParallel,
-            Float8RowwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            Float8RowwiseParallel,
-            Float8ColwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-    else:
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
-            PrepareModuleInput,
-        )
-
-    # Apply tensor + sequence parallelism to every transformer block
-    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
-
-    # Detect whether fused QKV is used by checking the first layer
-    # pyrefly: ignore [not-callable]
-    first_block = next(iter(model.layers.values()))
-    use_fused_qkv = isinstance(
-        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
-        FusedQKVLinear,
-    )
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        if use_fused_qkv:
-            qkv_plan = {
-                "attention.qkv_linear.wqkv": colwise_parallel(use_local_output=False),
-            }
-        else:
-            qkv_plan = {
-                "attention.qkv_linear.wq": colwise_parallel(use_local_output=False),
-                "attention.qkv_linear.wk": colwise_parallel(use_local_output=False),
-                "attention.qkv_linear.wv": colwise_parallel(use_local_output=False),
-            }
-        layer_plan = {
-            "attention_norm": norm_plan,
-            "attention": prepare_module_input(
-                input_layouts=(sp_layout, Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
-            ),
-            **qkv_plan,
-            "attention.wo": rowwise_parallel(
-                output_layouts=sp_layout, use_local_output=False
-            ),
-            "ffn_norm": norm_plan,
-        }
-        # pyrefly: ignore [missing-attribute]
-        if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward": prepare_module_input(
-                        input_layouts=(sp_layout,),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": colwise_parallel(use_local_output=False),
-                    "feed_forward.w2": rowwise_parallel(
-                        output_layouts=sp_layout, use_local_output=False
-                    ),
-                    "feed_forward.w3": colwise_parallel(use_local_output=False),
-                }
-            )
-
-        parallelize_module(
-            # pyrefly: ignore [bad-argument-type]
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
-
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
 
 
 def apply_fsdp(
@@ -567,6 +422,9 @@ def apply_moe_ep_tp(
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
+                    # Keep MoE output as DTensor so the residual add
+                    # ``h + self.moe(...)`` composes with config-based
+                    # attention (which flows DTensors).
                     use_local_output=False,
                 ),
                 # replicate computation for the router
