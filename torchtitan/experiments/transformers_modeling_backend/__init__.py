@@ -39,18 +39,35 @@ class TitanModelConfig:
 
 @dataclass
 class TitanMoeModelConfig(TitanModelConfig):
-    """MoE model config — adds expert parameters to the base config."""
+    """MoE model config — extends the base config with routed-expert parameters."""
 
     num_experts: int = 128
+    """Total number of routed experts in each MoE layer."""
+
     num_experts_per_tok: int = 8
+    """Top-k routing: number of experts each token is dispatched to."""
+
     moe_intermediate_size: int = 768
+    """Hidden dimension of each expert's MLP (per-expert intermediate size)."""
+
     decoder_sparse_step: int = 1
+    """Replace the dense MLP with an MoE block every N decoder layers (1 = every layer is MoE)."""
+
     norm_topk_prob: bool = False
+    """Normalize the top-k routing scores to sum to 1 (HF `norm_topk_prob` convention)."""
+
     num_nextn_predict_layers: int | None = None
-    # Selects the HF experts forward kernel via PretrainedConfig._experts_implementation.
-    # "grouped_mm" is the fused fast path; "eager" is HF's original for-loop
-    # (numerical reference for debugging).
+    """
+    DeepSeek V3-style multi-token prediction: number of MTP heads.
+    None or 0 disables MTP.
+    """
+
     experts_implementation: Literal["grouped_mm", "batched_mm", "eager"] = "grouped_mm"
+    """
+    Selects the HF experts forward kernel via `PretrainedConfig._experts_implementation`.
+    "grouped_mm" is the fused fast path; "eager" is HF's original for-loop
+    (numerical reference for debugging).
+    """
 
 
 flavors = {
@@ -62,9 +79,6 @@ flavors = {
             n_kv_heads=16,
         ),
     ),
-    # NOTE: dim=2048 is the minimum required for models with LoRA attention
-    # (DeepSeek V3 needs q_lora_rank=1536, GLM-5 needs q_lora_rank=2048).
-    # n_heads must be divisible by TP degree and n_kv_heads.
     "debugmodel_moe": HFTransformerModel.Config(
         model_config=TitanMoeModelConfig(
             dim=2048,
