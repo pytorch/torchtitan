@@ -30,6 +30,12 @@ from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
 from torchtitan.models.qwen3 import model_registry
 
 
+# NOTE: All RL configs set disable_loss_parallel=True because:
+# - Trainer: compute_logprobs() calls F.log_softmax over full vocab,
+#   which requires unsharded logits (loss parallel would shard dim=-1).
+# - Generator: vLLM's sampler expects plain tensor logits for sampling.
+
+
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
@@ -51,6 +57,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
@@ -64,8 +71,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -98,6 +107,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
@@ -111,8 +121,10 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -145,6 +157,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
                 disable_loss_parallel=True,
             ),
@@ -158,8 +171,10 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -191,8 +206,10 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
@@ -203,8 +220,10 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -243,6 +262,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             # TODO: replace bfloat16 enablement with FSDP2+TP2
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
@@ -258,8 +278,10 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 cudagraph_mode="piecewise",
             ),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
