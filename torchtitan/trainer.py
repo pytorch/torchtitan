@@ -445,6 +445,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+        self._rank_local_valid_tokens_per_step = 0
 
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
@@ -637,9 +638,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.config.parallelism.context_parallel_load_balancer,
             )
 
-        # Accumulate after CP sharding so labels.numel() reflects the actual
-        # unique tokens this rank processes (not the full pre-split sequence).
+        # Accumulate after CP sharding so counts reflect the actual unique
+        # tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
+        self._rank_local_valid_tokens_per_step += int(
+            (labels != IGNORE_INDEX).sum()
+        )
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -739,6 +743,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = local_valid_tokens.float()
 
         # Process each microbatch: move to GPU, forward/backward, then free
+        self._rank_local_valid_tokens_per_step = 0
         accumulated_losses = []
         for input_dict, labels in microbatches:
             # Move tensors to GPU
@@ -782,11 +787,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
             #                 = sum(loss)
             #
-            # For global_max_loss, we want the max of local average losses across ranks:
-            # local_avg_loss = local_loss_sum / local_valid_tokens
-            #                = (loss * global_valid_tokens) / local_valid_tokens
+            # For global_max_loss, we want the max of all the rank-local average losses.
+            # local_valid_tokens is the pre-CP-sharding count, identical on all ranks in a CP group,
+            # whereas max-loss requires the post-CP-sharding count. This is provided by
+            # _rank_local_valid_tokens_per_step, which is accumulated after CP sharding in
+            # post_dataloading_process:
+            # local_avg_loss = local_loss_sum / rank_local_valid_tokens
+            #                = (loss * global_valid_tokens) / rank_local_valid_tokens
             # global_max_loss = max(local_avg_loss)
-            local_avg_loss = loss * global_valid_tokens / local_valid_tokens
+            rank_local_valid_tokens = torch.tensor(
+                self._rank_local_valid_tokens_per_step,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            # clamp avoids 0/0 when, e.g.,  a CP shard contains only masked tokens (loss=0)
+            local_avg_loss = (
+                loss * global_valid_tokens / rank_local_valid_tokens.clamp(min=1)
+            )
             global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_sum(loss, loss_mesh),
                 dist_utils.dist_max(local_avg_loss, loss_mesh),
