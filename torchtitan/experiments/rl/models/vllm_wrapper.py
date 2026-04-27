@@ -126,7 +126,7 @@ def create_torchtitan_config_from_vllm_config(
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=1,
         expert_tensor_parallel_degree=1,
-        disable_loss_parallel=True,   # vLLM handles sampling and expects plain tensor logits.
+        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
     )
 
     logger.info(
