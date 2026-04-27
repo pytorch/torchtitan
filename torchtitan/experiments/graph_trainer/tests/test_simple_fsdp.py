@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from torchtitan.config.configs import TrainingConfig
+from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 
@@ -50,15 +50,17 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             etp=1,
             world_size=1,
         )
-        training = TrainingConfig(
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
+        parallelism = ParallelismConfig(
+            fsdp_mixed_precision_param="bfloat16",
+            fsdp_mixed_precision_reduce="float32",
         )
 
         model = nn.Linear(8, 8)
         self.assertEqual(model.weight.dtype, torch.float32)
 
-        model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+        model = apply_simple_fsdp(
+            model, parallel_dims=parallel_dims, parallelism=parallelism
+        )
 
         # Parametrization replaces ``weight`` access with a bf16 cast via
         # ``redistribute(forward_dtype=...)``.

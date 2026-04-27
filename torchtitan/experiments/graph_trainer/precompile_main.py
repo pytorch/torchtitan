@@ -43,6 +43,7 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     parallelize_inputs,
     register_blockmask_pytree_node,
@@ -64,7 +65,6 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -168,7 +168,6 @@ def _common_setup(config):
     model = model_spec.parallelize_fn(
         model,
         parallel_dims=parallel_dims,
-        training=config.training,
         parallelism=parallelism,
         compile_config=parallelize_compile_config,
         ac_config=config.activation_checkpoint,

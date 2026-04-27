@@ -13,7 +13,7 @@ from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
@@ -208,7 +208,7 @@ def apply_simple_fsdp(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
+    parallelism: ParallelismConfig,
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
@@ -228,8 +228,8 @@ def apply_simple_fsdp(
 
     dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
     mp_policy = MixedPrecisionPolicy(
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        param_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_reduce],
     )
 
     if parallel_dims.ep_enabled and hasattr(model, "layers"):

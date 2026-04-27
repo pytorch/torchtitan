@@ -10,7 +10,6 @@ from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -53,22 +52,14 @@ def parallelize_deepseekv3(
     model: GraphTrainerDeepSeekV3Model,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
+    compile_config: CompileConfig | None = None,
+    ac_config: ActivationCheckpointConfig | None = None,
+    dump_folder: str = "",
 ):
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
-        """
-
     from torchtitan.models.common.attention import ScaledDotProductAttention
 
     if parallelism.context_parallel_degree > 1 and not isinstance(
@@ -107,7 +98,7 @@ def parallelize_deepseekv3(
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
-    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, parallelism=parallelism)
 
     # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
     # the common HybridEP buffer init into a shared utility.

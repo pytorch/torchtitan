@@ -10,7 +10,6 @@ from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -51,11 +50,10 @@ def parallelize_qwen3(
     model: GraphTrainerQwen3Model,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
+    compile_config: CompileConfig | None = None,
+    ac_config: ActivationCheckpointConfig | None = None,
+    dump_folder: str = "",
 ):
     """
     Apply annotation, parallelization, activation checkpointing, and full graph
@@ -64,13 +62,6 @@ def parallelize_qwen3(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
-        """
-
     annotate_qwen3(model)
 
     if parallel_dims.tp_enabled:
@@ -90,7 +81,7 @@ def parallelize_qwen3(
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
-    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, parallelism=parallelism)
 
     # Apply compilation based on mode
     model = apply_compile(
