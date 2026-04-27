@@ -75,7 +75,7 @@ jobs:
         uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         # 5. Install torchtitan in editable mode because integration test spawns
-        # python simple_grpo_sum_digits.py as a subprocess
+        # python grpo.py as a subprocess
         uv pip install -e .
 
         # 6. Download HF model checkpoint for tests
