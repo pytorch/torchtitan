@@ -288,23 +288,21 @@ class ChunkedCELoss(BaseLoss):
         requires_grad = hidden_states.requires_grad
 
         # Split hidden states and labels into chunks along seq dim.
-        h_chunks = torch.chunk(hidden_states, num_chunks, dim=1)
+        # Use .contiguous() to break shared storage from torch.chunk().
+        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
+        # directly with Shard(1) on CP. Need local_map to operate on local tensors
+        h_detached = hidden_states.detach().requires_grad_(requires_grad)
+        h_chunks = [
+            c.contiguous().detach().requires_grad_(requires_grad)
+            for c in torch.chunk(h_detached, num_chunks, dim=1)
+        ]
         label_chunks = torch.chunk(labels, num_chunks, dim=1)
 
-        if requires_grad:
-            # Detach hidden states to stop gradient propagation at this boundary.
-            h_detached = hidden_states.detach().requires_grad_(True)
-            # Use .contiguous() to break shared storage from torch.chunk(),
-            # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
-            # directly with Shard(1) on CP. Need local_map to operate on local tensors
-            h_chunks = torch.chunk(h_detached, num_chunks, dim=1)
-            h_chunks = [c.contiguous().detach().requires_grad_(True) for c in h_chunks]
-
-            grad_accumulator = GradAccumulator(
-                h_detached,
-                num_chunks=num_chunks,
-                dtype=torch.float32,
-            )
+        grad_accumulator = GradAccumulator(
+            h_detached,
+            num_chunks=num_chunks,
+            dtype=torch.float32,
+        )
 
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
