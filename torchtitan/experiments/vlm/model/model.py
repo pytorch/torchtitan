@@ -115,7 +115,7 @@ class Llama3Siglip2Transformer(Llama3):
             )
 
         h_BSD = self.norm(h_BSD) if self.norm else h_BSD
-        if getattr(self, "_skip_lm_head", False):
+        if self._skip_lm_head:
             return h_BSD
-        output = self.lm_head(h_BSD) if self.lm_head else h_BSD
+        output = self.output(h_BSD) if self.output else h_BSD
         return output

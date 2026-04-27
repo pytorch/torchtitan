@@ -81,6 +81,9 @@ _TT_SPECIFIC_ATTRIBUTES = [
 
 
 class HFTransformerModel(BaseModel):
+    # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
+    _skip_lm_head: bool = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config, PretrainedConfig):
         """Configuration that bridges TorchTitan and HuggingFace Transformers.
@@ -654,6 +657,8 @@ class HFTransformerModel(BaseModel):
             local_seq_len, device=args[0].device
         ).unsqueeze(0)
         output = self.model.model(*args, **kwargs)
+        if self._skip_lm_head:
+            return output.last_hidden_state
         output = self.model.lm_head(output.last_hidden_state)
         return output
 
