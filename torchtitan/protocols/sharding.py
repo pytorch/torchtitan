@@ -9,7 +9,7 @@
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
 and read by ``Module.parallelize(mesh)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
-self-documenting and support multi-axis meshes.
+self-documenting and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
