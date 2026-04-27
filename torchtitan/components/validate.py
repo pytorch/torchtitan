@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import ChunkedCELoss, IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
@@ -258,6 +258,9 @@ class Validator(BaseValidator):
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
                 input_dict, labels, model_parts
             )
+
+            if isinstance(self.loss_fn, ChunkedCELoss):
+                extra_kwargs["skip_lm_head"] = True
 
             # Count valid tokens for this batch
             local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)

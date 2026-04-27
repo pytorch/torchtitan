@@ -196,7 +196,7 @@ class ConfigManager:
             self.config.hf_assets_path  # pyrefly: ignore[missing-attribute]
         ):
             logger.warning(
-                f"HF assets path {self.config.hf_assets_path} does not exist!"  # pyrefly: ignore [missing-attribute]
+                f"HF assets path {self.config.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
