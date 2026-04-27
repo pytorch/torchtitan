@@ -52,10 +52,11 @@ class TestApplyAC(unittest.TestCase):
             out.backward()
 
             x = torch.randn(512, 512, requires_grad=True)
-            out = model_fn(x)
-            with FlopCounterMode(display=False) as mode:
+            with FlopCounterMode(display=False) as fwd_mode:
+                out = model_fn(x)
+            with FlopCounterMode(display=False) as bwd_mode:
                 out.backward()
-            return mode.get_total_flops() / (512**3 * 2)
+            return bwd_mode.get_total_flops() / (512**3 * 2)
 
         # 1. No AC
         model_no_ac = ToyModule()
