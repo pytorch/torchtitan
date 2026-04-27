@@ -155,8 +155,9 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             if base_cls not in _converted_config_cache:
 
                 @dataclass(kw_only=True, slots=True)
-                class MXFP8GroupedExpertsConfig(base_cls, _QuantizedGroupedExpertsConfig):
-
+                class MXFP8GroupedExpertsConfig(
+                    base_cls, _QuantizedGroupedExpertsConfig
+                ):
                     def build(self, **kwargs):
                         instance = base_cls.build(self, **kwargs)
                         recipe = MXFP8TrainingRecipe(recipe_name)

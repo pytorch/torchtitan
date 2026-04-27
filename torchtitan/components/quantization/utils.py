@@ -13,9 +13,7 @@ from torchtitan.models.common.token_dispatcher import (
 )
 
 
-def module_filter_fn(
-    config: Linear.Config, fqn: str, filter_fqns: list[str]
-) -> bool:
+def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:
     """
     Filter function to determine which Linear.Config should be converted.
     For both Float8 and MXFP8, we only convert Linear modules
@@ -73,8 +71,8 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
     from torchtitan.components.quantization import (
-        QuantizedLinearConfig,
         _QuantizedGroupedExpertsConfig,
+        QuantizedLinearConfig,
     )
 
     has_quant_linear = any(

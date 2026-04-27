@@ -49,7 +49,6 @@ from torchtitan.models.common.attention import FusedQKVLinear
 
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 from torchtitan.models.llama4.model import Llama4Model
@@ -123,7 +122,7 @@ def parallelize_llama(
 
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )

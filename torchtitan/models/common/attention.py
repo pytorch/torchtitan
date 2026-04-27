@@ -170,7 +170,7 @@ class VarlenAttention(LocalMapInnerAttention):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
 
-    # pyrefly: ignore [bad-param-name-override, bad-override]
+    # pyrefly: ignore [bad-param-name-override]
     def forward(
         self,
         xq: torch.Tensor,

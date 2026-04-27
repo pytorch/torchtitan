@@ -5,13 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
+from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -96,9 +96,7 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     config.model_spec = model_registry(
         "debugmodel",
         quantization=[
-            Float8LinearConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
+            Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
         ],
     )
     return config
@@ -200,8 +198,7 @@ def llama3_405b() -> Trainer.Config:
                 Float8LinearConverter.Config(
                     filter_fqns=["output"],
                     model_compile_enabled=(
-                        compile_config.enable
-                        and "model" in compile_config.components
+                        compile_config.enable and "model" in compile_config.components
                     ),
                 ),
             ],

@@ -72,8 +72,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
             quantization=[
                 Float8GroupedExpertsConverter.Config(
                     model_compile_enabled=(
-                        compile_config.enable
-                        and "model" in compile_config.components
+                        compile_config.enable and "model" in compile_config.components
                     ),
                 ),
             ],

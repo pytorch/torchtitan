@@ -86,9 +86,7 @@ class Float8LinearConverter(QuantizationConverter):
         cfg = self.config
         filter_fqns = cfg.filter_fqns
 
-        if has_cuda_capability(8, 9) or (
-            cfg.emulate and not cfg.model_compile_enabled
-        ):
+        if has_cuda_capability(8, 9) or (cfg.emulate and not cfg.model_compile_enabled):
             pass
         else:
             raise ValueError(
@@ -111,7 +109,9 @@ class Float8LinearConverter(QuantizationConverter):
             self.enabled = False
             return
 
-        self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(cfg.recipe_name)
+        self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(
+            cfg.recipe_name
+        )
         logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
 
         # short-term solution for https://github.com/pytorch/pytorch/issues/150859
@@ -149,6 +149,7 @@ class Float8LinearConverter(QuantizationConverter):
         if not self.enabled:
             return
 
+        assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
                 new_config = Float8Linear.Config(
@@ -206,8 +207,9 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             if base_cls not in _converted_config_cache:
 
                 @dataclass(kw_only=True, slots=True)
-                class Float8GroupedExpertsConfig(base_cls, _QuantizedGroupedExpertsConfig):
-
+                class Float8GroupedExpertsConfig(
+                    base_cls, _QuantizedGroupedExpertsConfig
+                ):
                     def build(self, **kwargs):
                         instance = base_cls.build(self, **kwargs)
                         quantize_(instance, config=Float8TrainingOpConfig())

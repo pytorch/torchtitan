@@ -227,9 +227,7 @@ def apply_non_moe_tp(
             down_proj_name = (
                 "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
             )
-            mlp_plan[f"mlp.{down_proj_name}"] = RowwiseParallel(
-                output_layouts=Shard(1)
-            )
+            mlp_plan[f"mlp.{down_proj_name}"] = RowwiseParallel(output_layouts=Shard(1))
             layer_plan.update(mlp_plan)
 
         # Some models like Phi-2 don't have post_attention_layernorm

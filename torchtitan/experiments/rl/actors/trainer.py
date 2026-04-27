@@ -131,9 +131,7 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(
-            model_spec, config, device_type, hf_assets_path
-        )
+        model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
         self.model = model
         self.model_parts = [model]

@@ -8,7 +8,10 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization import Float8LinearConverter, Float8GroupedExpertsConverter
+from torchtitan.components.quantization import (
+    Float8GroupedExpertsConverter,
+    Float8LinearConverter,
+)
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -122,7 +125,9 @@ def deepseek_v3_671b() -> Trainer.Config:
                     filter_fqns=["output", "router.gate"],
                     model_compile_enabled=model_compile_enabled,
                 ),
-                Float8GroupedExpertsConverter.Config(model_compile_enabled=model_compile_enabled),
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=model_compile_enabled
+                ),
             ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
