@@ -112,6 +112,8 @@ class Float8LinearConverter(QuantizationConverter):
         self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(
             cfg.recipe_name
         )
+        if cfg.emulate:
+            self.torchao_config = TorchAOFloat8LinearConfig(emulate=True)
         logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
 
         # short-term solution for https://github.com/pytorch/pytorch/issues/150859
