@@ -154,13 +154,13 @@ def apply_non_moe_tp(
         else:
             root_plan["norm"] = SequenceParallel()
 
-    if hasattr(model, "output"):
-        if isinstance(model.output, nn.Identity):
-            root_plan["output"] = NoParallel(
+    if hasattr(model, "lm_head"):
+        if isinstance(model.lm_head, nn.Identity):
+            root_plan["lm_head"] = NoParallel(
                 local_output_grad_placements=(Replicate(),),
             )
         else:
-            root_plan["output"] = ColwiseParallel(
+            root_plan["lm_head"] = ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
                 use_local_output=not enable_loss_parallel,
@@ -374,9 +374,9 @@ def apply_fsdp(
 
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
+    if model.norm is not None and model.lm_head is not None:
         fully_shard(
-            [model.norm, model.output],
+            [model.norm, model.lm_head],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
@@ -410,17 +410,21 @@ def apply_fsdp(
                 transformer_block.set_modules_to_forward_prefetch(
                     [next_transformer_block]
                 )
-        elif model.norm is not None and model.output is not None:
+        elif model.norm is not None and model.lm_head is not None:
             transformer_block.set_modules_to_forward_prefetch(
-                [model.norm, model.output]
+                [model.norm, model.lm_head]
             )
 
     # backward
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if model.norm is not None and model.output is not None and model.layers is not None:
-        model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+    if (
+        model.norm is not None
+        and model.lm_head is not None
+        and model.layers is not None
+    ):
+        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
         reversed_transformer_blocks, prev_transformer_blocks

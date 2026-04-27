@@ -28,7 +28,7 @@ def module_split(
                                - "tok_embeddings" for token embeddings
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
-                               - "output" for the output projection layer
+                               - "lm_head" for the output projection layer
 
     Returns:
         List of model fragments
