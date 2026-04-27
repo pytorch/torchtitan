@@ -131,6 +131,12 @@ def create_torchtitan_config_from_vllm_config(
         # vLLM inference doesn't compute loss; the sharding config's output
         # layer should NOT be vocab-parallel.
         disable_loss_parallel=True,
+        # Match the trainer's plan. ``ParallelismConfig.enable_sequence_parallel``
+        # defaults to True; the RL trainer sets it to False explicitly. If the
+        # generator silently runs SP=True, ``set_qwen3_sharding_config`` builds
+        # a different sharding plan for activations and bf16 numerics drift
+        # between trainer and generator (test_trainer_vs_vllm_prefill).
+        enable_sequence_parallel=False,
     )
 
     logger.info(
