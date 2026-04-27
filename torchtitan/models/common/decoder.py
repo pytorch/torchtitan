@@ -146,7 +146,11 @@ class Decoder(BaseModel):
         # TODO: fix PP backward upstream to skip non-tensor inputs
         if self._skip_lm_head:
             return h
-        output = self.output(h) if self.output is not None else h
+        output = (
+            self.output(h)  # pyrefly: ignore[not-callable]
+            if self.output is not None
+            else h
+        )
         return output
 
     def _get_flex_attention_masks(
