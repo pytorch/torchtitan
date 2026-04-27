@@ -461,5 +461,33 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
+class TestLlama3Float8BitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for Llama3 debug model with float8 training."""
+
+    model_registry = staticmethod(llama3_model_registry)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_llama)
+
+    def setUp(self):
+        if not has_cuda_capability(8, 9):
+            self.skipTest("Float8 requires sm_89+")
+        try:
+            from torchao.float8 import convert_to_float8_training
+        except ImportError:
+            self.skipTest("torchao not installed")
+
+        super().setUp()
+        convert_to_float8_training(self.model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads with float8."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(
+            run_eager, run_traced, "eager vs aot_fx_trace (float8): "
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
