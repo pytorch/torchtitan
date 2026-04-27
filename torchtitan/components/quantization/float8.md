@@ -29,8 +29,8 @@ model_spec = model_registry(
 ```
 * `recipe_name`: Float8 recipe name. Options: `"rowwise"` (default), `"rowwise_with_gw_hp"`.
 * `filter_fqns` (optional): a list of fully qualified names of modules not to convert to float8 training. Example: `filter_fqns=["attention.wk", "attention.wv"]`. You can determine which layers to convert by looking at the microbenchmarks in the [performance section](https://github.com/pytorch/ao/tree/main/torchao/float8#performance) of the torchao documentation for the float8 recipe you're using.
-    * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to enable automatic module filtering, which will automatically not convert linear layers that are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape.
-* `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model (required for competitive performance).
+    * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to enable automatic module filtering, which will automatically not convert linear layers that are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape. For best performance, you should still manually filter out layers that are too small to benefit from float8 training.
+* `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model (required for competitive performance). `torch.compile` fuses the float8 scaling/casting kernels.
 
 For float8 MoE expert quantization (grouped GEMMs), use `Float8GroupedExpertsConverter`:
 ```python
@@ -50,6 +50,6 @@ model_spec = model_registry(
 )
 ```
 
-For parallelisms, all distributed communication for float8 rowwise scaling is done in high precision.
+For parallelisms, for float8 with rowwise scaling, all distributed communication is done in high precision.
 
-For scaling strategy, we support rowwise dynamic scaling.
+For scaling strategy, we support rowwise dynamic scaling (alpha).

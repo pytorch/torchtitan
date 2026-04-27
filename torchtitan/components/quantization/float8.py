@@ -129,7 +129,7 @@ class Float8LinearConverter(QuantizationConverter):
                 logger.info(
                     "Using _auto_filter_for_recipe to avoid converting linear layers "
                     "with dims too small to benefit from float8 training. "
-                    "See docs/float8.md for more info."
+                    "See torchtitan/components/quantization/float8.md for more info."
                 )
                 self.filter_fn = _auto_filter_for_recipe(
                     cfg.recipe_name, filter_fqns=clean_fqns
