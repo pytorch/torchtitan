@@ -311,18 +311,14 @@ class ChunkedCELoss(BaseLoss):
         # grad sync into a single reduce-scatter at the last chunk by
         # disabling gradient sync for chunks 0..N-2.
         if fsdp_enabled:
-            lm_head.set_reshard_after_forward(False)  # pyrefly: ignore[not-callable]
-            lm_head.set_reshard_after_backward(False)  # pyrefly: ignore[not-callable]
-            lm_head.set_requires_gradient_sync(
-                False, recurse=False
-            )  # pyrefly: ignore[not-callable]
+            lm_head.set_reshard_after_forward(False)
+            lm_head.set_reshard_after_backward(False)
+            lm_head.set_requires_gradient_sync(False, recurse=False)
 
         last_idx = len(h_chunks) - 1
         for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
             if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                    True, recurse=False
-                )
+                lm_head.set_requires_gradient_sync(True, recurse=False)
 
             logits = lm_head(h_chunk)
 
@@ -338,13 +334,10 @@ class ChunkedCELoss(BaseLoss):
                 h_chunk.grad = None
 
         if fsdp_enabled:
-            lm_head.set_reshard_after_forward(True)  # pyrefly: ignore[not-callable]
-            lm_head.set_reshard_after_backward(True)  # pyrefly: ignore[not-callable]
-            lm_head.set_requires_gradient_sync(
-                True, recurse=False
-            )  # pyrefly: ignore[not-callable]
-            lm_head.reshard()  # pyrefly: ignore[not-callable]
-
+            lm_head.set_reshard_after_forward(True)
+            lm_head.set_reshard_after_backward(True)
+            lm_head.set_requires_gradient_sync(True, recurse=False)
+            lm_head.reshard()
         if not requires_grad:
             return total_loss
 
