@@ -335,6 +335,22 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.memory_policy cpu_offload_all",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+cpu_offload_all",
+            "aot_fx_trace_llama3_fsdp_tp_cpu_offload_all",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
     ]
 
 
