@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -38,6 +39,7 @@ def _qwen3_vl_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
 
 def qwen3_vl_debugmodel() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -67,6 +69,7 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
 
 def qwen3_vl_debugmodel_moe() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -97,6 +100,7 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
 
 def qwen3_vl_2b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         model_spec=model_registry("2B"),
@@ -126,6 +130,7 @@ def qwen3_vl_2b() -> Trainer.Config:
 
 def qwen3_vl_8b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-8B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         model_spec=model_registry("8B"),
@@ -155,6 +160,7 @@ def qwen3_vl_8b() -> Trainer.Config:
 
 def qwen3_vl_30b_a3b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         model_spec=model_registry("30B-A3B", moe_comm_backend="standard"),

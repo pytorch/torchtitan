@@ -162,7 +162,7 @@ class Qwen3Model(Decoder):
         self.enable_weight_tying = config.enable_weight_tying
 
         if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.output.weight
+            self.tok_embeddings.weight = self.lm_head.weight
 
     def init_states(
         self,
@@ -172,7 +172,7 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             # Re-tie before init: on meta device the __init__ tying may
             # not have worked correctly.
-            assert self.tok_embeddings is not None and self.output is not None
-            self.tok_embeddings.weight = self.output.weight
+            assert self.tok_embeddings is not None and self.lm_head is not None
+            self.tok_embeddings.weight = self.lm_head.weight
 
         super().init_states(buffer_device=buffer_device)

@@ -107,7 +107,7 @@ def apply_non_moe_tp(
                 use_local_output=False,
             ),
             "norm": norm_plan,
-            "output": ColwiseParallel(
+            "lm_head": ColwiseParallel(
                 input_layouts=sp_layout,
                 output_layouts=Replicate(),
                 use_local_output=True,  # return logits and plain tensor
