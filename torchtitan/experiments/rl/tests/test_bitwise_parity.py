@@ -118,8 +118,8 @@ def build_trainer_model(
         training=config.trainer.training,
         model_converters=ModelConvertersContainer.Config(),
         parallelism=parallelism,
-        compile_config=CompileConfig(),
-        ac_config=ActivationCheckpointConfig(),
+        compile_config=CompileConfig(enable=False),
+        ac_config=ActivationCheckpointConfig(mode="none"),
         dump_folder="",
     )
     model.to_empty(device=device_type)
