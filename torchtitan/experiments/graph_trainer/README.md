@@ -10,9 +10,10 @@ This experiment demonstrates graph-based distributed training in torchtitan thro
 - Graph optimization via FX graph passes
 
 The goal is to give users more explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. Three compilation modes are currently supported:
+- **AOT FX trace mode** (`--compile.mode aot_fx_trace`): Non-strict tracing of the full forward + loss + backward via `make_fx`, producing a single end-to-end graph without AOTAutograd partitioning.
 - **AOT mode** (`--compile.mode aot`): Explicit joint graph export with a custom graph pass pipeline.
 - **JIT mode** (`--compile.mode jit`): Standard `torch.compile()` with graph passes registered to custom backends.
-- **AOT FX trace mode** (`--compile.mode aot_fx_trace`): Non-strict tracing of the full forward + loss + backward via `make_fx`, producing a single end-to-end graph without AOTAutograd partitioning.
+> **Deprecation notice:** The `aot` and `jit` compile modes are deprecated and will be removed in the future. Please migrate to `aot_fx_trace`.
 
 ### Prerequisites
 
@@ -49,22 +50,20 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
 
 ### Compiler Optimizations
 
-By default, the graph is captured with the AOT mode (switch to JIT mode via `--compile.mode jit` or AOT FX trace mode via `--compile.mode aot_fx_trace`) and compiled with the `aot_eager` backend.
-
-Graph passes can be applied to further optimize the graph by using the `--compile.joint_passes` and `--compile.passes` flags.
+> **Note:** Graph pass support for `aot_fx_trace` mode is a work in progress. The `--compile.passes` and `--compile.joint_passes` flags currently only apply to the deprecated `aot` and `jit` modes.
 
 ```bash
 # Auto bucketing for comm/compute overlap
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.passes auto_bucketing
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.passes auto_bucketing
 
 # Transformer-block bucketing for comm/compute overlap
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.passes transformer_block_bucketing
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.passes transformer_block_bucketing
 
 # CUDAGraph
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.passes cudagraph
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.passes cudagraph
 
 # Full Inductor compilation (AOT)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
 
 # Full Inductor compilation (JIT)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode jit --compile.backend inductor

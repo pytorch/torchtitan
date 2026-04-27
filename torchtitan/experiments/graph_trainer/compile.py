@@ -19,6 +19,7 @@ Additionally supports pre-compile via --compile.precompile_artifact_dir:
 
 import dataclasses
 import functools
+import warnings
 
 import torch
 import torch.nn as nn
@@ -238,6 +239,14 @@ def apply_compile(
     if mode is None:
         logger.info("No compile mode set, skipping compilation")
         return model
+
+    if mode in ("aot", "jit"):
+        warnings.warn(
+            f"compile.mode='{mode}' is deprecated and will be removed in the "
+            "future. Please use --compile.mode='aot_fx_trace' instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
     torch._inductor.config.reorder_for_peak_memory = False
     torch._dynamo.config.capture_scalar_outputs = True
