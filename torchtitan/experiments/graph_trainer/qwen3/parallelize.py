@@ -7,7 +7,6 @@
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.traceback import annotate_fn
 
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -29,7 +28,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     MixedPrecisionPolicy,
 )
 from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
-from torchtitan.models.qwen3.parallelize import apply_non_moe_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -87,25 +85,10 @@ def parallelize_qwen3(
     annotate_qwen3(model)
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_non_moe_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=parallelism.enable_async_tensor_parallel,
-            enable_cp=parallel_dims.cp_enabled,
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        # Config-based sharding: ShardingConfig is populated on the model
+        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
+        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
