@@ -444,7 +444,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         out = deterministic_scatter_add(
             out,
-            # pyrefly: ignore [missing-attribute]
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
             routed_output,
         )

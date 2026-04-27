@@ -17,10 +17,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 
-<<<<<<< HEAD
-from torchtitan.components.quantization import find_pad_multiple
-=======
->>>>>>> 95c416ca (quantize on config instead of on model)
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
