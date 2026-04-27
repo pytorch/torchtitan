@@ -220,10 +220,11 @@ class TorchTitanVLLMModelWrapper(Module):
         # Fill sharding configs on the config BEFORE build so every sub-module
         # (including VLLMAttentionWrapper) is constructed with its
         # ShardingConfig / LocalMapConfig attached. Uses the model-agnostic
-        # ``update_from_config`` hook. vLLM inference doesn't need RoPE
-        # cache extension here (that happens explicitly below via
-        # ``max_model_len``) nor MoE force-load-balance, so ``training`` and
-        # ``debug`` are omitted.
+        # ``update_from_config`` hook.
+
+        # TODO: We should make Module.Config.update_from_config more generic.
+        # Now it accepts Trainer.Config but RL instances may not have
+        # Trainer.Config
         self.config.update_from_config(
             trainer_config=SimpleNamespace(parallelism=parallelism)
         )

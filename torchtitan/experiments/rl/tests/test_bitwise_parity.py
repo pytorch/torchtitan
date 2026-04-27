@@ -53,12 +53,12 @@ from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
+from torchtitan.experiments.rl.grpo import RLTrainer
 from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.tools import utils
 
