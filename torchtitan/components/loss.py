@@ -318,7 +318,9 @@ class ChunkedCELoss(BaseLoss):
         last_idx = len(h_chunks) - 1
         for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
             if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(True, recurse=False)
+                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                    True, recurse=False
+                )
 
             logits = lm_head(h_chunk)
 
