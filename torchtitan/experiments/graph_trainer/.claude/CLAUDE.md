@@ -122,6 +122,21 @@ def my_pass(gm, example_inputs):
 diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
 ```
 
+### Printing and Inspecting Tensors Inside a Compiled Function
+
+To inspect tensor values or gradients *inside* `torch.compile` without graph
+breaks:
+
+- **Simple printing**: `torch._higher_order_ops.print("norm={}", x.norm())` —
+  format-string, forward-only. DTensors print each rank's local view with an
+  automatic `[rank N]` prefix.
+- **Gradient norms**: `from torch.utils.debug_log import debug_grad_log` —
+  call on intermediates (not direct graph inputs); fires during backward and
+  logs per-tensor gradient norms.
+- **Custom logic** (arbitrary Python, file logging, rank filtering, fwd+bwd):
+  compose `@leaf_function` with `@fn.register_multi_grad_hook` from
+  `torch._dynamo.decorators`.
+
 ### Benchmark
 
 Use `./run_train.sh` with a small number of steps. Disable tensorboard,
