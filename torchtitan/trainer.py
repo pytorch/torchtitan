@@ -21,7 +21,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -101,6 +101,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
             if self.debug.batch_invariant:
@@ -169,7 +170,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # TODO: we should make this list[BaseModel / Decoder] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
-    loss_fn: LossFunction
+    loss_fn: BaseLoss
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
@@ -315,8 +316,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims
+        self.loss_fn = config.loss.build(
+            compile_config=config.compile,
         )
 
         # verify batch sizes
@@ -409,6 +410,31 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model.train()
 
             self.model_parts = [model]
+
+        # Set lm_head reference for ChunkedCELoss after model construction.
+        # Non-PP: single model part always has lm_head.
+        # PP: only the last stage has lm_head; non-last stages skip this.
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            if parallel_dims.pp_enabled:
+                if self.pp_has_last_stage:
+                    lm_head = self.model_parts[-1].lm_head
+                    assert (
+                        lm_head is not None
+                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    self.loss_fn.set_lm_head(
+                        lm_head  # pyrefly: ignore[bad-argument-type]
+                    )
+                    self.model_parts[
+                        -1
+                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+            else:
+                assert len(self.model_parts) == 1
+                lm_head = self.model_parts[0].lm_head
+                assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
+                self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[
+                    0
+                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -666,6 +692,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
+            loss_kwargs = {"global_valid_tokens": global_valid_tokens}
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
@@ -677,6 +704,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        loss_kwargs=loss_kwargs,
                         return_outputs=False,
                     )
                 else:
@@ -684,6 +712,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        loss_kwargs=loss_kwargs,
                         return_outputs=False,
                     )
 
@@ -691,11 +720,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             if self.pp_has_last_stage:
                 assert losses is not None
-                # Rescale PP loss to be "local loss sum / global valid tokens"
-                # because each microbatch could have different number of valid tokens
-                loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
-                    self.device
-                )
+                # All loss classes scale by global_valid_tokens internally
+                loss = torch.sum(torch.stack(losses)).to(self.device)
             else:
                 loss = torch.tensor([-1.0], device=self.device)
         else:
@@ -712,13 +738,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
-                # Compute loss sum (reduction='sum')
-                loss_sum = self.loss_fn(pred, labels)
-
-                # Scale the loss by the inverse of the total weight denominator before backward
-                # This ensures gradients are properly normalized across all microbatches
-                loss = loss_sum / global_valid_tokens
-
+                loss = self.loss_fn(pred, labels, global_valid_tokens)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()

@@ -131,8 +131,8 @@ def parallelize_llama(
         else:
             logger.info("Applied FSDP to the model")
 
-        if training.enable_cpu_offload:
-            logger.info("Applied CPU Offloading to the model")
+    if training.enable_cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
 
     return model
 
@@ -175,7 +175,9 @@ def apply_fsdp(
         # When weights are tied, tok_embeddings and output share the same parameter.
         # Group them together in one FSDP unit to avoid duplicate all-gathers.
         modules = [
-            m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
+            m
+            for m in (model.tok_embeddings, model.norm, model.lm_head)
+            if m is not None
         ]
         # pyrefly: ignore [no-matching-overload]
         fully_shard(
@@ -191,12 +193,12 @@ def apply_fsdp(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-        # As an optimization, do not reshard_after_forward the last layers by default
-        # since FSDP would prefetch them immediately after the forward pass
-        if model.norm is not None and model.output is not None:
+        # As an optimization, do not reshard_after_forward the last layers
+        # by default since FSDP would prefetch them immediately.
+        if model.norm is not None and model.lm_head is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                [model.norm, model.output],
+                [model.norm, model.lm_head],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
