@@ -75,7 +75,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             # Final norm and output
             "model.language_model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
+            "lm_head.weight": "lm_head.weight",
             # ===== Vision Encoder =====
             # Patch embedding (Conv3d in HF, Linear in TT - weight reshape needed)
             "model.visual.patch_embed.proj.weight": "vision_encoder.patch_embed.proj.weight",
@@ -198,7 +198,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             else:
                 if tt_key not in to_hf_map:
                     continue
-                if tt_key == "output.weight" and self.model_config.enable_weight_tying:
+                if tt_key == "lm_head.weight" and self.model_config.enable_weight_tying:
                     continue
                 hf_key = to_hf_map[tt_key]
                 hf_value = value
