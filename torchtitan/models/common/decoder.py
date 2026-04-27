@@ -147,8 +147,8 @@ class Decoder(BaseModel):
         if self._skip_lm_head:
             return h
         output = (
-            self.output(h)  # pyrefly: ignore[not-callable]
-            if self.output is not None
+            self.lm_head(h)  # pyrefly: ignore[not-callable]
+            if self.lm_head is not None
             else h
         )
         return output
