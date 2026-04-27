@@ -558,21 +558,17 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
-                # Training: each TP rank processes a disjoint token subset
-                # (via SP splitting), so the MoE output is Partial.
-                # Inference: all ranks process all tokens (no SP splitting),
-                # so the MoE output after all-to-all combine is Replicate.
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
                     use_local_input=False,
-                    # With EP + inference: output is Replicate (all-to-all
-                    # combine returns complete result, no SP splitting).
-                    # Otherwise: output is Partial (each rank has partial
-                    # sum from TP-sharded experts or SP token splitting).
+                    # TP-sharded experts or SP token splitting produce
+                    # Partial outputs that need reduce-scatter. EP without
+                    # SP produces Replicate (all-to-all combine already
+                    # returns the full result on every rank).
                     output_layouts=(
                         Replicate()
-                        if (inference and ep_mesh is not None)
+                        if (not enable_sp and ep_mesh is not None)
                         else Partial(),
                     ),
                     desired_output_layouts=(sp_layout,),
@@ -633,14 +629,13 @@ def apply_moe_ep_tp(
                     )
                 dispatcher.pad_multiple = pad_multiple
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            # Set SP token splitting only for training. In training with
-            # ETP=1, each TP rank processes a disjoint token subset to
-            # avoid redundant all-to-all. For inference, all ranks process
-            # all tokens (the input is already all-gathered to Replicate).
+            # When SP is enabled, each TP rank processes a disjoint token
+            # subset to avoid redundant all-to-all. Without SP, all ranks
+            # process all tokens (the input is already Replicate).
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None and not inference:
+            if tp_mesh is not None and enable_sp:
                 if isinstance(dispatcher, AllToAllTokenDispatcher):
                     dispatcher.sp_size = tp_mesh.size()
                     # Use _sym_get_coordinate so the rank is a SymInt

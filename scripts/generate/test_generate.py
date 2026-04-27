@@ -107,9 +107,11 @@ def test_generate(
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
     tokenizer = HuggingFaceTokenizer.Config().build(
+        # pyrefly: ignore [missing-attribute]
         tokenizer_path=config.hf_assets_path
     )
 
+    # pyrefly: ignore [missing-attribute]
     model_config = config.model_spec.model
     model_config.update_from_config(trainer_config=config)
 
@@ -121,6 +123,7 @@ def test_generate(
     parallel_dims = None
     # Init distributed env
     if world_size > 1:
+        # pyrefly: ignore [missing-attribute]
         dist_utils.init_distributed(config.comm)
         parallel_dims = ParallelDims(
             dp_replicate=1,
