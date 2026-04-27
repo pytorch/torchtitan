@@ -7,27 +7,23 @@
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import (
-    LocalMapConfig,
-    MeshDimName,
-    NamedPlacement,
-    ShardingConfig,
-)
+from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.types import MeshAxisName
 
-DP_REPLICATE = MeshDimName.DP_REPLICATE
-DP_SHARD = MeshDimName.DP_SHARD
-CP = MeshDimName.CP
-TP = MeshDimName.TP
+DP_REPLICATE = MeshAxisName.DP_REPLICATE
+DP_SHARD = MeshAxisName.DP_SHARD
+CP = MeshAxisName.CP
+TP = MeshAxisName.TP
 
 
 def dense_param_placement(*, tp: Placement) -> NamedPlacement:
     """Placement for dense-path params/buffers.
 
-    DP/CP dims are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
+    DP/CP axes are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
     DP_SHARD post-parallelize. TP placement is caller-specified.
 
     TODO: Ideally placements would be defined on a computation mesh that
-    has a single DP dim (no DP_REPLICATE vs DP_SHARD distinction). That
+    has a single DP axis (no DP_REPLICATE vs DP_SHARD distinction). That
     requires a mesh switch between FSDP storage and computation — likely
     resolved by FlexShard. Revisit once FlexShard lands.
     """
@@ -46,7 +42,7 @@ def dense_activation_placement(
 ) -> NamedPlacement:
     """Placement for dense-path activations.
 
-    DP dims are batch-sharded (``Shard(0)``). CP defaults to seq-sharded
+    DP axes are batch-sharded (``Shard(0)``). CP defaults to seq-sharded
     (``Shard(1)``); override to ``Replicate()`` for K/V after all-gather.
     TP placement is caller-specified.
     """
@@ -215,7 +211,7 @@ def set_decoder_sharding_config(
     activation_tp: Placement = Shard(1) if enable_sp else Replicate()
     loss_tp: Placement = Shard(-1) if loss_parallel else Replicate()
 
-    # freqs_cis buffer on the decoder root: Replicate on all dims.
+    # freqs_cis buffer on the decoder root: Replicate on all axes.
     config.sharding_config = ShardingConfig(
         state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
     )
