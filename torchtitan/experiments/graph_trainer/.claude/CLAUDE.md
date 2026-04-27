@@ -208,3 +208,19 @@ This verifies that the aot_fx_trace path produces bitwise identical losses
 and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
+
+### CUDA Graph Kernel Annotations
+
+The `insert_kernel_annotations_pass` labels CUDA graph kernels with their
+originating `nn.Module` path in profiler traces. It runs automatically in the
+`aot_fx_trace` path (bundled with the cudagraph pass). The post-processor
+is attached via ``Profiler.Config.trace_post_processors`` (see
+``cudagraph_annotate_trace_post_processor``) so exported traces are
+annotated automatically — no manual post-processing is needed.
+
+Requirements: `cuda-python` package and CUDA toolkit/driver >= 13.1
+(or `cuda-compat >= 13.1` on `LD_LIBRARY_PATH`). The pass is a no-op when
+these are unavailable.
+
+To view annotated traces, open the exported JSON in https://ui.perfetto.dev.
+Kernel events will have `module_fqn` fields like `layers.0.attention.wq`.

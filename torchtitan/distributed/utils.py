@@ -45,15 +45,29 @@ def _dist_reduce(
             process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
-        # functional collectives do not support DTensor inputs
-        x = x.full_tensor()
+        # DTensor path: ``full_tensor()`` already performs the mesh reduction
+        # for Partial placements and is a no-op for Replicate. Skipping the
+        # subsequent mesh all-reduce is required to avoid double-counting.
+        # Shard placements are not supported — semantics are undefined since
+        # the reduction target is ambiguous.
+        assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
+            f"_dist_reduce received a DTensor with unsupported placements "
+            f"{x.placements}; only Replicate/Partial are supported."
+        )
+        if extra_pg is not None:
+            raise ValueError(
+                "_dist_reduce does not support DTensor input combined with "
+                "extra_pg: ``full_tensor()`` already reduces over the DTensor's "
+                "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
+                "to that mesh. Pass a plain tensor when using extra_pg."
+            )
+        return float(x.full_tensor().item())
 
+    # Plain tensor path.
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
-
     if mesh is None:
         return float(x.item())
-
     assert x.numel() == 1  # required by `.item()`
     return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
 
@@ -243,16 +257,33 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Set NCCL env vars for deterministic inter-GPU collectives.
     # Must be set BEFORE dist.init_process_group.
-    os.environ["NCCL_ALGO"] = "Ring"  # Fixed summation order (Tree may vary)
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"  # Single channel to avoid split interleaving
-    os.environ["NCCL_MAX_NCHANNELS"] = "1"
-    os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 may reorder reductions
+    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/batch_invariant.py
+    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"  # Fixed kernel launch ordering
     os.environ[
         "NCCL_COLLNET_ENABLE"
-    ] = "0"  # Disable SHARP (non-deterministic HW reduce)
+    ] = "0"  # Disable SHARP (non-deterministic IB HW reduce)
     os.environ[
         "NCCL_NVLS_ENABLE"
-    ] = "0"  # Disable NVLink SHARP (non-deterministic HW reduce)
+    ] = "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
+    os.environ[
+        "NCCL_P2P_NET_DISABLE"
+    ] = "1"  # Disable P2P to avoid transport-dependent accumulation order
+    os.environ[
+        "NCCL_MIN_NCHANNELS"
+    ] = "1"  # Single channel to prevent split-interleave reordering
+    os.environ[
+        "NCCL_MAX_NCHANNELS"
+    ] = "1"  # Single channel to prevent split-interleave reordering
+    os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 protocols may reorder reductions
+    os.environ[
+        "NCCL_ALGO"
+    ] = "allreduce:tree"  # Deterministic reduction order across ranks
+    os.environ[
+        "NCCL_NTHREADS"
+    ] = "1"  # Single thread to eliminate scheduling non-determinism
+    os.environ[
+        "NCCL_SOCKET_NTHREADS"
+    ] = "1"  # Single socket thread to eliminate scheduling non-determinism
 
     # Disable reduced-precision reductions: these allow cuBLAS to use
     # lower-precision accumulation that can round differently depending

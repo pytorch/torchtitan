@@ -40,7 +40,7 @@ jobs:
           # Load the archive, extract into temp folder, move the binary, delete the rest
           mkdir -p lychee_install
           curl -sLO "$URL"
-          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install
+          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install --strip-components=1
           sudo mv lychee_install/lychee /usr/local/bin/
           rm -rf lychee_install "lychee-x86_64-unknown-linux-gnu.tar.gz"
 
@@ -55,10 +55,10 @@ jobs:
 
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@22103cc46bda19c2b464ffe86db46df6922fd323 # v45.0.6
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v45.0.6
 
       - name: Lint modified files
-        run: pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
+        run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
       - name: Check links with Lychee
         run: |

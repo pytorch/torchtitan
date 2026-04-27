@@ -161,7 +161,7 @@ class GraphTrainer(Trainer):
             if self.config.compile.enable_passes:
                 passes = construct_default_graph_passes(
                     self._traced_step,
-                    precompiled=bool(self.config.compile.precompile_artifact_dir),
+                    self.config,
                 )
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,

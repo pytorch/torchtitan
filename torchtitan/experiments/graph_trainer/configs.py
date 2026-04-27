@@ -16,12 +16,12 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot"
+    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
-        jit: standard torch.compile() with custom backend
-        aot: explicit joint graph export + custom graph passes
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
+        jit: standard torch.compile() with custom backend (deprecated)
+        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -43,6 +43,17 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
+    memory_policy: Literal["default", "eager"] = "default"
+    """
+    Memory optimization policy for activation management (SAC, offload).
+        default: save all compute-intensive ops and FSDP all_gathers.
+        eager: alternate mm ops between save/recompute, matching the eager
+            AC policy in torchtitan.distributed.activation_checkpoint.
+    """
+
+    enable_cudagraph: bool = True
+    """When False, skip the cudagraph pass even if the graph is compatible."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
@@ -62,6 +73,7 @@ def to_graph_trainer_config(
     from the graph_trainer model_registry. The compile field is removed and
     left as the GraphTrainer.Config default; callers should explicitly set it.
     """
+    from .cudagraph import cudagraph_annotate_trace_post_processor
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
@@ -88,5 +100,12 @@ def to_graph_trainer_config(
     ac = d.get("activation_checkpoint")
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+
+    # Merge CUDA graph kernel annotations into profiler traces when profiling
+    # is active.  No-op otherwise (and no-op when requirements aren't met).
+    # It's also a no-op if there is CUDA graph is not enabled.
+    profiler = d.get("profiler")
+    if profiler is not None:
+        profiler.trace_post_processor = cudagraph_annotate_trace_post_processor()
 
     return GraphTrainer.Config(**d)

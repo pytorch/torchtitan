@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -15,7 +14,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_ac_regions,
     annotate_module_fqns,
     apply_graph_ac,
 )
@@ -25,23 +23,18 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.llama3.parallelize import apply_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
 def annotate_llama(model: GraphTrainerLlama3Model) -> None:
-    """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
+    """Attach module FQN annotations to FX graph nodes.
 
-    - Module FQN annotation: Tags each submodule's forward with its
-      fully-qualified name so that the transformer_block_bucketing pass
-      can identify which graph nodes belong to which module.
-    - AC region annotation: Tags each transformer block's forward with a unique
-      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
-      boundaries for the min-cut partitioner.
+    Tags each submodule's forward with its fully-qualified name via
+    ``torch.fx.traceback.annotate_fn`` for downstream passes (bucketing,
+    SAC region boundaries, etc.).
     """
     annotate_module_fqns(model)
-    annotate_ac_regions(model)
 
 
 def parallelize_llama(
@@ -62,9 +55,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -75,25 +65,8 @@ def parallelize_llama(
     annotate_llama(model)
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-        )
+        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if ac_config.mode != "none":
