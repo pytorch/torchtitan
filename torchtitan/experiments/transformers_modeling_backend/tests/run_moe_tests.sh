@@ -161,6 +161,16 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
             --parallelism.expert_parallel_degree 2 \
             --activation_checkpoint.mode none
 
+    run_pair \
+        "FSDP + CP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.context_parallel_degree 2 \
+        -- \
+        "FSDP + CP=2 + EP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.context_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 2
+
     run_half \
         "FSDP + PP=2 + EP=2 + compile" \
             --parallelism.data_parallel_shard_degree -1 \
@@ -168,6 +178,12 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
             --parallelism.pipeline_parallel_schedule 1F1B \
             --parallelism.expert_parallel_degree 2 \
             --compile.enable
+
+    run_half \
+        "FSDP + CP=2 + TP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.context_parallel_degree 2 \
+            --parallelism.tensor_parallel_degree 2
 
     # ── 8-GPU-only tests (sequential) ──
 
@@ -183,6 +199,13 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
         "HSDP + TP=2 + EP=2" \
             --parallelism.data_parallel_replicate_degree 2 \
             --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.tensor_parallel_degree 2 \
+            --parallelism.expert_parallel_degree 2
+
+    run_single \
+        "FSDP + CP=2 + TP=2 + EP=2" \
+            --parallelism.data_parallel_shard_degree -1 \
+            --parallelism.context_parallel_degree 2 \
             --parallelism.tensor_parallel_degree 2 \
             --parallelism.expert_parallel_degree 2
 
@@ -206,6 +229,9 @@ else
         "FSDP + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none" \
         "FSDP + TP=2 + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none" \
         "FSDP + PP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable" \
+        "FSDP + CP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2" \
+        "FSDP + CP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.expert_parallel_degree 2" \
+        "FSDP + CP=2 + TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2" \
     ; do
         name="${test_args%%|*}"
         args="${test_args#*|}"
@@ -251,12 +277,16 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none"
         "TP=2+EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --activation_checkpoint.mode none"
         "PP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable"
+        "CP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2"
+        "CP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.expert_parallel_degree 2"
+        "CP=2+TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2"
     )
 
     # 8-GPU configs (run sequentially on all GPUs)
     CONFIGS_8GPU=(
         "TP=2+PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
         "HSDP+TP=2+EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
+        "CP=2+TP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
     )
 
     for hf_model in "${SWEEP_MODELS[@]}"; do
