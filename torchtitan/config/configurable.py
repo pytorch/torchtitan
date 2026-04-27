@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from __future__ import annotations
-
 import dataclasses
 import logging
 from collections.abc import Iterator
@@ -74,7 +72,7 @@ class Configurable:
 
         def traverse(
             self, config_cls: type, *, _prefix: str = ""
-        ) -> Iterator[tuple[str, Config, object, str]]:
+        ) -> Iterator[tuple[str, "Configurable.Config", object, str]]:
             """Yield ``(fqn, config, parent, field_name)`` for every nested config of *config_cls*.
 
             Recursively traverses dataclass fields, including items inside lists.
