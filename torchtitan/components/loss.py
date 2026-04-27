@@ -196,7 +196,7 @@ class ChunkedCELoss(BaseLoss):
     from O(B*L*V) to O(B*L/N*V).
 
     The flow:
-    1. Model forward with skip_lm_head=True to get hidden states [B, L, D]
+    1. Model forward with _skip_lm_head=True to get hidden states [B, L, D]
     2. Detach hidden states at the boundary
     3. Split detached hidden states into N chunks along seq dim
     4. Disable FSDP reshard on lm_head to keep weight unsharded across chunks
@@ -254,7 +254,7 @@ class ChunkedCELoss(BaseLoss):
         """Compute chunked cross-entropy loss.
 
         ``pred`` should be hidden states from model forward with
-        ``skip_lm_head=True``.
+        ``_skip_lm_head=True``.
 
         When ``pred`` does not require grad (e.g. validation), runs chunked
         forward only — no per-chunk backward or gradient accumulation.

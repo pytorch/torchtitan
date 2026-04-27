@@ -126,7 +126,6 @@ class Decoder(BaseModel):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
-        skip_lm_head: bool = False,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
@@ -135,7 +134,11 @@ class Decoder(BaseModel):
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
-        if skip_lm_head:
+
+        # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
+        # calls .requires_grad on all stage inputs, which fails on bool kwargs.
+        # TODO: fix PP backward upstream to skip non-tensor inputs
+        if getattr(self, "_skip_lm_head", False):
             return h
         output = self.lm_head(h) if self.lm_head is not None else h
         return output

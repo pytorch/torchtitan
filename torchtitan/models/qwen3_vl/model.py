@@ -563,7 +563,6 @@ class Qwen3VLModel(Qwen3Model):
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
         special_tokens: dict[str, int],
-        skip_lm_head: bool = False,
     ):
         """Forward pass of Qwen3-VL.
 
@@ -630,7 +629,7 @@ class Qwen3VLModel(Qwen3Model):
         hidden_states = (
             self.norm(hidden_states) if self.norm is not None else hidden_states
         )
-        if skip_lm_head:
+        if getattr(self, "_skip_lm_head", False):
             return hidden_states
         output = (
             self.lm_head(hidden_states) if self.lm_head is not None else hidden_states

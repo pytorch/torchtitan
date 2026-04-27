@@ -91,7 +91,6 @@ class Llama3Siglip2Transformer(Llama3):
         special_tokens: SpecialTokens,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
-        skip_lm_head: bool = False,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
@@ -116,7 +115,7 @@ class Llama3Siglip2Transformer(Llama3):
             )
 
         h_BSD = self.norm(h_BSD) if self.norm else h_BSD
-        if skip_lm_head:
+        if getattr(self, "_skip_lm_head", False):
             return h_BSD
         output = self.lm_head(h_BSD) if self.lm_head else h_BSD
         return output
