@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -18,6 +19,7 @@ from .datasets.mm_datasets import HuggingFaceMultiModalDataLoader
 
 def vlm_debugmodel() -> MultiModalTrainerConfig:
     return MultiModalTrainerConfig(
+        loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),

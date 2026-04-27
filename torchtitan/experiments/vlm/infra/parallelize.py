@@ -155,9 +155,9 @@ def apply_fsdp(
         )
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
+    if model.norm is not None and model.lm_head is not None:
         fully_shard(
-            [model.norm, model.output],
+            [model.norm, model.lm_head],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )

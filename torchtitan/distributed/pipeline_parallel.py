@@ -308,7 +308,7 @@ def generate_llm_fqn_per_model_part(
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "output"]]
+        return [["tok_embeddings"] + layer_names + ["norm", "lm_head"]]
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -377,7 +377,7 @@ def generate_llm_fqn_per_model_part(
                     current_layer += 1
 
             # Add output modules
-            stage_modules.extend(["norm", "output"])
+            stage_modules.extend(["norm", "lm_head"])
 
         # Middle stages: only transformer layers
         else:
@@ -418,7 +418,7 @@ def pipeline_module_split(
                                - "tok_embeddings" for token embeddings
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
-                               - "output" for the output projection layer
+                               - "lm_head" for the output projection layer
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -428,7 +428,7 @@ def pipeline_module_split(
         module_names_per_stage = [
             ["tok_embeddings", "layers.0"],     # Stage 0: embeddings + first layer
             ["layers.1", "layers.2"],           # Stage 1: middle layers
-            ["norm", "output"]                  # Stage 2: final norm + output
+            ["norm", "lm_head"]                  # Stage 2: final norm + output
         ]
     """
     pp_rank = pp_mesh.get_local_rank()
