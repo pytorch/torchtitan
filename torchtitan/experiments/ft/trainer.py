@@ -151,9 +151,8 @@ class FaultTolerantTrainer(Trainer):
             init_device = device_type
             buffer_device = None
 
-        # FT addition: pass ft_manager to build_loss_fn
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims, ft_manager=self.ft_manager
+        self.loss_fn = config.loss.build(
+            compile_config=config.compile,
         )
 
         # verify batch sizes

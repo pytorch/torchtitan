@@ -59,7 +59,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
+            "lm_head.weight": "lm_head.weight",
         }
 
     def get_hf_storage_reader(

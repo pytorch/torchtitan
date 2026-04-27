@@ -20,6 +20,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import device_type
 
 
 def parallelize_llama(
@@ -69,7 +70,7 @@ def parallelize_llama(
                 0,
                 model.config.vocab_size,
                 (global_batch_size, training.seq_len),
-                device=torch.device("cuda"),
+                device=torch.device(device_type),
             ),
         )
 

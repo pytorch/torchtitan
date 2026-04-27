@@ -14,7 +14,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_ac_regions,
     annotate_module_fqns,
     apply_graph_ac,
 )
@@ -24,22 +23,17 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.llama3.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
 
 def annotate_llama(model: GraphTrainerLlama3Model) -> None:
-    """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
+    """Attach module FQN annotations to FX graph nodes.
 
-    - Module FQN annotation: Tags each submodule's forward with its
-      fully-qualified name so that the transformer_block_bucketing pass
-      can identify which graph nodes belong to which module.
-    - AC region annotation: Tags each transformer block's forward with a unique
-      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
-      boundaries for the min-cut partitioner.
+    Tags each submodule's forward with its fully-qualified name via
+    ``torch.fx.traceback.annotate_fn`` for downstream passes (bucketing,
+    SAC region boundaries, etc.).
     """
     annotate_module_fqns(model)
-    annotate_ac_regions(model)
 
 
 def parallelize_llama(
@@ -59,9 +53,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -73,11 +64,7 @@ def parallelize_llama(
 
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-        )
+        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if ac_config.mode != "none":

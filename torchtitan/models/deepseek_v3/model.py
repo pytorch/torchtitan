@@ -234,6 +234,16 @@ class DeepSeekV3Model(Decoder):
                     f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
 
+            from torchtitan.models.deepseek_v3.sharding import (
+                set_deepseek_v3_sharding_config,
+            )
+
+            set_deepseek_v3_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+            )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:

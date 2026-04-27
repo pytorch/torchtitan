@@ -4,17 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    RowwiseParallel,
-    SequenceParallel,
-)
-
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -25,8 +15,8 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.tools.logging import logger
@@ -43,9 +33,6 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -53,17 +40,18 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallel_dims.tp_enabled:
-        enable_sp = parallelism.enable_sequence_parallel
-
-        tp_mesh = parallel_dims.get_mesh("tp")
-        apply_non_moe_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_cp=parallel_dims.cp_enabled,
-            enable_sp=enable_sp,
+    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+    # runs inside the local_map boundary on local tensors.
+    if parallel_dims.cp_enabled:
+        apply_cp_to_forward(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
         )
+
+    if parallel_dims.tp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     # Check if using DeepEP/HybridEP for MoE communication
@@ -88,13 +76,7 @@ def parallelize_deepseekv3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
-        )
-
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
+            enable_sp=parallelism.enable_sequence_parallel,
         )
 
     model_compile_enabled = (
@@ -144,115 +126,3 @@ def parallelize_deepseekv3(
         logger.info("Applied CPU Offloading to the model")
 
     return model
-
-
-def apply_non_moe_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    enable_loss_parallel: bool,
-    enable_cp: bool,
-    enable_sp: bool = True,
-):
-    """Apply tensor parallelism."""
-    # 1. Parallelize the embedding and shard its outputs (which are the first
-    # transformer block's inputs)
-    # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Parallelize the final linear output layer
-    sp_layout = Shard(1) if enable_sp else Replicate()
-    embed_plan = RowwiseParallel(
-        input_layouts=Replicate(),
-        output_layouts=sp_layout,
-        use_local_output=enable_sp,
-    )
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": embed_plan,
-            "norm": SequenceParallel() if enable_sp else NoParallel(),
-            "output": ColwiseParallel(
-                input_layouts=sp_layout,
-                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
-                use_local_output=not enable_loss_parallel,
-            ),
-        },
-    )
-
-    attention_kernel_plan = PrepareModuleInput(
-        input_layouts=(Shard(1), Shard(1), Shard(1)),
-        desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
-        use_local_output=True,
-    )
-    # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    positions_sharding = Replicate() if enable_cp else None
-    norm_plan = SequenceParallel() if enable_sp else NoParallel()
-    rowwise_output_plan = RowwiseParallel(
-        output_layouts=sp_layout, use_local_output=enable_sp
-    )
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        layer_plan = {
-            "attention_norm": norm_plan,
-            "attention": PrepareModuleInput(
-                input_layouts=(sp_layout, Replicate(), None, positions_sharding),
-                desired_input_layouts=(
-                    Replicate(),
-                    Replicate(),
-                    None,
-                    positions_sharding,
-                ),
-            ),
-            # NOTE: NoParallel() without local_output_grad_placements keeps the output as a
-            # DTensor so that the intermediate results k is generated as a DTensor and its
-            # gradient is correctly handled by the autograd engine.
-            "attention.wkv_a": NoParallel(),
-            "attention.wkv_b": ColwiseParallel(use_local_output=False),
-            "attention.kv_norm": NoParallel(),
-            # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
-            "attention.inner_attention": attention_kernel_plan,
-            "attention.wo": rowwise_output_plan,
-            "ffn_norm": norm_plan,
-        }
-
-        # pyrefly: ignore [missing-attribute]
-        if transformer_block.attention.q_lora_rank == 0:
-            layer_plan["attention.wq"] = ColwiseParallel(
-                use_local_output=False
-            )  # This is only used when q_lora_rank==0
-        else:
-            layer_plan.update(
-                {
-                    "attention.wq_a": NoParallel(),
-                    "attention.wq_b": ColwiseParallel(use_local_output=False),
-                    "attention.q_norm": NoParallel(),
-                }
-            )
-
-        # pyrefly: ignore [missing-attribute]
-        if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward": PrepareModuleInput(
-                        input_layouts=(sp_layout,),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": ColwiseParallel(),
-                    "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": ColwiseParallel(),
-                }
-            )
-
-        parallelize_module(
-            # pyrefly: ignore [bad-argument-type]
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
-            parallelize_plan=layer_plan,
-        )
-
-    logger.info("Applied Tensor Parallelism to the model")

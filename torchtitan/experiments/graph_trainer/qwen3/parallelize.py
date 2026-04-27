@@ -17,7 +17,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_ac_regions,
     annotate_module_fqns,
     apply_graph_ac,
 )
@@ -29,7 +28,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     MixedPrecisionPolicy,
 )
 from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
-from torchtitan.models.qwen3.parallelize import apply_non_moe_tp
 from torchtitan.tools.logging import logger
 
 
@@ -38,9 +36,9 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes (only if MoE layers exist).
-    - AC region annotation: Tags each transformer block's forward with a unique
-      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
-      boundaries for the min-cut partitioner.
+    - Module FQN annotation: Tags each submodule's forward with its
+      fully-qualified name for downstream passes (bucketing, SAC region
+      boundaries, etc.).
     """
     # Annotate MoE EP regions if any layer has MoE enabled
     if any(layer.moe is not None for layer in model.config.layers):
@@ -56,7 +54,6 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
         MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
     annotate_module_fqns(model)
-    annotate_ac_regions(model)
 
 
 def parallelize_qwen3(
@@ -87,14 +84,9 @@ def parallelize_qwen3(
 
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_non_moe_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_async_tp=parallelism.enable_async_tensor_parallel,
-            enable_cp=parallel_dims.cp_enabled,
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        # Config-based sharding: ShardingConfig is populated on the model
+        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
+        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -104,6 +96,7 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            enable_sp=parallelism.enable_sequence_parallel,
         )
 
     if ac_config.mode != "none":

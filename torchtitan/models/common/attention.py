@@ -84,6 +84,13 @@ class LocalMapInnerAttention(Module):
     DTensors **after** all ``forward_hook``s complete.
 
     Placements and device mesh are inferred from the input DTensors.
+
+    TODO: This entire class is a legacy path for models that have not yet
+    adopted config-based sharding. Once all models use config-based
+    sharding, ``local_map`` will be applied statically by
+    ``Module.parallelize()`` via ``LocalMapConfig``, and this class
+    should be removed — subclasses should inherit from ``Module``
+    directly.
     """
 
     @dataclass(kw_only=True, slots=True)

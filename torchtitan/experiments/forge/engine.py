@@ -161,7 +161,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.build_loss_fn(
+        self.loss_fn = self.train_spec.loss.build(
             config.compile, parallel_dims=parallel_dims
         )
 

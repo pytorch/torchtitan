@@ -89,7 +89,10 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
-        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        # Keep an unshuffled reference so map-style datasets can be re-shuffled
+        # deterministically on re-loop and on checkpoint resume.
+        self._original_data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        self._data = self._original_data
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
@@ -167,13 +170,19 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 # Reset offset for the next iteration
                 self._sample_idx = 0
                 self._epoch += 1
-                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
-                # Ensures re-looping a dataset loaded from a checkpoint works correctly
-                if not isinstance(self._data, Dataset):
-                    if hasattr(self._data, "set_epoch") and hasattr(
-                        self._data, "epoch"
-                    ):
-                        self._data.set_epoch(self._data.epoch + 1)
+                logger.warning(
+                    f"Dataset {self.dataset_name} is being re-looped "
+                    f"(epoch {self._epoch})"
+                )
+                # Ensures re-looping a dataset loaded from a checkpoint works correctly.
+                # Map-style datasets replay the same order unless we shuffle per epoch;
+                # iterable-style datasets honor set_epoch and re-shuffle internally.
+                if isinstance(self._data, Dataset):
+                    self._data = cast(
+                        Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                    )
+                elif hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
+                    self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
         self._inputs_buffer = state_dict["inputs_buffer"]
@@ -183,12 +192,27 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 "RoPE positions may be incorrect with block_causal attention."
             )
         self._positions_buffer = state_dict.get("positions_buffer", [])
+        # Older checkpoints predate per-epoch shuffle on re-loop; default to 0
+        # so resuming those runs stays numerically identical (epoch 0 is never
+        # shuffled).
+        self._epoch = state_dict.get("epoch", 0)
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
+            # Replay the same per-epoch shuffle so _data matches the order
+            # observed at checkpoint time. Epoch 0 stays unshuffled, which
+            # preserves bit-identical resume for single-epoch training runs.
+            if self._epoch > 0:
+                self._data = cast(
+                    Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                )
         else:
             assert "data" in state_dict
-            self._data.load_state_dict(state_dict["data"])
+            data_state = state_dict["data"]
+            # HuggingFace IterableDataset sync epoch
+            saved_epoch = data_state.get("epoch", 0)
+            self._data.set_epoch(saved_epoch)
+            self._data.load_state_dict(data_state)
 
     def state_dict(self):
         _state_dict: dict[str, Any] = {
@@ -299,6 +323,8 @@ class ChatDataset(IterableDataset, Stateful):
         self._inputs_buffer: list[int] = []
         self._labels_buffer: list[int] = []
         self._positions_buffer: list[int] = []
+        self._pending_input_ids: list[int] = []
+        self._pending_label_ids: list[int] = []
 
         self._logged_first_sample = False
 
@@ -389,6 +415,18 @@ class ChatDataset(IterableDataset, Stateful):
         The model's flex/varlen attention mask uses these EOS positions to
         prevent cross-document attention.
         """
+        # resume from ckpt edge case
+        if self._pending_input_ids:
+            input_ids = self._pending_input_ids
+            label_ids = self._pending_label_ids
+            self._pending_input_ids = []
+            self._pending_label_ids = []
+            self._inputs_buffer.extend(input_ids)
+            self._labels_buffer.extend(label_ids)
+            self._positions_buffer.extend(range(len(input_ids)))
+            self._sample_idx += 1
+            if len(self._inputs_buffer) == self.seq_len:
+                yield self._flush_buffers()
         while True:
             for sample in self._get_data_iter():
                 # pyrefly: ignore [bad-argument-type]
@@ -406,8 +444,14 @@ class ChatDataset(IterableDataset, Stateful):
                     self._inputs_buffer.extend([self._eos_id] * pad_len)
                     self._labels_buffer.extend([IGNORE_INDEX] * pad_len)
                     self._positions_buffer.extend(range(pad_len))
-
+                    self._pending_input_ids = input_ids
+                    self._pending_label_ids = label_ids
                     yield self._flush_buffers()
+                    # resumed generator continues here or fresh generator handles pending at top (resume path)
+                    input_ids = self._pending_input_ids
+                    label_ids = self._pending_label_ids
+                    self._pending_input_ids = []
+                    self._pending_label_ids = []
 
                 # Add example to buffer with positions resetting to 0
                 self._inputs_buffer.extend(input_ids)
@@ -461,6 +505,8 @@ class ChatDataset(IterableDataset, Stateful):
             "inputs_buffer": self._inputs_buffer,
             "labels_buffer": self._labels_buffer,
             "positions_buffer": self._positions_buffer,
+            "pending_input_ids": self._pending_input_ids,
+            "pending_label_ids": self._pending_label_ids,
         }
 
         if isinstance(self._data, Dataset):
@@ -475,6 +521,8 @@ class ChatDataset(IterableDataset, Stateful):
         self._inputs_buffer = state_dict["inputs_buffer"]
         self._labels_buffer = state_dict["labels_buffer"]
         self._positions_buffer = state_dict["positions_buffer"]
+        self._pending_input_ids = state_dict["pending_input_ids"]
+        self._pending_label_ids = state_dict["pending_label_ids"]
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
@@ -485,7 +533,11 @@ class ChatDataset(IterableDataset, Stateful):
                 )
         else:
             assert "data" in state_dict
-            self._data.load_state_dict(state_dict["data"])
+            data_state = state_dict["data"]
+            # HuggingFace IterableDataset sync epoch
+            saved_epoch = data_state.get("epoch", 0)
+            self._data.set_epoch(saved_epoch)
+            self._data.load_state_dict(data_state)
 
 
 class ChatDataLoader(ParallelAwareDataloader):

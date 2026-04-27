@@ -135,6 +135,14 @@ class Qwen3Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
+            from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
+
+            set_qwen3_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+            )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -154,7 +162,7 @@ class Qwen3Model(Decoder):
         self.enable_weight_tying = config.enable_weight_tying
 
         if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.output.weight
+            self.tok_embeddings.weight = self.lm_head.weight
 
     def init_states(
         self,
@@ -164,7 +172,7 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             # Re-tie before init: on meta device the __init__ tying may
             # not have worked correctly.
-            assert self.tok_embeddings is not None and self.output is not None
-            self.tok_embeddings.weight = self.output.weight
+            assert self.tok_embeddings is not None and self.lm_head is not None
+            self.tok_embeddings.weight = self.lm_head.weight
 
         super().init_states(buffer_device=buffer_device)

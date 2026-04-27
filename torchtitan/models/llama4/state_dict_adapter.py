@@ -44,8 +44,8 @@ class Llama4StateDictAdapter(StateDictAdapter):
         self.from_hf_map = {
             "language_model.model.embed_tokens.weight": "tok_embeddings.weight",
             "language_model.model.norm.weight": "norm.weight",
-            "language_model.lm_head.weight": "output.weight",
-            **qkv_map,
+            "language_model.lm_head.weight": "lm_head.weight",
+            **qkv_map,  # pyrefly: ignore [invalid-argument]
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "language_model.model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "language_model.model.layers.{}.feed_forward.router.weight": "layers.{}.moe.router.gate.weight",

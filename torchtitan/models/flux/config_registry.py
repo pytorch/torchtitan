@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import MSELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -28,6 +29,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
     hf_assets_path = "tests/assets/tokenizer"
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
+        loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
@@ -88,6 +90,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
 
 def flux_dev() -> FluxTrainer.Config:
     return FluxTrainer.Config(
+        loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
@@ -139,6 +142,7 @@ def flux_dev() -> FluxTrainer.Config:
 
 def flux_schnell() -> FluxTrainer.Config:
     return FluxTrainer.Config(
+        loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",

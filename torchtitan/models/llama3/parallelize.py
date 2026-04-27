@@ -11,14 +11,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    RowwiseParallel,
-    SequenceParallel,
-)
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -30,13 +22,12 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
 
@@ -58,9 +49,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -68,25 +56,22 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallel_dims.tp_enabled:
-        enable_sp = parallelism.enable_sequence_parallel
-
-        tp_mesh = parallel_dims.get_mesh("tp")
-        apply_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_cp=parallel_dims.cp_enabled,
-            enable_sp=enable_sp,
-        )
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
-
+    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+    # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
-        apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute]
+        apply_cp_to_forward(
+            # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
+
+    # TODO: We pass tp_mesh here because TP is the only parallelism
+    # using DTensor currently. Once we move to full DTensor (e.g.,
+    # FSDP via DTensor, CP via DTensor), pass the full SPMD mesh instead.
+    if parallel_dims.tp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        model.parallelize(tp_mesh)
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -116,102 +101,15 @@ def parallelize_llama(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
     )
 
-    logger.info("Applied fully_shard to the model")
+    if parallel_dims.dp_replicate_enabled:
+        logger.info("Applied HSDP to the model")
+    else:
+        logger.info("Applied FSDP to the model")
 
     if training.enable_cpu_offload:
         logger.info("Applied CPU Offloading to the model")
 
     return model
-
-
-def apply_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    enable_loss_parallel: bool,
-    enable_cp: bool = False,
-    enable_sp: bool = True,
-):
-    """Apply tensor parallelism."""
-    # 1. Parallelize the embedding and shard its outputs (which are the first
-    # transformer block's inputs)
-    # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Parallelize the final linear output layer
-    sp_layout = Shard(1) if enable_sp else Replicate()
-    embed_plan = RowwiseParallel(
-        input_layouts=Replicate(),
-        output_layouts=sp_layout,
-        use_local_output=enable_sp,
-    )
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": embed_plan,
-            "norm": SequenceParallel() if enable_sp else NoParallel(),
-            "output": ColwiseParallel(
-                input_layouts=sp_layout,
-                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
-                use_local_output=not enable_loss_parallel,
-            ),
-        },
-    )
-
-    # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    norm_plan = SequenceParallel() if enable_sp else NoParallel()
-    rowwise_output_plan = RowwiseParallel(
-        output_layouts=sp_layout, use_local_output=enable_sp
-    )
-
-    # Detect whether fused QKV is used by checking the first layer
-    # pyrefly: ignore [not-callable]
-    first_block = next(iter(model.layers.values()))
-    use_fused_qkv = isinstance(
-        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
-        FusedQKVLinear,
-    )
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        if use_fused_qkv:
-            qkv_plan = {
-                "attention.qkv_linear.wqkv": ColwiseParallel(),
-            }
-        else:
-            qkv_plan = {
-                "attention.qkv_linear.wq": ColwiseParallel(),
-                "attention.qkv_linear.wk": ColwiseParallel(),
-                "attention.qkv_linear.wv": ColwiseParallel(),
-            }
-        layer_plan = {
-            "attention_norm": norm_plan,
-            "attention": PrepareModuleInput(
-                input_layouts=(sp_layout, None, None, None),
-                desired_input_layouts=(Replicate(), None, None, None),
-            ),
-            **qkv_plan,
-            "attention.wo": rowwise_output_plan,
-            "ffn_norm": norm_plan,
-            "feed_forward": PrepareModuleInput(
-                input_layouts=(sp_layout,),
-                desired_input_layouts=(Replicate(),),
-            ),
-            "feed_forward.w1": ColwiseParallel(),
-            "feed_forward.w2": rowwise_output_plan,
-            "feed_forward.w3": ColwiseParallel(),
-        }
-
-        parallelize_module(
-            # pyrefly: ignore [bad-argument-type]
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
-
-    logger.info("Applied Tensor Parallelism to the model")
 
 
 def apply_fsdp(
@@ -258,7 +156,9 @@ def apply_fsdp(
         # When weights are tied, tok_embeddings and output share the same parameter.
         # Group them together in one FSDP unit to avoid duplicate all-gathers.
         modules = [
-            m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
+            m
+            for m in (model.tok_embeddings, model.norm, model.lm_head)
+            if m is not None
         ]
         # pyrefly: ignore [no-matching-overload]
         fully_shard(
@@ -274,12 +174,12 @@ def apply_fsdp(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-        # As an optimization, do not reshard_after_forward the last layers by default
-        # since FSDP would prefetch them immediately after the forward pass
-        if model.norm is not None and model.output is not None:
+        # As an optimization, do not reshard_after_forward the last layers
+        # by default since FSDP would prefetch them immediately.
+        if model.norm is not None and model.lm_head is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                [model.norm, model.output],
+                [model.norm, model.lm_head],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )

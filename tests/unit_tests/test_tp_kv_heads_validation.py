@@ -49,6 +49,8 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
         tensor_parallel_degree=tp,
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
+        disable_loss_parallel=True,
+        enable_sequence_parallel=False,
     )
     return SimpleNamespace(training=training, parallelism=parallelism)
 
@@ -92,7 +94,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
         vocab_size=_VOCAB_SIZE,
         tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
         norm=RMSNorm.Config(normalized_shape=_DIM),
-        output=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
+        lm_head=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
         rope=RoPE.Config(
             dim=_DIM // n_heads,
             max_seq_len=4096,

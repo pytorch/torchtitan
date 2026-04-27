@@ -11,7 +11,6 @@ from typing import TypeAlias
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.loss import LossFunction
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
@@ -20,7 +19,6 @@ ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 PipeliningFunction: TypeAlias = Callable[
     ..., tuple[_PipelineSchedule, list[nn.Module], bool, bool]
 ]
-LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
 FragmentFunction: TypeAlias = Callable[..., list[nn.Module]]
 PostOptimizerBuildFn: TypeAlias = Callable[..., None]
 
@@ -39,7 +37,6 @@ class ModelSpec:
     # resolver does not handle ``Callable[..., X]`` (Ellipsis as param spec).
     # The detailed TypeAliases above are still available for use in function
     # signatures elsewhere in the codebase.
-    build_loss_fn: Callable
     parallelize_fn: Callable
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None
