@@ -22,6 +22,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
+        qkv_map: dict[str, str | None]
         if self.fuse_qkv:
             qkv_map = {
                 "model.layers.{}.self_attn.q_proj.weight": None,
@@ -264,6 +265,8 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 state_dict[tt_key] = value
             else:
                 tt_key = self.from_hf_map[key]
+                if tt_key is None:
+                    continue
                 state_dict[tt_key] = value
 
         if self.fuse_qkv and pending_qkv_weight:
