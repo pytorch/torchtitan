@@ -111,8 +111,6 @@ def compile_time_passes(
         # this pass, so custom_codegen_pass and
         # insert_kernel_annotations_pass cannot follow.
         passes.append(full_inductor_compilation_pass)
-        return passes
-
     if inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
@@ -125,21 +123,21 @@ def compile_time_passes(
             )
         )
         passes.append(regional_inductor_pass)
-    if use_cudagraph:
-        # Must run before custom_codegen_pass (last in pre_passes)
-        # which replaces the GraphModule's forward().
-        # Also must run before cudagraph_pass.
-        passes.append(insert_kernel_annotations_pass)
-    # TODO: Switch to upstream PyTorch implementation when
-    # https://github.com/pytorch/pytorch/pull/178246 lands.
-    # custom_codegen_pass saves the FX graph to disk for:
-    # 1. Debugging: inspect the generated graph code directly
-    # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
-    #    gives fine-grained operator-level attribution in profiler traces
-    # 3. User-editable codegen: users can directly modify the generated
-    #    program on disk for fine-grain scheduling optimizations, with
-    #    hot-reload picking up changes at runtime
-    passes.append(custom_codegen_pass)
+        if use_cudagraph:
+            # Must run before custom_codegen_pass (last in pre_passes)
+            # which replaces the GraphModule's forward().
+            # Also must run before cudagraph_pass.
+            passes.append(insert_kernel_annotations_pass)
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
+        passes.append(custom_codegen_pass)
     return passes
 
 
