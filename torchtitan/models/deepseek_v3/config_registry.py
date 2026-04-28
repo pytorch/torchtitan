@@ -83,7 +83,7 @@ def deepseek_v3_16b() -> Trainer.Config:
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model_spec=model_registry(
-            "16B", attn_backend="flex", moe_comm_backend="standard"
+            "16B", attn_backend="flex", moe_comm_backend="deepep"
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
