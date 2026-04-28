@@ -72,7 +72,7 @@ class Configurable:
 
         def traverse(
             self, config_cls: type, *, _prefix: str = ""
-        ) -> Iterator[tuple[str, "Configurable.Config", object, str]]:
+        ) -> Iterator[tuple[str, "Configurable.Config", object, str | int]]:
             """Yield ``(fqn, config, parent, field_name)`` for every nested config of *config_cls*.
 
             Recursively traverses dataclass fields, including items inside lists.

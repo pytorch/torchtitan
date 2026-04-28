@@ -40,6 +40,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
+        qkv_map: dict[str, str | None]
         if self.fuse_qkv:
             qkv_map = {
                 "model.language_model.layers.{}.self_attn.q_proj.weight": None,
