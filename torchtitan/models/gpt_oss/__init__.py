@@ -10,7 +10,6 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
@@ -348,14 +347,10 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
     )
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,

@@ -526,7 +526,7 @@ class Qwen3VLModel(Qwen3Model):
             deepstack_video_features,
         )
 
-    def forward(  # pyrefly: ignore [bad-override]
+    def forward(  # pyrefly: ignore [bad-override, bad-param-name-override]
         self,
         tokens: torch.Tensor,
         *,

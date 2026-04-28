@@ -12,6 +12,7 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInputOutput,
 )
 
+from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -31,6 +32,7 @@ from torchtitan.models.common.token_dispatcher import (
 )
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
@@ -42,6 +44,7 @@ def parallelize_gptoss(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -62,7 +65,7 @@ def parallelize_gptoss(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
+            # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
@@ -79,6 +82,7 @@ def parallelize_gptoss(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             enable_sp=True,
+            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if ac_config.mode != "none":
@@ -136,6 +140,7 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
     enable_sp: bool = True,
+    pad_multiple: int | None = None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -196,6 +201,11 @@ def apply_moe_ep_tp(
                     # under CooR precompile instead of a concrete int
                     # that gets baked into the FX graph.
                     dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
+            if isinstance(dispatcher, TorchAOTokenDispatcher):
+                assert (
+                    pad_multiple is not None
+                ), "pad_multiple must be set for TorchAOTokenDispatcher"
+                dispatcher.pad_multiple = pad_multiple
         else:
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
