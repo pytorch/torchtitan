@@ -60,7 +60,8 @@ class GraphTrainerCompileConfig(CompileConfig):
         regional: compile tagged regions (e.g. FlexAttention HOPs) with
             regional_inductor while leaving the rest interpreted.
         full: compile the entire graph with inductor into optimized
-            Triton kernels. Applies inductor decompositions first.
+            Triton kernels. Provides better performance but may change
+            bitwise numerics compared to regional/interpreted execution.
     """
 
     enable_cudagraph: bool = True
