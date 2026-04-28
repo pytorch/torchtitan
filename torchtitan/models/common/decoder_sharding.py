@@ -7,7 +7,12 @@
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import MeshDimName, NamedPlacement, ShardingConfig
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    MeshDimName,
+    NamedPlacement,
+    ShardingConfig,
+)
 
 DP_REPLICATE = MeshDimName.DP_REPLICATE
 DP_SHARD = MeshDimName.DP_SHARD
@@ -122,7 +127,7 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
-    Shared by llama3, qwen3, and llama4 — all three have a GQA block whose
+    Shared by llama3, qwen3, and llama4 -- all three have a GQA block whose
     ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
     Replicate internally) and a plain ``rope_cache`` (annotated Replicate).
 
@@ -146,6 +151,30 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+
+
+def set_gqa_inner_attention_local_map(
+    inner_attention_cfg, *, return_lse: bool = False
+) -> None:
+    """Install a ``LocalMapConfig`` on an inner-attention config.
+
+    q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
+    TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
+    to local tensors before the kernel runs, then wraps outputs back.
+
+    ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
+    GPT-OSS's flash attention with ``return_lse=True``); both outputs share
+    the same heads-sharded placement.
+    """
+    qkv_placements: NamedPlacement = {TP: Shard(2)}
+    num_outputs = 2 if return_lse else 1
+    inner_attention_cfg.sharding_config = ShardingConfig(
+        local_map=LocalMapConfig(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,) * num_outputs,
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
 
 
 def set_dense_ffn_sharding(

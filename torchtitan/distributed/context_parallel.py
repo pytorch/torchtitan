@@ -14,7 +14,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental._attention import (
     _context_parallel_shard,
-    _ContextParallel,
     _enable_context_parallel_dispatcher,
     _HeadTailLoadBalancer,
     _PTRRLoadBalancer,
@@ -22,7 +21,6 @@ from torch.distributed.tensor.experimental._attention import (
 from torch.distributed.tensor.experimental._context_parallel._attention import (
     flex_cp_allgather,
 )
-from torch.distributed.tensor.parallel import parallelize_module
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
@@ -32,52 +30,6 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.tools.logging import logger
-
-
-def apply_cp_to_attention_module(
-    attention_modules: Sequence[nn.Module],
-    cp_mesh: DeviceMesh,
-) -> None:
-    """
-    Apply context parallelism to attention modules.
-
-    CP splits the sequence dimension across devices to enable training with
-    longer sequences. This function applies CP to the provided attention
-    modules. The attention type is inferred via isinstance on the first module.
-
-    Args:
-        attention_modules: Sequence of attention modules to apply CP to
-        cp_mesh: Device mesh for context parallel dimension
-
-    Raises:
-        NotImplementedError: If the attention type does not support CP
-    """
-    first = attention_modules[0]
-    if isinstance(first, FlexAttention):
-        cp_plan = _ContextParallel(
-            seq_dim=1, attention_type=_ContextParallel.AttentionType.FLEX
-        )
-    elif isinstance(first, ScaledDotProductAttention):
-        # Enable the DTensor dispatcher to route SDPA operations to the
-        # Context Parallel implementation. This is required for CP to work
-        # with SDPA (but not FlexAttention).
-        _enable_context_parallel_dispatcher()
-        cp_plan = _ContextParallel(
-            seq_dim=1, attention_type=_ContextParallel.AttentionType.SDPA
-        )
-    else:
-        raise NotImplementedError(
-            f"Context Parallel is not supported for {type(first).__name__}"
-        )
-
-    for attention_module in attention_modules:
-        parallelize_module(
-            module=attention_module,
-            device_mesh=cp_mesh,
-            parallelize_plan=cp_plan,
-        )
-
-    logger.info("Applied Context Parallel to the model")
 
 
 def apply_cp_to_forward(

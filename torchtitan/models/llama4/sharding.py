@@ -13,6 +13,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
+    set_gqa_inner_attention_local_map,
 )
 
 if TYPE_CHECKING:
@@ -52,6 +53,7 @@ def _set_llama4_layer_sharding(
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
+    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
