@@ -50,6 +50,7 @@ def build_minimal_trainer(
                 else list(compile_joint_passes),
                 precompile_artifact_dir="",
                 memory_policy="default",
+                inductor_compilation="regional",
                 enable_cudagraph=True,
                 debug_graph_passes=False,
             ),
