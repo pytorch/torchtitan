@@ -43,7 +43,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         tp_mesh,
         {
             "tok_embeddings": RowwiseParallel(input_layouts=Replicate()),
-            "lm_head": ColwiseParallel(output_layouts=Replicate()),
+            "output": ColwiseParallel(output_layouts=Replicate()),
         },
     )
 
