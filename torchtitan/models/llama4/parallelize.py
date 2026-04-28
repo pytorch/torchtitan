@@ -17,7 +17,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 
-from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -45,11 +44,9 @@ from torchtitan.distributed.tensor_parallel import (
 )
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 from torchtitan.models.llama4.model import Llama4Model
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -58,7 +55,6 @@ def parallelize_llama(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -116,7 +112,6 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
             enable_sp=True,
-            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     model_compile_enabled = (
@@ -387,7 +382,6 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
     enable_sp: bool = True,
-    pad_multiple: int | None = None,
 ):
     """
     Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
@@ -476,13 +470,6 @@ def apply_moe_ep_tp(
             if comm_backend in ("deepep", "hybridep"):
                 # pyrefly: ignore [missing-attribute]
                 dispatcher = transformer_block.moe.experts.token_dispatcher
-                assert isinstance(dispatcher, DeepEPTokenDispatcher)
-                if comm_backend == "deepep" and pad_multiple is not None:
-                    raise ValueError(
-                        "DeepEP does not support pad_multiple. "
-                        "Use hybridep or standard comm backend instead."
-                    )
-                dispatcher.pad_multiple = pad_multiple
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             # sp_size and sp_rank are set for sequence-parallel token splitting
             # when EP borrows from TP (ETP=1).
@@ -496,11 +483,6 @@ def apply_moe_ep_tp(
                     # under CooR precompile instead of a concrete int
                     # that gets baked into the FX graph.
                     dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
-            if isinstance(dispatcher, TorchAOTokenDispatcher):
-                assert (
-                    pad_multiple is not None
-                ), "pad_multiple must be set for TorchAOTokenDispatcher"
-                dispatcher.pad_multiple = pad_multiple
         else:
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher

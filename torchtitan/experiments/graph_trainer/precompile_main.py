@@ -174,7 +174,6 @@ def _common_setup(config):
         model,
         parallel_dims=parallel_dims,
         training=config.training,
-        model_converters=config.model_converters,
         parallelism=parallelism,
         compile_config=parallelize_compile_config,
         ac_config=config.activation_checkpoint,

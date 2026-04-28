@@ -18,7 +18,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
@@ -37,7 +36,6 @@ def parallelize_deepseekv3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,

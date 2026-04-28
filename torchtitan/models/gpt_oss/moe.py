@@ -26,7 +26,6 @@ class ScaleBiasForward(torch.autograd.Function):
     """
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
     def forward(ctx, bias, tp_degree):
         ctx.tp_degree = tp_degree
         if tp_degree > 1:
