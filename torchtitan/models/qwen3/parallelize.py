@@ -67,6 +67,7 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            enable_sp=parallelism.enable_sequence_parallel,
         )
 
     if ac_config.mode != "none":

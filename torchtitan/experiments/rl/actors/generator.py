@@ -162,11 +162,6 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
                 )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
-                )
 
     def __init__(
         self,
@@ -191,11 +186,13 @@ class VLLMGenerator(Actor, Configurable):
         self.model_path = model_path
 
         # Build vLLM engine
+        enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             model=model_path,
             trust_remote_code=True,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            enable_expert_parallel=enable_ep,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",

@@ -291,8 +291,16 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
 
-        # All-to-all dispatch tokens to EP ranks
-        routed_input = all_to_all_single_autograd(
+        # All-to-all dispatch tokens to EP ranks.
+        # Use the non-autograd version when running in inference mode
+        # (e.g. vLLM), since _c10d_functional_autograd ops don't dispatch
+        # correctly without an active autograd context.
+        a2a_fn = (
+            all_to_all_single
+            if torch.is_inference_mode_enabled()
+            else all_to_all_single_autograd
+        )
+        routed_input = a2a_fn(
             routed_input,
             output_splits_list,
             input_splits_list,
@@ -414,7 +422,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         )
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output = all_to_all_single_autograd(
+        a2a_fn = (
+            all_to_all_single
+            if torch.is_inference_mode_enabled()
+            else all_to_all_single_autograd
+        )
+        routed_output = a2a_fn(
             routed_output,
             metadata.input_splits,
             metadata.output_splits,

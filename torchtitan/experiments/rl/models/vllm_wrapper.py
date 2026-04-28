@@ -101,39 +101,55 @@ def create_torchtitan_config_from_vllm_config(
         Tuple of (ParallelDims, ParallelismConfig) mapped from vLLM config
 
     Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
-        in inference. These are set to default values.
+        vLLM doesn't use FSDP sharding (dp_shard=1) in inference.
+        Expert parallelism is enabled when vLLM's enable_expert_parallel
+        flag is set, repurposing TP ranks for EP (ep=tp_size, etp=1).
     """
     world_size = dist.get_world_size()
     parallel_config = vllm_config.parallel_config
 
+    # When EP is enabled, all TP ranks are repurposed for expert parallelism
+    # (each rank holds a shard of experts): ep_size = tp_size, etp_size = 1.
+    tp_size = parallel_config.tensor_parallel_size
+    if parallel_config.enable_expert_parallel:
+        ep_size = tp_size
+        etp_size = 1
+    else:
+        ep_size = 1
+        etp_size = 1
+
     parallel_dims = ParallelDims(
         dp_replicate=parallel_config.data_parallel_size,
         dp_shard=1,
-        cp=parallel_config.decode_context_parallel_size,
-        tp=parallel_config.tensor_parallel_size,
+        cp=1,
+        tp=tp_size,
         pp=parallel_config.pipeline_parallel_size,
-        ep=1,
-        etp=1,
+        ep=ep_size,
+        etp=etp_size,
         world_size=world_size,
     )
 
     parallelism = ParallelismConfig(
         data_parallel_replicate_degree=parallel_config.data_parallel_size,
         data_parallel_shard_degree=1,
-        context_parallel_degree=parallel_config.decode_context_parallel_size,
-        tensor_parallel_degree=parallel_config.tensor_parallel_size,
+        context_parallel_degree=1,
+        tensor_parallel_degree=tp_size,
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
-        expert_parallel_degree=1,
-        expert_tensor_parallel_degree=1,
-        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
+        expert_parallel_degree=ep_size,
+        expert_tensor_parallel_degree=etp_size,
+        disable_loss_parallel=True,
         enable_sequence_parallel=False,
     )
+
+    # Build the full device mesh so all dimensions (tp, ep, etp, efsdp, etc.)
+    # are available to the core parallelize function.
+    parallel_dims.build_mesh()
 
     logger.info(
         f"Created TorchTitan config from vLLM: "
         f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
-        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"
+        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}, "
+        f"EP={parallel_dims.ep}, ETP={parallel_dims.etp}"
     )
 
     return parallel_dims, parallelism
@@ -229,28 +245,39 @@ class TorchTitanVLLMModelWrapper(Module):
             )
         )
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
+        # Build model on meta device to avoid allocating full model on every
+        # GPU. This is critical for large MoE models where replicating all
+        # experts would OOM. After parallelization (which sets up EP/TP
+        # sharding on meta tensors), to_empty() allocates only the local
+        # shards on the actual device.
+        with torch.device("meta"):
+            self.model = self.config.build()
 
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
 
         # Apply parallelism using the model's own parallelize function.
-        # AC and compile are explicitly disabled; skip_dp=True skips FSDP.
-        from torchtitan.config import ActivationCheckpointConfig, CompileConfig
-        from torchtitan.protocols.model_converter import ModelConvertersContainer
+        from torchtitan.config import (
+            ActivationCheckpointConfig,
+            CompileConfig,
+            TrainingConfig,
+        )
 
         self.parallelize_fn(
             self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
-            model_converters=ModelConvertersContainer.Config(),
             parallelism=parallelism,
             compile_config=CompileConfig(enable=False),
             ac_config=ActivationCheckpointConfig(mode="none"),
             dump_folder="",
             skip_dp=True,
         )
+
+        # Materialize model on GPU — only allocates local shards (not full
+        # model) thanks to EP/TP DTensor sharding applied above.
+        device_type = vllm_config.device_config.device.type
+        self.model.to_empty(device=device_type)
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
         # may use up to 2x max_seq_len, so use max_model_len which already
@@ -395,6 +422,10 @@ class TorchTitanVLLMModelWrapper(Module):
         if isinstance(logits, DTensor):
             logits = logits.to_local()
 
+        # Ensure logits are plain tensors for vLLM's sampling code
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
+
         return logits
 
     def load_weights_from_state_dict(self, state_dict):
@@ -431,6 +462,18 @@ class TorchTitanVLLMModelWrapper(Module):
 
         # Load HF state dict using DCP
         hf_state_dict = adapter.to_hf(self.model.state_dict())
+
+        # Filter out model keys that don't exist in the HF checkpoint.
+        # e.g. expert_bias is a TorchTitan training buffer (for auxiliary-
+        # loss-free load balancing) that is zero-initialized by init_states()
+        # and not present in HF checkpoints.
+        hf_keys_in_checkpoint = set(
+            storage_reader.read_metadata().state_dict_metadata.keys()
+        )
+        hf_state_dict = {
+            k: v for k, v in hf_state_dict.items() if k in hf_keys_in_checkpoint
+        }
+
         dcp.load(hf_state_dict, storage_reader=storage_reader)
 
         # Convert HF state dict to TorchTitan format
