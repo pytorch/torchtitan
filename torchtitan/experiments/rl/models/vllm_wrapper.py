@@ -463,8 +463,10 @@ class TorchTitanVLLMModelWrapper(Module):
         # Load HF state dict using DCP
         hf_state_dict = adapter.to_hf(self.model.state_dict())
 
-        # Filter out keys not in the HF checkpoint (e.g. expert_bias is a
-        # torchtitan training buffer initialized to zeros).
+        # Filter out model keys that don't exist in the HF checkpoint.
+        # e.g. expert_bias is a TorchTitan training buffer (for auxiliary-
+        # loss-free load balancing) that is zero-initialized by init_states()
+        # and not present in HF checkpoints.
         hf_keys_in_checkpoint = set(
             storage_reader.read_metadata().state_dict_metadata.keys()
         )
