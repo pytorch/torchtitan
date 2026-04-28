@@ -461,5 +461,102 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
 
+class _Float8BitwiseDeterministicBase(BitwiseDeterministicBase):
+    """Base class for float8 bitwise determinism tests.
+
+    Not runnable directly — subclasses must set model_registry, model_flavor,
+    and annotate_model.
+    """
+
+    filter_fqns: list[str] = []
+
+    def setUp(self):
+        if type(self) is _Float8BitwiseDeterministicBase:
+            self.skipTest("Base class — run a concrete subclass instead")
+
+        if not has_cuda_capability(8, 9):
+            self.skipTest("Float8 requires sm_89+")
+        try:
+            from torchao.float8 import convert_to_float8_training
+        except ImportError:
+            self.skipTest("torchao not installed")
+
+        super().setUp()
+        convert_to_float8_training(
+            self.model,
+            module_filter_fn=lambda mod, fqn: not any(
+                f in fqn for f in self.filter_fqns
+            ),
+        )
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads with float8."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(
+            run_eager, run_traced, "eager vs aot_fx_trace (float8): "
+        )
+
+
+class TestLlama3Float8BitwiseDeterministic(_Float8BitwiseDeterministicBase):
+    """Bitwise determinism tests for Llama3 debug model with float8 training."""
+
+    model_registry = staticmethod(llama3_model_registry)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_llama)
+
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
+    def test_eager_self_deterministic(self):
+        """Eager mode: results match hardcoded expected values.
+
+        Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` to update the inline expected values.
+        """
+        loss, model_hash, grad_hash = self._run_steps(
+            copy.deepcopy(self.model), Trainer
+        )
+        assert_expected_inline(str(loss.item()), """7.960383415222168""")
+        assert_expected_inline(
+            model_hash,
+            """f41fd63a399c593236bc26bd258d8dea12a3772cee50d2e1c8cba9fa8674c865""",
+        )
+        assert_expected_inline(
+            grad_hash,
+            """9b8c15267f5666fde781b3207675f2a6e0c4c898d1590cf683616aea33f6175f""",
+        )
+
+
+class TestDSv3Float8BitwiseDeterministic(_Float8BitwiseDeterministicBase):
+    """Bitwise determinism tests for DeepSeek-v3 debug model with float8 training."""
+
+    model_registry = staticmethod(dsv3_model_registry)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_deepseekv3)
+    filter_fqns = ["output", "router.gate"]
+
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
+    def test_eager_self_deterministic(self):
+        """Eager mode: results match hardcoded expected values.
+
+        Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` to update the inline expected values.
+        """
+        loss, model_hash, grad_hash = self._run_steps(
+            copy.deepcopy(self.model), Trainer
+        )
+        assert_expected_inline(str(loss.item()), """7.479403495788574""")
+        assert_expected_inline(
+            model_hash,
+            """5b5d84c521ef6771e3d735f3e9778bd828b173c7a85d59bf28d58e25782b67e0""",
+        )
+        assert_expected_inline(
+            grad_hash,
+            """380ad3221678e0279ee5c472b02daafc68957ec113e8621f04d516fcd591bae6""",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

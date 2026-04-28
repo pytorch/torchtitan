@@ -516,6 +516,15 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_float8_tests() -> list[OverrideDefinitions]:
+    """Float8 integration tests (require H100/SM89+ machines)."""
+    # TODO: enable_fsdp_float8_all_gather + TP is incompatible with
+    # make_fx tracing (WeightWithDynamicFloat8CastTensor nested inside
+    # DTensor loses the DTensor wrapper during Float8Linear's forward,
+    # causing mixed Tensor/DTensor errors in torch.mm).
+    return []
+
+
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
@@ -553,8 +562,13 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_test_list() -> list[OverrideDefinitions]:
-    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3)."""
-    return _build_llama3_tests() + _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3 + Float8)."""
+    return (
+        _build_llama3_tests()
+        + _build_deepseek_v3_tests()
+        + _build_qwen3_tests()
+        + _build_float8_tests()
+    )
 
 
 def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
@@ -563,8 +577,8 @@ def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 + Qwen3 tests (for H100 machines)."""
-    return _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """DeepSeek-v3 + Qwen3 + Float8 tests (for H100 machines)."""
+    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_float8_tests()
 
 
 _TEST_SUITES_FUNCTION = {
