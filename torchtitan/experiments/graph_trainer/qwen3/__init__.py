@@ -18,11 +18,12 @@ from .parallelize import parallelize_qwen3
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    moe_comm_backend: str | None = None,
 ) -> ModelSpec:
-    base = qwen3_configs[flavor](
-        attn_backend=attn_backend, moe_comm_backend=moe_comm_backend
-    )
+    kwargs = dict(attn_backend=attn_backend)
+    if moe_comm_backend is not None:
+        kwargs["moe_comm_backend"] = moe_comm_backend
+    base = qwen3_configs[flavor](**kwargs)
     config = GraphTrainerQwen3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )

@@ -86,7 +86,7 @@ def _build_llama4_layers(
     fixed_attn_block_size: int = 8192,
     attn_backend: str,
     shared_experts_hidden_dim: int | None = None,
-    moe_comm_backend: str = "standard",
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for a Llama4 model.
@@ -181,8 +181,8 @@ def _build_llama4_layers(
 
 
 def _debugmodel(
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> Llama4Model.Config:
     dim = 256
     n_heads = 16
@@ -212,7 +212,7 @@ def _debugmodel(
             interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
-            moe_comm_backend="standard",
+            moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
             dim=dim // n_heads,
@@ -227,8 +227,8 @@ def _debugmodel(
 
 
 def _17bx16e(
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
@@ -284,8 +284,8 @@ def _17bx16e(
 
 
 def _17bx128e(
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40

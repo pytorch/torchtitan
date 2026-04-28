@@ -84,7 +84,7 @@ def _build_qwen3_layers(
     head_dim: int,
     hidden_dim: int,
     fuse_qkv: bool = False,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -129,7 +129,7 @@ def _build_qwen3_moe_layers(
     num_experts: int,
     top_k: int,
     attn_backend: str,
-    moe_comm_backend: str = "standard",
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models with depth-scaled inits."""
@@ -178,7 +178,7 @@ def _build_qwen3_moe_layers(
     return layers
 
 
-def _debugmodel(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _debugmodel(attn_backend: str) -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     n_layers = 8
@@ -216,7 +216,7 @@ def _debugmodel(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") 
     )
 
 
-def _debugmodel_fused_qkv(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _debugmodel_fused_qkv(attn_backend: str) -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     n_layers = 8
@@ -255,7 +255,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa", moe_comm_backend: str = "s
     )
 
 
-def _0_6b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _0_6b(attn_backend: str) -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
     n_layers = 28
@@ -293,7 +293,7 @@ def _0_6b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwe
     )
 
 
-def _1_7b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _1_7b(attn_backend: str) -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
     n_layers = 28
@@ -331,7 +331,7 @@ def _1_7b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwe
     )
 
 
-def _4b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _4b(attn_backend: str) -> Qwen3Model.Config:
     dim = 2560
     head_dim = 128
     n_layers = 36
@@ -369,7 +369,7 @@ def _4b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3
     )
 
 
-def _8b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _8b(attn_backend: str) -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
     n_layers = 36
@@ -404,7 +404,7 @@ def _8b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3
     )
 
 
-def _14b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _14b(attn_backend: str) -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     n_layers = 40
@@ -439,7 +439,7 @@ def _14b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen
     )
 
 
-def _32b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
+def _32b(attn_backend: str) -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     n_layers = 64
@@ -478,7 +478,7 @@ def _32b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen
 
 
 def _debugmodel_moe(
-    attn_backend: str = "sdpa",
+    attn_backend: str,
     moe_comm_backend: str = "standard",
 ) -> Qwen3Model.Config:
     dim = 256
@@ -519,7 +519,7 @@ def _debugmodel_moe(
 
 
 def _30b_a3b(
-    attn_backend: str = "sdpa",
+    attn_backend: str,
     moe_comm_backend: str = "standard",
 ) -> Qwen3Model.Config:
     dim = 2048
@@ -560,7 +560,7 @@ def _30b_a3b(
 
 
 def _235b_a22b(
-    attn_backend: str = "sdpa",
+    attn_backend: str,
     moe_comm_backend: str = "standard",
 ) -> Qwen3Model.Config:
     dim = 4096
@@ -618,12 +618,13 @@ qwen3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    moe_comm_backend: str | None = None,
     quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = qwen3_configs[flavor](
-        attn_backend=attn_backend, moe_comm_backend=moe_comm_backend
-    )
+    kwargs = dict(attn_backend=attn_backend)
+    if moe_comm_backend is not None:
+        kwargs["moe_comm_backend"] = moe_comm_backend
+    config = qwen3_configs[flavor](**kwargs)
     if quantization is not None:
         for q in quantization:
             q.build().convert(config)

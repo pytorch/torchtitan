@@ -171,7 +171,7 @@ def _build_dsv3_layers(
     router_route_norm: bool = False,
     score_before_experts: bool = False,
     attn_backend: str,
-    moe_comm_backend: str = "standard",
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
@@ -253,8 +253,8 @@ def _build_dsv3_layers(
 
 
 def _debugmodel(
-    attn_backend: str = "sdpa",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -316,8 +316,8 @@ def _debugmodel(
 
 
 def _16b(
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -379,8 +379,8 @@ def _16b(
 
 
 def _236b(
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -446,8 +446,8 @@ def _236b(
 
 
 def _671b(
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61

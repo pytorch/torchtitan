@@ -474,6 +474,14 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         super().__init__(config)
         self.pad_multiple = config.pad_multiple
 
+    def dispatch(self, x, top_scores, selected_experts_indices):
+        if self.ep_mesh is None:
+            raise ValueError(
+                "TorchAOTokenDispatcher requires expert parallelism (ep_mesh must be set). "
+                "Quantized grouped GEMMs need padded token groups, which requires EP>1. "
+            )
+        return super().dispatch(x, top_scores, selected_experts_indices)
+
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
     ):

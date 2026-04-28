@@ -27,6 +27,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.token_dispatcher import (
+    LocalTokenDispatcher,
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )
@@ -200,7 +201,7 @@ def make_token_dispatcher_config(
     score_before_experts: bool = True,
     comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
-) -> AllToAllTokenDispatcher.Config:
+) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
     Returns the right Config subclass based on comm_backend:
