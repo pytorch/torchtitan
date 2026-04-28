@@ -251,7 +251,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def __len__(self) -> int:
         return len(self.optimizers)
 
-    # pyrefly: ignore [bad-override]
     def step(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
             optimizer.step(*args, **kwargs)
@@ -394,11 +393,9 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         )
         self._post_init(all_params, optimizer_kwargs)
 
-    # pyrefly: ignore [bad-override]
     def step(self) -> None:
         pass
 
-    # pyrefly: ignore [bad-override]
     def zero_grad(self) -> None:
         pass
 
