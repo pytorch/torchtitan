@@ -166,7 +166,6 @@ def download_hf_assets(
     missed_files = []
 
     # Download files with progress bar
-    # pyrefly: ignore [bad-context-manager]
     with tqdm(total=len(files_found), desc="Downloading files", unit="file") as pbar:
         for filename in files_found:
             try:
