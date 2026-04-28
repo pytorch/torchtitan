@@ -128,20 +128,6 @@ def async_tensor_parallel_pass(
     return gm
 
 
-def _collect_rmsnorm_fqns(model_config) -> set[str]:
-    """Build the set of RMSNorm module FQNs from a Decoder model config.
-
-    Instantiates the model on the meta device to walk ``named_modules()``
-    and collect FQNs of all ``nn.RMSNorm`` instances. The meta-device model
-    is discarded immediately after collection.
-    """
-    with torch.device("meta"):
-        model = model_config.build()
-    return {
-        name for name, mod in model.named_modules() if isinstance(mod, torch.nn.RMSNorm)
-    }
-
-
 # Default Inductor configs for RMSNorm regional compilation.
 # Same tuning flags as FlexAttention: Inductor max_autotune + coordinate
 # descent discover good Triton kernels, then wrap them for cudagraph
@@ -175,7 +161,6 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
-    rmsnorm_fqns = _collect_rmsnorm_fqns(config.model_spec.model)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -215,15 +200,14 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
-        # RMSNorm decomposes into small ATen ops (pow, mean, rsqrt, mul)
-        # that launch many separate kernels. Compiling each norm region
-        # with Inductor fuses them into a single Triton kernel, closing
-        # the gap vs. Megatron's fused TransformerEngine RMSNorm.
+        # RMSNorm appears as fused _fused_rms_norm / _fused_rms_norm_backward
+        # ops in the traced graph. Compiling each norm region with Inductor
+        # fuses them into a single Triton kernel, closing the gap vs.
+        # Megatron's fused TransformerEngine RMSNorm.
         passes.append(
             functools.partial(
                 annotate_rmsnorm_for_regional_inductor_pass,
                 rmsnorm_compile_config=_RMSNORM_INDUCTOR_CONFIGS,
-                rmsnorm_fqns=rmsnorm_fqns,
             )
         )
         passes.append(regional_inductor_pass)
@@ -623,16 +607,15 @@ def annotate_rmsnorm_for_regional_inductor_pass(
     example_inputs: tuple | None = None,
     *,
     rmsnorm_compile_config: dict | None,
-    rmsnorm_fqns: set[str],
 ) -> torch.fx.GraphModule:
     """Tag RMSNorm ops with compile_with_inductor for regional_inductor.
 
-    Identifies nodes belonging to RMSNorm modules via their ``module_fqn``
-    metadata and tags them so that ``regional_inductor_pass`` compiles each
-    norm as a fused Inductor kernel. Both forward and backward ops are
-    tagged (backward ops inherit the same ``module_fqn`` from tracing).
+    Identifies ``_fused_rms_norm`` and ``_fused_rms_norm_backward`` nodes
+    by their ``node.target`` and tags them (along with their ``getitem``
+    users) so that ``regional_inductor_pass`` compiles each norm as a
+    fused Inductor kernel.
 
-    Each distinct RMSNorm instance (identified by its module FQN) is
+    Each ``_fused_rms_norm`` / ``_fused_rms_norm_backward`` call is
     assigned a separate ``inductor_region`` so that norms at different
     points in the graph are compiled independently.
 
@@ -642,9 +625,6 @@ def annotate_rmsnorm_for_regional_inductor_pass(
         rmsnorm_compile_config: Inductor config dict for RMSNorm nodes.
             When provided, wrapped as ``{"inductor_configs": rmsnorm_compile_config}``.
             When None, nodes are tagged with an empty annotation.
-        rmsnorm_fqns: Set of fully-qualified module names that are RMSNorm
-            instances. Built from ``model.named_modules()`` and bound via
-            ``functools.partial`` during pass construction.
     """
     compile_annotation: dict = (
         {"inductor_configs": rmsnorm_compile_config}
@@ -652,45 +632,36 @@ def annotate_rmsnorm_for_regional_inductor_pass(
         else {}
     )
 
-    # Assign each unique RMSNorm FQN a distinct region ID so that norms
-    # at different graph positions are compiled as separate regions.
-    fqn_to_region: dict[str, int] = {}
+    _RMSNORM_TARGETS = {
+        torch.ops.aten._fused_rms_norm.default,
+        torch.ops.aten._fused_rms_norm_backward.default,
+    }
+
     next_region_id = 0
     num_tagged = 0
 
     for node in gm.graph.nodes:
-        fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
-        if fqn is None:
+        if node.op != "call_function" or node.target not in _RMSNORM_TARGETS:
             continue
-
-        # Check if this node's FQN matches an RMSNorm module or is a
-        # child of one (e.g. inner weight parameters). We match the
-        # exact FQN or any FQN that starts with an RMSNorm FQN prefix.
-        matched_fqn = None
-        if fqn in rmsnorm_fqns:
-            matched_fqn = fqn
-        else:
-            for norm_fqn in rmsnorm_fqns:
-                if fqn.startswith(norm_fqn + "."):
-                    matched_fqn = norm_fqn
-                    break
-
-        if matched_fqn is None:
-            continue
-
-        if matched_fqn not in fqn_to_region:
-            fqn_to_region[matched_fqn] = next_region_id
-            next_region_id += 1
 
         annotation = dict(compile_annotation)
-        annotation["inductor_region"] = fqn_to_region[matched_fqn]
+        annotation["inductor_region"] = next_region_id
+        next_region_id += 1
+
+        # Tag the fused norm node itself.
         node.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
         num_tagged += 1
+
+        # Tag getitem users that extract outputs from the fused op.
+        for user in node.users:
+            if user.op == "call_function" and user.target is operator.getitem:
+                user.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+                num_tagged += 1
 
     if num_tagged > 0:
         logger.info(
             f"Tagged {num_tagged} RMSNorm nodes across "
-            f"{len(fqn_to_region)} regions for regional Inductor compilation"
+            f"{next_region_id} regions for regional Inductor compilation"
         )
 
     return gm

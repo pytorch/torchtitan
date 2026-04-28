@@ -1307,21 +1307,41 @@ class TestAnnotateModuleFqns(TestCase):
 class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
     """Unit tests for annotate_rmsnorm_for_regional_inductor_pass."""
 
-    def _build_annotated_gm(self, fqn_sequence):
-        """Build a GraphModule with module_fqn annotations on its nodes.
+    def _build_rmsnorm_gm(self, node_specs):
+        """Build a GraphModule with fused RMSNorm ops and other ops.
 
         Args:
-            fqn_sequence: List of (op_target, fqn_or_None) tuples.
+            node_specs: List of op targets. For ``_fused_rms_norm`` and
+                ``_fused_rms_norm_backward`` nodes, ``getitem`` users are
+                automatically appended (mirroring the real traced graph
+                structure).
         """
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
+        w = graph.placeholder("w")
         last = x
-        for target, fqn in fqn_sequence:
-            last = graph.call_function(target, args=(last,))
-            if fqn is not None:
-                last.meta["custom"] = {_MODULE_FQN: fqn}
+
+        _FUSED_TARGETS = {
+            torch.ops.aten._fused_rms_norm.default,
+            torch.ops.aten._fused_rms_norm_backward.default,
+        }
+
+        for target in node_specs:
+            if target in _FUSED_TARGETS:
+                # Mimic the real graph: fused op returns a tuple,
+                # followed by getitem nodes extracting elements.
+                if target == torch.ops.aten._fused_rms_norm.default:
+                    fused = graph.call_function(target, args=(last, [256], w, 1e-5))
+                else:
+                    fused = graph.call_function(
+                        target, args=(last, w, last, [256], 1e-5)
+                    )
+                gi0 = graph.call_function(operator.getitem, args=(fused, 0))
+                gi1 = graph.call_function(operator.getitem, args=(fused, 1))
+                last = gi0
             else:
-                last.meta["custom"] = {}
+                last = graph.call_function(target, args=(last,))
+
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
 
@@ -1345,103 +1365,110 @@ class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
                 regions.setdefault(region, []).append(node.name)
         return regions
 
-    def test_tags_rmsnorm_nodes_by_fqn(self):
-        """Nodes with FQNs in the rmsnorm_fqns set are tagged."""
-        gm = self._build_annotated_gm(
+    def test_tags_fused_rmsnorm_and_getitems(self):
+        """_fused_rms_norm nodes and their getitem users are tagged."""
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
-                (torch.ops.aten.mean.dim, "layers.0.attention_norm"),
-                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
-                (torch.ops.aten.mul.Tensor, "layers.0.attention"),
-                (torch.ops.aten.add.Tensor, "layers.0.feed_forward"),
+                torch.ops.aten._fused_rms_norm.default,
+                torch.ops.aten.mul.Tensor,
+                torch.ops.aten.add.Tensor,
             ]
         )
 
-        rmsnorm_fqns = {"layers.0.attention_norm"}
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns=rmsnorm_fqns,
         )
 
+        # 1 fused node + 2 getitem users = 3 tagged nodes
         self.assertEqual(self._count_tagged_nodes(gm), 3)
 
     def test_does_not_tag_non_rmsnorm_nodes(self):
-        """Nodes whose FQNs are not in rmsnorm_fqns are not tagged."""
-        gm = self._build_annotated_gm(
-            [
-                (torch.ops.aten.mul.Tensor, "layers.0.attention"),
-                (torch.ops.aten.add.Tensor, "layers.0.feed_forward"),
-            ]
-        )
+        """Nodes that are not _fused_rms_norm targets are not tagged."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.ops.aten.mul.Tensor, args=(x, x))
+        n2 = graph.call_function(torch.ops.aten.add.Tensor, args=(n1, x))
+        graph.output(n2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        rmsnorm_fqns = {"layers.0.attention_norm", "layers.0.ffn_norm"}
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns=rmsnorm_fqns,
         )
 
         self.assertEqual(self._count_tagged_nodes(gm), 0)
 
-    def test_separate_regions_per_norm_instance(self):
-        """Each distinct RMSNorm FQN gets its own inductor_region ID."""
-        gm = self._build_annotated_gm(
+    def test_separate_regions_per_fused_norm(self):
+        """Each _fused_rms_norm call gets its own inductor_region ID."""
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
-                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
-                (torch.ops.aten.mul.Tensor, "layers.0.attention"),
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.ffn_norm"),
-                (torch.ops.aten.rsqrt.default, "layers.0.ffn_norm"),
+                torch.ops.aten._fused_rms_norm.default,
+                torch.ops.aten.mul.Tensor,
+                torch.ops.aten._fused_rms_norm.default,
             ]
         )
 
-        rmsnorm_fqns = {"layers.0.attention_norm", "layers.0.ffn_norm"}
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns=rmsnorm_fqns,
         )
 
         regions = self._get_tagged_regions(gm)
         # Should have exactly 2 distinct regions
         self.assertEqual(len(regions), 2)
-        # Each region should have 2 nodes
+        # Each region: 1 fused node + 2 getitem users = 3 nodes
         for region_id, node_names in regions.items():
-            self.assertEqual(len(node_names), 2)
+            self.assertEqual(len(node_names), 3)
 
-    def test_empty_rmsnorm_fqns_is_noop(self):
-        """When rmsnorm_fqns is empty, no nodes are tagged."""
-        gm = self._build_annotated_gm(
+    def test_backward_fused_norm_tagged(self):
+        """_fused_rms_norm_backward nodes and their getitem users are tagged."""
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
-                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
+                torch.ops.aten._fused_rms_norm_backward.default,
             ]
         )
 
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns=set(),
+        )
+
+        # 1 fused backward node + 2 getitem users = 3 tagged nodes
+        self.assertEqual(self._count_tagged_nodes(gm), 3)
+        regions = self._get_tagged_regions(gm)
+        self.assertEqual(len(regions), 1)
+
+    def test_no_fused_norm_is_noop(self):
+        """When no fused RMSNorm ops exist, no nodes are tagged."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.ops.aten.pow.Tensor_Scalar, args=(x, 2))
+        n2 = graph.call_function(torch.ops.aten.rsqrt.default, args=(n1,))
+        graph.output(n2)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
         )
 
         self.assertEqual(self._count_tagged_nodes(gm), 0)
 
     def test_none_compile_config_tags_with_empty_annotation(self):
-        """When rmsnorm_compile_config is None, nodes are tagged with empty annotation."""
-        gm = self._build_annotated_gm(
+        """When rmsnorm_compile_config is None, nodes are tagged without inductor_configs."""
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+                torch.ops.aten._fused_rms_norm.default,
             ]
         )
 
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config=None,
-            rmsnorm_fqns={"layers.0.attention_norm"},
         )
 
-        self.assertEqual(self._count_tagged_nodes(gm), 1)
+        self.assertEqual(self._count_tagged_nodes(gm), 3)
         for node in gm.graph.nodes:
             annotation = node.meta.get("custom", {}).get("compile_with_inductor")
             if annotation is not None:
@@ -1450,9 +1477,9 @@ class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
 
     def test_compile_config_propagated_to_annotation(self):
         """The compile config dict is wrapped under inductor_configs in the annotation."""
-        gm = self._build_annotated_gm(
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+                torch.ops.aten._fused_rms_norm.default,
             ]
         )
 
@@ -1460,7 +1487,6 @@ class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config=config,
-            rmsnorm_fqns={"layers.0.attention_norm"},
         )
 
         for node in gm.graph.nodes:
@@ -1468,64 +1494,37 @@ class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
             if annotation is not None:
                 self.assertEqual(annotation["inductor_configs"], config)
 
-    def test_nodes_without_fqn_are_skipped(self):
-        """Nodes with no module_fqn metadata are not tagged."""
-        gm = self._build_annotated_gm(
+    def test_fwd_and_bwd_get_distinct_regions(self):
+        """Forward and backward fused norms get distinct region IDs."""
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, None),
-                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
+                torch.ops.aten._fused_rms_norm.default,
+                torch.ops.aten.mul.Tensor,
+                torch.ops.aten._fused_rms_norm_backward.default,
             ]
         )
 
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns={"layers.0.attention_norm"},
         )
 
-        # Only the second node should be tagged
-        self.assertEqual(self._count_tagged_nodes(gm), 1)
-
-    def test_top_level_norm_tagged(self):
-        """The top-level 'norm' (final model norm) is tagged when in rmsnorm_fqns."""
-        gm = self._build_annotated_gm(
-            [
-                (torch.ops.aten.pow.Tensor_Scalar, "norm"),
-                (torch.ops.aten.mean.dim, "norm"),
-                (torch.ops.aten.rsqrt.default, "norm"),
-                (torch.ops.aten.mul.Tensor, "norm"),
-            ]
-        )
-
-        annotate_rmsnorm_for_regional_inductor_pass(
-            gm,
-            rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns={"norm"},
-        )
-
-        self.assertEqual(self._count_tagged_nodes(gm), 4)
         regions = self._get_tagged_regions(gm)
-        self.assertEqual(len(regions), 1)
+        self.assertEqual(len(regions), 2)
 
-    def test_multiple_layers_get_distinct_regions(self):
-        """Norms across different layers get distinct region IDs."""
-        gm = self._build_annotated_gm(
+    def test_multiple_fused_norms_get_distinct_regions(self):
+        """Multiple fused norm calls each get their own region ID."""
+        gm = self._build_rmsnorm_gm(
             [
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
-                (torch.ops.aten.pow.Tensor_Scalar, "layers.1.attention_norm"),
-                (torch.ops.aten.pow.Tensor_Scalar, "norm"),
+                torch.ops.aten._fused_rms_norm.default,
+                torch.ops.aten._fused_rms_norm.default,
+                torch.ops.aten._fused_rms_norm.default,
             ]
         )
 
-        rmsnorm_fqns = {
-            "layers.0.attention_norm",
-            "layers.1.attention_norm",
-            "norm",
-        }
         annotate_rmsnorm_for_regional_inductor_pass(
             gm,
             rmsnorm_compile_config={"max_autotune": True},
-            rmsnorm_fqns=rmsnorm_fqns,
         )
 
         regions = self._get_tagged_regions(gm)
