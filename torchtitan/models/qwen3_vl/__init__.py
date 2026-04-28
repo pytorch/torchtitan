@@ -18,6 +18,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
@@ -184,7 +185,7 @@ def _build_qwen3_vl_moe_layers(
     moe_hidden_dim: int,
     num_experts: int,
     top_k: int,
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
@@ -282,7 +283,7 @@ def _debugmodel() -> Qwen3VLModel.Config:
 
 
 def _debugmodel_moe(
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 256
     head_dim = 64
@@ -438,7 +439,7 @@ def _8b() -> Qwen3VLModel.Config:
 
 
 def _30b_a3b(
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 2048
     head_dim = 128
@@ -492,7 +493,7 @@ def _30b_a3b(
 
 
 def _235b_a22b(
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 4096
     head_dim = 128
@@ -558,12 +559,13 @@ qwen3_vl_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
+    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
-    kwargs = {}
-    if moe_comm_backend is not None:
-        kwargs["moe_comm_backend"] = moe_comm_backend
-    config = qwen3_vl_configs[flavor](**kwargs)
+    config = qwen3_vl_configs[flavor](moe_comm_backend=moe_comm_backend)
+    if quantization is not None:
+        for q in quantization:
+            q.build().convert(config)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,

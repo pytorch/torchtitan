@@ -11,6 +11,7 @@ from typing import Literal
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -170,7 +171,7 @@ def _build_dsv3_layers(
     router_route_norm: bool = False,
     score_before_experts: bool = False,
     attn_backend: str,
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
@@ -253,7 +254,7 @@ def _build_dsv3_layers(
 
 def _debugmodel(
     attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -316,7 +317,7 @@ def _debugmodel(
 
 def _16b(
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -379,7 +380,7 @@ def _16b(
 
 def _236b(
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -446,7 +447,7 @@ def _236b(
 
 def _671b(
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -523,12 +524,16 @@ deepseekv3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
+    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
+    if quantization is not None:
+        for q in quantization:
+            q.build().convert(config)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,

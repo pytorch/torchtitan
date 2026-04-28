@@ -9,7 +9,7 @@ from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.float8 import Float8GroupedMMConverter
+from torchtitan.components.quantization import Float8GroupedExpertsConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -17,7 +17,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -60,16 +59,27 @@ def llama4_debugmodel() -> Trainer.Config:
 
 def llama4_debugmodel_ep() -> Trainer.Config:
     config = llama4_debugmodel()
-    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel")
     return config
 
 
 def llama4_debugmodel_fp8() -> Trainer.Config:
+    compile_config = CompileConfig(enable=False, components=["model", "loss"])
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", moe_comm_backend="torchao"),
+        model_spec=model_registry(
+            "debugmodel",
+            ,
+            quantization=[
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=(
+                        compile_config.enable and "model" in compile_config.components
+                    ),
+                ),
+            ],
+        ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -86,7 +96,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
             steps=10,
         ),
         parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
+            expert_parallel_degree=2,
             expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
@@ -96,10 +106,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
         ),
-        compile=CompileConfig(enable=True, components=["model", "loss"]),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[Float8GroupedMMConverter.Config(fqns=["experts"])]
-        ),
+        compile=compile_config,
     )
 
 
