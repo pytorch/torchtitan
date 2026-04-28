@@ -382,6 +382,8 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
     enable_sp: bool = True,
+    pad_multiple: int | None = None,
+    inference: bool = False,
 ):
     """
     Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
@@ -408,15 +410,19 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
-                # With SP: all-gather (Shard→Replicate) for input,
-                # reduce-scatter (Partial→Shard) for output.
-                # Without SP: input is already Replicate,
-                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
                     use_local_input=False,
-                    output_layouts=(Partial(),),
+                    # TP-sharded experts or SP token splitting produce
+                    # Partial outputs that need reduce-scatter. EP without
+                    # SP produces Replicate (all-to-all combine already
+                    # returns the full result on every rank).
+                    output_layouts=(
+                        Replicate()
+                        if (not enable_sp and ep_mesh is not None)
+                        else Partial(),
+                    ),
                     desired_output_layouts=(sp_layout,),
                     # Keep MoE output as DTensor so the residual add
                     # ``h + self.moe(...)`` composes with config-based
@@ -461,9 +467,16 @@ def apply_moe_ep_tp(
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             assert ep_etp_mesh is None
-            experts_mesh = tp_mesh
-            # input Replicate, output Partial
-            experts_plan = TensorParallel()
+            if inference:
+                # For inference without EP, skip expert parallelization.
+                # Expert weights stay full (not TP-sharded) — the MoE
+                # uses grouped_mm which needs full weights per expert.
+                experts_mesh = None
+                experts_plan = None
+            else:
+                experts_mesh = tp_mesh
+                # input Replicate, output Partial
+                experts_plan = TensorParallel()
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
@@ -471,12 +484,13 @@ def apply_moe_ep_tp(
                 # pyrefly: ignore [missing-attribute]
                 dispatcher = transformer_block.moe.experts.token_dispatcher
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            # sp_size and sp_rank are set for sequence-parallel token splitting
-            # when EP borrows from TP (ETP=1).
+            # When SP is enabled, each TP rank processes a disjoint token
+            # subset to avoid redundant all-to-all. Without SP, all ranks
+            # process all tokens (the input is already Replicate).
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None:
+            if tp_mesh is not None and enable_sp:
                 if isinstance(dispatcher, AllToAllTokenDispatcher):
                     dispatcher.sp_size = tp_mesh.size()
                     # Use _sym_get_coordinate so the rank is a SymInt
@@ -495,9 +509,10 @@ def apply_moe_ep_tp(
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
 
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=transformer_block.moe.experts,
-            device_mesh=experts_mesh,
-            parallelize_plan=experts_plan,
-        )
+        if experts_mesh is not None and experts_plan is not None:
+            parallelize_module(
+                # pyrefly: ignore [missing-attribute]
+                module=transformer_block.moe.experts,
+                device_mesh=experts_mesh,
+                parallelize_plan=experts_plan,
+            )

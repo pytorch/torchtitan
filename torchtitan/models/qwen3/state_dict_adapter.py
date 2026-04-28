@@ -63,6 +63,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
             "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            "model.layers.{}.mlp.expert_bias": "layers.{}.moe.expert_bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }

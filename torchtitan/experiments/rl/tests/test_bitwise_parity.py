@@ -110,13 +110,11 @@ def build_trainer_model(
             model = model_spec.model.build()
 
     from torchtitan.config import ActivationCheckpointConfig, CompileConfig
-    from torchtitan.protocols.model_converter import ModelConvertersContainer
 
     model_spec.parallelize_fn(
         model,
         parallel_dims=parallel_dims,
         training=config.trainer.training,
-        model_converters=ModelConvertersContainer.Config(),
         parallelism=parallelism,
         compile_config=CompileConfig(enable=False),
         ac_config=ActivationCheckpointConfig(mode="none"),
