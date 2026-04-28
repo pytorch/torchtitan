@@ -43,7 +43,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     _NOT_IN_LAYERS,
 )
-from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
+from torchtitan.experiments.graph_trainer.cpu_offload import (
+    apply_cpu_offload_pass,
+    tag_all_offloadable_activations,
+)
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
@@ -81,19 +84,19 @@ def compile_time_passes(
     )
     from torchtitan.models.common.attention import FlexAttention
 
-    memory_policy_fn = {
-        "default": _make_default_memory_policy,
-        "eager": _make_eager_memory_policy,
-    }[config.compile.memory_policy]()
-
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        # TODO: uncomment after sorting out common tagging API between offload and sac
-        # cpu_offload_pass,
-        functools.partial(selective_activation_remat_pass, policy_fn=memory_policy_fn),
+        functools.partial(
+            tag_with_memory_policy_pass,
+            config=config,
+        ),
+        # TODO: currently either SAC or CPU offload is used, not both at the
+        # same time. Composability between these two passes is untested.
+        apply_cpu_offload_pass,
+        selective_activation_remat_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
@@ -783,27 +786,48 @@ def apply_sac_pass(
     return gm
 
 
-def selective_activation_remat_pass(
+def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    policy_fn: Callable[[torch.fx.Node], CheckpointPolicy] | None = None,
+    config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
-    """Apply graph-based SAC to a traced fwd+loss+bwd graph.
+    """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
-    Tags forward nodes with recompute policy via apply_sac_pass (backward
-    nodes are skipped automatically via ``node.meta["autograd_backward"]``), then
-    applies remat_using_tags_for_fwd_loss_bwd_graph to duplicate
-    PREFER_RECOMPUTE forward ops before backward and DCE originals.
+    The ``config.compile.memory_policy`` selects the tagging strategy:
+        default: SAC with all compute-intensive ops saved.
+        eager: SAC alternating mm ops between save/recompute.
+        cpu_offload_all: tag all eligible activations for CPU offload.
 
-    The model must have been annotated with annotate_module_fqns before
-    tracing so that nodes have custom["module_fqn"] metadata.
+    Other memory policies combining SAC and CPU offload can be added here.
     """
+    memory_policy = config.compile.memory_policy
+    if memory_policy == "default":
+        apply_sac_pass(gm, policy_fn=_make_default_memory_policy())
+    elif memory_policy == "eager":
+        apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
+    elif memory_policy == "cpu_offload_all":
+        tag_all_offloadable_activations(gm)
+    else:
+        raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
+    return gm
+
+
+def selective_activation_remat_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Duplicate recompute nodes for backward use, then DCE unused forward versions.
+
+    Wraps ``remat_using_tags_for_fwd_loss_bwd_graph`` with the graph pass
+    signature ``(gm, example_inputs)``.
+    """
+    # TODO: remove this wrapper when upstream remat_using_tags_for_fwd_loss_bwd_graph
+    # accepts example_inputs (matching the graph pass signature).
     from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
         remat_using_tags_for_fwd_loss_bwd_graph,
     )
 
-    apply_sac_pass(gm, policy_fn=policy_fn)
     return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
@@ -1037,5 +1061,4 @@ AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
-    "cpu_offload": cpu_offload_pass,
 }
