@@ -55,22 +55,22 @@ jobs:
           if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
             ROCM_MATRIX=""
           else
-            ROCM_MATRIX=$(cat <<EOF
-            {
-              "name": "rocm",
-              "runner": "${ROCM_RUNNER}",
-              "gpu-arch-type": "rocm",
-              "gpu-arch-version": "7.1",
-              "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-              "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1",
-              "torch-version": ""
-            }
-            EOF
-            )
+            ROCM_MATRIX="$(cat <<EOF
+          {
+            "name": "rocm",
+            "runner": "${ROCM_RUNNER}",
+            "gpu-arch-type": "rocm",
+            "gpu-arch-version": "7.1",
+            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1",
+            "torch-version": ""
+          }
+          EOF
+          )"
           fi
 
           # Define CUDA matrix
-          CUDA_MATRIX=$(cat <<EOF
+          CUDA_MATRIX="$(cat <<EOF
           {
             "name": "cuda",
             "runner": "${CUDA_RUNNER}",
@@ -81,7 +81,7 @@ jobs:
             "torch-version": ""
           }
           EOF
-          )
+          )"
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
