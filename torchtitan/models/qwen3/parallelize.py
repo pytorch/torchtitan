@@ -7,7 +7,6 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
-from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -22,7 +21,6 @@ from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -31,11 +29,11 @@ def parallelize_qwen3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -55,7 +53,7 @@ def parallelize_qwen3(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
@@ -71,7 +69,6 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     if ac_config.mode != "none":
@@ -85,6 +82,12 @@ def parallelize_qwen3(
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model, compile_config)
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

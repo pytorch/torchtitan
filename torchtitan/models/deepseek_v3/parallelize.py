@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.quantization import find_pad_multiple
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -19,7 +18,6 @@ from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
-from torchtitan.protocols import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -29,7 +27,6 @@ def parallelize_deepseekv3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -49,7 +46,7 @@ def parallelize_deepseekv3(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
@@ -81,7 +78,6 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             comm_backend=comm_backend,
             enable_sp=parallelism.enable_sequence_parallel,
-            pad_multiple=find_pad_multiple(model_converters.converters),
         )
 
     model_compile_enabled = (

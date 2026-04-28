@@ -9,6 +9,7 @@ import time
 import torch
 from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
+from autoparallel.compile import autoparallel_backend
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torchtitan.config import (
@@ -19,7 +20,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -29,7 +29,6 @@ def parallelize_llama(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -107,7 +106,6 @@ def parallelize_llama(
         input_fn,
         dense_mesh,
         mp_policy=mp_policy,
-        compile=compile_config,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
@@ -146,6 +144,9 @@ def parallelize_llama(
         t1 = time.time()
         logger.info(f"AutoParallel took {t1 - t0} seconds")
         parallel_mod = autop.apply_placement(sharding_placement)
+
+    if compile_config.enable:
+        parallel_mod = torch.compile(parallel_mod, backend=autoparallel_backend())
 
     if loss_parallel_enabled:
 
