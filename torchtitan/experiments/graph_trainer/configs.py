@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
+from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
@@ -16,12 +17,12 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot"
+    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
-        jit: standard torch.compile() with custom backend
-        aot: explicit joint graph export + custom graph passes
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
+        jit: standard torch.compile() with custom backend (deprecated)
+        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -43,12 +44,14 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager"] = "default"
+    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: save all compute-intensive ops and FSDP all_gathers.
         eager: alternate mm ops between save/recompute, matching the eager
             AC policy in torchtitan.distributed.activation_checkpoint.
+        cpu_offload_all: offload all eligible activations to CPU.
+            Work in progress — for development and testing only.
     """
 
     enable_cudagraph: bool = True
@@ -100,6 +103,10 @@ def to_graph_trainer_config(
     ac = d.get("activation_checkpoint")
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+
+    # TODO: graph_trainer doesn't yet support ChunkedCELoss
+    if isinstance(d.get("loss"), ChunkedCELoss.Config):
+        d["loss"] = CrossEntropyLoss.Config()
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

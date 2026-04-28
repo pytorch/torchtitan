@@ -23,9 +23,8 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import disable_fsdp_gradient_division
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -34,7 +33,6 @@ def parallelize_flux(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -191,8 +189,8 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         # pyrefly: ignore [missing-attribute]
         attention_modules.append(single_block.inner_attention)
 
-    # Apply CP using the shared implementation (always uses SDPA for Flux)
-    apply_cp_to_attention_module(attention_modules, cp_mesh)
+    # Apply CP using direct forward wrapping (always uses SDPA for Flux)
+    apply_cp_to_forward(attention_modules, cp_mesh)
 
     logger.info("Applied Context Parallel to the Flux model")
 
