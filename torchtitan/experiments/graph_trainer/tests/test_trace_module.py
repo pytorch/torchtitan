@@ -793,9 +793,6 @@ class TestTraceModels(unittest.TestCase):
                     f"{node.name} missing compile_with_inductor annotation",
                 )
 
-    # TODO: Fix ep_mesh assertion — ExpertParallel._partition_fn() must set
-    # ep_mesh before dispatch; single-GPU trace has no mesh available.
-    @unittest.skip("ep_mesh must be set before dispatch")
     def test_llama4(self):
         from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
@@ -1051,8 +1048,6 @@ class TestTraceFSDP(FSDPTest):
         config = deepseekv3_configs["debugmodel"]()
         self._run_fsdp_model_test(DeepSeekV3Model, config)
 
-    # TODO: Fix ep_mesh assertion — same root cause as TestTraceModels.test_llama4.
-    @unittest.skip("ep_mesh must be set before dispatch")
     def test_llama4_fsdp(self):
         from torchtitan.models.llama4 import llama4_configs
         from torchtitan.models.llama4.model import Llama4Model
