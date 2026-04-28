@@ -158,8 +158,10 @@ def construct_default_graph_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
-        traced_result.gm
+    use_cudagraph = (
+        config.compile.enable_cudagraph
+        and config.compile.inductor_compilation != "full"
+        and is_cudagraph_compatible(traced_result.gm)
     )
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
