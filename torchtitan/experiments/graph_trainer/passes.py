@@ -42,6 +42,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
+    _ROPE_REGION,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     apply_cpu_offload_pass,
@@ -108,6 +109,13 @@ def compile_time_passes(
         functools.partial(
             annotate_flex_attention_for_regional_inductor_pass,
             flex_compile_config=FlexAttention.inductor_configs,
+        ),
+        # RoPE free functions are annotated at tracing time via
+        # annotate_rope_functions(). This pass tags those nodes for
+        # regional Inductor compilation to fuse RoPE kernels.
+        functools.partial(
+            annotate_rope_for_regional_inductor_pass,
+            rope_compile_config=_ROPE_INDUCTOR_CONFIGS,
         ),
         regional_inductor_pass,
     ]
@@ -627,6 +635,77 @@ def annotate_flex_attention_for_regional_inductor_pass(
                 sub_node.meta.setdefault("custom", {})[
                     "compile_with_inductor"
                 ] = mask_compile_annotation
+    return gm
+
+
+_ROPE_INDUCTOR_CONFIGS: dict[str, bool] = {
+    "wrap_inductor_compiled_regions": True,
+    "max_autotune": True,
+    "coordinate_descent_tuning": True,
+    "triton.cudagraphs": False,
+}
+
+
+def annotate_rope_for_regional_inductor_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    rope_compile_config: dict | None,
+) -> torch.fx.GraphModule:
+    """Tag RoPE nodes with ``compile_with_inductor`` for ``regional_inductor``.
+
+    RoPE free functions (``apply_rotary_emb_complex``,
+    ``apply_rotary_emb_cos_sin``, ``apply_rotary_emb_single_complex``) are
+    annotated at tracing time by ``annotate_rope_functions`` which sets
+    ``node.meta["custom"]["rope_region"] = True``. This pass finds those
+    nodes and tags them so that ``regional_inductor_pass`` compiles them
+    with Inductor.
+
+    Each attention layer's RoPE ops are assigned a separate
+    ``inductor_region`` ID (derived from the enclosing ``module_fqn``) so
+    that Inductor compiles them as independent regions. Forward and backward
+    RoPE ops sharing the same ``module_fqn`` are grouped into the same
+    region.
+
+    Args:
+        gm: The graph module to annotate.
+        example_inputs: Example inputs (unused, required by pass interface).
+        rope_compile_config: Inductor config dict for RoPE nodes.
+            When provided, wrapped as ``{"inductor_configs": rope_compile_config}``.
+            When None, nodes are tagged with an empty annotation.
+    """
+    compile_annotation: dict = (
+        {"inductor_configs": rope_compile_config}
+        if rope_compile_config is not None
+        else {}
+    )
+
+    # Assign a unique inductor_region ID per enclosing module FQN so that
+    # each attention layer's RoPE is compiled as a separate region.
+    fqn_to_region: dict[str, int] = {}
+    next_region = 0
+    num_tagged = 0
+
+    for node in gm.graph.nodes:
+        custom = node.meta.get("custom", {})
+        if not custom.get(_ROPE_REGION):
+            continue
+
+        fqn = custom.get(_MODULE_FQN, "")
+        if fqn not in fqn_to_region:
+            fqn_to_region[fqn] = next_region
+            next_region += 1
+
+        annotation = dict(compile_annotation)
+        annotation["inductor_region"] = fqn_to_region[fqn]
+        node.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
+        num_tagged += 1
+
+    if num_tagged > 0:
+        logger.info(
+            f"Tagged {num_tagged} RoPE node(s) across {len(fqn_to_region)} "
+            f"region(s) for regional Inductor compilation"
+        )
     return gm
 
 

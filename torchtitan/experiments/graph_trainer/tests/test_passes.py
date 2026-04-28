@@ -1263,6 +1263,189 @@ class TestAnnotateModuleFqns(TestCase):
         self.assertEqual(num_before, num_after)
 
 
+class TestAnnotateRopeForRegionalInductor(TestCase):
+    """Unit tests for annotate_rope_for_regional_inductor_pass."""
+
+    def _build_rope_annotated_gm(self, num_layers=2):
+        """Build a GraphModule simulating RoPE ops from multiple attention layers.
+
+        Each layer contributes two RoPE nodes (one for xq, one for xk) with
+        rope_region=True and module_fqn set to layers.<N>.attention.
+        Interspersed non-RoPE nodes simulate the surrounding computation.
+        """
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            _MODULE_FQN,
+            _ROPE_REGION,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        last = x
+
+        for i in range(num_layers):
+            fqn = f"layers.{i}.attention"
+            # Non-RoPE op (e.g. linear projection)
+            proj = graph.call_function(torch.ops.aten.mm.default, args=(last, last))
+            proj.meta["custom"] = {_MODULE_FQN: fqn}
+
+            # RoPE op for xq
+            rope_q = graph.call_function(torch.ops.aten.mul.Tensor, args=(proj, proj))
+            rope_q.meta["custom"] = {_MODULE_FQN: fqn, _ROPE_REGION: True}
+
+            # RoPE op for xk
+            rope_k = graph.call_function(torch.ops.aten.mul.Tensor, args=(rope_q, proj))
+            rope_k.meta["custom"] = {_MODULE_FQN: fqn, _ROPE_REGION: True}
+
+            last = rope_k
+
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _count_tagged_nodes(self, gm):
+        """Count nodes tagged with compile_with_inductor."""
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if "compile_with_inductor" in n.meta.get("custom", {})
+        )
+
+    def _get_tagged_regions(self, gm):
+        """Return set of inductor_region IDs from tagged nodes."""
+        regions = set()
+        for n in gm.graph.nodes:
+            annotation = n.meta.get("custom", {}).get("compile_with_inductor")
+            if annotation and "inductor_region" in annotation:
+                regions.add(annotation["inductor_region"])
+        return regions
+
+    def test_rope_nodes_tagged(self):
+        """Nodes with rope_region=True should be tagged with compile_with_inductor."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            _ROPE_INDUCTOR_CONFIGS,
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        gm = self._build_rope_annotated_gm(num_layers=2)
+        annotate_rope_for_regional_inductor_pass(
+            gm, rope_compile_config=_ROPE_INDUCTOR_CONFIGS
+        )
+
+        # 2 layers x 2 RoPE ops = 4 tagged nodes
+        self.assertEqual(self._count_tagged_nodes(gm), 4)
+
+    def test_non_rope_nodes_not_tagged(self):
+        """Nodes without rope_region should not be tagged."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            _ROPE_INDUCTOR_CONFIGS,
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        gm = self._build_rope_annotated_gm(num_layers=2)
+        annotate_rope_for_regional_inductor_pass(
+            gm, rope_compile_config=_ROPE_INDUCTOR_CONFIGS
+        )
+
+        for node in gm.graph.nodes:
+            custom = node.meta.get("custom", {})
+            if not custom.get("rope_region"):
+                self.assertNotIn(
+                    "compile_with_inductor",
+                    custom,
+                    f"Non-RoPE node {node.name} should not be tagged",
+                )
+
+    def test_separate_regions_per_layer(self):
+        """Each attention layer's RoPE ops should get a distinct inductor_region."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            _ROPE_INDUCTOR_CONFIGS,
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        gm = self._build_rope_annotated_gm(num_layers=3)
+        annotate_rope_for_regional_inductor_pass(
+            gm, rope_compile_config=_ROPE_INDUCTOR_CONFIGS
+        )
+
+        regions = self._get_tagged_regions(gm)
+        self.assertEqual(len(regions), 3, "Expected one region per layer")
+
+    def test_same_layer_shares_region(self):
+        """RoPE ops within the same attention layer should share one region ID."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            _ROPE_INDUCTOR_CONFIGS,
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        gm = self._build_rope_annotated_gm(num_layers=1)
+        annotate_rope_for_regional_inductor_pass(
+            gm, rope_compile_config=_ROPE_INDUCTOR_CONFIGS
+        )
+
+        region_ids = []
+        for n in gm.graph.nodes:
+            annotation = n.meta.get("custom", {}).get("compile_with_inductor")
+            if annotation and "inductor_region" in annotation:
+                region_ids.append(annotation["inductor_region"])
+
+        # Both RoPE ops in layer 0 should have the same region ID
+        self.assertEqual(len(region_ids), 2)
+        self.assertEqual(region_ids[0], region_ids[1])
+
+    def test_inductor_configs_propagated(self):
+        """The inductor_configs dict should be present in the annotation."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            _ROPE_INDUCTOR_CONFIGS,
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        gm = self._build_rope_annotated_gm(num_layers=1)
+        annotate_rope_for_regional_inductor_pass(
+            gm, rope_compile_config=_ROPE_INDUCTOR_CONFIGS
+        )
+
+        for n in gm.graph.nodes:
+            annotation = n.meta.get("custom", {}).get("compile_with_inductor")
+            if annotation:
+                self.assertIn("inductor_configs", annotation)
+                self.assertEqual(annotation["inductor_configs"], _ROPE_INDUCTOR_CONFIGS)
+
+    def test_none_config_tags_without_inductor_configs(self):
+        """When rope_compile_config=None, nodes are tagged with empty annotation."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        gm = self._build_rope_annotated_gm(num_layers=1)
+        annotate_rope_for_regional_inductor_pass(gm, rope_compile_config=None)
+
+        tagged = self._count_tagged_nodes(gm)
+        self.assertEqual(tagged, 2)
+        for n in gm.graph.nodes:
+            annotation = n.meta.get("custom", {}).get("compile_with_inductor")
+            if annotation:
+                self.assertNotIn("inductor_configs", annotation)
+
+    def test_noop_without_rope_annotations(self):
+        """When no nodes have rope_region, the pass should be a no-op."""
+        from torchtitan.experiments.graph_trainer.passes import (
+            _ROPE_INDUCTOR_CONFIGS,
+            annotate_rope_for_regional_inductor_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        n1.meta["custom"] = {_MODULE_FQN: "layers.0.attention"}
+        graph.output(n1)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        annotate_rope_for_regional_inductor_pass(
+            gm, rope_compile_config=_ROPE_INDUCTOR_CONFIGS
+        )
+
+        self.assertEqual(self._count_tagged_nodes(gm), 0)
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 

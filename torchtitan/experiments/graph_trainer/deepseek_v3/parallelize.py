@@ -18,6 +18,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    annotate_rope_functions,
     apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -35,6 +36,8 @@ from torchtitan.tools.logging import logger
 def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
+    - RoPE annotation: Tags RoPE free functions so their traced ops carry a
+      ``rope_region`` tag for regional Inductor compilation.
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes.
     - Module FQN annotation: Tags each submodule's forward with its
@@ -43,6 +46,8 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     """
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+
+    annotate_rope_functions()
 
     LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
         LocalTokenDispatcher.dispatch

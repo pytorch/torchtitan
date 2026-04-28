@@ -18,6 +18,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    annotate_rope_functions,
     apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -34,12 +35,16 @@ from torchtitan.tools.logging import logger
 def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
     """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
+    - RoPE annotation: Tags RoPE free functions so their traced ops carry a
+      ``rope_region`` tag for regional Inductor compilation.
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes (only if MoE layers exist).
     - Module FQN annotation: Tags each submodule's forward with its
       fully-qualified name for downstream passes (bucketing, SAC region
       boundaries, etc.).
     """
+    annotate_rope_functions()
+
     # Annotate MoE EP regions if any layer has MoE enabled
     if any(layer.moe is not None for layer in model.config.layers):
         from torchtitan.models.common.moe import MoE
