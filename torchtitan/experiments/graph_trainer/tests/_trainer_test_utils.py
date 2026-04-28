@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
@@ -30,7 +30,7 @@ def build_minimal_trainer(
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
     trainer.model_parts = [model]
-    trainer.loss_fn = cross_entropy_loss
+    trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
     trainer.train_context = get_train_context(False)
     trainer.model_config = model_config

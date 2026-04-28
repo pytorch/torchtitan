@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 
 def multinomial_sample_one(
@@ -64,15 +65,28 @@ def generate(
 
     generated_tokens = input_ids.clone()
 
-    for _ in range(max_new_tokens):
-        next_token = generate_next_token(
-            model,
-            x=generated_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            rng=rng,
-        )
+    # Inference can hit shapes that ``FLASH_ATTENTION`` / ``CUDNN_ATTENTION``
+    # refuse (e.g., debug-model ``head_dim=16`` is outside flash's supported
+    # set), and the trainer-side ``ScaledDotProductAttention`` defaults
+    # intentionally exclude ``MATH``. Allow ``MATH`` as a last-resort fallback
+    # here so generation works on more hardware/configs without affecting
+    # training-side strictness.
+    backends = [
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.MATH,
+    ]
+    with sdpa_kernel(backends, set_priority=True):
+        for _ in range(max_new_tokens):
+            next_token = generate_next_token(
+                model,
+                x=generated_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                rng=rng,
+            )
 
-        generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
+            generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
 
     return generated_tokens

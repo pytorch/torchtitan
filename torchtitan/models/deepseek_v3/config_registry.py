@@ -9,8 +9,8 @@ from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.float8 import (
-    Float8GroupedMMConverter,
+from torchtitan.components.quantization import (
+    Float8GroupedExpertsConverter,
     Float8LinearConverter,
 )
 from torchtitan.config import (
@@ -20,7 +20,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -114,11 +113,26 @@ def deepseek_v3_16b() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
+    compile_config = CompileConfig(enable=True, components=["loss"])
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_registry(
-            "671B", attn_backend="flex", moe_comm_backend="torchao"
+            "671B",
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            quantization=[
+                Float8LinearConverter.Config(
+                    filter_fqns=["output", "router.gate"],
+                    model_compile_enabled=model_compile_enabled,
+                ),
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=model_compile_enabled
+                ),
+            ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -137,18 +151,12 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=1,
+            expert_parallel_degree=2,
             expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
         ),
-        compile=CompileConfig(enable=True, components=["loss"]),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[
-                Float8LinearConverter.Config(filter_fqns=["lm_head", "router.gate"]),
-                Float8GroupedMMConverter.Config(fqns=["experts"]),
-            ]
-        ),
+        compile=compile_config,
     )

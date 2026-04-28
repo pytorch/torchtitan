@@ -4,9 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from torchtitan.experiments.ft.manager import FTManager
+from torchtitan.protocols.model_spec import ModelSpec
 
 
 @dataclass(kw_only=True, slots=True)
@@ -73,6 +75,11 @@ class FaultTolerance(FTManager.Config):
     This is used to automatically split the model into fragments provided that the model
     implements FaultTolerantModelSpec
     """
+
+
+@dataclass
+class FaultTolerantModelSpec(ModelSpec):
+    fragment_fn: Callable | None = None
 
 
 @dataclass

@@ -13,8 +13,6 @@ TorchTitan models for vLLM.
 
 import dataclasses
 
-from types import SimpleNamespace
-
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -128,14 +126,7 @@ def create_torchtitan_config_from_vllm_config(
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=1,
         expert_tensor_parallel_degree=1,
-        # vLLM inference doesn't compute loss; the sharding config's output
-        # layer should NOT be vocab-parallel.
-        disable_loss_parallel=True,
-        # Match the trainer's plan. ``ParallelismConfig.enable_sequence_parallel``
-        # defaults to True; the RL trainer sets it to False explicitly. If the
-        # generator silently runs SP=True, ``set_qwen3_sharding_config`` builds
-        # a different sharding plan for activations and bf16 numerics drift
-        # between trainer and generator (test_trainer_vs_vllm_prefill).
+        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
         enable_sequence_parallel=False,
     )
 
@@ -217,22 +208,25 @@ class TorchTitanVLLMModelWrapper(Module):
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Create ParallelDims and configs from vLLM config at runtime.
-        # vLLM config contains the tensor_parallel_size from command-line args
-        # and this will be consistent across all worker processes.
         self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
             vllm_config
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
-        # (including VLLMAttentionWrapper) is constructed with its
-        # ShardingConfig / LocalMapConfig attached. Uses the model-agnostic
-        # ``update_from_config`` hook.
+        # is constructed with its ShardingConfig attached (required by the
+        # declarative model.parallelize() API).
+        # TODO: Refactor update_from_config to accept ParallelismConfig
+        # directly instead of requiring a trainer_config wrapper.
+        from types import SimpleNamespace
 
-        # TODO: We should make Module.Config.update_from_config more generic.
-        # Now it accepts Trainer.Config but RL instances may not have
-        # Trainer.Config
+        from torchtitan.config import DebugConfig, TrainingConfig
+
         self.config.update_from_config(
-            trainer_config=SimpleNamespace(parallelism=parallelism)
+            trainer_config=SimpleNamespace(
+                training=TrainingConfig(),
+                parallelism=parallelism,
+                debug=DebugConfig(),
+            )
         )
 
         # TODO: Check if it's possible to apply meta init
@@ -241,13 +235,21 @@ class TorchTitanVLLMModelWrapper(Module):
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
 
-        # NOTE: We need to apply parallelize within model.__init__ because vllm
-        # doesn't separate model creation and parallelism application and instead
-        # requires parallelization to be done inside model constructor.
-        self.model = self.parallelize_fn(
-            model=self.model,
+        # Apply parallelism using the model's own parallelize function.
+        # AC and compile are explicitly disabled; skip_dp=True skips FSDP.
+        from torchtitan.config import ActivationCheckpointConfig, CompileConfig
+        from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+        self.parallelize_fn(
+            self.model,
             parallel_dims=self.parallel_dims,
+            training=TrainingConfig(),
+            model_converters=ModelConvertersContainer.Config(),
             parallelism=parallelism,
+            compile_config=CompileConfig(enable=False),
+            ac_config=ActivationCheckpointConfig(mode="none"),
+            dump_folder="",
+            skip_dp=True,
         )
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
@@ -389,8 +391,7 @@ class TorchTitanVLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Config-based sharding returns logits as a Replicate DTensor; vLLM
-        # expects a plain tensor.
+        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
         if isinstance(logits, DTensor):
             logits = logits.to_local()
 
