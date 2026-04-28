@@ -444,6 +444,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         out = deterministic_scatter_add(
             out,
+            # pyrefly: ignore [missing-attribute]
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
             routed_output,
         )
@@ -463,11 +464,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AllToAllTokenDispatcher.Config):
-        pad_multiple: int
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.pad_multiple = config.pad_multiple
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
+        self.pad_multiple: int
 
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
@@ -561,13 +563,16 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         comm_backend: str
         non_blocking_capacity_factor: float | None = None
-        pad_multiple: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
-        self.pad_multiple = config.pad_multiple
+        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
+        # pad_multiple: Alignment size for token groups needed by quantized
+        # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
+        # with hybridep. None means no padding.
+        self.pad_multiple: int | None = None
         # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
         self.ep_mesh: DeviceMesh | None = None
 

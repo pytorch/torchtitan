@@ -27,7 +27,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization.utils import has_quantization
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -43,6 +43,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -78,6 +79,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
+        model_converters: ModelConvertersContainer.Config = field(
+            default_factory=ModelConvertersContainer.Config
+        )
         optimizer: OptimizersContainer.Config = field(
             default_factory=OptimizersContainer.Config
         )
@@ -196,6 +200,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
+        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -253,6 +258,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ):
             model = model_config.build()
 
+        # Build the collection of model converters. No-op if converters empty
+        model_compile_enabled = (
+            config.compile.enable and "model" in config.compile.components
+        )
+        model_converters = config.model_converters.build(
+            parallel_dims=parallel_dims,
+            model_compile_enabled=model_compile_enabled,
+        )
+        model_converters.convert(model)
+
         # Verify all submodules satisfy the Module protocol
         # TODO: move this to module validate().
         # This is current put here to verify module build and
@@ -261,13 +276,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
 
+        # Check if any converter uses quantization (FP8, MX, etc.)
+        has_quantization = any(
+            isinstance(cc, QuantizationConverter.Config)
+            for cc in config.model_converters.converters
+        )
+
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
-            has_quantization=has_quantization(model_config),
+            has_quantization=has_quantization,
         )
         color = self.metrics_processor.color
 
@@ -337,6 +358,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
+                model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
@@ -372,6 +394,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     model,
                     parallel_dims=parallel_dims,
                     training=config.training,
+                    model_converters=config.model_converters,
                     parallelism=config.parallelism,
                     compile_config=config.compile,
                     ac_config=config.activation_checkpoint,
@@ -432,6 +455,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
+        )
+        # Post optimizer step model converters hook.
+        # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
+        # where it issues a single all-reduce for all parameters at once for better performance
+        self.optimizers.register_step_post_hook(
+            lambda *args, **kwargs: model_converters.post_optimizer_hook(
+                self.model_parts
+            )
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts

@@ -12,7 +12,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization import Float8LinearConverter
+from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -24,6 +24,7 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
@@ -92,13 +93,12 @@ def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
 
 def llama3_debugmodel_float8() -> Trainer.Config:
     config = llama3_debugmodel()
-    model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
-    )
-    config.model_spec = model_registry(
-        "debugmodel",
-        quantization=[
-            Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+            ),
         ],
     )
     return config
@@ -115,14 +115,12 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
 
 def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel",
-        quantization=[
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
             Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
                 emulate=True,
-                model_compile_enabled=(
-                    config.compile.enable and "model" in config.compile.components
-                ),
             ),
         ],
     )
@@ -195,7 +193,6 @@ def llama3_70b() -> Trainer.Config:
 
 
 def llama3_405b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True)
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-405B",
@@ -206,14 +203,13 @@ def llama3_405b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_registry(
-            "405B",
-            quantization=[
+        model_spec=model_registry("405B"),
+        model_converters=ModelConvertersContainer.Config(
+            converters=[
                 Float8LinearConverter.Config(
-                    filter_fqns=["output"],
-                    model_compile_enabled=(
-                        compile_config.enable and "model" in compile_config.components
-                    ),
+                    enable_fsdp_float8_all_gather=True,
+                    precompute_float8_dynamic_scale_for_fsdp=True,
+                    filter_fqns=["lm_head"],
                 ),
             ],
         ),
@@ -233,7 +229,7 @@ def llama3_405b() -> Trainer.Config:
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
-        compile=compile_config,
+        compile=CompileConfig(enable=True),
         validator=Validator.Config(
             freq=500,
             steps=1200,

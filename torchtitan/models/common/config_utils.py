@@ -30,6 +30,7 @@ from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
+    TorchAOTokenDispatcher,
 )
 
 
@@ -207,6 +208,7 @@ def make_token_dispatcher_config(
     Returns the right Config subclass based on comm_backend:
     - None: LocalTokenDispatcher.Config (no EP communication)
     - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
+    - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
     - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
     if comm_backend is None:
@@ -223,6 +225,12 @@ def make_token_dispatcher_config(
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
+    elif comm_backend == "torchao":
+        return TorchAOTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
@@ -232,7 +240,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of None, 'standard', 'deepep', 'hybridep'."
+            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
         )
 
 

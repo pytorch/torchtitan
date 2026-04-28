@@ -29,6 +29,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     MixedPrecisionPolicy,
 )
 from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -61,6 +62,7 @@ def parallelize_deepseekv3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,

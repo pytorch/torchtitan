@@ -367,7 +367,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         hidden_states: torch.Tensor,
         accumulated_grad: torch.Tensor,

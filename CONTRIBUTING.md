@@ -76,7 +76,7 @@ When appropriate, one should consider
 - Adding CPU/GPU unit/integration tests.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
   - To add a GPU integration test, create a new `OverrideDefinitions` in [integration_tests](tests/integration_tests/). It will override the default config to run on the Llama 3 debug model (see [config_registry.py](torchtitan/models/llama3/config_registry.py)).
-- Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [float8.md](torchtitan/components/quantization/float8.md).
+- Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [float8.md](docs/float8.md).
 - Adding a new file with benchmark results in [benchmarks](benchmarks) folder.
 - Creating GitHub issues for things that cannot be addressed at the moment.
 - Writing a post on [PyTorch Forums](https://discuss.pytorch.org/c/distributed/torchtitan/44) and linking to it.

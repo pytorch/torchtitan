@@ -123,14 +123,12 @@ class TestConfigManager(unittest.TestCase):
             "lr_scheduler",
         ]
 
-    def test_trainer_config_quantization_default(self):
-        from torchtitan.components.quantization.utils import has_quantization
-
+    def test_trainer_config_model_converters_default(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert not has_quantization(config.model_spec.model)
+        assert config.model_converters.converters == []
 
     # TODO: remove this test when we remove the merge functionality
     def test_extend_trainer_config_directly(self):

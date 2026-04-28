@@ -20,7 +20,6 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -618,15 +617,11 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,
