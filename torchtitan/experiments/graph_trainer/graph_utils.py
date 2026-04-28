@@ -159,25 +159,6 @@ def joint_graph_builder(
         precompile=serializable,
     )
 
-    # Check if inductor_decomposition is configured and create the pass with proper context
-    if compile_config is not None:
-        joint_pass_names = getattr(compile_config, "joint_passes", [])
-        if "inductor_decomposition" in joint_pass_names:
-            from torchtitan.experiments.graph_trainer.passes import (
-                inductor_decomposition_pass,
-            )
-
-            # Create the decomposition pass with context
-            decomp_pass = functools.partial(
-                inductor_decomposition_pass,
-                joint_with_descriptors=joint_with_descriptors,
-            )
-
-            # Prepend to joint_custom_passes
-            if joint_custom_passes is None:
-                joint_custom_passes = []
-            joint_custom_passes = [decomp_pass] + joint_custom_passes
-
     # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
         for joint_custom_pass in joint_custom_passes:
