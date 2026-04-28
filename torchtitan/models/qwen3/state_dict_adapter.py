@@ -30,6 +30,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
+        qkv_map: dict[str, str | None]
         if self.fuse_qkv:
             qkv_map = {
                 "model.layers.{}.self_attn.q_proj.weight": None,
@@ -271,6 +272,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
             else:
                 new_key = self.from_hf_map[key]
+                if new_key is None:
+                    continue
                 state_dict[new_key] = value
 
         if self.fuse_qkv and pending_qkv:

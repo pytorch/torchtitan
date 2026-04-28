@@ -9,6 +9,8 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.components.quantization import QuantizationConverter
+
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import (
@@ -18,7 +20,6 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
