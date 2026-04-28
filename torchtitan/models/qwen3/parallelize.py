@@ -82,25 +82,43 @@ def parallelize_qwen3(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    # Skip FSDP wrapper for inference. FSDP's forward hooks
-    # are incompatible with torch.inference_mode() used by vLLM.
-    # AC and compile are disabled via config (mode="none", enable=False).
-    if skip_dp:
-        return model
+    if skip_dp:  # Inference path
+        # there's only one kind of DP which is DDP during inferece, but we use "fsdp" to represent dp_degree
+        # Trick: apply number of fsdp_degree of DDP, instead of FSDP on dense module
+        assert not parallel_dims.dp_replicate_enabled
+        dp_mesh_names = [
+            "fsdp",
+            "dp_replicate",
+        ]  # we need to use 2D mesh to apply DDP on first mesh
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        # Assumption: DP is only applied when EP degree is greater than dense module's TP degree
+        # So EP >= (DP * TP) for inference. Otherwise we will just spin more vllm instances
+        # efsdp degree must = 1
+        edp_mesh = None
+        if parallel_dims.ep_enabled:
+            edp_mesh_names = [
+                "efsdp",
+                "dp_replicate",
+            ]  # we need to use 2D mesh to apply DDP on first mesh
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+            if edp_mesh is not None:
+                assert edp_mesh.size() == 2
 
-    edp_mesh = None
-    if parallel_dims.ep_enabled:
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
+    else:  # pre-training path
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+
+        edp_mesh = None
+        if parallel_dims.ep_enabled:
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
     apply_fsdp(
         model,
