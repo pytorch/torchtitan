@@ -15,7 +15,11 @@ import math
 import einops as E
 import requests
 import torch
+
+# pyrefly: ignore [missing-import]
 import torchvision.io
+
+# pyrefly: ignore [missing-import]
 import torchvision.transforms.v2.functional as TVF
 
 from PIL import Image

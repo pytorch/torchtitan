@@ -442,6 +442,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
 
+        assert isinstance(token_indices_experts_sorted, torch.Tensor)
         out = deterministic_scatter_add(
             out,
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
