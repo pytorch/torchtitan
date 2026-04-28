@@ -44,6 +44,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+from torch.distributed.tensor import DTensor
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
@@ -244,6 +245,12 @@ def compute_trainer_prefill_logprobs(model, token_ids, device):
     positions = torch.arange(max_len, device=device).unsqueeze(0).expand(len(seqs), -1)
 
     logits = model(padded, attention_masks=attention_masks, positions=positions)
+    # Config-based TP returns logits as a Replicate DTensor; downstream code
+    # (slicing per-sample, ``gather`` with plain-tensor indices) expects a
+    # plain tensor — materialize once here. Same pattern as ``compute_logprobs``
+    # in ``actors/utils.py``.
+    if isinstance(logits, DTensor):
+        logits = logits.to_local()
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
 
     results = []
