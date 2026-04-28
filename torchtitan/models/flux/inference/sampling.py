@@ -111,6 +111,7 @@ def generate_image(
         },
     )
 
+    empty_batch = None
     if enable_classifier_free_guidance:
         num_images = len(prompt)
 
@@ -141,13 +142,10 @@ def generate_image(
         t5_encodings=batch["t5_encodings"],
         enable_classifier_free_guidance=enable_classifier_free_guidance,
         empty_t5_encodings=(
-            # pyrefly: ignore [unbound-name]
-            empty_batch["t5_encodings"]
-            if enable_classifier_free_guidance
-            else None
+            empty_batch["t5_encodings"] if empty_batch is not None else None
         ),
         empty_clip_encodings=(
-            empty_batch["clip_encodings"] if enable_classifier_free_guidance else None
+            empty_batch["clip_encodings"] if empty_batch is not None else None
         ),
         classifier_free_guidance_scale=classifier_free_guidance_scale,
     )
