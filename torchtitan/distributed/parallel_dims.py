@@ -28,11 +28,9 @@ class ParallelDims:
     ep: int
     etp: int
     world_size: int
-
     full_dtensor: bool = False
-
-    _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
-    _submesh_cache: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
+    _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
 
     @classmethod
@@ -172,28 +170,30 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        dense_mesh = unflatten_mesh(
-            self._world_mesh,
-            ("pp", "dp_replicate", "fsdp", "tp"),
-            (self.pp, self.dp_replicate, fsdp, self.tp),
-        )
+        # Dense mesh layout depends on ``full_dtensor``:
+        #   - full_dtensor=False: ``dp_shard`` and ``cp`` are pre-flattened into
+        #     a single ``fsdp`` axis so FSDP2's 1D API works directly.
+        #   - full_dtensor=True: keep them separate so
+        #     ``DataParallelMeshDims(shard=("dp_shard", "cp"))`` can declare
+        #     both as data-parallel while CP activations stay sharded on the
+        #     distinct ``cp`` axis. The ``fsdp`` flatten would lose the CP
+        #     boundary, so this layout cannot be derived from the other one.
+        if self.full_dtensor:
+            dense_mesh = unflatten_mesh(
+                self._world_mesh,
+                ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+                (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
+            )
+        else:
+            dense_mesh = unflatten_mesh(
+                self._world_mesh,
+                ("pp", "dp_replicate", "fsdp", "tp"),
+                (self.pp, self.dp_replicate, fsdp, self.tp),
+            )
         sparse_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "efsdp", "ep", "etp"),
             (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
-        )
-
-        # Full DTensor dense mesh: separate dp_shard and cp axes.
-        # The non-full-dtensor path pre-flattens dp_shard*cp into a single
-        # ``fsdp`` axis so FSDP2's 1D API works directly. The full DTensor
-        # path keeps them separate so ``DataParallelMeshDims(shard=("dp_shard",
-        # "cp"))`` can declare both as data-parallel while CP activations
-        # stay sharded on the distinct ``cp`` axis. The two meshes can't be
-        # unified because the ``fsdp`` flatten loses the CP boundary.
-        full_dtensor_dense_mesh = unflatten_mesh(
-            self._world_mesh,
-            ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
-            (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
         )
 
         self._global_meshes = {
@@ -201,22 +201,23 @@ class ParallelDims:
             "loss": loss_mesh,
             "dense": dense_mesh,
             "sparse": sparse_mesh,
-            "full_dtensor_dense": full_dtensor_dense_mesh,
         }
 
-        self._meshes = {
+        self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
             "dp_replicate": dense_mesh["dp_replicate"],
-            "dp_shard": full_dtensor_dense_mesh["dp_shard"],
-            "fsdp": dense_mesh["fsdp"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
             "etp": sparse_mesh["etp"],
         }
+        if self.full_dtensor:
+            self._single_axis_meshes["dp_shard"] = dense_mesh["dp_shard"]
+        else:
+            self._single_axis_meshes["fsdp"] = dense_mesh["fsdp"]
 
         # Validate mesh sizes
         self._validate_meshes()
@@ -235,17 +236,19 @@ class ParallelDims:
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
-            "dp_shard": self.dp_shard,
-            "fsdp": self.dp_shard * self.cp,
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
             "etp": self.etp,
         }
+        if self.full_dtensor:
+            expected_sizes["dp_shard"] = self.dp_shard
+        else:
+            expected_sizes["fsdp"] = self.dp_shard * self.cp
 
         for mesh_name, expected_size in expected_sizes.items():
-            actual_size = self._meshes[mesh_name].size()
+            actual_size = self._single_axis_meshes[mesh_name].size()
             assert actual_size == expected_size, (
                 f"Mesh '{mesh_name}' has unexpected size: "
                 f"expected {expected_size}, got {actual_size}"
@@ -269,37 +272,39 @@ class ParallelDims:
         Raises:
             ValueError: If the requested dimension name(s) is not valid.
         """
-        if not self._meshes:
+        if not self._single_axis_meshes:
             self.build_mesh()
 
         if isinstance(dims, str):
             dims = [dims]
 
         for mesh_name in dims:
-            if mesh_name not in self._meshes:
+            if mesh_name not in self._single_axis_meshes:
                 raise ValueError(
                     f"Invalid mesh dim: '{mesh_name}'. "
-                    f"Valid dimensions are: {list(self._meshes.keys())}"
+                    f"Valid dimensions are: {list(self._single_axis_meshes.keys())}"
                 )
 
-        if any(not self._mesh_exist(dim, self._meshes[dim].size()) for dim in dims):
+        if any(
+            not self._mesh_exist(dim, self._single_axis_meshes[dim].size())
+            for dim in dims
+        ):
             return None
 
         if len(dims) == 1:
-            return self._meshes[dims[0]]
+            return self._single_axis_meshes[dims[0]]
 
-        # Multi-axis: cache submesh slices by axis tuple. FSDP2 compares the
-        # param's DTensor mesh and the mesh handed to ``fully_shard`` with
-        # object identity, so every consumer must see the same instance.
+        # Cache because some downstream users (e.g., FSDP2) compare mesh
+        # equality by object identity across multiple calls.
         key = tuple(dims)
-        if key in self._submesh_cache:
-            return self._submesh_cache[key]
+        if key in self._multi_axis_meshes:
+            return self._multi_axis_meshes[key]
         for global_mesh in self._global_meshes.values():
             assert global_mesh.mesh_dim_names is not None
             if not set(dims).issubset(set(global_mesh.mesh_dim_names)):
                 continue
             submesh = global_mesh[key]
-            self._submesh_cache[key] = submesh
+            self._multi_axis_meshes[key] = submesh
             return submesh
         raise ValueError(f"Invalid mesh name combinations {dims}.")
 
@@ -332,12 +337,12 @@ class ParallelDims:
     def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Return the mesh a ``Module`` should use for ``distribute_tensor``.
 
-        WORKAROUND: bridges ``full_dtensor`` and legacy modes during the
-        transition. Once all models support ``full_dtensor`` and the legacy
-        path is removed, this method goes away — callers should use
-        ``get_optional_mesh(axes)`` directly.
+        TODO(fegin): This is a WORKAROUND to bridge ``full_dtensor`` and legacy
+        modes during the transition. Once all models support ``full_dtensor`` and
+        the legacy path is removed, this method goes away — callers should use
+        ``get_mesh(axes)`` directly.
 
-        - ``full_dtensor=True``: identical to ``get_optional_mesh(axes)``.
+        - ``full_dtensor=True``: identical to ``get_mesh(axes)``.
         - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep, etp}`` first
           (the axes that participate in ``distribute_tensor`` under the
           legacy path; DP/CP are handled by FSDP / LocalMapConfig
@@ -376,9 +381,13 @@ class ParallelDims:
             >>> print(meshes.keys())
             dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss', 'efsdp'])
         """
-        if not self._meshes:
+        if not self._single_axis_meshes:
             self.build_mesh()
-        return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
+        return {
+            k: v
+            for k, v in self._single_axis_meshes.items()
+            if v.ndim == 1 and v.size() > 1
+        }
 
     @property
     def world_mesh(self) -> DeviceMesh:
@@ -396,7 +405,6 @@ class ParallelDims:
 
     @property
     def dp_shard_enabled(self):
-        """True when dp_shard > 1 (not counting cp folded into fsdp)."""
         return self.dp_shard > 1
 
     @property

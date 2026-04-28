@@ -272,6 +272,8 @@ class Module(nn.Module, Configurable):
 
         mesh = parallel_dims.get_module_mesh(self._needed_axes(sharding_config))
         if mesh is None:
+            # TODO(fegin): This should only happen when full_dtensor is False
+            # Change this to an assert once we deprecate non-full_dtensor mode.
             return
 
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
@@ -356,13 +358,11 @@ class Module(nn.Module, Configurable):
                 redistribute_inputs=True,
             )
 
-        assert mesh is not None  # pyrefly narrowing through closure
-        _mesh = mesh
-
         def with_redistribution(*args, **kwargs):
-            args, kwargs = self._shard_inputs(_mesh, args, kwargs)
+            assert mesh is not None
+            args, kwargs = self._shard_inputs(mesh, args, kwargs)
             outputs = fn(*args, **kwargs)
-            return self._shard_outputs(_mesh, outputs)
+            return self._shard_outputs(mesh, outputs)
 
         self.forward = with_redistribution
 

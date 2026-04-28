@@ -11,7 +11,7 @@ buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
 FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
 
-TP sharding is handled by ``Module.parallelize(spmd_mesh)`` using
+TP and CP shardings are handled by ``Module.parallelize(spmd_mesh)`` using
 config-based ``ShardingConfig``.
 """
 
@@ -46,18 +46,16 @@ def validate_config(
         )
 
     if parallel_dims.cp_enabled:
-        for m in model.modules():
-            if isinstance(m, (ScaledDotProductAttention, VarlenAttention)):
-                backend = (
-                    "sdpa" if isinstance(m, ScaledDotProductAttention) else "varlen"
-                )
-                raise NotImplementedError(
-                    f"full_dtensor + CP is not supported with {backend} attention. "
-                    "After K/V all-gather on CP, Q and K/V have asymmetric sequence "
-                    "lengths, which sdpa/varlen cannot handle with is_causal=True. "
-                    "Use FlexAttention (e.g. --config llama3_debugmodel_flex_attn) "
-                    "or disable CP."
-                )
+        if any(
+            isinstance(m, (ScaledDotProductAttention, VarlenAttention))
+            for m in model.modules()
+        ):
+
+            raise NotImplementedError(
+                "full_dtensor + CP is not supported with "
+                "ScaledDotProductAttention or VarlenAttention. "
+                "Use FlexAttention + CP or disable CP."
+            )
 
 
 def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
@@ -66,7 +64,7 @@ def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     Uses ``dp_shard`` and ``cp`` as separate shard axes rather than
     the flattened ``fsdp`` axis from the non-full-dtensor path. The
     return type still spells ``Dims`` because that's the upstream class
-    name; everything we own here uses ``axes``.
+    name.
     """
     shard_axes: list[str] = []
     if parallel_dims.dp_shard_enabled:
@@ -81,9 +79,7 @@ def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     else:
         shard = None
 
-    replicate: str | None = None
-    if parallel_dims.dp_replicate_enabled:
-        replicate = "dp_replicate"
+    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
 
     return DataParallelMeshDims(shard=shard, replicate=replicate)
 
@@ -105,14 +101,10 @@ def resolve_fsdp_mesh(
     """Select the FSDP mesh and optional DataParallelMeshDims.
 
     In full DTensor mode, returns the SPMD mesh and DataParallelMeshDims.
-    In standard mode, returns the conventional dp_mesh and None.
+    In non-full DTensor mode, returns the conventional dp_mesh and None.
     """
     if full_dtensor:
-        spmd_mesh = parallel_dims.get_optional_mesh(_dense_spmd_axes(parallel_dims))
-        assert spmd_mesh is not None, (
-            "full_dtensor requires at least one of dp_replicate, "
-            "dp_shard, cp, tp to be enabled."
-        )
+        spmd_mesh = parallel_dims.get_mesh(_dense_spmd_axes(parallel_dims))
         dp_mesh_axes = get_dp_mesh_axes(parallel_dims)
         return spmd_mesh, dp_mesh_axes
     else:
@@ -132,9 +124,11 @@ def parallelize_inputs(
 
     DP axes get Shard(0) (batch), CP gets Shard(1) (sequence), TP gets Replicate.
     Tensor values in extra_kwargs (e.g. positions) use the same placements.
+
+    NOTE: This API assumes the inputs are already sharded; it only converts
+    the class from ``torch.Tensor`` to ``DTensor`` via ``DTensor.from_local``.
     """
-    mesh = parallel_dims.get_optional_mesh(_dense_spmd_axes(parallel_dims))
-    assert mesh is not None, "parallelize_inputs requires an enabled spmd axis"
+    mesh = parallel_dims.get_mesh(_dense_spmd_axes(parallel_dims))
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))

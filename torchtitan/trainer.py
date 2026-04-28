@@ -668,7 +668,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        # Convert inputs/labels to DTensors on the SPMD mesh
         if self.config.parallelism.full_dtensor:
             inputs, labels = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
@@ -739,7 +738,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
-                # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 
