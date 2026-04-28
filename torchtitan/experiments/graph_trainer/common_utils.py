@@ -18,6 +18,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 _MODULE_FQN = "module_fqn"
+_ROPE_REGION = "rope_region"
 _NOT_IN_LAYERS = -1
 
 
@@ -53,6 +54,48 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def annotate_rope_functions() -> None:
+    """Wrap RoPE free functions with ``annotate_fn`` so traced nodes carry a tag.
+
+    RoPE computation is performed by free functions (``apply_rotary_emb_complex``,
+    ``apply_rotary_emb_cos_sin``, ``apply_rotary_emb_single_complex``) called
+    inside attention modules. Unlike ``nn.Module`` submodules, these free
+    functions do not get their own ``module_fqn`` -- all their ops inherit the
+    enclosing attention module's FQN. This makes FQN-based identification
+    impossible.
+
+    This helper monkey-patches the function references in the modules that
+    import them (``attention`` and ``deepseek_v3.model``) so that ``make_fx``
+    tracing propagates a ``rope_region`` tag into ``node.meta["custom"]``.
+    The tag is later consumed by
+    ``annotate_rope_for_regional_inductor_pass``.
+
+    Must be called before tracing, alongside ``annotate_module_fqns``.
+    """
+    import torchtitan.models.common.attention as attn_mod
+    import torchtitan.models.deepseek_v3.model as ds_mod
+
+    rope_annotation = {_ROPE_REGION: True}
+
+    # Patch apply_rotary_emb_complex and apply_rotary_emb_cos_sin in attention.py
+    # (used by GQAttention for Llama3/4, Qwen3, GPT-OSS)
+    for fn_name in ("apply_rotary_emb_complex", "apply_rotary_emb_cos_sin"):
+        original = getattr(attn_mod, fn_name, None)
+        if original is not None and not getattr(original, "_rope_annotated", False):
+            wrapped = annotate_fn(rope_annotation)(original)
+            wrapped._rope_annotated = True
+            setattr(attn_mod, fn_name, wrapped)
+
+    # Patch apply_rotary_emb_single_complex in deepseek_v3/model.py
+    # (used by DeepSeek V3 MLA attention directly)
+    fn_name = "apply_rotary_emb_single_complex"
+    original = getattr(ds_mod, fn_name, None)
+    if original is not None and not getattr(original, "_rope_annotated", False):
+        wrapped = annotate_fn(rope_annotation)(original)
+        wrapped._rope_annotated = True
+        setattr(ds_mod, fn_name, wrapped)
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):

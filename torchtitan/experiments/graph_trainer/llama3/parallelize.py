@@ -15,6 +15,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    annotate_rope_functions,
     apply_graph_ac,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -31,8 +32,11 @@ def annotate_llama(model: GraphTrainerLlama3Model) -> None:
 
     Tags each submodule's forward with its fully-qualified name via
     ``torch.fx.traceback.annotate_fn`` for downstream passes (bucketing,
-    SAC region boundaries, etc.).
+    SAC region boundaries, etc.). Also annotates RoPE free functions so
+    their traced ops carry a ``rope_region`` tag for regional Inductor
+    compilation.
     """
+    annotate_rope_functions()
     annotate_module_fqns(model)
 
 
