@@ -37,10 +37,13 @@ from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.graph_trainer.bucketing import (
+    joint_transformer_block_bucketing_reordering_pass,
+)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _is_backward_node,
-    _MODULE_FQN,
     _NOT_IN_LAYERS,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
@@ -99,7 +102,7 @@ def compile_time_passes(
         selective_activation_remat_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
-            fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
+            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
         ),
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
@@ -239,70 +242,6 @@ def transformer_block_bucketing_reordering_pass(
         gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
     )
     gm.recompile()
-    return gm
-
-
-def joint_transformer_block_bucketing_reordering_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    fsdp_manual_buckets,
-) -> torch.fx.GraphModule:
-    """Apply manual bucketing and reordering on a joint fwd+bwd graph.
-
-    The joint graph is processed in two passes to ensure each direction's
-    collectives are bucketed independently and reordering uses the correct
-    execution order (forward order for fwd, reversed order for bwd).
-
-    Used by the aot_fx_trace mode where forward and backward are in a
-    single graph.
-    """
-
-    def _make_module_fqn_stack_fn(
-        *, bwd: bool
-    ) -> Callable[[torch.fx.Node], list[tuple[str, type]]]:
-        """Create a module_stack_fn that filters nodes by forward/backward direction.
-
-        Recomputed nodes (from SAC remat) have autograd_backward=False
-        (copied from their original forward node) but serve the backward
-        pass. We identify them by the ``_recomputed`` name suffix and
-        route them to the backward bucketing pass.
-        """
-
-        def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
-            # TODO: Workaround — recomputed nodes should carry
-            # autograd_backward=True but remat_using_tags_for_fwd_loss_bwd_graph
-            # copies metadata from the original forward node. Fix upstream to
-            # tag recomputed nodes with autograd_backward=True.
-            is_recomputed = node.name.endswith("_recomputed")
-            is_bwd = node.meta.get("autograd_backward", False) or is_recomputed
-            if is_bwd != bwd:
-                return []
-            fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
-            if not fqn:
-                return []
-            return [(fqn, torch.nn.Module)]
-
-        return _stack_fn
-
-    # Forward graph pass: bucket and reorder forward collectives
-    manual_overlap_bucketing(
-        gm,
-        module_bucket_plans=fsdp_manual_buckets,
-        insert_overlap_deps=False,
-        module_stack_fn=_make_module_fqn_stack_fn(bwd=False),
-    )
-
-    # Backward pass: bucket and reorder backward collectives.
-    manual_overlap_bucketing(
-        gm,
-        module_bucket_plans=fsdp_manual_buckets,
-        insert_overlap_deps=False,
-        module_stack_fn=_make_module_fqn_stack_fn(bwd=True),
-    )
-
-    gm.recompile()
-
     return gm
 
 
@@ -630,21 +569,16 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
-def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
+def _make_default_memory_policy(
+    save_ops: set | None = None,
+    *,
+    fsdp_reshard_after_forward: bool = True,
+) -> Callable:
     """Create a SAC policy function from a set of op targets to save."""
     if save_ops is None:
         save_ops = _get_save_ops()
-        # TODO: Temporary workaround — saving FSDP all_gathers prevents
-        # re-communication during backward recomputation. Without this,
-        # recomputed all_gather nodes in the backward region cause
-        # manual_overlap_bucketing to produce incorrect prefetch ordering.
-        # The proper fix has two parts:
-        # 1. Allow users to configure reshard_after_forward behavior
-        #    (equivalent to eager FSDP's parallelism.fsdp_reshard_after_forward)
-        #    which controls whether parameters are resharded after forward.
-        # 2. Fix manual_overlap_bucketing to handle recomputed all_gathers
-        #    in the backward region correctly.
-        save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
+        if not fsdp_reshard_after_forward:
+            save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if node.target in save_ops:
@@ -803,7 +737,15 @@ def tag_with_memory_policy_pass(
     """
     memory_policy = config.compile.memory_policy
     if memory_policy == "default":
-        apply_sac_pass(gm, policy_fn=_make_default_memory_policy())
+        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+            config.parallelism.fsdp_reshard_after_forward,
+            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+        )
+        default_policy_fn = functools.partial(
+            _make_default_memory_policy,
+            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+        )
+        apply_sac_pass(gm, policy_fn=default_policy_fn())
     elif memory_policy == "eager":
         apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
     elif memory_policy == "cpu_offload_all":

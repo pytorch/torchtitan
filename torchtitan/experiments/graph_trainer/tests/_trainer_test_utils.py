@@ -26,6 +26,7 @@ def build_minimal_trainer(
     compile_passes: list[str] | None = None,
     compile_joint_passes: list[str] | None = None,
     tokenizer=None,
+    fsdp_reshard_after_forward: str = "default",
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
@@ -55,6 +56,10 @@ def build_minimal_trainer(
             model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode=activation_checkpoint_mode
+            ),
+            parallelism=SimpleNamespace(
+                pipeline_parallel_degree=1,
+                fsdp_reshard_after_forward=fsdp_reshard_after_forward,
             ),
         )
         trainer._fwd_bwd_step_module = None

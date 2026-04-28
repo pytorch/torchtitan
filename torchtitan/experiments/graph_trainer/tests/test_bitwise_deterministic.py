@@ -192,6 +192,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
                 compile=SimpleNamespace(memory_policy="default"),
+                parallelism=SimpleNamespace(
+                    pipeline_parallel_degree=1,
+                    fsdp_reshard_after_forward="default",
+                ),
             )
             passes = compile_time_passes(traced_result, config)
             traced_result.gm = apply_graph_passes(
