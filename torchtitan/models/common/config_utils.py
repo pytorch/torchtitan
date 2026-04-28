@@ -29,7 +29,6 @@ from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
-    LocalTokenDispatcher,
 )
 
 

@@ -72,9 +72,7 @@ def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel", attn_backend="flex"
-    )
+    config.model_spec = model_registry("debugmodel", attn_backend="flex")
     return config
 
 
@@ -82,9 +80,7 @@ def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry(
-            "16B", attn_backend="flex"
-        ),
+        model_spec=model_registry("16B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -123,7 +119,6 @@ def deepseek_v3_671b() -> Trainer.Config:
         model_spec=model_registry(
             "671B",
             attn_backend="flex",
-            ,
             quantization=[
                 Float8LinearConverter.Config(
                     filter_fqns=["output", "router.gate"],

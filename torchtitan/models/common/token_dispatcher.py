@@ -197,7 +197,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata
+    ]:
         """Reorder tokens, then all-to-all dispatch to expert-parallel ranks.
 
         When ep_mesh is None (EP=1), falls back to local dispatch — no
