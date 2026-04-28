@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-from importlib.util import find_spec
 import os
 import subprocess
 import sys
@@ -202,18 +201,6 @@ def _filter_tests(
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
-            continue
-
-        missing_packages = [
-            package
-            for package in test_flavor.required_packages
-            if find_spec(package) is None
-        ]
-        if missing_packages:
-            logger.info(
-                f"Skipping test {test_flavor.test_name} that requires missing package(s): "
-                f"{', '.join(missing_packages)}"
-            )
             continue
 
         if (

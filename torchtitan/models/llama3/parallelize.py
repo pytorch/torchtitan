@@ -175,7 +175,7 @@ def apply_fsdp(
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
-        # pyrefly: ignore[bad-typed-dict-key]
+
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
