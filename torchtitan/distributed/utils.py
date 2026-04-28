@@ -20,7 +20,6 @@ import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
@@ -144,7 +143,6 @@ def set_determinism(
         # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
-
         from torchtitan.models.common.attention import FlexAttention
 
         FlexAttention._compiled_flex_attn = torch.compile(flex_attention)
@@ -262,31 +260,31 @@ def set_batch_invariance(enable: bool) -> None:
     # Must be set BEFORE dist.init_process_group.
     # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/batch_invariant.py
     os.environ["NCCL_LAUNCH_MODE"] = "GROUP"  # Fixed kernel launch ordering
-    os.environ[
-        "NCCL_COLLNET_ENABLE"
-    ] = "0"  # Disable SHARP (non-deterministic IB HW reduce)
-    os.environ[
-        "NCCL_NVLS_ENABLE"
-    ] = "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
-    os.environ[
-        "NCCL_P2P_NET_DISABLE"
-    ] = "1"  # Disable P2P to avoid transport-dependent accumulation order
-    os.environ[
-        "NCCL_MIN_NCHANNELS"
-    ] = "1"  # Single channel to prevent split-interleave reordering
-    os.environ[
-        "NCCL_MAX_NCHANNELS"
-    ] = "1"  # Single channel to prevent split-interleave reordering
+    os.environ["NCCL_COLLNET_ENABLE"] = (
+        "0"  # Disable SHARP (non-deterministic IB HW reduce)
+    )
+    os.environ["NCCL_NVLS_ENABLE"] = (
+        "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
+    )
+    os.environ["NCCL_P2P_NET_DISABLE"] = (
+        "1"  # Disable P2P to avoid transport-dependent accumulation order
+    )
+    os.environ["NCCL_MIN_NCHANNELS"] = (
+        "1"  # Single channel to prevent split-interleave reordering
+    )
+    os.environ["NCCL_MAX_NCHANNELS"] = (
+        "1"  # Single channel to prevent split-interleave reordering
+    )
     os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 protocols may reorder reductions
-    os.environ[
-        "NCCL_ALGO"
-    ] = "allreduce:tree"  # Deterministic reduction order across ranks
-    os.environ[
-        "NCCL_NTHREADS"
-    ] = "1"  # Single thread to eliminate scheduling non-determinism
-    os.environ[
-        "NCCL_SOCKET_NTHREADS"
-    ] = "1"  # Single socket thread to eliminate scheduling non-determinism
+    os.environ["NCCL_ALGO"] = (
+        "allreduce:tree"  # Deterministic reduction order across ranks
+    )
+    os.environ["NCCL_NTHREADS"] = (
+        "1"  # Single thread to eliminate scheduling non-determinism
+    )
+    os.environ["NCCL_SOCKET_NTHREADS"] = (
+        "1"  # Single socket thread to eliminate scheduling non-determinism
+    )
 
     # Disable reduced-precision reductions: these allow cuBLAS to use
     # lower-precision accumulation that can round differently depending
@@ -602,9 +600,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:

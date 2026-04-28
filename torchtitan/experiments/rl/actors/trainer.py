@@ -35,7 +35,6 @@ from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
     create_flex_block_mask,
     create_positions_from_seq_lens,
-    create_varlen_metadata,
     extract_response_logprobs,
     pad_to_block_aligned,
     unpad_from_block_aligned,
@@ -227,15 +226,6 @@ class PolicyTrainer(Actor, Configurable):
         if self._use_flex:
             self._flex_block_size = inner_attn_cfg.block_size
 
-        # Build model converters (e.g. float8). No-op if converters list is empty.
-        model_compile_enabled = (
-            config.compile.enable and "model" in config.compile.components
-        )
-        model_converters = config.model_converters.build(
-            parallel_dims=self.parallel_dims,
-            model_compile_enabled=model_compile_enabled,
-        )
-
         # Create training policy model
         model = self._build_model(model_spec, config, device_type)
         model.train()
@@ -247,14 +237,6 @@ class PolicyTrainer(Actor, Configurable):
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
-        )
-
-        # Post optimizer step model converters hook.
-        # e.g. calculate float8 dynamic amax/scale for FSDP2
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
-            )
         )
 
         self.policy_version = 0
@@ -339,17 +321,19 @@ class PolicyTrainer(Actor, Configurable):
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
 
+        # Fill sharding configs on the config BEFORE build via the
+        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
+        # ``torchtitan.Trainer``'s call, so we invoke it directly).
+        model_spec.model.update_from_config(trainer_config=config)
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
-
-        model_converters.convert(model)
 
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
             training=config.training,
-            model_converters=config.model_converters,
             parallelism=config.parallelism,
             compile_config=self.compile_config,
             ac_config=config.ac_config,

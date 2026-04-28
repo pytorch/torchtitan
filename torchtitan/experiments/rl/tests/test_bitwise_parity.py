@@ -59,6 +59,12 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
     VLLM_MODEL_NAME,
 )
+from torchtitan.experiments.rl.actors.utils import (
+    create_flex_block_mask,
+    create_positions_from_seq_lens,
+    pad_to_block_aligned,
+    unpad_from_block_aligned,
+)
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.tools import utils
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -236,6 +242,70 @@ def _build_padded_varlen_metadata(batch_size, max_len, device):
     )
 
 
+def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
+    """Compute per-sequence logprobs using flex attention with packed sequences."""
+    flat = torch.cat(input_tensors)
+    attention_masks, maybe_padded_seq_lens = create_flex_block_mask(seq_lens, device)
+    needs_unpad = maybe_padded_seq_lens != seq_lens
+    if needs_unpad:
+        packed_ids, positions = pad_to_block_aligned(
+            flat, seq_lens, maybe_padded_seq_lens, device
+        )
+    else:
+        packed_ids = flat.unsqueeze(0)
+        positions = create_positions_from_seq_lens(seq_lens, device)
+
+    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
+
+    if needs_unpad:
+        logits = unpad_from_block_aligned(logits, seq_lens, maybe_padded_seq_lens)
+        packed_ids = unpad_from_block_aligned(
+            packed_ids, seq_lens, maybe_padded_seq_lens
+        )
+
+    log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
+    target_ids = packed_ids[:, 1:]
+
+    results = []
+    offset = 0
+    for sl in seq_lens:
+        seq_lps = log_probs[0, offset : offset + sl - 1]
+        seq_tgt = target_ids[0, offset : offset + sl - 1]
+        seq_lps = seq_lps.gather(1, seq_tgt.unsqueeze(-1)).squeeze(-1)
+        results.append(seq_lps)
+        offset += sl
+    return results
+
+
+def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
+    """Compute per-sequence logprobs using varlen attention with padded batches."""
+    max_len = max(seq_lens)
+    padded = torch.zeros(len(input_tensors), max_len, dtype=torch.long, device=device)
+    for i, t in enumerate(input_tensors):
+        padded[i, : t.shape[0]] = t
+
+    attention_masks = _build_padded_varlen_metadata(len(input_tensors), max_len, device)
+
+    # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
+    # which can break torch.compile with symbolic shapes.
+    positions = (
+        torch.arange(max_len, device=device)
+        .unsqueeze(0)
+        .expand(len(input_tensors), -1)
+    )
+
+    logits = model(padded, attention_masks=attention_masks, positions=positions)
+    log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
+
+    results = []
+    for i, t in enumerate(input_tensors):
+        seq_len = t.shape[0]
+        seq_lps = log_probs[i, : seq_len - 1]
+        seq_lps = seq_lps.gather(1, t[1:seq_len].unsqueeze(-1)).squeeze(-1)
+        results.append(seq_lps)
+    return results
+
+
 def compute_trainer_prefill_logprobs(model, token_ids, device, attn_backend="varlen"):
     """Compute next-token logprobs using the trainer model.
 
@@ -256,68 +326,9 @@ def compute_trainer_prefill_logprobs(model, token_ids, device, attn_backend="var
     seq_lens = [t.shape[0] for t in input_tensors]
 
     if attn_backend == "flex":
-        from torchtitan.experiments.rl.actors.utils import (
-            create_flex_block_mask,
-            create_positions_from_seq_lens,
-            pad_to_block_aligned,
-            unpad_from_block_aligned,
-        )
-
-        flat = torch.cat(input_tensors)
-        attention_masks, maybe_padded_seq_lens = create_flex_block_mask(
-            seq_lens, device
-        )
-        needs_unpad = maybe_padded_seq_lens != seq_lens
-        if needs_unpad:
-            packed_ids, positions = pad_to_block_aligned(
-                flat, seq_lens, maybe_padded_seq_lens, device
-            )
-        else:
-            packed_ids = flat.unsqueeze(0)
-            positions = create_positions_from_seq_lens(seq_lens, device)
-
-        logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
-
-        if needs_unpad:
-            logits = unpad_from_block_aligned(logits, seq_lens, maybe_padded_seq_lens)
-            packed_ids = unpad_from_block_aligned(
-                packed_ids, seq_lens, maybe_padded_seq_lens
-            )
-
-        log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
-        target_ids = packed_ids[:, 1:]
-
-        results = []
-        offset = 0
-        for sl in seq_lens:
-            seq_lps = log_probs[0, offset : offset + sl - 1]
-            seq_tgt = target_ids[0, offset : offset + sl - 1]
-            seq_lps = seq_lps.gather(1, seq_tgt.unsqueeze(-1)).squeeze(-1)
-            results.append(seq_lps)
-            offset += sl
+        results = _flex_prefill_logprobs(model, input_tensors, seq_lens, device)
     else:
-        max_len = max(seq_lens)
-        padded = torch.zeros(len(seqs), max_len, dtype=torch.long, device=device)
-        for i, t in enumerate(input_tensors):
-            padded[i, : t.shape[0]] = t
-
-        attention_masks = _build_padded_varlen_metadata(len(seqs), max_len, device)
-
-        # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
-        # which can break torch.compile with symbolic shapes.
-        positions = (
-            torch.arange(max_len, device=device).unsqueeze(0).expand(len(seqs), -1)
-        )
-
-        logits = model(padded, attention_masks=attention_masks, positions=positions)
-        log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
-
-        results = []
-        for i, t in enumerate(input_tensors):
-            seq_len = t.shape[0]
-            seq_lps = log_probs[i, : seq_len - 1]
-            seq_lps = seq_lps.gather(1, t[1:seq_len].unsqueeze(-1)).squeeze(-1)
-            results.append(seq_lps)
+        results = _varlen_prefill_logprobs(model, input_tensors, seq_lens, device)
 
     return results if batched else results[0]
 
