@@ -22,6 +22,19 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(pred, DTensor) and pred.ndim == 3:
+        # 3D DTensor: (batch, seq, vocab) -> (batch, vocab, seq) so that
+        # F.cross_entropy treats dim 1 as the class dim.  Avoids
+        # flatten(0, 1) which produces _StridedShard when batch and seq
+        # are sharded on different mesh axes (e.g. dp_shard + cp).
+        return torch.nn.functional.cross_entropy(
+            pred.permute(0, 2, 1).float(),
+            labels,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),

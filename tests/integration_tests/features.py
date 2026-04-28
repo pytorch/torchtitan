@@ -349,6 +349,121 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.full_dtensor",
+                ]
+            ],
+            "Full DTensor FSDP",
+            "full_dtensor_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "Full DTensor HSDP",
+            "full_dtensor_hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor TP + FSDP",
+            "full_dtensor_tp_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor CP + FSDP (FlexAttention)",
+            "full_dtensor_cp_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor TP + CP + FSDP (FlexAttention)",
+            "full_dtensor_tp_cp_fsdp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "Full DTensor TP + HSDP",
+            "full_dtensor_tp_hsdp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor PP + TP + FSDP",
+            "full_dtensor_pp_tp_fsdp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor PP + CP + FSDP (FlexAttention)",
+            "full_dtensor_pp_cp_fsdp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                ]
+            ],
+            "Full DTensor PP + CP + TP (FlexAttention)",
+            "full_dtensor_pp_cp_tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
