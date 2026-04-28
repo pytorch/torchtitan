@@ -42,7 +42,6 @@ from torchtitan.experiments.rl.actors.utils import (
 )
 from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.models.common.attention import FlexAttention
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -83,9 +82,6 @@ class PolicyTrainer(Actor, Configurable):
         loss: Configurable.Config = field(default_factory=Configurable.Config)
         ac_config: ActivationCheckpointConfig = field(
             default_factory=lambda: ActivationCheckpointConfig(mode="none")
-        )
-        model_converters: ModelConvertersContainer.Config = field(
-            default_factory=ModelConvertersContainer.Config
         )
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
@@ -145,19 +141,8 @@ class PolicyTrainer(Actor, Configurable):
         if self._use_flex:
             self._flex_block_size = inner_attn_cfg.block_size
 
-        # Build model converters (e.g. float8). No-op if converters list is empty.
-        model_compile_enabled = (
-            config.compile.enable and "model" in config.compile.components
-        )
-        model_converters = config.model_converters.build(
-            parallel_dims=self.parallel_dims,
-            model_compile_enabled=model_compile_enabled,
-        )
-
         # Create training policy model
-        model = self._build_model(
-            model_spec, config, model_converters, device_type, hf_assets_path
-        )
+        model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
         self.model = model
         self.model_parts = [model]
@@ -167,14 +152,6 @@ class PolicyTrainer(Actor, Configurable):
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
-        )
-
-        # Post optimizer step model converters hook.
-        # e.g. calculate float8 dynamic amax/scale for FSDP2
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
-            )
         )
 
         self.policy_version = 0
@@ -232,7 +209,6 @@ class PolicyTrainer(Actor, Configurable):
         self,
         model_spec: ModelSpec,
         config: Config,
-        model_converters: ModelConvertersContainer,
         device_type: str,
         hf_assets_path: str,
     ):
@@ -241,7 +217,6 @@ class PolicyTrainer(Actor, Configurable):
         Args:
             model_spec: Model specification for building and parallelizing.
             config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
-            model_converters: Built model converters instance for pre-parallelize conversion.
             device_type: Device type string (e.g. "cuda").
             hf_assets_path: Path to HF assets folder for checkpoint loading.
 
@@ -256,17 +231,19 @@ class PolicyTrainer(Actor, Configurable):
             inner_attn, (VarlenAttention.Config, FlexAttention.Config)
         ), f"Only varlen and flex attention backends are allowed, got {type(inner_attn)}."
 
+        # Fill sharding configs on the config BEFORE build via the
+        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
+        # ``torchtitan.Trainer``'s call, so we invoke it directly).
+        model_spec.model.update_from_config(trainer_config=config)
+
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
-
-        model_converters.convert(model)
 
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
             training=config.training,
-            model_converters=config.model_converters,
             parallelism=config.parallelism,
             compile_config=config.compile,
             ac_config=config.ac_config,

@@ -40,6 +40,7 @@ def parallelize_qwen3(
     parallelism: ParallelismConfig,
     compile_config: CompileConfig | None = None,
     has_position_id: bool = False,
+    **kwargs,
 ):
     """
     Apply tensor parallelism to the Qwen3 dense model for RL training/inference.
@@ -194,3 +195,9 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
+
+        inner_attn = (
+            transformer_block.attention.inner_attention
+        )  # pyrefly: ignore [missing-attribute]
+        if hasattr(inner_attn, "_sharding_config") and inner_attn._sharding_config:
+            inner_attn.parallelize(tp_mesh)
