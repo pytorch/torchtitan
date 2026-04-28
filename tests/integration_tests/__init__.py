@@ -25,7 +25,6 @@ class OverrideDefinitions:
     disabled: bool = False
     skip_rocm_test: bool = False
     timeout: int | None = None
-    required_packages: Sequence[str] = ()
 
     def __repr__(self):
         return self.test_descr
