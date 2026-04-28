@@ -23,6 +23,32 @@ bound during pass construction in `construct_default_graph_passes` via
 parameters. The apply function is a generic pass runner and must not contain
 pass-specific arguments.
 
+## Memory Policy Framework
+
+`tag_with_memory_policy_pass` is the unified framework for activation memory
+management — selective activation checkpointing (SAC), CPU offload, and
+mixtures of both. It is a two-step process:
+
+1. **Tag nodes.** Each saved forward activation is tagged with one of:
+   - `MUST_SAVE` — keep the activation in GPU memory.
+   - `MUST_RECOMPUTE` — discard and recompute during backward.
+   - `MUST_CPU_OFFLOAD` — offload to CPU, reload before backward.
+
+   Tagging can be done manually (per-node annotations) or with an
+   advanced solver algorithm that optimizes the save/recompute/offload
+   split based on memory budget and compute cost.
+
+2. **Act on tags.** Two passes run unconditionally after tagging (both
+   are no-ops when no nodes carry the relevant tag):
+   - `apply_cpu_offload_pass` — inserts offload/reload/wait ops for
+     `MUST_CPU_OFFLOAD` nodes.
+   - `selective_activation_remat_pass` — duplicates `MUST_RECOMPUTE`
+     ops before backward and DCEs the originals.
+
+The `--compile.memory_policy` config selects the tagging strategy.
+New policies (e.g. budget-aware mixed SAC + offload) should be added
+as new branches in `tag_with_memory_policy_pass`.
+
 ## Don't Modify Core for This Experiment
 
 Do not add `if graph_trainer:` branches to `torchtitan/train.py`
