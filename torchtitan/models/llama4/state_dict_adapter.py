@@ -126,7 +126,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 hf_abstract_key = (
                     "language_model.model.layers.{}.feed_forward.experts.gate_up_proj"
                 )
-                # pyrefly: ignore [unnecessary-comparison]
+
                 if hf_abstract_key is None:
                     continue
                 to_combine[hf_abstract_key.format(layer_num)][

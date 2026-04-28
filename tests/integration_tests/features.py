@@ -472,7 +472,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "fsdp_symm_mem_float8_all_gather",
             ngpu=2,
             skip_rocm_test=True,
-            required_packages=("torchao",),
         ),
         OverrideDefinitions(
             [
