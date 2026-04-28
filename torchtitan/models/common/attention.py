@@ -272,6 +272,13 @@ class ScaledDotProductAttention(Module):
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
             ]
+            # ROCm builds typically lack ``CUDNN_ATTENTION`` and have a
+            # narrower ``FLASH_ATTENTION`` shape support, so the strict
+            # CUDA-only set above can fail to dispatch and raise "No
+            # available kernel". Keep ``MATH`` as a fallback on ROCm so
+            # training stays functional; CUDA keeps the strict set.
+            if torch.version.hip is not None:
+                self.sdpa_backends.append(SDPBackend.MATH)
 
     def forward(
         self,
