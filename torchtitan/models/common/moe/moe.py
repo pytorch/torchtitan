@@ -292,13 +292,11 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        # Use bincount (deterministic across backends) instead of histc.
+        num_tokens_per_expert = torch.bincount(
+            selected_experts_indices.view(-1).to(torch.int64),
+            minlength=self.num_experts,
+        ).to(selected_experts_indices.dtype)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -340,13 +338,11 @@ class TokenReorderer(Module):
                 - token_indices_experts_sorted: Token indices reordered to match expert ordering
                 - num_tokens_per_expert: Number of tokens assigned to each expert
         """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        # Use bincount (deterministic across backends) instead of histc.
+        num_tokens_per_expert = torch.bincount(
+            selected_experts_indices.view(-1).to(torch.int64),
+            minlength=self.num_experts,
+        ).to(selected_experts_indices.dtype)
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
