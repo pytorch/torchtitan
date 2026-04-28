@@ -135,7 +135,26 @@ breaks:
   logs per-tensor gradient norms.
 - **Custom logic** (arbitrary Python, file logging, rank filtering, fwd+bwd):
   compose `@leaf_function` with `@fn.register_multi_grad_hook` from
-  `torch._dynamo.decorators`.
+  `torch._dynamo.decorators`, following the pattern in
+  `torch/utils/debug_log.py`:
+
+  ```python
+  from torch._dynamo.decorators import leaf_function
+
+  @leaf_function
+  def log_tensor(x, tag=""):
+      return None  # no-op in forward
+
+  @log_tensor.register_fake
+  def log_tensor_fake(x, tag=""):
+      return None
+
+  @log_tensor.register_multi_grad_hook
+  def log_tensor_hook(x_grad, tag=""):  # non-tensor args passed through unchanged
+      print(f"[{tag}][bwd] grad_norm={x_grad.norm():.4f}")
+
+  log_tensor(x, "after_add")
+  ```
 
 ### Benchmark
 
