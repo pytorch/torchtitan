@@ -31,12 +31,6 @@ def enable_fsdp_symm_mem(model: nn.Module) -> None:
     """
     for module in model.modules():
         if isinstance(module, FSDPModule):
-            if not hasattr(module, "set_symm_mem_for_comm"):
-                raise RuntimeError(
-                    "FSDP symmetric-memory communication was requested, but "
-                    "`FSDPModule.set_symm_mem_for_comm()` is not available in "
-                    "the installed PyTorch build."
-                )
             # Potential hiccup: TorchTitan also supports float8 FSDP all-gather
             # via torchao. That path customizes FSDP communication behavior, so
             # this combination may need extra validation when both are enabled.
