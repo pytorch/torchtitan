@@ -15,11 +15,9 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
-
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -84,7 +82,6 @@ def parallelize_qwen3(
         # Config-based sharding: ShardingConfig is populated on the model
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(

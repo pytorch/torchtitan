@@ -198,6 +198,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
                     fsdp_reshard_after_forward="default",
+                    enable_async_tensor_parallel=False,
                 ),
             )
             passes = compile_time_passes(traced_result, config)

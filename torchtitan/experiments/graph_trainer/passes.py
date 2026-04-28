@@ -64,6 +64,66 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
 )
 from torchtitan.tools.logging import logger
 
+aten = torch.ops.aten
+c10d = torch.ops._c10d_functional
+
+
+def normalize_view_ops_as_reshape(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Replace aten.view and aten._unsafe_view with aten.reshape.
+
+    Downstream passes expect aten.reshape.default for pattern matching.
+    """
+    view_targets = {aten.view.default, aten._unsafe_view.default}
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target in view_targets:
+            node.target = aten.reshape.default
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
+def async_tensor_parallel_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Pipeline TP collectives with matmuls via symmetric memory.
+
+    Fuses all-gather + matmul into ``symm_mem.fused_all_gather_matmul``
+    and matmul + reduce-scatter into
+    ``symm_mem.fused_matmul_reduce_scatter``.
+    """
+    import warnings
+
+    from torch._inductor.fx_passes.micro_pipeline_tp import micro_pipeline_tp_pass
+    from torch._inductor.fx_passes.overlap_scheduling import get_group_name
+    from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+    # Ensure symmetric memory is registered for every collective PG in
+    # the graph.  The upstream API is deprecated but the auto-registration
+    # it promises has not landed yet, so the explicit call is still needed.
+    collective_targets = {
+        c10d.all_gather_into_tensor.default,
+        c10d.reduce_scatter_tensor.default,
+    }
+    registered: set[str] = set()
+    for node in gm.graph.nodes:
+        if node.target not in collective_targets:
+            continue
+        pg = get_group_name(node)
+        if pg not in registered:
+            registered.add(pg)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                enable_symm_mem_for_group(pg)
+
+    micro_pipeline_tp_pass(gm.graph)
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
 
 def compile_time_passes(
     traced_result: "TracedResult",
@@ -90,6 +150,7 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        normalize_view_ops_as_reshape,
         functools.partial(
             tag_with_memory_policy_pass,
             config=config,
@@ -103,6 +164,8 @@ def compile_time_passes(
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
         ),
     ]
+    if config.parallelism.enable_async_tensor_parallel:
+        passes.append(async_tensor_parallel_pass)
 
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
