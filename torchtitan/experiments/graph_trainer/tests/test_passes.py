@@ -32,6 +32,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     _make_default_memory_policy,
+    annotate_rmsnorm_for_regional_inductor_pass,
     apply_sac_pass,
     insert_kernel_annotations_pass,
     reassign_to_pg_pass,
@@ -1301,6 +1302,234 @@ class TestAnnotateModuleFqns(TestCase):
         num_after = len(list(gm.graph.nodes))
 
         self.assertEqual(num_before, num_after)
+
+
+class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
+    """Unit tests for annotate_rmsnorm_for_regional_inductor_pass."""
+
+    def _build_annotated_gm(self, fqn_sequence):
+        """Build a GraphModule with module_fqn annotations on its nodes.
+
+        Args:
+            fqn_sequence: List of (op_target, fqn_or_None) tuples.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        last = x
+        for target, fqn in fqn_sequence:
+            last = graph.call_function(target, args=(last,))
+            if fqn is not None:
+                last.meta["custom"] = {_MODULE_FQN: fqn}
+            else:
+                last.meta["custom"] = {}
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _count_tagged_nodes(self, gm):
+        """Count nodes that have compile_with_inductor in their custom metadata."""
+        count = 0
+        for node in gm.graph.nodes:
+            custom = node.meta.get("custom", {})
+            if "compile_with_inductor" in custom:
+                count += 1
+        return count
+
+    def _get_tagged_regions(self, gm):
+        """Return a dict mapping inductor_region -> list of node names."""
+        regions = {}
+        for node in gm.graph.nodes:
+            custom = node.meta.get("custom", {})
+            annotation = custom.get("compile_with_inductor")
+            if annotation is not None:
+                region = annotation.get("inductor_region")
+                regions.setdefault(region, []).append(node.name)
+        return regions
+
+    def test_tags_rmsnorm_nodes_by_fqn(self):
+        """Nodes with FQNs in the rmsnorm_fqns set are tagged."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+                (torch.ops.aten.mean.dim, "layers.0.attention_norm"),
+                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
+                (torch.ops.aten.mul.Tensor, "layers.0.attention"),
+                (torch.ops.aten.add.Tensor, "layers.0.feed_forward"),
+            ]
+        )
+
+        rmsnorm_fqns = {"layers.0.attention_norm"}
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns=rmsnorm_fqns,
+        )
+
+        self.assertEqual(self._count_tagged_nodes(gm), 3)
+
+    def test_does_not_tag_non_rmsnorm_nodes(self):
+        """Nodes whose FQNs are not in rmsnorm_fqns are not tagged."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.mul.Tensor, "layers.0.attention"),
+                (torch.ops.aten.add.Tensor, "layers.0.feed_forward"),
+            ]
+        )
+
+        rmsnorm_fqns = {"layers.0.attention_norm", "layers.0.ffn_norm"}
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns=rmsnorm_fqns,
+        )
+
+        self.assertEqual(self._count_tagged_nodes(gm), 0)
+
+    def test_separate_regions_per_norm_instance(self):
+        """Each distinct RMSNorm FQN gets its own inductor_region ID."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
+                (torch.ops.aten.mul.Tensor, "layers.0.attention"),
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.ffn_norm"),
+                (torch.ops.aten.rsqrt.default, "layers.0.ffn_norm"),
+            ]
+        )
+
+        rmsnorm_fqns = {"layers.0.attention_norm", "layers.0.ffn_norm"}
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns=rmsnorm_fqns,
+        )
+
+        regions = self._get_tagged_regions(gm)
+        # Should have exactly 2 distinct regions
+        self.assertEqual(len(regions), 2)
+        # Each region should have 2 nodes
+        for region_id, node_names in regions.items():
+            self.assertEqual(len(node_names), 2)
+
+    def test_empty_rmsnorm_fqns_is_noop(self):
+        """When rmsnorm_fqns is empty, no nodes are tagged."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
+            ]
+        )
+
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns=set(),
+        )
+
+        self.assertEqual(self._count_tagged_nodes(gm), 0)
+
+    def test_none_compile_config_tags_with_empty_annotation(self):
+        """When rmsnorm_compile_config is None, nodes are tagged with empty annotation."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+            ]
+        )
+
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config=None,
+            rmsnorm_fqns={"layers.0.attention_norm"},
+        )
+
+        self.assertEqual(self._count_tagged_nodes(gm), 1)
+        for node in gm.graph.nodes:
+            annotation = node.meta.get("custom", {}).get("compile_with_inductor")
+            if annotation is not None:
+                self.assertNotIn("inductor_configs", annotation)
+                self.assertIn("inductor_region", annotation)
+
+    def test_compile_config_propagated_to_annotation(self):
+        """The compile config dict is wrapped under inductor_configs in the annotation."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+            ]
+        )
+
+        config = {"max_autotune": True, "coordinate_descent_tuning": True}
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config=config,
+            rmsnorm_fqns={"layers.0.attention_norm"},
+        )
+
+        for node in gm.graph.nodes:
+            annotation = node.meta.get("custom", {}).get("compile_with_inductor")
+            if annotation is not None:
+                self.assertEqual(annotation["inductor_configs"], config)
+
+    def test_nodes_without_fqn_are_skipped(self):
+        """Nodes with no module_fqn metadata are not tagged."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, None),
+                (torch.ops.aten.rsqrt.default, "layers.0.attention_norm"),
+            ]
+        )
+
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns={"layers.0.attention_norm"},
+        )
+
+        # Only the second node should be tagged
+        self.assertEqual(self._count_tagged_nodes(gm), 1)
+
+    def test_top_level_norm_tagged(self):
+        """The top-level 'norm' (final model norm) is tagged when in rmsnorm_fqns."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "norm"),
+                (torch.ops.aten.mean.dim, "norm"),
+                (torch.ops.aten.rsqrt.default, "norm"),
+                (torch.ops.aten.mul.Tensor, "norm"),
+            ]
+        )
+
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns={"norm"},
+        )
+
+        self.assertEqual(self._count_tagged_nodes(gm), 4)
+        regions = self._get_tagged_regions(gm)
+        self.assertEqual(len(regions), 1)
+
+    def test_multiple_layers_get_distinct_regions(self):
+        """Norms across different layers get distinct region IDs."""
+        gm = self._build_annotated_gm(
+            [
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.0.attention_norm"),
+                (torch.ops.aten.pow.Tensor_Scalar, "layers.1.attention_norm"),
+                (torch.ops.aten.pow.Tensor_Scalar, "norm"),
+            ]
+        )
+
+        rmsnorm_fqns = {
+            "layers.0.attention_norm",
+            "layers.1.attention_norm",
+            "norm",
+        }
+        annotate_rmsnorm_for_regional_inductor_pass(
+            gm,
+            rmsnorm_compile_config={"max_autotune": True},
+            rmsnorm_fqns=rmsnorm_fqns,
+        )
+
+        regions = self._get_tagged_regions(gm)
+        self.assertEqual(len(regions), 3)
 
 
 class TestNormalizeViewOpsAsReshape(TestCase):
