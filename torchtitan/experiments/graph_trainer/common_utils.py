@@ -17,8 +17,28 @@ from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
-_AC_REGION_ID = "ac_region_id"
 _MODULE_FQN = "module_fqn"
+_NOT_IN_LAYERS = -1
+
+
+def _is_backward_node(node: torch.fx.Node) -> bool:
+    return node.meta.get("autograd_backward", False)
+
+
+def _get_layer_id(node: torch.fx.Node) -> int:
+    """Extract the layer index from the node's module_fqn metadata.
+
+    Nodes under ``layers.<N>`` return ``N``.
+    All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
+    """
+    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    parts = fqn.split(".")
+    if parts[0] == "layers" and len(parts) >= 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return _NOT_IN_LAYERS
 
 
 def annotate_module_fqns(model: nn.Module) -> None:
@@ -33,19 +53,6 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
-
-
-def annotate_ac_regions(model: nn.Module) -> None:
-    """Annotate each transformer block with a unique AC region ID.
-
-    This enables apply_sac_pass to assign different ac_graph_id values
-    per block, creating AC region boundaries between transformer blocks.
-    """
-    layers = model.get_submodule("layers")
-    for layer_id, transformer_block in layers.named_children():
-        transformer_block.forward = annotate_fn({_AC_REGION_ID: int(layer_id)})(
-            transformer_block.forward
-        )
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -139,6 +146,21 @@ def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
     return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
 
 
+def get_default_transformer_block_buckets(
+    n_layers: int,
+) -> list[list[str] | str]:
+    """Get default transformer block buckets for manual bucketing passes.
+
+    Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
+    norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
+    """
+    return [
+        "tok_embeddings",
+        *[f"layers.{i}" for i in range(n_layers)],
+        ["norm", "lm_head"],
+    ]
+
+
 def get_transformer_block_buckets(model) -> list[list[str] | str]:
     """Get transformer block buckets for manual bucketing passes.
 
@@ -148,7 +170,7 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     # [TODO](ruisizhang123) add EP support for transformer block bucketing
     module_list = [
         model.tok_embeddings,
-        [model.norm, model.output],
+        [model.norm, model.lm_head],
     ]
     for layer_id, transformer_block in model.layers.items():
         module_list.append(transformer_block)

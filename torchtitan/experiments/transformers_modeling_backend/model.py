@@ -83,6 +83,9 @@ _TT_SPECIFIC_ATTRIBUTES = [
 
 
 class HFTransformerModel(BaseModel):
+    # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
+    _skip_lm_head: bool = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config, PretrainedConfig):
         """Configuration that bridges TorchTitan and HuggingFace Transformers.
@@ -103,12 +106,14 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=attn_implementation, **kwargs
             )
-            # Set param_init before Module.Config.build() accesses it.
-            # PretrainedConfig.__getattribute__ doesn't recognize the
-            # param_init slot inherited from Module.Config.
+            # Set param_init and sharding_config before Module.Config.build()
+            # accesses them. PretrainedConfig.__getattribute__ doesn't
+            # recognize slots inherited from Module.Config.
             self.param_init = (
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
+            self.sharding_config = None
+
             assert model_config is not None, "model_config is required"
 
             from torchtitan.experiments.transformers_modeling_backend import (
@@ -721,23 +726,22 @@ class HFTransformerModel(BaseModel):
             )
 
     @property
-    def output(self):
+    def lm_head(self):
         """Returns the model's output layer, handling different Hugging Face model structures."""
         if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
             return self.model.lm_head
         else:
-            # Add more cases here if needed for other model architectures
             raise AttributeError(
-                "Could not find output (lm_head) in the model. Please check the model structure."
+                "Could not find lm_head in the model. Please check the model structure."
             )
 
-    @output.setter
-    def output(self, value):
+    @lm_head.setter
+    def lm_head(self, value):
         if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
             self.model.lm_head = value
         else:
             raise AttributeError(
-                "Could not find output (lm_head) in the model. Please check the model structure."
+                "Could not find lm_head in the model. Please check the model structure."
             )
 
     @property
@@ -774,6 +778,8 @@ class HFTransformerModel(BaseModel):
             local_seq_len, device=args[0].device
         ).unsqueeze(0)
         output = self.model.model(*args, **kwargs)
+        if self._skip_lm_head:
+            return output.last_hidden_state
         output = self.model.lm_head(output.last_hidden_state)
         return output
 
@@ -812,7 +818,7 @@ class HFTransformerModel(BaseModel):
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?
         if not isinstance(self.tok_embeddings, nn.Identity) and not isinstance(
-            self.output, nn.Identity
+            self.lm_head, nn.Identity
         ):
             self.model.tie_weights()
 
@@ -824,7 +830,7 @@ class HFTransformerModel(BaseModel):
         yield "tok_embeddings", self.tok_embeddings
         yield "layers", self.layers
         yield "norm", self.norm
-        yield "output", self.output
+        yield "lm_head", self.lm_head
         yield "rotary_emb", self.rotary_emb
 
     def __setattr__(self, name, value):

@@ -5,6 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.nn.attention import SDPBackend
+
+from torchtitan.models.common.attention import ScaledDotProductAttention
 
 
 def multinomial_sample_one(
@@ -63,6 +66,20 @@ def generate(
         rng = torch.Generator(input_ids.device).manual_seed(seed)
 
     generated_tokens = input_ids.clone()
+
+    # Inference can hit shapes that ``FLASH_ATTENTION`` / ``CUDNN_ATTENTION``
+    # refuse (e.g., debug-model ``head_dim=16`` is outside flash's supported
+    # set). The trainer-side ``ScaledDotProductAttention`` defaults
+    # intentionally exclude ``MATH`` so silent slow-path fallback can't hide
+    # mistakes during training. Each module opens its own
+    # ``with sdpa_kernel(self.sdpa_backends, set_priority=True)`` inside
+    # ``forward``, so an outer ``sdpa_kernel`` wrapper is overridden and has
+    # no effect. Instead, append ``MATH`` as a last-resort fallback to each
+    # ``ScaledDotProductAttention`` instance for the generate path.
+    for module in model.modules():
+        if isinstance(module, ScaledDotProductAttention):
+            if SDPBackend.MATH not in module.sdpa_backends:
+                module.sdpa_backends = list(module.sdpa_backends) + [SDPBackend.MATH]
 
     for _ in range(max_new_tokens):
         next_token = generate_next_token(

@@ -17,7 +17,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
     GQAttention,
-    LocalMapInnerAttention,
     QKVLinear,
     ScaledDotProductAttention,
     VarlenAttention,
@@ -30,13 +29,13 @@ from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
-    TorchAOTokenDispatcher,
 )
+from torchtitan.protocols.module import Module
 
 
 def get_attention_config(
     backend: str,
-) -> tuple[LocalMapInnerAttention.Config, str]:
+) -> tuple[Module.Config, str]:
     """Map backend string to (inner_attention config, mask_type)."""
     if backend == "sdpa":
         return ScaledDotProductAttention.Config(), "causal"
@@ -67,7 +66,7 @@ def make_gqa_config(
     n_heads: int,
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
-    inner_attention: LocalMapInnerAttention.Config,
+    inner_attention: Module.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
@@ -208,7 +207,6 @@ def make_token_dispatcher_config(
     Returns the right Config subclass based on comm_backend:
     - None: LocalTokenDispatcher.Config (no EP communication)
     - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
-    - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
     - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
     if comm_backend is None:
@@ -225,12 +223,6 @@ def make_token_dispatcher_config(
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
-    elif comm_backend == "torchao":
-        return TorchAOTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-        )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
@@ -240,7 +232,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
+            "Must be one of None, 'standard', 'deepep', 'hybridep'."
         )
 
 

@@ -122,7 +122,6 @@ class FluxValidator(Validator):
         clip_encoder: FluxEmbedder,
         dump_folder: str,
     ):
-        # pyrefly: ignore [read-only]
         self.device = device
         self._dtype = _dtype
         self.autoencoder = autoencoder

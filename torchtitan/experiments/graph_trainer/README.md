@@ -10,9 +10,10 @@ This experiment demonstrates graph-based distributed training in torchtitan thro
 - Graph optimization via FX graph passes
 
 The goal is to give users more explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. Three compilation modes are currently supported:
+- **AOT FX trace mode** (`--compile.mode aot_fx_trace`): Non-strict tracing of the full forward + loss + backward via `make_fx`, producing a single end-to-end graph without AOTAutograd partitioning.
 - **AOT mode** (`--compile.mode aot`): Explicit joint graph export with a custom graph pass pipeline.
 - **JIT mode** (`--compile.mode jit`): Standard `torch.compile()` with graph passes registered to custom backends.
-- **AOT FX trace mode** (`--compile.mode aot_fx_trace`): Non-strict tracing of the full forward + loss + backward via `make_fx`, producing a single end-to-end graph without AOTAutograd partitioning.
+> **Deprecation notice:** The `aot` and `jit` compile modes are deprecated and will be removed in the future. Please migrate to `aot_fx_trace`.
 
 ### Prerequisites
 
@@ -49,22 +50,20 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
 
 ### Compiler Optimizations
 
-By default, the graph is captured with the AOT mode (switch to JIT mode via `--compile.mode jit` or AOT FX trace mode via `--compile.mode aot_fx_trace`) and compiled with the `aot_eager` backend.
-
-Graph passes can be applied to further optimize the graph by using the `--compile.joint_passes` and `--compile.passes` flags.
+> **Note:** Graph pass support for `aot_fx_trace` mode is a work in progress. The `--compile.passes` and `--compile.joint_passes` flags currently only apply to the deprecated `aot` and `jit` modes.
 
 ```bash
 # Auto bucketing for comm/compute overlap
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.passes auto_bucketing
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.passes auto_bucketing
 
 # Transformer-block bucketing for comm/compute overlap
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.passes transformer_block_bucketing
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.passes transformer_block_bucketing
 
 # CUDAGraph
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.passes cudagraph
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.passes cudagraph
 
 # Full Inductor compilation (AOT)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode aot --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
 
 # Full Inductor compilation (JIT)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.mode jit --compile.backend inductor
@@ -83,6 +82,8 @@ to create them. Changing any of these requires regenerating the artifacts.
 Stale artifacts are detected automatically via config fingerprinting and
 will raise an error at load time. Delete old artifacts and re-run
 precompile when upgrading PyTorch or changing the model/parallelism setup.
+
+#### Llama3 (dense model)
 
 ```bash
 # Step 1: precompile on a single process (needs only 1 GPU)
@@ -104,6 +105,33 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
     --compile.precompile_artifact_dir /tmp/precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2
+```
+
+#### DeepSeek-v3 (MoE model with expert parallelism)
+
+```bash
+# Step 1: precompile on a single process (needs only 1 GPU)
+python -m torchtitan.experiments.graph_trainer.precompile_main \
+    --module graph_trainer.deepseek_v3 \
+    --config graph_trainer_deepseek_v3_debugmodel \
+    --compile.passes full_inductor_compilation \
+    --compile.joint_passes inductor_decomposition \
+    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2 \
+    --parallelism.expert_parallel_degree 4 \
+    --parallelism.expert_tensor_parallel_degree 1
+
+# Step 2: load and train with torchrun (uses all GPUs)
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
+    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
+    --compile.passes full_inductor_compilation \
+    --compile.joint_passes inductor_decomposition \
+    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.tensor_parallel_degree 2 \
+    --parallelism.expert_parallel_degree 4 \
+    --parallelism.expert_tensor_parallel_degree 1
 ```
 
 **`--virtual-local-rank`:** This torchrun flag makes every worker process see

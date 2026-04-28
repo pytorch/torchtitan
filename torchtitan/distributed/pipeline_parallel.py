@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 import torch
 import torch.nn as nn
+from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
@@ -31,7 +32,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
@@ -44,12 +44,35 @@ __all__ = [
 ]
 
 
+def _build_get_mesh_callback(
+    parallel_dims: ParallelDims,
+) -> Callable[[tuple[str, ...], _MeshLayout | None], DeviceMesh | None]:
+    """Build a callback that resolves a DeviceMesh from dimension names.
+
+    Pipeline parallelism requires an SPMD mesh during module split so that
+    at runtime the current PP rank can reconstruct a DTensor after receiving
+    a plain tensor from the previous PP rank. DTensors are not directly
+    serializable across PP stages (because ProcessGroup is not serializable),
+    so each stage uses this callback to obtain its local DeviceMesh and
+    re-wrap incoming tensors as DTensors with the correct placements.
+    """
+
+    def _get_mesh(
+        mesh_dim_names: tuple[str, ...], mesh_layout: _MeshLayout | None
+    ) -> DeviceMesh | None:
+        mesh = parallel_dims.get_mesh(list(mesh_dim_names))
+        if mesh_layout is not None and mesh._layout != mesh_layout:
+            return None
+        return mesh
+
+    return _get_mesh
+
+
 def pipeline_llm(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -130,12 +153,14 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
+    get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = pipeline_module_split(
         model,
         pp_mesh,
         parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
+        get_mesh=get_mesh_cb,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -147,7 +172,6 @@ def pipeline_llm(
             m,
             parallel_dims=parallel_dims,
             training=training,
-            model_converters=model_converters,
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ac_config,
@@ -281,7 +305,7 @@ def generate_llm_fqn_per_model_part(
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "output"]]
+        return [["tok_embeddings"] + layer_names + ["norm", "lm_head"]]
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -350,7 +374,7 @@ def generate_llm_fqn_per_model_part(
                     current_layer += 1
 
             # Add output modules
-            stage_modules.extend(["norm", "output"])
+            stage_modules.extend(["norm", "lm_head"])
 
         # Middle stages: only transformer layers
         else:
@@ -370,6 +394,7 @@ def pipeline_module_split(
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
+    get_mesh: Callable | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
@@ -390,7 +415,7 @@ def pipeline_module_split(
                                - "tok_embeddings" for token embeddings
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
-                               - "output" for the output projection layer
+                               - "lm_head" for the output projection layer
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -400,7 +425,7 @@ def pipeline_module_split(
         module_names_per_stage = [
             ["tok_embeddings", "layers.0"],     # Stage 0: embeddings + first layer
             ["layers.1", "layers.2"],           # Stage 1: middle layers
-            ["norm", "output"]                  # Stage 2: final norm + output
+            ["norm", "lm_head"]                  # Stage 2: final norm + output
         ]
     """
     pp_rank = pp_mesh.get_local_rank()
@@ -456,6 +481,7 @@ def pipeline_module_split(
             num_stages,
             device,
             group=pp_mesh.get_group("pp"),
+            get_mesh=get_mesh,
         )
         return stage, model
 

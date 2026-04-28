@@ -45,15 +45,29 @@ def _dist_reduce(
             process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
-        # functional collectives do not support DTensor inputs
-        x = x.full_tensor()
+        # DTensor path: ``full_tensor()`` already performs the mesh reduction
+        # for Partial placements and is a no-op for Replicate. Skipping the
+        # subsequent mesh all-reduce is required to avoid double-counting.
+        # Shard placements are not supported — semantics are undefined since
+        # the reduction target is ambiguous.
+        assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
+            f"_dist_reduce received a DTensor with unsupported placements "
+            f"{x.placements}; only Replicate/Partial are supported."
+        )
+        if extra_pg is not None:
+            raise ValueError(
+                "_dist_reduce does not support DTensor input combined with "
+                "extra_pg: ``full_tensor()`` already reduces over the DTensor's "
+                "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
+                "to that mesh. Pass a plain tensor when using extra_pg."
+            )
+        return float(x.full_tensor().item())
 
+    # Plain tensor path.
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
-
     if mesh is None:
         return float(x.item())
-
     assert x.numel() == 1  # required by `.item()`
     return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
 

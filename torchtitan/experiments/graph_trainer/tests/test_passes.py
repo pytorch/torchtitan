@@ -22,7 +22,6 @@ from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
-    _AC_REGION_ID,
     _MODULE_FQN,
     annotate_module_fqns,
 )
@@ -32,6 +31,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     trace_train_step,
 )
 from torchtitan.experiments.graph_trainer.passes import (
+    _make_default_memory_policy,
     apply_sac_pass,
     insert_kernel_annotations_pass,
     reassign_to_pg_pass,
@@ -40,6 +40,12 @@ from torchtitan.experiments.graph_trainer.passes import (
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
+    TestCpuOffloadPass,
+)
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
+    TestCustomCodegenPass,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
@@ -266,7 +272,10 @@ class TestApplySACPass(TestCase):
                 # If the next op is getitem, wrap in a tuple so getitem has
                 # a proper tuple/list input.
                 if i + 1 < len(op_targets) and op_targets[i + 1] is operator.getitem:
-                    _make_tuple = lambda x: (x, x)
+
+                    def _make_tuple(x):
+                        return (x, x)
+
                     last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -291,13 +300,13 @@ class TestApplySACPass(TestCase):
         """Non-mm ops in the save list should be marked MUST_SAVE."""
         custom_save = {torch.ops.aten.add.Tensor}
         gm = self._build_gm([torch.ops.aten.add.Tensor])
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
         nodes = self._get_call_function_nodes(gm)
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
     def test_getitem_propagates_parent_tags(self):
-        """operator.getitem nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -311,19 +320,14 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].target, torch.ops.aten.add.Tensor)
         self.assertEqual(nodes[2].target, operator.getitem)
 
-        # Set ac_region_id on the tuple-returning parent (the direct parent of getitem)
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 3}
-
         apply_sac_pass(gm)
 
         tuple_node = nodes[1]
         getitem_node = nodes[2]
         self.assertEqual(getitem_node.meta["recompute"], tuple_node.meta["recompute"])
-        self.assertEqual(tuple_node.meta["ac_graph_id"], 3)
-        self.assertEqual(getitem_node.meta["ac_graph_id"], 3)
 
     def test_wait_tensor_propagates_parent_tags(self):
-        """wait_tensor nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """wait_tensor nodes should inherit the parent's recompute tag."""
         custom_save = {torch.ops._c10d_functional.reduce_scatter_tensor.default}
         gm = self._build_gm(
             [
@@ -332,33 +336,17 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 3}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.3.attention"}
 
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
 
         rs_node = nodes[0]
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
-        self.assertEqual(rs_node.meta["ac_graph_id"], 3)
-        self.assertEqual(wait_node.meta["ac_graph_id"], 3)
 
-    def test_ac_graph_id_defaults_to_zero(self):
-        """Nodes without ac_region_id annotation should have ac_graph_id = 0."""
-        gm = self._build_gm(
-            [
-                torch.ops.aten.add.Tensor,
-                torch.ops.aten.mm.default,
-                torch.ops.aten.relu.default,
-            ]
-        )
-        apply_sac_pass(gm)
-        for node in self._get_call_function_nodes(gm):
-            if node.target is not operator.getitem:
-                self.assertEqual(node.meta["ac_graph_id"], 0)
-
-    def test_ac_graph_id_from_annotation(self):
-        """Nodes with _AC_REGION_ID_KEY in custom metadata should use that as ac_graph_id."""
+    def test_boundary_nodes_forced_to_must_save(self):
+        """Nodes at AC region boundaries should be forced to MUST_SAVE."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -366,14 +354,14 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        # Simulate annotate_fn setting custom metadata on different nodes
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 1}
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 2}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
+        nodes[1].meta["custom"] = {_MODULE_FQN: "layers.1.attention"}
 
         apply_sac_pass(gm)
 
-        self.assertEqual(nodes[0].meta["ac_graph_id"], 1)
-        self.assertEqual(nodes[1].meta["ac_graph_id"], 2)
+        # add is at the boundary (layer 0 -> layer 1), forced to MUST_SAVE
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(nodes[1].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
     def test_custom_op_list_to_save(self):
         """A custom op_list_to_save should override the defaults."""
@@ -384,7 +372,7 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
         policies = {
             n.target: n.meta["recompute"] for n in self._get_call_function_nodes(gm)
         }
@@ -400,19 +388,19 @@ class TestApplySACPass(TestCase):
         custom_save = {torch.ops.aten.mm.default, torch.ops.aten.max.default}
         gm = self._build_gm(
             [
-                torch.ops.aten.mm.default,  # 1st mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.max.default,  # in save list -> MUST_SAVE
-                torch.ops.aten.mm.default,  # 2nd mm -> PREFER_RECOMPUTE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.add.Tensor,  # not in save list -> PREFER_RECOMPUTE
-                torch.ops.aten.mm.default,  # 3rd mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
             ]
         )
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
         nodes = self._get_call_function_nodes(gm)
         expected = [
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.max.default, CheckpointPolicy.MUST_SAVE),
-            (torch.ops.aten.mm.default, CheckpointPolicy.PREFER_RECOMPUTE),
+            (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.add.Tensor, CheckpointPolicy.PREFER_RECOMPUTE),
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
         ]
@@ -420,6 +408,143 @@ class TestApplySACPass(TestCase):
         for node, (target, policy) in zip(nodes, expected):
             self.assertEqual(node.target, target)
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
+
+
+class TestBucketingPrefetchOrder(FSDPTest):
+    """Guard that SAC + bucketing produces correct all_gather prefetch order.
+
+    Uses the real Llama3 debug model with FSDP via the GraphTrainer path.
+    Verifies that bucketed all_gather starts follow forward layer order
+    (0, 1, 2, ...) and not reverse order (which was a prior bug).
+    """
+
+    BATCH_SIZE = 4
+    SEQ_LEN = 128
+
+    @staticmethod
+    def _get_bucketed_ag_layer_order(gm):
+        """Extract layer IDs from bucketed all_gather_into_tensor_out nodes.
+
+        For each bucketed all_gather, searches its transitive users for
+        a node with module_fqn under ``layers.<N>`` and records N.
+        Returns deduplicated layer IDs in graph order.
+        """
+        layer_ids = []
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            if "all_gather_into_tensor_out" not in str(node.target):
+                continue
+            # BFS through users to find a node with layers.N FQN
+            visited = set()
+            queue = list(node.users)
+            found_lid = None
+            while queue and found_lid is None:
+                u = queue.pop(0)
+                if u in visited:
+                    continue
+                visited.add(u)
+                fqn = u.meta.get("custom", {}).get(_MODULE_FQN, "")
+                parts = fqn.split(".")
+                if parts[0] == "layers" and len(parts) >= 2:
+                    try:
+                        found_lid = int(parts[1])
+                    except ValueError:
+                        pass
+                else:
+                    queue.extend(u.users)
+            if found_lid is not None and (not layer_ids or layer_ids[-1] != found_lid):
+                layer_ids.append(found_lid)
+        return layer_ids
+
+    def test_forward_allgather_prefetch_follows_layer_order(self):
+        """Bucketed forward all_gather starts must appear in layer order 0→N."""
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+        from torchtitan.experiments.graph_trainer.llama3 import (
+            model_registry as llama3_model_registry,
+        )
+        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
+            annotate_llama,
+        )
+        from torchtitan.experiments.graph_trainer.simple_fsdp import (
+            data_parallel,
+            MixedPrecisionPolicy,
+        )
+        from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
+            build_minimal_trainer,
+        )
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+        model_spec = llama3_model_registry("debugmodel")
+        model_config = model_spec.model
+        vocab_size = model_config.vocab_size
+
+        with torch.device("meta"):
+            model = model_config.build()
+
+        annotate_llama(model)
+        fsdp_mesh = parallel_dims.get_mesh("fsdp")
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+        model = data_parallel(
+            model, device_mesh=fsdp_mesh, mode="fully_shard", mp_policy=mp_policy
+        )
+        model.to_empty(device="cuda")
+        with torch.no_grad():
+            model.init_states(buffer_device=None)
+        model.train()
+
+        # Use GraphTrainer's full path: trace + construct_default_graph_passes
+        trainer = build_minimal_trainer(
+            model,
+            model_config,
+            GraphTrainer,
+            tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
+        )
+
+        inputs = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
+        )
+        labels = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
+        )
+        global_valid_tokens = torch.tensor(
+            self.BATCH_SIZE * self.SEQ_LEN, dtype=torch.float, device="cuda"
+        )
+
+        # One forward_backward_step triggers _make_fx_forward_backward_step
+        # which traces the model and applies all graph passes.
+        trainer.forward_backward_step(
+            input_dict={"input": inputs},
+            labels=labels,
+            global_valid_tokens=global_valid_tokens,
+        )
+
+        layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)
+        self.assertGreater(len(layer_ids), 0, "No layer all_gather nodes found")
+
+        # Forward layer order must be monotonically non-decreasing
+        for i in range(1, len(layer_ids)):
+            self.assertGreaterEqual(
+                layer_ids[i],
+                layer_ids[i - 1],
+                f"Forward all_gather prefetch order violated: "
+                f"layer {layer_ids[i]} before layer {layer_ids[i - 1]} "
+                f"(full order: {layer_ids})",
+            )
 
 
 class TestRemoveDetachPass(TestCase):
@@ -907,12 +1032,6 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 2)
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
-
-
-# Import TestCustomCodegenPass so it's discoverable when running this file
-from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
-    TestCustomCodegenPass,
-)
 
 
 class TestAnnotateModuleFqns(TestCase):

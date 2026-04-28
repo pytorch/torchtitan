@@ -10,7 +10,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -21,6 +20,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -192,7 +192,7 @@ def _debugmodel(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -230,7 +230,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -269,7 +269,7 @@ def _0_6b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -307,7 +307,7 @@ def _1_7b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -345,7 +345,7 @@ def _4b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -380,7 +380,7 @@ def _8b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -415,7 +415,7 @@ def _14b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -450,7 +450,7 @@ def _32b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -491,7 +491,7 @@ def _debugmodel_moe(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -532,7 +532,7 @@ def _30b_a3b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -573,7 +573,7 @@ def _235b_a22b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -618,18 +618,21 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
+    quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
+    if quantization is not None:
+        for q in quantization:
+            q.build().convert(config)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
     )

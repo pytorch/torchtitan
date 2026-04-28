@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import MSELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.mx import MXFP8Converter
+from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -20,7 +21,6 @@ from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from . import model_registry
 
@@ -29,6 +29,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
     hf_assets_path = "tests/assets/tokenizer"
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
+        loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
@@ -89,6 +90,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
 
 def flux_dev() -> FluxTrainer.Config:
     return FluxTrainer.Config(
+        loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
@@ -140,6 +142,7 @@ def flux_dev() -> FluxTrainer.Config:
 
 def flux_schnell() -> FluxTrainer.Config:
     return FluxTrainer.Config(
+        loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
@@ -194,9 +197,14 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_schnell()
     config.compile = CompileConfig(enable=True)
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
-            MXFP8Converter.Config(
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "flux-schnell",
+        quantization=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -217,9 +225,14 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_dev()
     config.compile = CompileConfig(enable=True)
-    config.model_converters = ModelConvertersContainer.Config(
-        converters=[
-            MXFP8Converter.Config(
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "flux-dev",
+        quantization=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
                 fqns=[
                     "double_blocks",
                     "single_blocks",

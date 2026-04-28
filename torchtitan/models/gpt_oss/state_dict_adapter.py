@@ -44,7 +44,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
-            **qkv_map,  # pyrefly: ignore [invalid-argument]
+            **qkv_map,
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.layers.{}.self_attn.o_proj.bias": "layers.{}.attention.wo.bias",
             "model.layers.{}.self_attn.sinks": "layers.{}.attention.sinks",
@@ -59,7 +59,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
+            "lm_head.weight": "lm_head.weight",
         }
 
     def get_hf_storage_reader(
