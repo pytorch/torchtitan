@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -17,6 +18,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_flex_attn,
     deepseek_v3_debugmodel_flex_attn_ep,
 )
+from torchtitan.trainer import Trainer
 
 from . import model_registry
 
@@ -56,4 +58,15 @@ def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
 def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_671b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+# CrossEntropyLoss baseline for graph_trainer numerics tests. graph_trainer
+# doesn't yet support ChunkedCELoss, so to_graph_trainer_config swaps it for
+# CrossEntropyLoss; this wrapper applies the same swap to the eager baseline
+# so loss_compare runs apples-to-apples.
+# TODO: Remove once graph_trainer supports ChunkedCELoss.
+def deepseek_v3_debugmodel_ep_ce_loss() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_ep()
+    config.loss = CrossEntropyLoss.Config()
     return config

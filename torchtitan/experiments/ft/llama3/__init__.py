@@ -5,13 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.experiments.ft.config.job_config import FaultTolerantModelSpec
 from torchtitan.experiments.ft.diloco import fragment_llm
 from torchtitan.models.llama3 import (
     llama3_configs,
     Llama3StateDictAdapter,
     parallelize_llama,
 )
-from torchtitan.protocols.model_spec import FaultTolerantModelSpec
 
 
 def model_registry(flavor: str) -> FaultTolerantModelSpec:

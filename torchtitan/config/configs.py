@@ -12,7 +12,6 @@ Some configs live near their owner instead of here:
   - OptimizersContainer.Config      (in components/optimizer.py)
   - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
-  - ModelConvertersContainer.Config  (in protocols/model_converter.py)
   - CheckpointManager.Config        (in components/checkpoint.py)
 
 Configs without a clear single owner (or with circular-import constraints)
