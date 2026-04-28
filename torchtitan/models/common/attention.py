@@ -228,6 +228,12 @@ class FlexAttention(Module):
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
 
+        # In batch-invariant mode, pin Triton tile sizes to prevent the
+        # autotuner from picking input-dependent block dimensions.
+        kernel_options = self.kernel_options
+        if is_in_batch_invariant_mode():
+            kernel_options = {"BLOCK_M": 16, "BLOCK_N": 16, **self.kernel_options}
+
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
@@ -241,7 +247,7 @@ class FlexAttention(Module):
             scale=scale,
             enable_gqa=enable_gqa,
             return_aux=AuxRequest(lse=return_lse),
-            kernel_options=self.kernel_options,
+            kernel_options=kernel_options,
         )
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:

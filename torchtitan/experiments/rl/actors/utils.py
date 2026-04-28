@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import _DEFAULT_SPARSE_BLOCK_SIZE, BlockMask
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import create_attention_mask, VarlenMetadata
+from torchtitan.models.common.attention import create_attention_mask
 
 
 def _align_to(length: int, alignment: int) -> int:
@@ -42,26 +42,29 @@ def create_flex_block_mask(
         total, dtype=torch.int32, device=device
     ) - torch.repeat_interleave(offsets, maybe_padded_seq_lens_tensor)
 
+    def same_doc(q_idx, kv_idx):
+        return doc_ids[q_idx] == doc_ids[kv_idx]
+
+    def causal(q_idx, kv_idx):
+        return local_pos[kv_idx] <= local_pos[q_idx]
+
+    def not_padding(idx):
+        return local_pos[idx] < original_seq_lens_tensor[doc_ids[idx]]
+
     if is_in_batch_invariant_mode():
 
         def mask_mod(b, h, q_idx, kv_idx):
-            q_doc = doc_ids[q_idx]
-            q_local = local_pos[q_idx]
-            kv_local = local_pos[kv_idx]
-            q_len = original_seq_lens_tensor[q_doc]
             return (
-                (q_doc == doc_ids[kv_idx])
-                & (q_local < q_len)
-                & (kv_local < q_len)
-                & (kv_local <= q_local)
+                same_doc(q_idx, kv_idx)
+                & not_padding(q_idx)
+                & not_padding(kv_idx)
+                & causal(q_idx, kv_idx)
             )
 
     else:
 
         def mask_mod(b, h, q_idx, kv_idx):
-            return (doc_ids[q_idx] == doc_ids[kv_idx]) & (
-                local_pos[kv_idx] <= local_pos[q_idx]
-            )
+            return same_doc(q_idx, kv_idx) & causal(q_idx, kv_idx)
 
     block_mask = create_attention_mask(
         mask_mod,
@@ -73,6 +76,14 @@ def create_flex_block_mask(
         separate_full_blocks=not is_in_batch_invariant_mode(),
     )
     return block_mask, maybe_padded_seq_lens
+
+
+def create_positions_from_seq_lens(
+    seq_lens: list[int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a ``(1, total)`` position tensor from packed sequence lengths."""
+    return torch.cat([torch.arange(l, device=device) for l in seq_lens]).unsqueeze(0)
 
 
 def pad_to_block_aligned(

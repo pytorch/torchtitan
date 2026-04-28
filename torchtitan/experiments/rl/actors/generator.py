@@ -249,7 +249,7 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
 
-        if config.vllm_attn_backend == "flex":
+        if self._use_flex:
             engine_kwargs["enable_chunked_prefill"] = False
         elif not has_cuda_capability(9, 0):
             # FA2 requires block_size to be a multiple of 256

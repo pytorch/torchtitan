@@ -45,18 +45,15 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=8,
@@ -82,7 +79,6 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         num_steps=10,
         num_prompts_per_step=5,
         num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -99,7 +95,6 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -154,19 +149,16 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
                 disable_loss_parallel=True,
                 enable_sequence_parallel=False,
             ),
-            compile=CompileConfig(enable=False),
             debug=_BATCH_INVARIANT_DEBUG,
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=8,

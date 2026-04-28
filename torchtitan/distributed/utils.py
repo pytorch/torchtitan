@@ -249,7 +249,7 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import (  # pyrefly: ignore [missing-import]
+    from batch_invariant_ops import (
         enable_batch_invariant_mode as _upstream_enable,
     )
 
