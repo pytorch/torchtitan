@@ -382,8 +382,6 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     comm_backend: str = "standard",
     enable_sp: bool = True,
-    pad_multiple: int | None = None,
-    inference: bool = False,
 ):
     """
     Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
@@ -396,7 +394,6 @@ def apply_moe_ep_tp(
         ep_etp_mesh: Combined EP/ETP mesh.
         comm_backend: MoE communication backend.
         enable_sp: Whether sequence parallelism is enabled.
-        pad_multiple: Optional token padding multiple for compatible expert kernels.
     """
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -467,16 +464,9 @@ def apply_moe_ep_tp(
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             assert ep_etp_mesh is None
-            if inference:
-                # For inference without EP, skip expert parallelization.
-                # Expert weights stay full (not TP-sharded) — the MoE
-                # uses grouped_mm which needs full weights per expert.
-                experts_mesh = None
-                experts_plan = None
-            else:
-                experts_mesh = tp_mesh
-                # input Replicate, output Partial
-                experts_plan = TensorParallel()
+            experts_mesh = tp_mesh
+            # input Replicate, output Partial
+            experts_plan = TensorParallel()
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
