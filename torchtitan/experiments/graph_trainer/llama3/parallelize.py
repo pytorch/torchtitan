@@ -23,7 +23,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -42,7 +41,6 @@ def parallelize_llama(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
