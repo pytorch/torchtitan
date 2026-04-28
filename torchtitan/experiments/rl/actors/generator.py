@@ -147,11 +147,6 @@ class VLLMGenerator(Actor, Configurable):
             # Generator only supports TP. vLLM handles its own parallelism
             # and we only apply TP via the core parallelize function.
             p = self.parallelism
-            if p.data_parallel_shard_degree != 1:
-                raise ValueError(
-                    f"Generator does not support data parallel sharding, "
-                    f"got dp_shard={p.data_parallel_shard_degree}"
-                )
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
                     f"Generator does not support data parallel replication, "

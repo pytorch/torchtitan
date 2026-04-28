@@ -221,14 +221,13 @@ class TorchTitanVLLMModelWrapper(Module):
 
         from torchtitan.config import DebugConfig, TrainingConfig
 
-        if hasattr(self.config, "update_from_config"):
-            self.config.update_from_config(
-                trainer_config=SimpleNamespace(
-                    training=TrainingConfig(),
-                    parallelism=parallelism,
-                    debug=DebugConfig(),
-                )
+        self.config.update_from_config(
+            trainer_config=SimpleNamespace(
+                training=TrainingConfig(),
+                parallelism=parallelism,
+                debug=DebugConfig(),
             )
+        )
 
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
@@ -237,7 +236,7 @@ class TorchTitanVLLMModelWrapper(Module):
         self.rope_config = self.config.rope
 
         # Apply parallelism using the model's own parallelize function.
-        # AC and compile are explicitly disabled; inference=True skips FSDP.
+        # AC and compile are explicitly disabled; skip_dp=True skips FSDP.
         from torchtitan.config import ActivationCheckpointConfig, CompileConfig
         from torchtitan.protocols.model_converter import ModelConvertersContainer
 
@@ -250,7 +249,7 @@ class TorchTitanVLLMModelWrapper(Module):
             compile_config=CompileConfig(enable=False),
             ac_config=ActivationCheckpointConfig(mode="none"),
             dump_folder="",
-            inference=True,
+            skip_dp=True,
         )
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling

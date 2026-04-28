@@ -36,7 +36,7 @@ def parallelize_qwen3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
-    inference: bool = False,
+    skip_dp: bool = False,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -85,9 +85,10 @@ def parallelize_qwen3(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    # Skip FSDP for inference. FSDP's forward hooks are incompatible with torch.inference_mode() used by vLLM.
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
     # AC and compile are disabled via config (mode="none", enable=False).
-    if inference:
+    if skip_dp:
         return model
 
     dp_mesh_names = (
