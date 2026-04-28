@@ -40,6 +40,7 @@ def parallelize_qwen3(
     parallelism: ParallelismConfig,
     compile_config: CompileConfig | None = None,
     has_position_id: bool = False,
+    **kwargs,
 ):
     """
     Apply tensor parallelism to the Qwen3 dense model for RL training/inference.

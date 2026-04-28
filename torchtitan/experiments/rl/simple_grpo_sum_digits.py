@@ -380,19 +380,23 @@ class RLTrainer(Configurable):
         await setup_torch_elastic_env_async(trainer_mesh)
         await setup_torch_elastic_env_async(generator_mesh)
 
+        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+
+        trainer_model_spec = replace(
+            config.model_spec, parallelize_fn=parallelize_qwen3
+        )
+
         # Spawn actors on their respective meshes
         self.trainer = trainer_mesh.spawn(
             "trainer",
             PolicyTrainer,
             config.trainer,
-            model_spec=config.model_spec,
+            model_spec=trainer_model_spec,
             hf_assets_path=config.hf_assets_path,
             generator_dtype=config.generator.model_dtype,
         )
 
         # Generator uses RL-specific parallelize (TP-only, no FSDP, vLLM-compatible)
-        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-
         gen_model_spec = replace(config.model_spec, parallelize_fn=parallelize_qwen3)
         self.generator = generator_mesh.spawn(
             "generator",
