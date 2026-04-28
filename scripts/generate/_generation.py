@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import SDPBackend
+
+from torchtitan.models.common.attention import ScaledDotProductAttention
 
 
 def multinomial_sample_one(
@@ -67,26 +69,27 @@ def generate(
 
     # Inference can hit shapes that ``FLASH_ATTENTION`` / ``CUDNN_ATTENTION``
     # refuse (e.g., debug-model ``head_dim=16`` is outside flash's supported
-    # set), and the trainer-side ``ScaledDotProductAttention`` defaults
-    # intentionally exclude ``MATH``. Allow ``MATH`` as a last-resort fallback
-    # here so generation works on more hardware/configs without affecting
-    # training-side strictness.
-    backends = [
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.MATH,
-    ]
-    with sdpa_kernel(backends, set_priority=True):
-        for _ in range(max_new_tokens):
-            next_token = generate_next_token(
-                model,
-                x=generated_tokens,
-                temperature=temperature,
-                top_k=top_k,
-                rng=rng,
-            )
+    # set). The trainer-side ``ScaledDotProductAttention`` defaults
+    # intentionally exclude ``MATH`` so silent slow-path fallback can't hide
+    # mistakes during training. Each module opens its own
+    # ``with sdpa_kernel(self.sdpa_backends, set_priority=True)`` inside
+    # ``forward``, so an outer ``sdpa_kernel`` wrapper is overridden and has
+    # no effect. Instead, append ``MATH`` as a last-resort fallback to each
+    # ``ScaledDotProductAttention`` instance for the generate path.
+    for module in model.modules():
+        if isinstance(module, ScaledDotProductAttention):
+            if SDPBackend.MATH not in module.sdpa_backends:
+                module.sdpa_backends = list(module.sdpa_backends) + [SDPBackend.MATH]
 
-            generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
+    for _ in range(max_new_tokens):
+        next_token = generate_next_token(
+            model,
+            x=generated_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            rng=rng,
+        )
+
+        generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
 
     return generated_tokens
