@@ -234,7 +234,7 @@ def _build_qwen3_vl_moe_layers(
     return layers
 
 
-def _debugmodel() -> Qwen3VLModel.Config:
+def _debugmodel(moe_comm_backend: str = "standard") -> Qwen3VLModel.Config:
     dim = 256
     head_dim = 64
     n_layers = 4
@@ -337,7 +337,7 @@ def _debugmodel_moe(
     )
 
 
-def _2b() -> Qwen3VLModel.Config:
+def _2b(moe_comm_backend: str = "standard") -> Qwen3VLModel.Config:
     dim = 2048
     head_dim = 128
     n_layers = 28
@@ -387,7 +387,7 @@ def _2b() -> Qwen3VLModel.Config:
     )
 
 
-def _8b() -> Qwen3VLModel.Config:
+def _8b(moe_comm_backend: str = "standard") -> Qwen3VLModel.Config:
     dim = 4096
     head_dim = 128
     n_layers = 36

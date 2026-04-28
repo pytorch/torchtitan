@@ -178,7 +178,7 @@ def _build_qwen3_moe_layers(
     return layers
 
 
-def _debugmodel(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _debugmodel(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     n_layers = 8
@@ -216,7 +216,7 @@ def _debugmodel(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _debugmodel_fused_qkv(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 256
     head_dim = 128
     n_layers = 8
@@ -255,7 +255,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _0_6b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _0_6b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
     n_layers = 28
@@ -293,7 +293,7 @@ def _0_6b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _1_7b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _1_7b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
     n_layers = 28
@@ -331,7 +331,7 @@ def _1_7b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _4b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _4b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 2560
     head_dim = 128
     n_layers = 36
@@ -369,7 +369,7 @@ def _4b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _8b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _8b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 4096
     head_dim = 128
     n_layers = 36
@@ -404,7 +404,7 @@ def _8b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _14b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _14b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     n_layers = 40
@@ -439,7 +439,7 @@ def _14b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
     )
 
 
-def _32b(attn_backend: str = "sdpa") -> Qwen3Model.Config:
+def _32b(attn_backend: str = "sdpa", moe_comm_backend: str = "standard") -> Qwen3Model.Config:
     dim = 5120
     head_dim = 128
     n_layers = 64
