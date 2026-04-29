@@ -86,9 +86,8 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
-        # TODO: uncomment after sorting out common tagging API between offload and sac
-        # cpu_offload_pass,
         selective_activation_remat_pass,
+        functools.partial(cpu_offload_pass, force_joint_graph=True),
         # TODO: bucketing is failing for DSv3, allgather prefetching
         # for Llama3 is not working.
         # functools.partial(

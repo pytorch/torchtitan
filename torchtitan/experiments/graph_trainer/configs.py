@@ -46,6 +46,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
 
+    cpu_offload_prefetch_n_layers: int = 0
+    """When > 0, prefetch reloads this many layers ahead in the backward graph
+    to overlap H2D transfers with compute. Only effective when cpu_offload is
+    in joint_passes."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:

@@ -209,7 +209,7 @@ def apply_graph_ac(
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])
     if "apply_sac" not in joint_pass_names:
-        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
+        compile_config.joint_passes = ["apply_sac"] + list(joint_pass_names)
         logger.info(
             "activation_checkpoint.mode is 'selective', added apply_sac to "
             "compile.joint_passes"
