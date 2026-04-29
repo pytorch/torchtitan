@@ -44,7 +44,6 @@ import torch.distributed as dist
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
-    apply_graph_ac,
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
@@ -158,9 +157,6 @@ def _common_setup(config):
 
     # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
     # (returns model unchanged), so we pass the real compile_config.
-    # This lets side effects from parallelize_fn (e.g. apply_graph_ac
-    # adding "apply_sac" to joint_passes) be visible to
-    # compute_config_fingerprint later without needing a manual hack.
     # For aot, apply_compile would try to load a non-existent artifact,
     # so we suppress it with a copy that has enable=False. This
     # complexity goes away once we complete the migration to
@@ -226,12 +222,6 @@ def _precompile_aot(
             "serializable output "
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
-
-    # Augment compile_config with AC joint passes to match the training
-    # path, which calls apply_graph_ac during parallelization. Without
-    # this the SAC pass won't run and the config fingerprint will differ.
-    if config.activation_checkpoint.mode != "none":
-        apply_graph_ac(compile_config, config.activation_checkpoint)
 
     register_blockmask_pytree_node()
 

@@ -16,10 +16,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_module_fqns,
-    apply_graph_ac,
-)
+from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
 
@@ -98,9 +95,6 @@ def parallelize_qwen3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=parallelism.enable_sequence_parallel,
         )
-
-    if ac_config.mode != "none":
-        apply_graph_ac(compile_config, ac_config)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

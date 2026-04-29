@@ -13,7 +13,6 @@ from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
-from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -198,27 +197,3 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_to_name = {m: n for n, m in model.named_modules()}
     module_fqns = convert_modules_to_fqns(module_list, module_to_name)
     return module_fqns
-
-
-def apply_graph_ac(
-    compile_config: CompileConfig,
-    ac_config: "ActivationCheckpointConfig",
-) -> None:
-    """Add apply_sac to compile joint passes for graph-based selective AC.
-
-    Must be called only when ac_config.mode != "none". Only "selective" mode
-    is supported; other modes raise ValueError.
-    """
-    if ac_config.mode != "selective":
-        raise ValueError(
-            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
-        )
-
-    joint_pass_names = getattr(compile_config, "joint_passes", [])
-    if "apply_sac" not in joint_pass_names:
-        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
-        logger.info(
-            "activation_checkpoint.mode is 'selective', added apply_sac to "
-            "compile.joint_passes"
-        )
