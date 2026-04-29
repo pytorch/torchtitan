@@ -79,7 +79,7 @@ def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="llama3",
-        baseline_config="llama3_debugmodel_ce_loss",
+        baseline_config="llama3_debugmodel",
         test_module="graph_trainer.llama3",
         test_config="graph_trainer_llama3_debugmodel",
         baseline_options=LLAMA3_PARALLELISM,
@@ -121,8 +121,8 @@ def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.qwen3",
-        baseline_config="qwen3_debugmodel_ce_loss",
+        baseline_module="qwen3",
+        baseline_config="qwen3_debugmodel",
         test_module="graph_trainer.qwen3",
         test_config="graph_trainer_qwen3_debugmodel",
         baseline_options=QWEN3_PARALLELISM,

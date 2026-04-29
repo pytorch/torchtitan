@@ -114,8 +114,17 @@ def to_graph_trainer_config(
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
 
-    # TODO: graph_trainer doesn't yet support ChunkedCELoss
-    if isinstance(d.get("loss"), ChunkedCELoss.Config):
+    # ChunkedCELoss + full inductor compilation hits an upstream make_fx
+    # retrace bug on MoE models: per-chunk autograd.grad creates multiple
+    # disjoint backward regions, the retrace inside
+    # full_inductor_compilation_pass rebinds unbacked symints, and the MoE
+    # all_to_all_single backward fails with "Split sizes doesn't match
+    # total dim 0 size" at runtime. Until fixed upstream, fall back to
+    # non-chunked CE for MoE models.
+    if isinstance(d.get("loss"), ChunkedCELoss.Config) and any(
+        getattr(layer, "moe", None) is not None
+        for layer in getattr(d.get("model_spec").model, "layers", None) or []
+    ):
         d["loss"] = CrossEntropyLoss.Config()
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
