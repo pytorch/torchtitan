@@ -462,8 +462,9 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
     quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
 
-    When EP is enabled (ep_mesh is set), uses all-to-all communication.
-    When EP=1 (ep_mesh is None), falls back to local dispatch.
+    Requires EP to be enabled (ep_mesh must be set). Raises ValueError
+    if ep_mesh is None, since quantized grouped GEMMs need padded token
+    groups which are only produced by the EP permute_and_pad path.
     """
 
     @dataclass(kw_only=True, slots=True)

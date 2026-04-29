@@ -78,7 +78,7 @@ def parallelize_llama(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
+            # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )

@@ -505,6 +505,7 @@ def _30b_a3b(
 
 
 def _235b_a22b(
+    attn_backend: str,
     moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 4096
