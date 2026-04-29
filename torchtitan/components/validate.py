@@ -201,9 +201,7 @@ class Validator(BaseValidator):
             extra_kwargs["attention_masks"] = cast(
                 BaseModel, model_parts[0]
             ).get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
+                positions=extra_kwargs.get("positions"),
             )
         except TypeError:
             pass
