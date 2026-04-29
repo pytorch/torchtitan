@@ -16,11 +16,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
-    extract_module_state,
+    _reparametrize_optimizer,
     minimal_fx_tracer,
     run_traced,
-    run_traced_train_step,
-    trace_train_step,
+    TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -35,29 +34,15 @@ def get_loss(logits, labels):
     )
 
 
-def make_train_step(loss_fn):
-    """Return a plain function for module-first tracing. loss_fn is captured in closure."""
+def make_train_step(model, loss_fn):
+    """Return a plain function that closes over ``model`` for module-based tracing."""
 
-    def train_step(model, *args):
+    def train_step(*args):
         *fwd_args, labels = args
         logits = model(*fwd_args)
         loss = loss_fn(logits, labels)
         params = list(model.parameters())
         grads = torch.autograd.grad(loss, params)
-        return [loss] + list(grads)
-
-    return train_step
-
-
-def make_stateless_train_step(model, loss_fn):
-    """Return a state-first function for the minimal_fx_tracer core API."""
-
-    def train_step(state, *args):
-        *fwd_args, labels = args
-        with torch.nn.utils.stateless._reparametrize_module(model, state):
-            logits = model(*fwd_args)
-        loss = loss_fn(logits, labels)
-        grads = torch.autograd.grad(loss, list(state.values()))
         return [loss] + list(grads)
 
     return train_step
@@ -139,12 +124,12 @@ class TestTraceModule(unittest.TestCase):
     def test_mlp_forward(self):
         model, tokens, labels, loss_fn = self._make_mlp()
 
-        def forward(model, tokens):
+        def forward(tokens):
             return model(tokens)
 
-        traced = trace_train_step(forward)(model, tokens)
+        traced = minimal_fx_tracer(forward, module=model)(tokens)
         out_eager = model(tokens)
-        wrapped = run_traced_train_step(traced, model, tokens)
+        wrapped = run_traced(traced, tokens, module=model)
         self.assertTrue(torch.equal(out_eager, wrapped))
 
     def test_mlp_train_step(self):
@@ -152,15 +137,15 @@ class TestTraceModule(unittest.TestCase):
         model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
 
-        train_step = make_train_step(loss_fn)
-        traced = trace_train_step(train_step)(model_ref, tokens, labels)
+        train_step = make_train_step(model_ref, loss_fn)
+        traced = minimal_fx_tracer(train_step, module=model_ref)(tokens, labels)
 
         logits_ref = model_ref(tokens)
         loss_ref = loss_fn(logits_ref, labels)
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        wrapped = run_traced_train_step(traced, model_test, tokens, labels)
+        wrapped = run_traced(traced, tokens, labels, module=model_test)
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -173,8 +158,8 @@ class TestTraceModule(unittest.TestCase):
         model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
 
-        train_step = make_train_step(loss_fn)
-        traced = trace_train_step(train_step)(model_ref, tokens, labels)
+        train_step = make_train_step(model_ref, loss_fn)
+        traced = minimal_fx_tracer(train_step, module=model_ref)(tokens, labels)
 
         opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR)
@@ -187,7 +172,7 @@ class TestTraceModule(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            wrapped = run_traced_train_step(traced, model_test, tokens, labels)
+            wrapped = run_traced(traced, tokens, labels, module=model_test)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -204,23 +189,23 @@ class TestTraceModule(unittest.TestCase):
     def test_non_tensor_leaf_raises(self):
         """Passing a callable leaf in args raises (should be in closure instead)."""
 
-        def fn(model, x, loss_fn):
-            return loss_fn(model(x))
-
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
+        def fn(x, loss_fn):
+            return loss_fn(model(x))
+
         with self.assertRaises(ValueError, msg="all pytree leaves"):
-            trace_train_step(fn)(model, tokens, lambda x: x.sum())
+            minimal_fx_tracer(fn, module=model)(tokens, lambda x: x.sum())
 
     def test_mismatched_module_raises_when_validation_enabled(self):
         """Opt-in module FQN validation catches execution with the wrong module."""
         model, tokens, labels, loss_fn = self._make_mlp()
 
-        def forward(model, tokens):
+        def forward(tokens):
             return model(tokens)
 
-        traced = trace_train_step(forward)(model, tokens)
+        traced = minimal_fx_tracer(forward, module=model)(tokens)
 
         different_model = nn.Sequential(
             nn.Embedding(256, 64),
@@ -228,68 +213,100 @@ class TestTraceModule(unittest.TestCase):
         ).to(device=self.DEVICE, dtype=self.DTYPE)
 
         with self.assertRaises(ValueError, msg="different parameter/buffer names"):
-            run_traced_train_step(
-                traced, different_model, tokens, validate_module_fqns=True
+            run_traced(
+                traced, tokens, module=different_model, validate_module_fqns=True
             )
 
-    def test_trace_train_step_requires_module_first_arg(self):
-        def forward(model, tokens):
-            return model(tokens)
-
-        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
-
-        with self.assertRaises(ValueError, msg="args\\[0\\]"):
-            trace_train_step(forward)(tokens)
-
-    def test_core_explicit_state_executes(self):
+    def test_optimizer_passed_without_module_raises(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        opt = torch.optim.Adam(model.parameters())
+        with self.assertRaises(ValueError, msg="optimizer"):
+            minimal_fx_tracer(lambda: None, optimizer=opt)
 
-        def forward(state, tokens):
-            with torch.nn.utils.stateless._reparametrize_module(model, state):
-                return model(tokens)
-
-        state = extract_module_state(model)
-        traced = minimal_fx_tracer(forward)(state, tokens)
-        out_ref = forward(state, tokens)
-        out_traced = run_traced(traced, state, tokens)
-
-        self.assertTrue(torch.equal(out_ref, out_traced))
-
-    def test_core_explicit_state_train_step(self):
-        model_ref, tokens, labels, loss_fn = self._make_mlp()
-        model_test = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        model_test.load_state_dict(model_ref.state_dict())
-
-        state_ref = extract_module_state(model_ref)
-        state_test = extract_module_state(model_test)
-        train_step = make_stateless_train_step(model_ref, loss_fn)
-        traced = minimal_fx_tracer(train_step)(state_ref, tokens, labels)
-
-        logits_ref = model_ref(tokens)
-        loss_ref = loss_fn(logits_ref, labels)
-        loss_ref.backward()
-        grads_ref = [p.grad.clone() for p in model_ref.parameters()]
-
-        wrapped = run_traced(traced, state_test, tokens, labels)
-        loss_tr = wrapped[0]
-        grads_tr = wrapped[1:]
-
-        self.assertTrue(torch.equal(loss_ref, loss_tr))
-        for gr, gt in zip(grads_ref, grads_tr, strict=True):
-            self.assertTrue(torch.equal(gr, gt))
-
-    def test_additional_module_arg_raises(self):
-        def forward(model, other_model, tokens):
-            del other_model
-            return model(tokens)
-
+    def test_module_in_args_raises(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         other_model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        with self.assertRaises(ValueError, msg="Additional nn.Module"):
-            trace_train_step(forward)(model, other_model, tokens)
+        def forward(other, tokens):
+            return other(tokens)
+
+        with self.assertRaises(ValueError, msg="nn.Module"):
+            minimal_fx_tracer(forward, module=model)(other_model, tokens)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestReparametrizeOptimizer(unittest.TestCase):
+    """Verify _reparametrize_optimizer works with a torchtitan OptimizersContainer.
+
+    OptimizersContainer is itself an Optimizer subclass, but it delegates
+    ``step``/``state``/``state_dict`` to inner ``torch.optim.Adam``/``AdamW``
+    instances. ``OptimizersContainer.state_dict()`` returns a DCP-flattened
+    (FQN-keyed) dict, so the reparametrize helper consumes the inner
+    optimizer's raw ``state_dict()`` (packed-int-id format) instead.
+    """
+
+    DEVICE = "cuda"
+    DTYPE = torch.float32
+
+    def test_titan_optimizers_container(self):
+        from torchtitan.components.optimizer import OptimizersContainer
+
+        torch.manual_seed(0)
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        container = OptimizersContainer(
+            OptimizersContainer.Config(
+                name="AdamW", lr=1e-3, implementation="for-loop"
+            ),
+            model_parts=[model],
+        )
+        inner = container.optimizers[0]
+
+        # Initialize Adam's lazy per-parameter state.
+        x = torch.randint(0, 256, (2, 16), device=self.DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        container.step()
+        container.zero_grad(set_to_none=True)
+
+        # Snapshot the originals so we can verify perfect restoration.
+        optim_state_dict = inner.state_dict()
+        original_param_ids = [[id(p) for p in g["params"]] for g in inner.param_groups]
+        original_state_keys = list(inner.state.keys())
+        original_state_id = id(inner.state)
+
+        # Rebind to fake parameter tensors (zeros to make the swap obvious).
+        params_dict = dict(model.named_parameters(remove_duplicate=False))
+        fake_params = {name: torch.zeros_like(p) for name, p in params_dict.items()}
+
+        with _reparametrize_optimizer(inner, fake_params, optim_state_dict):
+            # The live optimizer now points at the fake tensors.
+            rebound = [p for g in inner.param_groups for p in g["params"]]
+            for fake, rebound_p in zip(fake_params.values(), rebound, strict=True):
+                self.assertIs(fake, rebound_p)
+
+            # Per-param state is keyed by the rebound tensors and shares the
+            # original tensor values (so in-place ops would propagate).
+            for fake in fake_params.values():
+                self.assertIn(fake, inner.state)
+            for name, fake in fake_params.items():
+                # Match against the original state_dict via positional
+                # alignment in the optimizer's first (only) param group.
+                idx = list(fake_params).index(name)
+                packed_id = optim_state_dict["param_groups"][0]["params"][idx]
+                expected_state = optim_state_dict["state"][packed_id]
+                self.assertEqual(
+                    set(inner.state[fake].keys()), set(expected_state.keys())
+                )
+                for k, v in expected_state.items():
+                    if isinstance(v, torch.Tensor):
+                        self.assertIs(inner.state[fake][k], v)
+
+        # After the context the live optimizer is fully restored.
+        self.assertEqual(id(inner.state), original_state_id)
+        self.assertEqual(list(inner.state.keys()), original_state_keys)
+        for orig_ids, group in zip(original_param_ids, inner.param_groups, strict=True):
+            self.assertEqual([id(p) for p in group["params"]], orig_ids)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -340,17 +357,17 @@ class TestTraceDTensor(unittest.TestCase):
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
 
-        def forward(model, tokens):
+        def forward(tokens):
             return model(tokens)
 
-        traced = trace_train_step(forward)(model, tokens_dt)
+        traced = minimal_fx_tracer(forward, module=model)(tokens_dt)
         has_subclass = any(
             layout.meta is not None for layout in traced.input_subclass_layouts.values()
         )
         self.assertTrue(has_subclass)
 
         out_eager = model(tokens_dt)
-        wrapped = run_traced_train_step(traced, model, tokens_dt)
+        wrapped = run_traced(traced, tokens_dt, module=model)
         self.assertTrue(torch.equal(out_eager.full_tensor(), wrapped.full_tensor()))
 
     def test_dtensor_train_step(self):
@@ -371,15 +388,15 @@ class TestTraceDTensor(unittest.TestCase):
         tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
         labels_dt = DTensor.from_local(labels, mesh, [Replicate()])
 
-        train_step = make_train_step(get_loss)
-        traced = trace_train_step(train_step)(model_ref, tokens_dt, labels_dt)
+        train_step = make_train_step(model_ref, get_loss)
+        traced = minimal_fx_tracer(train_step, module=model_ref)(tokens_dt, labels_dt)
 
         logits_ref = model_ref(tokens_dt)
         loss_ref = get_loss(logits_ref, labels_dt)
         loss_ref.backward()
         grads_ref = [p.grad.clone() for p in model_ref.parameters()]
 
-        wrapped = run_traced_train_step(traced, model_test, tokens_dt, labels_dt)
+        wrapped = run_traced(traced, tokens_dt, labels_dt, module=model_test)
         loss_tr = wrapped[0]
         grads_tr = wrapped[1:]
 
@@ -401,11 +418,11 @@ class TestMetadataPropagation(unittest.TestCase):
     def test_backward_nodes_have_seq_nr(self):
         """Verify that backward FX nodes get seq_nr metadata via patched autograd.grad."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        train_step = make_train_step(get_loss)
+        train_step = make_train_step(model, get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = trace_train_step(train_step)(model, tokens, labels)
+        traced = minimal_fx_tracer(train_step, module=model)(tokens, labels)
 
         # Collect seq_nr values from all call_function nodes
         seq_nrs = []
@@ -429,11 +446,11 @@ class TestMetadataPropagation(unittest.TestCase):
         """Verify _copy_fwd_metadata_to_bw_nodes copies custom metadata to bwd nodes."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
 
-        train_step = make_train_step(get_loss)
+        train_step = make_train_step(model, get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = trace_train_step(train_step)(model, tokens, labels)
+        traced = minimal_fx_tracer(train_step, module=model)(tokens, labels)
         gm = traced.gm
 
         # Manually set custom metadata on the first fwd node for each seq_nr
@@ -484,11 +501,11 @@ class TestMetadataPropagation(unittest.TestCase):
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        train_step = make_train_step(get_loss)
+        train_step = make_train_step(model, get_loss)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         labels = torch.randint(0, 256, (2, 32), device=self.DEVICE)
 
-        traced = trace_train_step(train_step)(model, tokens, labels)
+        traced = minimal_fx_tracer(train_step, module=model)(tokens, labels)
 
         # Find backward nodes: nodes sharing a seq_nr with an earlier (forward) node
         seq_nr_first: dict[int, torch.fx.Node] = {}
@@ -544,11 +561,11 @@ class TestTraceModels(unittest.TestCase):
         num_steps=5,
         lr=1e-3,
     ):
-        train_step = make_train_step(get_loss)
+        train_step = make_train_step(model_ref, get_loss)
 
         maybe_register_blockmask_pytree_node()
-        traced: TracedResult = trace_train_step(train_step)(
-            model_ref, *fwd_args, labels
+        traced: TracedResult = minimal_fx_tracer(train_step, module=model_ref)(
+            *fwd_args, labels
         )
 
         if check_collective_ops:
@@ -581,7 +598,7 @@ class TestTraceModels(unittest.TestCase):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            wrapped = run_traced_train_step(traced, model_test, *fwd_args, labels)
+            wrapped = run_traced(traced, *fwd_args, labels, module=model_test)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):
@@ -776,9 +793,11 @@ class TestTraceModels(unittest.TestCase):
             }
         )(FlexAttention.forward)
         try:
-            train_step = make_train_step(get_loss)
+            train_step = make_train_step(model, get_loss)
             maybe_register_blockmask_pytree_node()
-            traced = trace_train_step(train_step)(model, tokens, block_mask, labels)
+            traced = minimal_fx_tracer(train_step, module=model)(
+                tokens, block_mask, labels
+            )
         finally:
             FlexAttention.forward = orig_forward
 
@@ -895,10 +914,10 @@ class TestTraceModels(unittest.TestCase):
         }
         maybe_register_blockmask_pytree_node()
 
-        def forward(model, tokens, attn_masks):
+        def forward(tokens, attn_masks):
             return model(tokens, attn_masks)
 
-        traced = trace_train_step(forward)(model, tokens, attn_masks)
+        traced = minimal_fx_tracer(forward, module=model)(tokens, attn_masks)
 
         flex_nodes = [
             n
@@ -986,10 +1005,10 @@ class TestTraceFSDP(FSDPTest):
         else:
             fwd_args = (tokens,)
 
-        train_step = make_train_step(get_loss)
+        train_step = make_train_step(model_ref, get_loss)
 
         maybe_register_blockmask_pytree_node()
-        traced = trace_train_step(train_step)(model_ref, *fwd_args, labels)
+        traced = minimal_fx_tracer(train_step, module=model_ref)(*fwd_args, labels)
 
         ag = sum(
             1
@@ -1018,7 +1037,7 @@ class TestTraceFSDP(FSDPTest):
             opt_ref.step()
             opt_ref.zero_grad()
 
-            wrapped = run_traced_train_step(traced, model_test, *fwd_args, labels)
+            wrapped = run_traced(traced, *fwd_args, labels, module=model_test)
             loss_tr = wrapped[0]
             grads_tr = wrapped[1:]
             for p, g in zip(model_test.parameters(), grads_tr, strict=True):

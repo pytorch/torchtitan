@@ -151,8 +151,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         torchrun training with --compile.precompile_artifact_dir.
         """
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-            run_traced_train_step,
-            trace_train_step,
+            minimal_fx_tracer,
+            run_traced,
         )
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
@@ -168,7 +168,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         self.annotate_model(model)
         loss_fn = cross_entropy_loss
-        fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+        fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -177,8 +177,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         extra_kwargs: dict[str, torch.Tensor] = {}
 
         # Step 1: Trace the graph
-        traced_result = trace_train_step(fwd_bwd_fn)(
-            model,
+        traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
             self.inputs,
             self.labels,
             global_valid_tokens,
@@ -236,14 +235,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            outputs = run_traced_train_step(
+            outputs = run_traced(
                 loaded_result,
-                model,
                 self.inputs,
                 self.labels,
                 global_valid_tokens,
                 extra_inputs,
                 extra_kwargs,
+                module=model,
             )
             loss = outputs[0]
             grads = outputs[1:]

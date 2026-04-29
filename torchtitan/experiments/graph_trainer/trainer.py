@@ -16,8 +16,8 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    run_traced_train_step,
-    trace_train_step,
+    minimal_fx_tracer,
+    run_traced,
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import (
@@ -27,15 +27,15 @@ from torchtitan.experiments.graph_trainer.passes import (
 from torchtitan.trainer import Trainer
 
 
-def make_fwd_bwd_step(loss_fn):
+def make_fwd_bwd_step(model, loss_fn):
     """Return a plain function that traces the entire fwd+loss+bwd step.
 
-    ``loss_fn`` is captured in the closure so it is not a graph input.
+    ``model`` and ``loss_fn`` are captured in the closure so neither shows up
+    as a graph input. Pass ``model`` through ``minimal_fx_tracer(fn, module=model)``
+    to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(
-        model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
-    ):
+    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
         loss = loss_fn(pred, labels) / global_valid_tokens
         params = [
@@ -146,11 +146,10 @@ class GraphTrainer(Trainer):
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(model)
             else:
-                fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
+                fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
                 maybe_register_blockmask_pytree_node()
                 with self.train_context():
-                    self._traced_step = trace_train_step(fwd_bwd_fn)(
-                        model,
+                    self._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model)(
                         inputs,
                         labels,
                         global_valid_tokens,
@@ -170,14 +169,14 @@ class GraphTrainer(Trainer):
                     compile_config=self.config.compile,
                 )
         with self.train_context():
-            outputs = run_traced_train_step(
+            outputs = run_traced(
                 self._traced_step,
-                model,
                 inputs,
                 labels,
                 global_valid_tokens,
                 extra_inputs,
                 extra_kwargs,
+                module=model,
             )
         loss = outputs[0]
         grads = outputs[1:]

@@ -301,7 +301,7 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
+    from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         precompile_fx_trace_save,
@@ -310,7 +310,7 @@ def _precompile_aot_fx_trace(
 
     loss_fn = config.loss.build(compile_config=compile_config)
 
-    fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+    fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
     seq_len = config.training.seq_len
     local_batch_size = config.training.local_batch_size
@@ -393,8 +393,7 @@ def _precompile_aot_fx_trace(
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with loss_parallel_ctx:
-        traced_result = trace_train_step(fwd_bwd_fn)(
-            model,
+        traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
             dummy_inputs,
             dummy_labels,
             dummy_global_valid_tokens,

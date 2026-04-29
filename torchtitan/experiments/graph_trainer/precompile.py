@@ -425,7 +425,7 @@ def precompile_fx_trace_load(
     """Load a precompiled aot_fx_trace artifact.
 
     Returns a TracedResult with the deserialized GraphModule and
-    metadata. The caller uses this with run_traced_train_step to
+    metadata. The caller uses this with run_traced(..., module=model) to
     execute the graph (same path as non-precompiled aot_fx_trace).
 
     DeviceMesh objects are graph inputs (placeholders), not baked-in

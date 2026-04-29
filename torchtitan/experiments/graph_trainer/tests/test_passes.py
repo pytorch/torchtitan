@@ -26,10 +26,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    trace_train_step,
-)
+from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
 from torchtitan.experiments.graph_trainer.passes import (
     _make_default_memory_policy,
     apply_sac_pass,
@@ -1080,16 +1077,16 @@ class TestAnnotateModuleFqns(TestCase):
     """Unit tests for annotate_module_fqns and insert_kernel_annotations_pass."""
 
     def _trace_and_get_fqns(self, model, *args):
-        """Trace fwd+bwd with trace_train_step and return module_fqn annotations."""
+        """Trace fwd+bwd via minimal_fx_tracer and return module_fqn annotations."""
 
-        def fwd_step(model, *inputs):
+        def fwd_step(*inputs):
             pred = model(inputs[0])
             loss = pred.sum()
             params = [p for p in model.parameters() if p.requires_grad]
             grads = torch.autograd.grad(loss, params)
             return [loss] + list(grads)
 
-        traced = trace_train_step(fwd_step)(model, *args)
+        traced = minimal_fx_tracer(fwd_step, module=model)(*args)
         fqns = set()
         for node in traced.gm.graph.nodes:
             fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
@@ -1098,7 +1095,7 @@ class TestAnnotateModuleFqns(TestCase):
         return fqns
 
     def test_annotate_transformer_like_model(self):
-        """Module FQNs survive trace_train_step for a transformer-like model
+        """Module FQNs survive minimal_fx_tracer for a transformer-like model
         with distinct submodule classes (norm, attention, ffn)."""
 
         class Norm(torch.nn.Module):
@@ -1166,8 +1163,8 @@ class TestAnnotateModuleFqns(TestCase):
     def test_same_class_instances_get_distinct_fqns(self):
         """Two parameterless instances of the same class get distinct fqns.
 
-        Uses minimal_fx_tracer directly (not trace_train_step) because
-        parameterless models cannot produce gradients via autograd.grad.
+        Calls minimal_fx_tracer without ``module=`` because parameterless
+        models cannot produce gradients via autograd.grad.
         """
 
         class Block(torch.nn.Module):
@@ -1186,10 +1183,10 @@ class TestAnnotateModuleFqns(TestCase):
         model = Model()
         annotate_module_fqns(model)
 
-        def fwd_only(state, x):
+        def fwd_only(x):
             return model(x)
 
-        traced = minimal_fx_tracer(fwd_only)({}, torch.randn(4))
+        traced = minimal_fx_tracer(fwd_only)(torch.randn(4))
         fqns = set()
         for node in traced.gm.graph.nodes:
             fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
