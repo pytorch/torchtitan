@@ -15,10 +15,10 @@ from collections import defaultdict
 import torch
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
-from torchtitan.experiments.graph_trainer.passes import (
+from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _is_backward_node,
+    _MODULE_FQN,
     _NOT_IN_LAYERS,
 )
 from torchtitan.tools.logging import logger
@@ -33,7 +33,9 @@ _PASSTHROUGH_TARGETS = frozenset(
 
 def _resolve_producing_op(node: torch.fx.Node) -> torch.fx.Node:
     """Walk through getitem/wait_tensor to find the real producing op."""
-    while node.target in _PASSTHROUGH_TARGETS:
+    seen: set[torch.fx.Node] = set()
+    while node.target in _PASSTHROUGH_TARGETS and node not in seen:
+        seen.add(node)
         parent = node.args[0]
         if not isinstance(parent, torch.fx.Node) or parent.op != "call_function":
             break
@@ -55,15 +57,24 @@ def _format_shape(val: object) -> str:
     return "?"
 
 
+_SYMBOLIC_NBYTES = -1
+
+
 def _tensor_nbytes(val: object) -> int:
+    """Return byte count, or ``_SYMBOLIC_NBYTES`` for symbolic shapes."""
     if isinstance(val, torch.Tensor):
         try:
-            # int() can fail on symbolic shapes (e.g. MoE token dispatch)
             return int(val.numel() * val.element_size())
         except Exception:
-            return 0
+            return _SYMBOLIC_NBYTES
     if isinstance(val, (tuple, list)):
-        return sum(_tensor_nbytes(v) for v in val)
+        total = 0
+        for v in val:
+            n = _tensor_nbytes(v)
+            if n == _SYMBOLIC_NBYTES:
+                return _SYMBOLIC_NBYTES
+            total += n
+        return total
     return 0
 
 
@@ -80,6 +91,8 @@ def _tensor_dtype(val: object) -> str:
 
 
 def _format_bytes(nbytes: int) -> str:
+    if nbytes == _SYMBOLIC_NBYTES:
+        return "symbolic"
     if nbytes >= 1 << 30:
         return f"{nbytes / (1 << 30):.2f} GiB"
     if nbytes >= 1 << 20:
@@ -95,6 +108,7 @@ _REPO_ROOT = "torchtitan/"
 def _parse_stack_frames(
     stack_trace: str,
 ) -> list[tuple[str, str, str]]:
+    # Assumes CPython traceback format: 'File "path", line N\n  code'
     raw_lines = stack_trace.strip().splitlines()
     frames = []
     i = 0
@@ -155,8 +169,7 @@ _POLICY_SHORT_NAMES = {
 def _format_policy(node: torch.fx.Node) -> str:
     policy = node.meta.get("recompute")
     if policy is None:
-        # Untagged activations are kept in GPU memory by default.
-        return _POLICY_SHORT_NAMES[CheckpointPolicy.MUST_SAVE]
+        return "SAVE*"
     return _POLICY_SHORT_NAMES.get(policy, str(policy))
 
 
@@ -277,20 +290,24 @@ def log_activation_memory_policy(
     sep = "-" * len(header)
     lines = [sep, header, sep]
 
+    def _sum_concrete_bytes(acts: list[dict]) -> int:
+        return sum(a["nbytes"] for a in acts if a["nbytes"] != _SYMBOLIC_NBYTES)
+
     total_activations = 0
     total_bytes = 0
 
     # Print non-layer activations
     if _NOT_IN_LAYERS in activations_by_layer:
         other_acts = activations_by_layer[_NOT_IN_LAYERS]
-        other_bytes = sum(act["nbytes"] for act in other_acts)
+        other_bytes = _sum_concrete_bytes(other_acts)
         lines.append(
             f"[non-layer] ({len(other_acts)} activations, {_format_bytes(other_bytes)})"
         )
         for i, act in enumerate(other_acts):
             lines.append(_fmt_row(i, act, act["fqn"]))
             total_activations += 1
-            total_bytes += act["nbytes"]
+            if act["nbytes"] != _SYMBOLIC_NBYTES:
+                total_bytes += act["nbytes"]
         lines.append("")
 
     # Print consolidated layer groups
@@ -299,7 +316,7 @@ def log_activation_memory_policy(
     ):
         representative = activations_by_layer[layer_ids[0]]
         num_layers = len(layer_ids)
-        layer_bytes = sum(act["nbytes"] for act in representative)
+        layer_bytes = _sum_concrete_bytes(representative)
 
         if num_layers == 1:
             label = f"[layer {layer_ids[0]}]"
@@ -328,6 +345,8 @@ def log_activation_memory_policy(
         f"{_format_bytes(total_bytes)} across {scope}"
     )
     lines.append(sep)
+
+    lines.append("SAVE* = untagged (kept in GPU memory by default)")
 
     logger.info(
         "Activation listing (forward nodes with backward consumers):\n"
