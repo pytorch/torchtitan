@@ -199,23 +199,17 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    comm_backend: str | None = None,
+    comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
     Returns the right Config subclass based on comm_backend:
-    - None: LocalTokenDispatcher.Config (no EP communication)
-    - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
+    - "standard": AllToAllTokenDispatcher.Config (falls back to local
+      dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
     """
-    if comm_backend is None:
-        return LocalTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-        )
-    elif comm_backend in ("deepep", "hybridep"):
+    if comm_backend in ("deepep", "hybridep"):
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
@@ -232,7 +226,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of None, 'standard', 'deepep', 'hybridep'."
+            "Must be one of 'standard', 'deepep', 'hybridep'."
         )
 
 
@@ -245,7 +239,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    comm_backend: str | None = None,
+    comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
