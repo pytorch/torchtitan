@@ -155,7 +155,8 @@ _POLICY_SHORT_NAMES = {
 def _format_policy(node: torch.fx.Node) -> str:
     policy = node.meta.get("recompute")
     if policy is None:
-        return ""
+        # Untagged activations are kept in GPU memory by default.
+        return _POLICY_SHORT_NAMES[CheckpointPolicy.MUST_SAVE]
     return _POLICY_SHORT_NAMES.get(policy, str(policy))
 
 
@@ -206,7 +207,7 @@ def _strip_layer_prefix(fqn: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def list_activations_pass(
+def log_activation_memory_policy(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """List all activation nodes whose outputs are consumed by backward nodes.

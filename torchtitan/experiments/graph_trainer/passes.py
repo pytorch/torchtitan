@@ -146,10 +146,6 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
-    from torchtitan.experiments.graph_trainer.list_activations import (
-        list_activations_pass,
-    )
-
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -159,7 +155,6 @@ def compile_time_passes(
             tag_with_memory_policy_pass,
             config=config,
         ),
-        list_activations_pass,
         # TODO: currently either SAC or CPU offload is used, not both at the
         # same time. Composability between these two passes is untested.
         apply_cpu_offload_pass,
@@ -830,6 +825,13 @@ def tag_with_memory_policy_pass(
         tag_all_offloadable_activations(gm)
     else:
         raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
+
+    if config.compile.debug_graph_passes:
+        from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
+            log_activation_memory_policy,
+        )
+
+        log_activation_memory_policy(gm)
     return gm
 
 
