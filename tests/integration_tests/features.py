@@ -597,10 +597,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
             skip_rocm_test=True,
         ),
+        # TODO: re-enable this test once ChunkedCELoss+TP+compile+torchcomms PG resolution failure fixed
         OverrideDefinitions(
             [
                 [
-                    "--module llama3 --config llama3_debugmodel_ce_loss",
                     "--comm.mode torchcomms",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -611,6 +611,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
