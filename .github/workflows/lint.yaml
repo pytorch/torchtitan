@@ -29,6 +29,24 @@ jobs:
       - name: Update pip
         run: python -m pip install --upgrade pip
 
+      - name: Install Lychee (Latest Release)
+        run: |
+          # Query GitHub API for the latest release tag
+          LATEST_TAG=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | jq -r .tag_name)
+          echo "Installing Lychee version: $LATEST_TAG"
+
+          URL="https://github.com/lycheeverse/lychee/releases/download/${LATEST_TAG}/lychee-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Load the archive, extract into temp folder, move the binary, delete the rest
+          mkdir -p lychee_install
+          curl -sLO "$URL"
+          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install --strip-components=1
+          sudo mv lychee_install/lychee /usr/local/bin/
+          rm -rf lychee_install "lychee-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Verify installation
+          lychee --version
+
       - name: Install dependencies and lint utilities
         run: |
           python -m pip install -r requirements.txt -r requirements-dev.txt
@@ -40,4 +58,20 @@ jobs:
         uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v45.0.6
 
       - name: Lint modified files
+        env:
+          # External-link checking via lychee is flaky on transient network
+          # failures and runs in the nightly Link Check workflow. We still run
+          # lychee on PRs in the next step, but in --offline mode for in-repo
+          # link validation only.
+          SKIP: lychee-link-checker
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
+
+      - name: Check in-repo links with Lychee (offline)
+        run: |
+          FILES=$(echo "${{ steps.changed-files.outputs.all_changed_files }}" \
+            | tr ' ' '\n' | grep -E '\.(md|py)$' || true)
+          if [ -z "$FILES" ]; then
+            echo "No modified markdown/python files; skipping lychee."
+            exit 0
+          fi
+          lychee --offline --no-progress --root-dir=. $FILES
