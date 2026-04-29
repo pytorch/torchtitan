@@ -27,7 +27,7 @@ import math
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 import torchstore as ts
@@ -416,11 +416,15 @@ class RLTrainer(Configurable):
             generator_dtype=config.generator.model_dtype,
         )
 
+        # Generator uses RL-specific parallelize (TP-only, no FSDP, vLLM-compatible)
+        from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+
+        gen_model_spec = replace(config.model_spec, parallelize_fn=parallelize_qwen3)
         self.generator = generator_mesh.spawn(
             "generator",
             VLLMGenerator,
             config.generator,
-            model_spec=config.model_spec,
+            model_spec=gen_model_spec,
             model_path=config.hf_assets_path,
         )
 

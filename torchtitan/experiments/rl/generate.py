@@ -36,6 +36,12 @@ def generate():
     gen_config = config.generator
     model_path = config.hf_assets_path
 
+    # Patch model_spec to use the RL-specific parallelize function.
+    # TODO: Switch to canonical Qwen3 parallel plan
+    from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
+
+    config.model_spec.parallelize_fn = parallelize_qwen3
+
     # Register TorchTitan model with vLLM before engine creation
     from torchtitan.experiments.rl.models.vllm_registry import (
         register_model_to_vllm_model_registry,

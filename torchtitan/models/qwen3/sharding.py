@@ -17,7 +17,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -44,9 +43,7 @@ def set_qwen3_sharding_config(
 
 
 def _set_qwen3_layer_sharding(
-    layer_cfg: "Qwen3TransformerBlock.Config",
-    *,
-    enable_sp: bool,
+    layer_cfg: "Qwen3TransformerBlock.Config", *, enable_sp: bool
 ) -> None:
     """Set sharding on one Qwen3 transformer layer."""
     attention = layer_cfg.attention
@@ -58,7 +55,6 @@ def _set_qwen3_layer_sharding(
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(attention.inner_attention)
 
     # QK norms: shard on head dim (dim=2) — independent of SP.
     if attention.qk_norm is not None:

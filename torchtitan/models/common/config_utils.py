@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
     GQAttention,
+    LocalMapInnerAttention,
     QKVLinear,
     ScaledDotProductAttention,
     VarlenAttention,
@@ -30,12 +31,11 @@ from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
 )
-from torchtitan.protocols.module import Module
 
 
 def get_attention_config(
     backend: str,
-) -> tuple[Module.Config, str]:
+) -> tuple[LocalMapInnerAttention.Config, str]:
     """Map backend string to (inner_attention config, mask_type)."""
     if backend == "sdpa":
         return ScaledDotProductAttention.Config(), "causal"
@@ -66,7 +66,7 @@ def make_gqa_config(
     n_heads: int,
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
-    inner_attention: Module.Config,
+    inner_attention: LocalMapInnerAttention.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,

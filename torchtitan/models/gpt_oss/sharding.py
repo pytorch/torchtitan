@@ -14,7 +14,6 @@ from torchtitan.models.common.decoder_sharding import (
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
-    set_gqa_inner_attention_local_map,
     set_qkv_linear_sharding,
 )
 from torchtitan.models.gpt_oss.model import Attention
@@ -73,6 +72,3 @@ def _set_gpt_oss_layer_sharding(
     )
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
-
-    # GPT-OSS flash attention always returns (output, lse).
-    set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)

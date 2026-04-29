@@ -16,7 +16,6 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
@@ -84,8 +83,6 @@ def _set_deepseek_v3_layer_sharding(
 
     attention.wkv_b.sharding_config = colwise_config()
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
-
-    set_gqa_inner_attention_local_map(attention.inner_attention)
 
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:

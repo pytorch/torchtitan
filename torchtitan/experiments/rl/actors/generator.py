@@ -144,29 +144,14 @@ class VLLMGenerator(Actor, Configurable):
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # Generator only supports TP. vLLM handles its own parallelism
-            # and we only apply TP via the core parallelize function.
-            p = self.parallelism
-            if p.data_parallel_replicate_degree != 1:
-                raise ValueError(
-                    f"Generator does not support data parallel replication, "
-                    f"got dp_replicate={p.data_parallel_replicate_degree}"
-                )
-            if p.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support pipeline parallelism, "
-                    f"got pp={p.pipeline_parallel_degree}"
-                )
-            if p.context_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support context parallelism, "
-                    f"got cp={p.context_parallel_degree}"
-                )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
-                )
+            assert self.parallelism.data_parallel_shard_degree in (1, -1), (
+                f"Generator does not support data parallel sharding, "
+                f"got dp_shard={self.parallelism.data_parallel_shard_degree}"
+            )
+            assert self.parallelism.data_parallel_replicate_degree == 1, (
+                f"Generator does not support data parallel replication, "
+                f"got dp_replicate={self.parallelism.data_parallel_replicate_degree}"
+            )
 
     def __init__(
         self,
