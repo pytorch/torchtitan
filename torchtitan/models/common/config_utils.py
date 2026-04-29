@@ -199,7 +199,7 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    comm_backend: str = "standard",
+    comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
@@ -239,7 +239,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    comm_backend: str | None = None,
+    comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
