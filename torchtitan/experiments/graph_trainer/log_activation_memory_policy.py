@@ -55,6 +55,10 @@ def _format_shape(val: object) -> str:
     if isinstance(val, (tuple, list)):
         parts = [_format_shape(v) for v in val]
         return "(" + ", ".join(parts) + ")"
+    if isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+        return "SymInt"
+    if isinstance(val, (int, float, bool)):
+        return "Scalar"
     return "?"
 
 
@@ -83,11 +87,15 @@ def _tensor_dtype(val: object) -> str:
     if isinstance(val, torch.Tensor):
         return str(val.dtype).replace("torch.", "")
     if isinstance(val, (tuple, list)):
-        dtypes = {_tensor_dtype(v) for v in val} - {"?"}
+        dtypes = {_tensor_dtype(v) for v in val} - {"?", "Scalar", "SymInt"}
         if len(dtypes) == 1:
             return dtypes.pop()
         if dtypes:
             return "/".join(sorted(dtypes))
+    if isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+        return "SymInt"
+    if isinstance(val, (int, float, bool)):
+        return "Scalar"
     return "?"
 
 
@@ -243,8 +251,8 @@ def log_activation_memory_policy(
         if num_bwd_users == 0:
             continue
 
-        layer_id = _get_layer_id(node)
         val = node.meta.get("val")
+        layer_id = _get_layer_id(node)
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
 
         producer = _resolve_producing_op(node)
@@ -273,7 +281,7 @@ def log_activation_memory_policy(
     def _fmt_target(act: dict) -> str:
         aten = act["original_aten"]
         if aten:
-            return f"{act['target']}  (← {aten})"
+            return f"{act['target']}  (<- {aten})"
         return act["target"]
 
     def _fmt_row(idx: int, act: dict, submodule: str) -> str:
@@ -350,7 +358,7 @@ def log_activation_memory_policy(
     lines.append("SAVE* = untagged (kept in GPU memory by default)")
 
     output = "\n".join(lines)
-    logger.info(
+    logger.debug(
         "Activation listing (forward nodes with backward consumers):\n" + output
     )
 
