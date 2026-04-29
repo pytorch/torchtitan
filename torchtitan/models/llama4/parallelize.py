@@ -37,6 +37,11 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.full_dtensor import (
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+    validate_config,
+)
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
@@ -74,21 +79,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
-
-    tp_mesh = None
-    if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
-
     # Check if using DeepEP/HybridEP for MoE communication
     comm_backend = parallelism.expert_parallel_comm_backend
     if comm_backend in ("deepep", "hybridep"):
@@ -103,16 +93,24 @@ def parallelize_llama(
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            etp_mesh=parallel_dims.get_optional_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            comm_backend=comm_backend,
-            enable_sp=True,
-        )
+    if parallelism.full_dtensor:
+        validate_config(parallel_dims, model)
+        model.parallelize(parallel_dims)
+    else:
+        # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+        # runs inside the local_map boundary on local tensors.
+        if parallel_dims.cp_enabled:
+            apply_cp_to_forward(
+                # pyrefly: ignore [missing-attribute, not-callable]
+                [block.attention.inner_attention for block in model.layers.values()],
+                parallel_dims.get_mesh("cp"),
+            )
+        # ``model.parallelize`` walks every ``Module`` and applies its
+        # ``sharding_config`` (dense + MoE). Fires under TP or EP.
+        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            model.parallelize(parallel_dims)
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -129,19 +127,28 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-
-    edp_mesh = None
-    if parallel_dims.ep_enabled:
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
+    if parallelism.full_dtensor:
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+            model, parallel_dims, parallelism.full_dtensor
         )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(
+            parallel_dims, parallelism.full_dtensor
+        )
+    else:
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh_dims = None
+        edp_mesh = None
+        edp_mesh_dims = None
+        if parallel_dims.ep_enabled:
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
     apply_fsdp(
         model,
@@ -153,6 +160,8 @@ def parallelize_llama(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -173,6 +182,8 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
+    dp_mesh_dims: "Any" = None,
+    edp_mesh_dims: "Any" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -180,6 +191,8 @@ def apply_fsdp(
     Args:
         model (nn.Module): The model to apply data parallelism to.
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+            Under full_dtensor, this is the dense SPMD mesh; under
+            non-full_dtensor, the conventional dp_mesh.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
@@ -189,7 +202,15 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
-
+        ep_degree: Expert parallel degree (>= 1).
+        edp_mesh: Routed-expert FSDP mesh. Under full_dtensor, the
+            sparse SPMD mesh; under non-full_dtensor, the conventional
+            efsdp / (dp_replicate, efsdp) mesh.
+        dp_mesh_dims: When provided (full_dtensor path), tells FSDP which
+            axes of the dense SPMD mesh are data-parallel. ``None`` under
+            non-full_dtensor.
+        edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD
+            mesh used by routed experts.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -197,6 +218,8 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -289,8 +312,23 @@ def apply_fsdp(
                 )
 
                 assert edp_mesh is not None
-                edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
-                dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
+                # Under full_dtensor, the meshes are SPMD meshes spanning
+                # multiple DP axes; pass dp_mesh_dims + spmd_mesh so FSDP2
+                # knows which axes are data-parallel. Under non-full_dtensor,
+                # dp_mesh_dims/edp_mesh_dims are None and FSDP uses the
+                # legacy single-axis (mesh, shard_mesh_dim=0) interpretation.
+                edp_mesh_info = FSDPMeshInfo(
+                    mesh=edp_mesh,
+                    shard_mesh_dim=0,
+                    dp_mesh_dims=edp_mesh_dims,
+                    spmd_mesh=edp_mesh if edp_mesh_dims is not None else None,
+                )
+                dp_mesh_info = FSDPMeshInfo(
+                    mesh=dp_mesh,
+                    shard_mesh_dim=0,
+                    dp_mesh_dims=dp_mesh_dims,
+                    spmd_mesh=dp_mesh if dp_mesh_dims is not None else None,
+                )
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
@@ -476,13 +514,10 @@ def apply_moe_ep_tp(
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None:
-                if isinstance(dispatcher, AllToAllTokenDispatcher):
-                    dispatcher.sp_size = tp_mesh.size()
-                    # Use _sym_get_coordinate so the rank is a SymInt
-                    # under CooR precompile instead of a concrete int
-                    # that gets baked into the FX graph.
-                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
+            if tp_mesh is not None and isinstance(dispatcher, AllToAllTokenDispatcher):
+                # ``sp_size``/``sp_rank`` are read-only properties off
+                # ``tp_mesh``; install via ``_wire_meshes`` (PR7-era contract).
+                dispatcher._wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
         else:
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
