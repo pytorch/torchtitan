@@ -13,6 +13,7 @@ import re
 from collections import defaultdict
 
 import torch
+from torch._logging import trace_structured
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -348,9 +349,19 @@ def log_activation_memory_policy(
 
     lines.append("SAVE* = untagged (kept in GPU memory by default)")
 
+    output = "\n".join(lines)
     logger.info(
-        "Activation listing (forward nodes with backward consumers):\n"
-        + "\n".join(lines)
+        "Activation listing (forward nodes with backward consumers):\n" + output
+    )
+
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": "activation_memory_policy",
+            "encoding": "string",
+        },
+        payload_fn=lambda: output,
+        expect_trace_id=False,
     )
 
     return gm
