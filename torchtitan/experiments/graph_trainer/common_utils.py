@@ -25,6 +25,14 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
 
 
+def _is_recomputed_node(node: torch.fx.Node) -> bool:
+    # TODO: Workaround — recomputed nodes (from SAC) should carry
+    # autograd_backward=True but remat_using_tags_for_fwd_loss_bwd_graph
+    # copies metadata from the original forward node. Fix upstream to
+    # tag recomputed nodes with autograd_backward=True.
+    return node.name.endswith("_recomputed")
+
+
 def _get_layer_id(node: torch.fx.Node) -> int:
     """Extract the layer index from the node's module_fqn metadata.
 

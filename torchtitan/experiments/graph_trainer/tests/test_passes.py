@@ -457,8 +457,8 @@ class TestBucketingPrefetchOrder(FSDPTest):
                 layer_ids.append(found_lid)
         return layer_ids
 
-    def test_forward_allgather_prefetch_follows_layer_order(self):
-        """Bucketed forward all_gather starts must appear in layer order 0→N."""
+    def _run_and_get_layer_ids(self, fsdp_reshard_after_forward: str):
+        """Run a single forward+backward step and return bucketed AG layer ids."""
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
         from torchtitan.experiments.graph_trainer.llama3 import (
             model_registry as llama3_model_registry,
@@ -513,6 +513,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             model_config,
             GraphTrainer,
             tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
+            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
         )
 
         inputs = torch.randint(
@@ -535,14 +536,55 @@ class TestBucketingPrefetchOrder(FSDPTest):
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)
         self.assertGreater(len(layer_ids), 0, "No layer all_gather nodes found")
+        return layer_ids
 
-        # Forward layer order must be monotonically non-decreasing
+    def test_forward_allgather_prefetch_follows_layer_order(self):
+        """Without reshard-after-forward, all all_gathers are in forward and
+        must appear in non-decreasing layer order 0 → N."""
+        layer_ids = self._run_and_get_layer_ids(fsdp_reshard_after_forward="never")
+
         for i in range(1, len(layer_ids)):
             self.assertGreaterEqual(
                 layer_ids[i],
                 layer_ids[i - 1],
                 f"Forward all_gather prefetch order violated: "
                 f"layer {layer_ids[i]} before layer {layer_ids[i - 1]} "
+                f"(full order: {layer_ids})",
+            )
+
+    def test_allgather_prefetch_with_reshard_after_forward(self):
+        """With reshard-after-forward, backward also issues all_gathers.
+        The graph-order sequence must be forward (0 → N) then backward (N → 0)."""
+        layer_ids = self._run_and_get_layer_ids(fsdp_reshard_after_forward="always")
+
+        # Split forward (ascending) and backward (descending) at the peak.
+        peak = max(range(len(layer_ids)), key=lambda i: layer_ids[i])
+        forward_ids = layer_ids[: peak + 1]
+        backward_ids = layer_ids[peak:]
+
+        # Backward all_gathers should exist when reshard-after-forward is on.
+        self.assertGreater(
+            len(backward_ids),
+            1,
+            f"Expected backward all_gathers with reshard-after-forward, "
+            f"got order: {layer_ids}",
+        )
+
+        for i in range(1, len(forward_ids)):
+            self.assertGreaterEqual(
+                forward_ids[i],
+                forward_ids[i - 1],
+                f"Forward all_gather prefetch order violated: "
+                f"layer {forward_ids[i]} before layer {forward_ids[i - 1]} "
+                f"(full order: {layer_ids})",
+            )
+
+        for i in range(1, len(backward_ids)):
+            self.assertLessEqual(
+                backward_ids[i],
+                backward_ids[i - 1],
+                f"Backward all_gather prefetch order violated: "
+                f"layer {backward_ids[i]} after layer {backward_ids[i - 1]} "
                 f"(full order: {layer_ids})",
             )
 
