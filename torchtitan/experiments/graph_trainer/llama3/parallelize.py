@@ -12,11 +12,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_module_fqns,
-    apply_graph_ac,
-)
+from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
@@ -65,10 +61,6 @@ def parallelize_llama(
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
-
-    if ac_config.mode != "none":
-        apply_graph_ac(compile_config, ac_config)
 
     # apply data parallel
     if (

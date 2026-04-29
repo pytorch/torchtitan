@@ -197,8 +197,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, AllToAllDispatchMetadata]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata
+    ]:
         """Reorder tokens, then all-to-all dispatch to expert-parallel ranks.
+
+        When ep_mesh is None (EP=1), falls back to local dispatch — no
+        all-to-all communication, just local token reordering with padding.
 
         When sp_size > 1 (sequence parallel), inputs are first split along
         the token dim so each EP rank processes a disjoint subset.
@@ -211,12 +216,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Returns:
             routed_input: (R, dim) tokens in expert-major order for local experts
             num_tokens_per_expert_local: (num_local_experts,) token counts
-            metadata: AllToAllDispatchMetadata for combine()
+            metadata: dispatch metadata for combine()
         """
-        assert self.ep_mesh is not None, (
-            "ep_mesh must be set before dispatch. "
-            "ExpertParallel._partition_fn() should set it."
-        )
+        # EP=1: fall back to local dispatch (no all-to-all needed)
+        if self.ep_mesh is None:
+            return super().dispatch(x, top_scores, selected_experts_indices)
+
         ep_size = self.ep_mesh.size()
 
         if self.sp_size > 1:
@@ -403,14 +408,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Returns:
             (num_tokens, dim) combined output with shared_experts added.
         """
+        # EP=1: fall back to local combine (no all-to-all needed)
+        if self.ep_mesh is None:
+            return super().combine(routed_output, metadata, x, shared_experts)
+
         # Reverse expert-major reordering
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
-        )
-
-        assert self.ep_mesh is not None, (
-            "ep_mesh must be set before combine. "
-            "ExpertParallel._partition_fn() should set it."
         )
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
@@ -452,14 +456,16 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
-    """Token dispatcher for EP>1 with token group padding for quantized grouped GEMMs.
+    """Token dispatcher with token group padding for quantized grouped GEMMs.
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
     reorder tokens into expert-major order and pad each expert's token group to
     a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
     quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
 
-    ep_mesh is set by ExpertParallel / ExpertTensorParallel._apply().
+    Requires EP to be enabled (ep_mesh must be set). Raises ValueError
+    if ep_mesh is None, since quantized grouped GEMMs need padded token
+    groups which are only produced by the EP permute_and_pad path.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -469,6 +475,14 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.pad_multiple = config.pad_multiple
+
+    def dispatch(self, x, top_scores, selected_experts_indices):
+        if self.ep_mesh is None:
+            raise ValueError(
+                "TorchAOTokenDispatcher requires expert parallelism (ep_mesh must be set). "
+                "Quantized grouped GEMMs need padded token groups, which requires EP>1. "
+            )
+        return super().dispatch(x, top_scores, selected_experts_indices)
 
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts

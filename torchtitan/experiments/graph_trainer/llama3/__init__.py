@@ -18,12 +18,8 @@ from .parallelize import parallelize_llama
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
 ) -> ModelSpec:
-    kwargs = dict(attn_backend=attn_backend)
-    if moe_comm_backend is not None:
-        kwargs["moe_comm_backend"] = moe_comm_backend
-    base = llama3_configs[flavor](**kwargs)
+    base = llama3_configs[flavor](attn_backend=attn_backend)
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )

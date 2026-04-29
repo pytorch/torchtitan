@@ -269,6 +269,28 @@ and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
 
+### Async Tensor Parallel (micro-pipeline TP)
+
+Enable with `--parallelism.enable_async_tensor_parallel`. This fuses
+all-gather + matmul and matmul + reduce-scatter into pipelined ops using
+symmetric memory (NVLink).
+
+**When to use:**
+- TP is enabled and the model has large hidden dimensions (shard_dim >= 1024
+  after TP split; e.g. llama3 8B dim=4096 with TP=4 gives shard=1024).
+- Below this threshold the pipeline chunking overhead exceeds the overlap
+  benefit — the pass silently skips small shards.
+- Requires NVLink-connected GPUs (H100, A100 NVSwitch, etc.).
+
+**Example:**
+```bash
+NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.tensor_parallel_degree=4 \
+    --parallelism.enable_async_tensor_parallel \
+    --dataloader.dataset c4_test
+```
+
 ### CUDA Graph Kernel Annotations
 
 The `insert_kernel_annotations_pass` labels CUDA graph kernels with their

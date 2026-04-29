@@ -24,23 +24,24 @@ from collections import defaultdict
 from collections.abc import Callable
 
 import torch
-from torch._functorch.aot_autograd import JointWithDescriptors
 from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
-from torch._inductor.output_code import OutputCode
 from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.graph_trainer.bucketing import (
+    joint_transformer_block_bucketing_reordering_pass,
+)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _is_backward_node,
-    _MODULE_FQN,
     _NOT_IN_LAYERS,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
@@ -62,6 +63,66 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
+
+aten = torch.ops.aten
+c10d = torch.ops._c10d_functional
+
+
+def normalize_view_ops_as_reshape(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Replace aten.view and aten._unsafe_view with aten.reshape.
+
+    Downstream passes expect aten.reshape.default for pattern matching.
+    """
+    view_targets = {aten.view.default, aten._unsafe_view.default}
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target in view_targets:
+            node.target = aten.reshape.default
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
+def async_tensor_parallel_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Pipeline TP collectives with matmuls via symmetric memory.
+
+    Fuses all-gather + matmul into ``symm_mem.fused_all_gather_matmul``
+    and matmul + reduce-scatter into
+    ``symm_mem.fused_matmul_reduce_scatter``.
+    """
+    import warnings
+
+    from torch._inductor.fx_passes.micro_pipeline_tp import micro_pipeline_tp_pass
+    from torch._inductor.fx_passes.overlap_scheduling import get_group_name
+    from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+    # Ensure symmetric memory is registered for every collective PG in
+    # the graph.  The upstream API is deprecated but the auto-registration
+    # it promises has not landed yet, so the explicit call is still needed.
+    collective_targets = {
+        c10d.all_gather_into_tensor.default,
+        c10d.reduce_scatter_tensor.default,
+    }
+    registered: set[str] = set()
+    for node in gm.graph.nodes:
+        if node.target not in collective_targets:
+            continue
+        pg = get_group_name(node)
+        if pg not in registered:
+            registered.add(pg)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                enable_symm_mem_for_group(pg)
+
+    micro_pipeline_tp_pass(gm.graph)
+    gm.graph.lint()
+    gm.recompile()
+    return gm
 
 
 def compile_time_passes(
@@ -89,6 +150,7 @@ def compile_time_passes(
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
+        normalize_view_ops_as_reshape,
         functools.partial(
             tag_with_memory_policy_pass,
             config=config,
@@ -99,33 +161,46 @@ def compile_time_passes(
         selective_activation_remat_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
-            fsdp_manual_buckets=get_default_transformer_block_buckets(n_layers),
+            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
         ),
+    ]
+    if config.parallelism.enable_async_tensor_parallel:
+        passes.append(async_tensor_parallel_pass)
+
+    inductor_compilation = config.compile.inductor_compilation
+    if inductor_compilation == "full":
+        # Compile the entire graph into optimized Triton kernels. Must
+        # be terminal — the FX graph is no longer authoritative after
+        # this pass, so custom_codegen_pass and
+        # insert_kernel_annotations_pass cannot follow.
+        passes.append(full_inductor_compilation_pass)
+    if inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         # When left uncompiled, flex_attention still runs correctly but
         # produces different numerical results.
-        functools.partial(
-            annotate_flex_attention_for_regional_inductor_pass,
-            flex_compile_config=FlexAttention.inductor_configs,
-        ),
-        regional_inductor_pass,
-    ]
-    if use_cudagraph:
-        # Must run before custom_codegen_pass (last in pre_passes)
-        # which replaces the GraphModule's forward().
-        # Also must run before cudagraph_pass.
-        passes.append(insert_kernel_annotations_pass)
-    # TODO: Switch to upstream PyTorch implementation when
-    # https://github.com/pytorch/pytorch/pull/178246 lands.
-    # custom_codegen_pass saves the FX graph to disk for:
-    # 1. Debugging: inspect the generated graph code directly
-    # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
-    #    gives fine-grained operator-level attribution in profiler traces
-    # 3. User-editable codegen: users can directly modify the generated
-    #    program on disk for fine-grain scheduling optimizations, with
-    #    hot-reload picking up changes at runtime
-    passes.append(custom_codegen_pass)
+        passes.append(
+            functools.partial(
+                annotate_flex_attention_for_regional_inductor_pass,
+                flex_compile_config=FlexAttention.inductor_configs,
+            )
+        )
+        passes.append(regional_inductor_pass)
+        if use_cudagraph:
+            # Must run before custom_codegen_pass (last in pre_passes)
+            # which replaces the GraphModule's forward().
+            # Also must run before cudagraph_pass.
+            passes.append(insert_kernel_annotations_pass)
+        # TODO: Switch to upstream PyTorch implementation when
+        # https://github.com/pytorch/pytorch/pull/178246 lands.
+        # custom_codegen_pass saves the FX graph to disk for:
+        # 1. Debugging: inspect the generated graph code directly
+        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
+        #    gives fine-grained operator-level attribution in profiler traces
+        # 3. User-editable codegen: users can directly modify the generated
+        #    program on disk for fine-grain scheduling optimizations, with
+        #    hot-reload picking up changes at runtime
+        passes.append(custom_codegen_pass)
     return passes
 
 
@@ -239,70 +314,6 @@ def transformer_block_bucketing_reordering_pass(
         gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
     )
     gm.recompile()
-    return gm
-
-
-def joint_transformer_block_bucketing_reordering_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    fsdp_manual_buckets,
-) -> torch.fx.GraphModule:
-    """Apply manual bucketing and reordering on a joint fwd+bwd graph.
-
-    The joint graph is processed in two passes to ensure each direction's
-    collectives are bucketed independently and reordering uses the correct
-    execution order (forward order for fwd, reversed order for bwd).
-
-    Used by the aot_fx_trace mode where forward and backward are in a
-    single graph.
-    """
-
-    def _make_module_fqn_stack_fn(
-        *, bwd: bool
-    ) -> Callable[[torch.fx.Node], list[tuple[str, type]]]:
-        """Create a module_stack_fn that filters nodes by forward/backward direction.
-
-        Recomputed nodes (from SAC remat) have autograd_backward=False
-        (copied from their original forward node) but serve the backward
-        pass. We identify them by the ``_recomputed`` name suffix and
-        route them to the backward bucketing pass.
-        """
-
-        def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
-            # TODO: Workaround — recomputed nodes should carry
-            # autograd_backward=True but remat_using_tags_for_fwd_loss_bwd_graph
-            # copies metadata from the original forward node. Fix upstream to
-            # tag recomputed nodes with autograd_backward=True.
-            is_recomputed = node.name.endswith("_recomputed")
-            is_bwd = node.meta.get("autograd_backward", False) or is_recomputed
-            if is_bwd != bwd:
-                return []
-            fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
-            if not fqn:
-                return []
-            return [(fqn, torch.nn.Module)]
-
-        return _stack_fn
-
-    # Forward graph pass: bucket and reorder forward collectives
-    manual_overlap_bucketing(
-        gm,
-        module_bucket_plans=fsdp_manual_buckets,
-        insert_overlap_deps=False,
-        module_stack_fn=_make_module_fqn_stack_fn(bwd=False),
-    )
-
-    # Backward pass: bucket and reorder backward collectives.
-    manual_overlap_bucketing(
-        gm,
-        module_bucket_plans=fsdp_manual_buckets,
-        insert_overlap_deps=False,
-        module_stack_fn=_make_module_fqn_stack_fn(bwd=True),
-    )
-
-    gm.recompile()
-
     return gm
 
 
@@ -630,21 +641,16 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
-def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
+def _make_default_memory_policy(
+    save_ops: set | None = None,
+    *,
+    fsdp_reshard_after_forward: bool = True,
+) -> Callable:
     """Create a SAC policy function from a set of op targets to save."""
     if save_ops is None:
         save_ops = _get_save_ops()
-        # TODO: Temporary workaround — saving FSDP all_gathers prevents
-        # re-communication during backward recomputation. Without this,
-        # recomputed all_gather nodes in the backward region cause
-        # manual_overlap_bucketing to produce incorrect prefetch ordering.
-        # The proper fix has two parts:
-        # 1. Allow users to configure reshard_after_forward behavior
-        #    (equivalent to eager FSDP's parallelism.fsdp_reshard_after_forward)
-        #    which controls whether parameters are resharded after forward.
-        # 2. Fix manual_overlap_bucketing to handle recomputed all_gathers
-        #    in the backward region correctly.
-        save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
+        if not fsdp_reshard_after_forward:
+            save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if node.target in save_ops:
@@ -803,7 +809,15 @@ def tag_with_memory_policy_pass(
     """
     memory_policy = config.compile.memory_policy
     if memory_policy == "default":
-        apply_sac_pass(gm, policy_fn=_make_default_memory_policy())
+        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+            config.parallelism.fsdp_reshard_after_forward,
+            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+        )
+        default_policy_fn = functools.partial(
+            _make_default_memory_policy,
+            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+        )
+        apply_sac_pass(gm, policy_fn=default_policy_fn())
     elif memory_policy == "eager":
         apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
     elif memory_policy == "cpu_offload_all":
@@ -848,123 +862,59 @@ def fsdp_reshard_after_fwd_pass(
     return gm
 
 
-def inductor_decomposition_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    joint_with_descriptors: JointWithDescriptors,
-) -> torch.fx.GraphModule:
-    """
-    Apply Inductor decompositions to the joint graph.
-
-    This pass applies decompositions to the joint forward-backward graph using make_fx.
-    It reads fake tensor inputs from placeholder metadata and retraces the graph with
-    decompositions applied, while preserving metadata required by the partitioner.
-
-    Args:
-        gm: The joint graph module
-        joint_with_descriptors: The joint graph with descriptors
-
-    Returns:
-        The joint graph with decompositions applied
-    """
-    from torch._inductor.decomposition import select_decomp_table
-    from torch.fx.experimental.proxy_tensor import make_fx
-
-    logger.info("Applying decompositions to joint graph")
-
-    decomp_table = select_decomp_table()
-
-    # Build fake inputs directly from the joint graph placeholders' metadata.
-    # This handles all inputs including effect tokens (e.g. from MoE load
-    # balancing copy_ mutations) that AOT Autograd prepends as placeholders,
-    # as well as opaque inputs (e.g. DeviceMesh FakeScriptObjects) that the
-    # graph lifts when compile-on-one-rank is enabled.
-    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-    all_inputs = []
-    for ph in placeholders:
-        val = ph.meta.get("val")
-        if val is None:
-            raise RuntimeError(f"Placeholder {ph.target} has no 'val' metadata")
-        all_inputs.append(val)
-
-    # The joint graph forward() takes (primals, tangents) as two list args.
-    # Use the graph's _in_spec (set by AOTAutograd during joint export) to
-    # determine the correct split point rather than
-    # fw_metadata.traced_tangents, because the latter only counts tensor
-    # tangents and misses opaque inputs (e.g. DeviceMesh objects) that may
-    # appear as additional placeholders when compile-on-one-rank is enabled.
-    num_primals = gm._in_spec.child(0).num_children
-    primals_fake = all_inputs[:num_primals]
-    tangents_fake = all_inputs[num_primals:]
-
-    # Get the FakeTensorMode from the original joint graph
-    fake_mode = None
-    for node in gm.graph.nodes:
-        if node.op == "placeholder" and "val" in node.meta:
-            val = node.meta["val"]
-            if hasattr(val, "fake_mode"):
-                fake_mode = val.fake_mode
-                break
-
-    if fake_mode is None:
-        from torch._guards import detect_fake_mode
-
-        fake_mode = detect_fake_mode(all_inputs)
-
-    # Use make_fx with the original fake mode to retrace with decompositions
-    with fake_mode:
-        decomposed_gm = make_fx(
-            gm,
-            decomposition_table=decomp_table,
-            _allow_non_fake_inputs=False,
-        )(primals_fake, tangents_fake)
-
-    # Copy metadata from original placeholders to decomposed placeholders
-    orig_placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-    decomp_placeholders = [
-        n for n in decomposed_gm.graph.nodes if n.op == "placeholder"
-    ]
-
-    if len(orig_placeholders) != len(decomp_placeholders):
-        raise RuntimeError(
-            f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
-        )
-
-    for orig, decomp in zip(orig_placeholders, decomp_placeholders, strict=True):
-        # Copy all metadata from original to decomposed
-        for key, value in orig.meta.items():
-            if key not in decomp.meta:
-                decomp.meta[key] = value
-
-        # Rename decomposed placeholder to match original name
-        decomp.target = orig.target
-        decomp.name = orig.name
-
-    decomposed_gm.recompile()
-    logger.info("Decompositions applied successfully to joint graph")
-
-    return decomposed_gm
-
-
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
-) -> OutputCode:
+) -> torch.fx.GraphModule:
+    """Apply full Inductor compilation with code generation.
+
+    Applies inductor decompositions (e.g. ``aten.t`` → ``aten.permute``),
+    then compiles the graph into optimized Triton/C++ kernels via
+    ``compile_fx_inner`` and replaces the GraphModule's ``forward``
+    with the compiled callable.
+
+    Must be the **terminal** pass — no FX-graph-level passes (e.g.
+    ``custom_codegen_pass``, ``insert_kernel_annotations_pass``) can
+    run after this because the FX graph is no longer authoritative.
     """
-    Apply full Inductor compilation with code generation.
 
-    This pass uses compile_fx_inner to generate optimized code for the graph.
+    def _apply_decompositions(
+        gm: torch.fx.GraphModule, example_inputs: tuple
+    ) -> torch.fx.GraphModule:
+        """Retrace with ``select_decomp_table()`` so that ops like ``aten.t``
+        are decomposed before ``compile_fx_inner``."""
+        from torch._inductor.decomposition import select_decomp_table
+        from torch._subclasses.fake_tensor import FakeTensor
+        from torch.fx.experimental.proxy_tensor import make_fx
 
-    Args:
-        gm: The graph module (forward or backward)
-        example_inputs: Example inputs for compilation
+        decomp_table = select_decomp_table()
 
-    Returns:
-        The compiled OutputCode from Inductor
-    """
-    # TODO: This pass returns OutputCode instead of GraphModule, violating the
-    # unified graph pass signature convention. Should be addressed to comply.
-    return compile_fx_inner(gm, example_inputs)
+        fake_mode = None
+        for inp in example_inputs:
+            if isinstance(inp, FakeTensor):
+                fake_mode = inp.fake_mode
+                break
+
+        if fake_mode is not None:
+            with fake_mode:
+                gm = make_fx(
+                    gm,
+                    decomposition_table=decomp_table,
+                    _allow_non_fake_inputs=True,
+                )(*example_inputs)
+
+        return gm
+
+    gm = _apply_decompositions(gm, example_inputs)
+    output_code = compile_fx_inner(gm, example_inputs)
+
+    # compile_fx_inner returns OutputCode with boxed calling convention
+    # (single list arg). Adapt to positional args so the graph trainer's
+    # execution path (gm(*flat_inputs)) works unchanged.
+    def _compiled_forward(*args):
+        return output_code(list(args))
+
+    gm.forward = _compiled_forward
+    return gm
 
 
 def reassign_to_pg_pass(
@@ -1058,7 +1008,6 @@ AVAILABLE_COMPILER_PASSES = {
 
 # Registry for joint custom passes (applied before partitioning, AOT mode only)
 AVAILABLE_JOINT_PASSES = {
-    "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
 }

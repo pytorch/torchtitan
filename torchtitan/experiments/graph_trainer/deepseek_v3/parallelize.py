@@ -15,11 +15,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_module_fqns,
-    apply_graph_ac,
-)
+from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
@@ -91,7 +87,6 @@ def parallelize_deepseekv3(
         # Config-based sharding: ShardingConfig is populated on the model
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
@@ -102,9 +97,6 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=parallelism.enable_sequence_parallel,
         )
-
-    if ac_config.mode != "none":
-        apply_graph_ac(compile_config, ac_config)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
