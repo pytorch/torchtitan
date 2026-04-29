@@ -773,8 +773,7 @@ def apply_sac_pass(
                 and _is_recomputable(user)
                 and _get_layer_id(user) > node_layer_id
             ):
-                # Hacky demo to show that we can force an activation to be offloaded
-                node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
                 boundary_saves += 1
                 break
 
