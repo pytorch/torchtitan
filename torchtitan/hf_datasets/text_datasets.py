@@ -311,7 +311,7 @@ class ChatDataset(IterableDataset, Stateful):
         # datasets, split_dataset_by_node assigns contiguous data chunks to consecutive nodes, which
         # can lead to token imbalances, causing some nodes' epoch_idx to run ahead of others.
         self._original_data = split_dataset_by_node(
-            dataset.shuffle(seed=42), dp_rank, dp_world_size
+            cast(Dataset, dataset.shuffle(seed=42)), dp_rank, dp_world_size
         )
         self._data = self._original_data
         self._tokenizer = tokenizer
