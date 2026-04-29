@@ -8,48 +8,28 @@
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
 and read by ``Module.parallelize(mesh)``.  All placements use
-``NamedPlacement`` (dict keyed by ``MeshDimName``) so they are
-self-documenting and support multi-dim meshes.
+``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
+self-documenting and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
 
 from torch.distributed.tensor import Placement
 
-
-class StrEnum(str, Enum):
-    """str + Enum for Python < 3.11 compatibility."""
-
-    pass
+from torchtitan.protocols.types import MeshAxisName
 
 
-class MeshDimName(StrEnum):
-    """Mesh dimension names for parallelism."""
-
-    DP = "dp"
-    DP_REPLICATE = "dp_replicate"
-    DP_SHARD = "dp_shard"
-    FSDP = "fsdp"
-    TP = "tp"
-    CP = "cp"
-    PP = "pp"
-    EP = "ep"
-    ETP = "etp"
-    EFSDP = "efsdp"
-
-
-# Placement per mesh dim, keyed by MeshDimName.
-# Example: {MeshDimName.TP: Shard(0), MeshDimName.DP_SHARD: Replicate()}
-# Every sharding_config must declare a placement for every mesh dim it will be applied
+# Placement per mesh axis, keyed by MeshAxisName.
+# Example: {MeshAxisName.TP: Shard(0), MeshAxisName.DP_SHARD: Replicate()}
+# Every sharding_config must declare a placement for every mesh axis it will be applied
 # against; ``resolve_placements`` errors otherwise.
 #
 # Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh dim order. The only non-trivial case is FSDP + TP both sharding on
-# dim 0, but it doesn't need to be annotated today.
+# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
+# tensor dim 0, but it doesn't need to be annotated today.
 # TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
 # carrying explicit shard-order info) once that lands.
-NamedPlacement = dict[MeshDimName, Placement]
+NamedPlacement = dict[MeshAxisName, Placement]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -59,9 +39,9 @@ class LocalMapConfig:
     Wraps forward with ``local_map()``: DTensor -> local before forward,
     local -> DTensor after forward.
 
-    Placements are ``NamedPlacement`` (keyed by mesh dim name). At
+    Placements are ``NamedPlacement`` (keyed by mesh axis name). At
     parallelize time they are resolved to positional tuples matching the
-    runtime mesh's dim order.
+    runtime mesh's axis order.
 
     Attributes:
         in_placements: Per-input NamedPlacements (positional: q, k, v).
@@ -81,9 +61,9 @@ class LocalMapConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``NamedPlacement`` (``dict[MeshDimName, Placement]``)
-    keyed by mesh dim names.  At ``parallelize()`` time, NamedPlacements
-    are resolved to ``tuple[Placement, ...]`` in mesh dim order.
+    All placements use ``NamedPlacement`` (``dict[MeshAxisName, Placement]``)
+    keyed by mesh axis names.  At ``parallelize()`` time, NamedPlacements
+    are resolved to ``tuple[Placement, ...]`` in mesh axis order.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
@@ -132,23 +112,23 @@ class ShardingConfig:
 
 def resolve_placements(
     named: NamedPlacement,
-    mesh_dim_names: tuple[str, ...],
+    mesh_axis_names: tuple[str, ...],
 ) -> tuple[Placement, ...]:
-    """Resolve NamedPlacement against a mesh in dim order.
+    """Resolve NamedPlacement against a mesh in axis order.
 
-    Every sharding_config must explicitly declare a placement for every mesh dim it
-    will be applied against. Missing declarations raise ``ValueError``;
-    extra declarations (dims not in the mesh) are ignored.
+    Every sharding_config must explicitly declare a placement for every mesh axis
+    it will be applied against. Missing declarations raise ``ValueError``;
+    extra declarations (axes not in the mesh) are ignored.
     """
     result = []
-    for dim_name in mesh_dim_names:
-        key = MeshDimName(dim_name)
+    for axis_name in mesh_axis_names:
+        key = MeshAxisName(axis_name)
         if key not in named:
             raise ValueError(
-                f"Sharding sharding_config does not declare a placement for mesh dim "
-                f"{dim_name!r}. Declared: "
+                f"Sharding sharding_config does not declare a placement for mesh axis "
+                f"{axis_name!r}. Declared: "
                 f"{sorted(k.value for k in named)}; "
-                f"required: {list(mesh_dim_names)}."
+                f"required: {list(mesh_axis_names)}."
             )
         result.append(named[key])
     return tuple(result)

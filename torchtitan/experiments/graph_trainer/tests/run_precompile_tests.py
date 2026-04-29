@@ -56,7 +56,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 " --config graph_trainer_llama3_debugmodel"
                 " --compile.mode aot"
                 " --compile.passes full_inductor_compilation"
-                " --compile.joint_passes inductor_decomposition"
                 f" --compile.precompile_artifact_dir {full_inductor_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2"
@@ -66,7 +65,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 "--config graph_trainer_llama3_debugmodel",
                 "--compile.mode aot",
                 "--compile.passes full_inductor_compilation",
-                "--compile.joint_passes inductor_decomposition",
                 f"--compile.precompile_artifact_dir {full_inductor_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 4",
                 "--parallelism.tensor_parallel_degree 2",

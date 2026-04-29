@@ -148,6 +148,40 @@ def my_pass(gm, example_inputs):
 diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
 ```
 
+### Printing and Inspecting Tensors Inside a Compiled Function
+
+To inspect tensor values or gradients *inside* `torch.compile` without graph
+breaks:
+
+- **Simple printing**: `torch._higher_order_ops.print("norm={}", x.norm())` —
+  format-string, forward-only. DTensors print each rank's local view with an
+  automatic `[rank N]` prefix.
+- **Gradient norms**: `from torch.utils.debug_log import debug_grad_log` —
+  call on intermediates (not direct graph inputs); fires during backward and
+  logs per-tensor gradient norms.
+- **Custom logic** (arbitrary Python, file logging, rank filtering, fwd+bwd):
+  compose `@leaf_function` with `@fn.register_multi_grad_hook` from
+  `torch._dynamo.decorators`, following the pattern in
+  `torch/utils/debug_log.py`:
+
+  ```python
+  from torch._dynamo.decorators import leaf_function
+
+  @leaf_function
+  def log_tensor(x, tag=""):
+      return None  # no-op in forward
+
+  @log_tensor.register_fake
+  def log_tensor_fake(x, tag=""):
+      return None
+
+  @log_tensor.register_multi_grad_hook
+  def log_tensor_hook(x_grad, tag=""):  # non-tensor args passed through unchanged
+      print(f"[{tag}][bwd] grad_norm={x_grad.norm():.4f}")
+
+  log_tensor(x, "after_add")
+  ```
+
 ### Benchmark
 
 Use `./run_train.sh` with a small number of steps. Disable tensorboard,

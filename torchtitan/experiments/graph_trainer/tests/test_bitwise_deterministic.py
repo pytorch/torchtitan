@@ -191,7 +191,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
         if enable_passes:
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
-                compile=SimpleNamespace(memory_policy="default"),
+                compile=SimpleNamespace(
+                    memory_policy="default",
+                    inductor_compilation="regional",
+                ),
+                parallelism=SimpleNamespace(
+                    pipeline_parallel_degree=1,
+                    fsdp_reshard_after_forward="default",
+                ),
             )
             passes = compile_time_passes(traced_result, config)
             traced_result.gm = apply_graph_passes(
@@ -213,6 +220,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 model_spec=SimpleNamespace(model=self.model_config),
                 compile=SimpleNamespace(
                     precompile_artifact_dir="precompiled",
+                    inductor_compilation="regional",
                     enable_cudagraph=True,
                 ),
             )
