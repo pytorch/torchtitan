@@ -112,6 +112,40 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
+def deepseek_v3_16b_deepep() -> Trainer.Config:
+    return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
+        hf_assets_path="./assets/hf/deepseek-moe-16b-base",
+        model_spec=model_registry(
+            "16B", attn_backend="flex", moe_comm_backend="deepep"
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
+        optimizer=OptimizersContainer.Config(lr=2.2e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=1000,
+        ),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="Interleaved1F1B",
+            expert_parallel_degree=8,
+            expert_tensor_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(interval=10),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+        compile=CompileConfig(enable=True, components=["loss"]),
+    )
+
+
 def deepseek_v3_671b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True, components=["loss"])
     model_compile_enabled = (
