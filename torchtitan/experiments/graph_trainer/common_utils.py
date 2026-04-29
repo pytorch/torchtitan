@@ -13,7 +13,6 @@ from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
-from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -23,6 +22,14 @@ _NOT_IN_LAYERS = -1
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def _is_recomputed_node(node: torch.fx.Node) -> bool:
+    # TODO: Workaround — recomputed nodes (from SAC) should carry
+    # autograd_backward=True but remat_using_tags_for_fwd_loss_bwd_graph
+    # copies metadata from the original forward node. Fix upstream to
+    # tag recomputed nodes with autograd_backward=True.
+    return node.name.endswith("_recomputed")
 
 
 def _get_layer_id(node: torch.fx.Node) -> int:
@@ -157,7 +164,7 @@ def get_default_transformer_block_buckets(
     return [
         "tok_embeddings",
         *[f"layers.{i}" for i in range(n_layers)],
-        ["norm", "output"],
+        ["norm", "lm_head"],
     ]
 
 
@@ -170,7 +177,7 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     # [TODO](ruisizhang123) add EP support for transformer block bucketing
     module_list = [
         model.tok_embeddings,
-        [model.norm, model.output],
+        [model.norm, model.lm_head],
     ]
     for layer_id, transformer_block in model.layers.items():
         module_list.append(transformer_block)
@@ -190,27 +197,3 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_to_name = {m: n for n, m in model.named_modules()}
     module_fqns = convert_modules_to_fqns(module_list, module_to_name)
     return module_fqns
-
-
-def apply_graph_ac(
-    compile_config: CompileConfig,
-    ac_config: "ActivationCheckpointConfig",
-) -> None:
-    """Add apply_sac to compile joint passes for graph-based selective AC.
-
-    Must be called only when ac_config.mode != "none". Only "selective" mode
-    is supported; other modes raise ValueError.
-    """
-    if ac_config.mode != "selective":
-        raise ValueError(
-            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
-        )
-
-    joint_pass_names = getattr(compile_config, "joint_passes", [])
-    if "apply_sac" not in joint_pass_names:
-        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
-        logger.info(
-            "activation_checkpoint.mode is 'selective', added apply_sac to "
-            "compile.joint_passes"
-        )

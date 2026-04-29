@@ -8,7 +8,9 @@
 
 import numpy as np
 import torch
-import torchvision.transforms.v2.functional as TVF  # pyrefly: ignore [missing-import]
+
+# pyrefly: ignore [missing-import]
+import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.tools.logging import logger
 

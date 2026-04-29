@@ -62,7 +62,6 @@ def parallelize_qwen3(
             model,
             tp_mesh,
             enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=False,
             enable_async_tp=parallelism.enable_async_tensor_parallel,
             enable_sp=parallelism.enable_sequence_parallel,
             has_position_id=has_position_id,
@@ -82,7 +81,6 @@ def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     enable_loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
     enable_sp: bool = True,
     has_position_id: bool = False,
@@ -107,7 +105,7 @@ def apply_non_moe_tp(
                 use_local_output=False,
             ),
             "norm": norm_plan,
-            "output": ColwiseParallel(
+            "lm_head": ColwiseParallel(
                 input_layouts=sp_layout,
                 output_layouts=Replicate(),
                 use_local_output=True,  # return logits and plain tensor

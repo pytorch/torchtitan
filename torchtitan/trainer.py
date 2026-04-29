@@ -20,14 +20,14 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.quantization import QuantizationConverter
+from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -43,7 +43,6 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -79,9 +78,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        model_converters: ModelConvertersContainer.Config = field(
-            default_factory=ModelConvertersContainer.Config
-        )
         optimizer: OptimizersContainer.Config = field(
             default_factory=OptimizersContainer.Config
         )
@@ -100,6 +96,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
             if self.debug.batch_invariant:
@@ -168,7 +165,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # TODO: we should make this list[BaseModel / Decoder] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
-    loss_fn: LossFunction
+    loss_fn: BaseLoss
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
@@ -257,16 +254,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ):
             model = model_config.build()
 
-        # Build the collection of model converters. No-op if converters empty
-        model_compile_enabled = (
-            config.compile.enable and "model" in config.compile.components
-        )
-        model_converters = config.model_converters.build(
-            parallel_dims=parallel_dims,
-            model_compile_enabled=model_compile_enabled,
-        )
-        model_converters.convert(model)
-
         # Verify all submodules satisfy the Module protocol
         # TODO: move this to module validate().
         # This is current put here to verify module build and
@@ -275,19 +262,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
 
-        # Check if any converter uses quantization (FP8, MX, etc.)
-        has_quantization = any(
-            isinstance(cc, QuantizationConverter.Config)
-            for cc in config.model_converters.converters
-        )
-
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
-            has_quantization=has_quantization,
+            has_quantization=has_quantization(model_config),
         )
         color = self.metrics_processor.color
 
@@ -314,8 +295,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims
+        self.loss_fn = config.loss.build(
+            compile_config=config.compile,
         )
 
         # verify batch sizes
@@ -357,7 +338,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
-                model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
@@ -393,7 +373,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     model,
                     parallel_dims=parallel_dims,
                     training=config.training,
-                    model_converters=config.model_converters,
                     parallelism=config.parallelism,
                     compile_config=config.compile,
                     ac_config=config.activation_checkpoint,
@@ -408,6 +387,31 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model.train()
 
             self.model_parts = [model]
+
+        # Set lm_head reference for ChunkedCELoss after model construction.
+        # Non-PP: single model part always has lm_head.
+        # PP: only the last stage has lm_head; non-last stages skip this.
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            if parallel_dims.pp_enabled:
+                if self.pp_has_last_stage:
+                    lm_head = self.model_parts[-1].lm_head
+                    assert (
+                        lm_head is not None
+                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    self.loss_fn.set_lm_head(
+                        lm_head  # pyrefly: ignore[bad-argument-type]
+                    )
+                    self.model_parts[
+                        -1
+                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+            else:
+                assert len(self.model_parts) == 1
+                lm_head = self.model_parts[0].lm_head
+                assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
+                self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[
+                    0
+                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -429,14 +433,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
-        )
-        # Post optimizer step model converters hook.
-        # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
-        # where it issues a single all-reduce for all parameters at once for better performance
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
-            )
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
@@ -659,6 +655,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
+            loss_kwargs = {"global_valid_tokens": global_valid_tokens}
             with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
@@ -670,6 +667,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        loss_kwargs=loss_kwargs,
                         return_outputs=False,
                     )
                 else:
@@ -677,6 +675,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        loss_kwargs=loss_kwargs,
                         return_outputs=False,
                     )
 
@@ -684,11 +683,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             if self.pp_has_last_stage:
                 assert losses is not None
-                # Rescale PP loss to be "local loss sum / global valid tokens"
-                # because each microbatch could have different number of valid tokens
-                loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
-                    self.device
-                )
+                # All loss classes scale by global_valid_tokens internally
+                loss = torch.sum(torch.stack(losses)).to(self.device)
             else:
                 loss = torch.tensor([-1.0], device=self.device)
         else:
@@ -696,14 +692,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Compute loss sum (reduction='sum')
-                loss_sum = self.loss_fn(pred, labels)
-
-                # Scale the loss by the inverse of the total weight denominator before backward
-                # This ensures gradients are properly normalized across all microbatches
-                loss = loss_sum / global_valid_tokens
-
-                # need to free pred before bwd to avoid peaking memory
+                loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 loss.backward()
 
