@@ -226,7 +226,6 @@ class ParallelismConfig:
     """
 
 
-
 @dataclass(kw_only=True, slots=True)
 class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
