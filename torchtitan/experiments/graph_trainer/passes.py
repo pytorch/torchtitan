@@ -128,18 +128,6 @@ def async_tensor_parallel_pass(
     return gm
 
 
-# Default Inductor configs for RMSNorm regional compilation.
-# Same tuning flags as FlexAttention: Inductor max_autotune + coordinate
-# descent discover good Triton kernels, then wrap them for cudagraph
-# compatibility.
-_RMSNORM_INDUCTOR_CONFIGS: dict[str, bool] = {
-    "wrap_inductor_compiled_regions": True,
-    "max_autotune": True,
-    "coordinate_descent_tuning": True,
-    "triton.cudagraphs": False,
-}
-
-
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -200,16 +188,13 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
-        # RMSNorm appears as fused _fused_rms_norm / _fused_rms_norm_backward
-        # ops in the traced graph. Compiling each norm region with Inductor
-        # fuses them into a single Triton kernel, closing the gap vs.
-        # Megatron's fused TransformerEngine RMSNorm.
-        passes.append(
-            functools.partial(
+        # Performance passes that may change numerics.
+        if config.compile.numerics_changing_optim:
+            from torchtitan.experiments.graph_trainer.performance_passes import (
                 annotate_rmsnorm_for_regional_inductor_pass,
-                rmsnorm_compile_config=_RMSNORM_INDUCTOR_CONFIGS,
             )
-        )
+
+            passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
         if use_cudagraph:
             # Must run before custom_codegen_pass (last in pre_passes)
@@ -599,71 +584,6 @@ def cudagraph_pass(
         tensor_input_indices=tensor_input_indices,
     )
     logger.info("Applied cudagraph pass.")
-    return gm
-
-
-def annotate_rmsnorm_for_regional_inductor_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    rmsnorm_compile_config: dict | None,
-) -> torch.fx.GraphModule:
-    """Tag RMSNorm ops with compile_with_inductor for regional_inductor.
-
-    Identifies ``_fused_rms_norm`` and ``_fused_rms_norm_backward`` nodes
-    by their ``node.target`` and tags them (along with their ``getitem``
-    users) so that ``regional_inductor_pass`` compiles each norm as a
-    fused Inductor kernel.
-
-    Each ``_fused_rms_norm`` / ``_fused_rms_norm_backward`` call is
-    assigned a separate ``inductor_region`` so that norms at different
-    points in the graph are compiled independently.
-
-    Args:
-        gm: The graph module to annotate.
-        example_inputs: Example inputs (unused, required by pass interface).
-        rmsnorm_compile_config: Inductor config dict for RMSNorm nodes.
-            When provided, wrapped as ``{"inductor_configs": rmsnorm_compile_config}``.
-            When None, nodes are tagged with an empty annotation.
-    """
-    compile_annotation: dict = (
-        {"inductor_configs": rmsnorm_compile_config}
-        if rmsnorm_compile_config is not None
-        else {}
-    )
-
-    _RMSNORM_TARGETS = {
-        torch.ops.aten._fused_rms_norm.default,
-        torch.ops.aten._fused_rms_norm_backward.default,
-    }
-
-    next_region_id = 0
-    num_tagged = 0
-
-    for node in gm.graph.nodes:
-        if node.op != "call_function" or node.target not in _RMSNORM_TARGETS:
-            continue
-
-        annotation = dict(compile_annotation)
-        annotation["inductor_region"] = next_region_id
-        next_region_id += 1
-
-        # Tag the fused norm node itself.
-        node.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
-        num_tagged += 1
-
-        # Tag getitem users that extract outputs from the fused op.
-        for user in node.users:
-            if user.op == "call_function" and user.target is operator.getitem:
-                user.meta.setdefault("custom", {})["compile_with_inductor"] = annotation
-                num_tagged += 1
-
-    if num_tagged > 0:
-        logger.info(
-            f"Tagged {num_tagged} RMSNorm nodes across "
-            f"{next_region_id} regions for regional Inductor compilation"
-        )
-
     return gm
 
 

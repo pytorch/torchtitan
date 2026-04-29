@@ -51,6 +51,7 @@ def build_minimal_trainer(
                 precompile_artifact_dir="",
                 memory_policy="default",
                 inductor_compilation="regional",
+                numerics_changing_optim=False,
                 enable_cudagraph=True,
                 debug_graph_passes=False,
             ),

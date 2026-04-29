@@ -198,6 +198,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 compile=SimpleNamespace(
                     memory_policy="default",
                     inductor_compilation="regional",
+                    numerics_changing_optim=False,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
