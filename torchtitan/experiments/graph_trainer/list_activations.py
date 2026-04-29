@@ -13,6 +13,7 @@ import re
 from collections import defaultdict
 
 import torch
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 from torchtitan.experiments.graph_trainer.passes import (
@@ -143,6 +144,21 @@ def _format_stack_trace(stack_trace: str | None) -> str:
     return loc
 
 
+_POLICY_SHORT_NAMES = {
+    CheckpointPolicy.MUST_SAVE: "SAVE",
+    CheckpointPolicy.PREFER_RECOMPUTE: "RECOMPUTE",
+    CheckpointPolicy.MUST_RECOMPUTE: "RECOMPUTE!",
+    CheckpointPolicy.MUST_CPU_OFFLOAD: "OFFLOAD",
+}
+
+
+def _format_policy(node: torch.fx.Node) -> str:
+    policy = node.meta.get("recompute")
+    if policy is None:
+        return ""
+    return _POLICY_SHORT_NAMES.get(policy, str(policy))
+
+
 def _format_original_aten(node: torch.fx.Node) -> str:
     original = node.meta.get("original_aten")
     if original is None or str(original) == str(node.target):
@@ -170,6 +186,7 @@ def _layer_fingerprint(activations: list[dict]) -> tuple:
             act["target"],
             _normalize_shape(act["shape"]),
             act["dtype"],
+            act["policy"],
             act["original_aten"],
         )
         for act in activations
@@ -224,6 +241,7 @@ def list_activations_pass(
                 "shape": _format_shape(val),
                 "dtype": _tensor_dtype(val),
                 "nbytes": _tensor_nbytes(val),
+                "policy": _format_policy(node),
                 "fqn": fqn,
                 "original_aten": _format_original_aten(producer),
                 "source": _format_stack_trace(producer.meta.get("stack_trace")),
@@ -246,12 +264,13 @@ def list_activations_pass(
     def _fmt_row(idx: int, act: dict, submodule: str) -> str:
         return (
             f"  {idx:<3} {_format_bytes(act['nbytes']):>10}  {act['dtype']:<10} "
-            f"{act['shape']:<25} {submodule:<30} "
+            f"{act['policy']:<12} {act['shape']:<25} {submodule:<30} "
             f"{_fmt_target(act):<55} {act['source']}"
         )
 
     header = (
-        f"  {'#':<3} {'Memory':>10}  {'DType':<10} {'Shape':<25} "
+        f"  {'#':<3} {'Memory':>10}  {'DType':<10} "
+        f"{'Policy':<12} {'Shape':<25} "
         f"{'SubModule':<30} {'Target':<55} {'Source'}"
     )
     sep = "-" * len(header)

@@ -146,6 +146,10 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    from torchtitan.experiments.graph_trainer.list_activations import (
+        list_activations_pass,
+    )
+
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -155,6 +159,7 @@ def compile_time_passes(
             tag_with_memory_policy_pass,
             config=config,
         ),
+        list_activations_pass,
         # TODO: currently either SAC or CPU offload is used, not both at the
         # same time. Composability between these two passes is untested.
         apply_cpu_offload_pass,
@@ -773,7 +778,8 @@ def apply_sac_pass(
                 and _is_recomputable(user)
                 and _get_layer_id(user) > node_layer_id
             ):
-                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+                # Hacky demo to show that we can force an activation to be offloaded
+                node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
                 boundary_saves += 1
                 break
 
