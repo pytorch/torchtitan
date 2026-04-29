@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import einops as E
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -22,9 +21,8 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.protocols.module import Module, ModuleDict
-
-LayerNorm = Module.from_nn_module(nn.LayerNorm)
 
 
 def resize_positional_embeddings(

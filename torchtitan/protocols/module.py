@@ -220,9 +220,16 @@ class Module(nn.Module, Configurable):
         if sharding_config.local_output_grad_placements is not None:
             candidates.append(sharding_config.local_output_grad_placements)
         if sharding_config.local_map is not None:
-            candidates.extend(sharding_config.local_map.in_placements)
-            candidates.extend(sharding_config.local_map.out_placements)
-            candidates.extend(sharding_config.local_map.in_grad_placements)
+            # ``None`` entries mark non-tensor args (no placements); skip them.
+            candidates.extend(
+                p for p in sharding_config.local_map.in_placements if p is not None
+            )
+            candidates.extend(
+                p for p in sharding_config.local_map.out_placements if p is not None
+            )
+            candidates.extend(
+                p for p in sharding_config.local_map.in_grad_placements if p is not None
+            )
 
         if not candidates:
             return []
@@ -377,17 +384,17 @@ class Module(nn.Module, Configurable):
         fn = self.forward
         if sharding_config.local_map is not None:
             # Resolve each NamedPlacement to a positional tuple for the
-            # current mesh.
+            # current mesh. ``None`` entries pass through (non-tensor args
+            # have no placement; ``torch.distributed.tensor.experimental
+            # .local_map`` accepts ``None`` per-arg).
             lm = sharding_config.local_map
-            in_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_placements
-            )
-            out_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.out_placements
-            )
-            in_grad_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements
-            )
+
+            def _resolve(p):
+                return None if p is None else resolve_placements(p, mesh_axis_names)
+
+            in_placements = tuple(_resolve(p) for p in lm.in_placements)
+            out_placements = tuple(_resolve(p) for p in lm.out_placements)
+            in_grad_placements = tuple(_resolve(p) for p in lm.in_grad_placements)
             fn = local_map(
                 fn,
                 in_placements=in_placements,
@@ -529,7 +536,14 @@ class Module(nn.Module, Configurable):
         """Create a ``Module``-protocol-compatible version of *nn_module_cls*.
 
         The returned class inherits from ``(nn_module_cls, Module)`` and has the
-        same constructor signature as *nn_module_cls*.
+        same constructor signature as *nn_module_cls*. It also has an
+        auto-generated ``Config`` subclass of ``Module.Config`` that
+        forwards positional / keyword args to the underlying
+        ``nn_module_cls`` constructor at ``build`` time and applies
+        ``sharding_config`` / ``param_init`` to the resulting instance --
+        so call sites that need declarative sharding can use the
+        Config-based path while call sites that don't can keep direct
+        construction.
 
         * If *nn_module_cls* defines ``reset_parameters``, the injected
           ``_init_self_parameters`` delegates to it.
@@ -541,9 +555,13 @@ class Module(nn.Module, Configurable):
 
         Usage::
 
-            Conv2d = Module.from_nn_module(nn.Conv2d)
             LayerNorm = Module.from_nn_module(nn.LayerNorm)
-            # Then use Conv2d / LayerNorm exactly like nn.Conv2d / nn.LayerNorm
+            # Direct construction (no declarative sharding):
+            norm = LayerNorm(dim, eps)
+            # Config-based construction (with declarative sharding):
+            norm = LayerNorm.Config(
+                sharding_config=norm_config(enable_sp=False),
+            ).build(dim, eps)
         """
         if nn_module_cls in _created_classes:
             return _created_classes[nn_module_cls]
@@ -560,6 +578,26 @@ class Module(nn.Module, Configurable):
         new_cls = type(name, (nn_module_cls, Module), attrs)
         new_cls.__module__ = __name__
         new_cls.__qualname__ = name
+
+        # Auto-generated Config: inherits sharding_config / param_init from
+        # Module.Config; build forwards args to nn_module_cls and applies
+        # the slots. dataclass(slots=True) prevents ad-hoc attributes; the
+        # inherited fields are the only state the Config carries.
+        @dataclass(kw_only=True, slots=True)
+        class _AutoConfig(Module.Config):
+            def build(self, *args: Any, **kwargs: Any) -> Any:
+                instance = new_cls(*args, **kwargs)
+                if self.sharding_config is not None:
+                    instance._sharding_config = self.sharding_config
+                if self.param_init is not None:
+                    instance._param_init = self.param_init
+                return instance
+
+        _AutoConfig.__name__ = "Config"
+        _AutoConfig.__qualname__ = f"{name}.Config"
+        _AutoConfig.__module__ = __name__
+        new_cls.Config = _AutoConfig  # pyrefly: ignore [missing-attribute]
+
         _created_classes[nn_module_cls] = new_cls
         return new_cls
 

@@ -94,6 +94,16 @@ class Qwen3VLModel(Qwen3Model):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
+            from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
+
+            set_qwen3_vl_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                tp_enabled=parallelism.tensor_parallel_degree > 1,
+                ep_enabled=parallelism.expert_parallel_degree > 1,
+                etp_enabled=parallelism.expert_tensor_parallel_degree > 1,
+            )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:

@@ -29,7 +29,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
-from torchtitan.protocols.module import Module, ModuleDict, ModuleList
+from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
@@ -228,7 +228,8 @@ def pipeline_module_split(
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
                 # Replace with Identity
-                Identity = Module.from_nn_module(nn.Identity)
+                from torchtitan.models.common.nn_modules import Identity
+
                 setattr(model, module_name, Identity())
 
         stage = PipelineStage(

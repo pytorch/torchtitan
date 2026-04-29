@@ -197,6 +197,40 @@ class TestFromNnModule(unittest.TestCase):
                 orig.state_dict()[key], wrapped.state_dict()[key]
             )
 
+    def test_auto_config_exists(self):
+        """from_nn_module-generated class has a Module.Config subclass."""
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        LayerNorm = Module.from_nn_module(nn.LayerNorm)
+        self.assertTrue(issubclass(LayerNorm.Config, Module.Config))
+        # Default-constructed Config has the inherited slots set to None.
+        cfg = LayerNorm.Config()
+        self.assertIsNone(cfg.sharding_config)
+        self.assertIsNone(cfg.param_init)
+
+        # sharding_config slot accepts a ShardingConfig.
+        cfg = LayerNorm.Config(sharding_config=ShardingConfig())
+        self.assertIsInstance(cfg.sharding_config, ShardingConfig)
+
+    def test_auto_config_build_forwards_args(self):
+        """Config.build forwards positional/keyword args to the nn module."""
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        LayerNorm = Module.from_nn_module(nn.LayerNorm)
+        sc = ShardingConfig()
+        instance = LayerNorm.Config(sharding_config=sc).build(16, eps=1e-5)
+        self.assertIsInstance(instance, LayerNorm)
+        self.assertEqual(instance.normalized_shape, (16,))
+        self.assertEqual(instance.eps, 1e-5)
+        # sharding_config flowed onto the instance.
+        self.assertIs(instance._sharding_config, sc)
+
+    def test_direct_construction_no_sharding_config(self):
+        """Direct construction (no Config) leaves _sharding_config=None."""
+        LayerNorm = Module.from_nn_module(nn.LayerNorm)
+        instance = LayerNorm(16)
+        self.assertIsNone(instance._sharding_config)
+
 
 class TestContainerInitStates(unittest.TestCase):
     """Tests for ModuleList, ModuleDict, Sequential init_states."""
