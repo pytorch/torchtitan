@@ -39,6 +39,9 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
+
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
@@ -49,9 +52,8 @@ def parallelize_deepseekv3(
         )
 
     if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+        model.parallelize(parallel_dims)
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Check if using DeepEP/HybridEP for MoE communication
     comm_backend = parallelism.expert_parallel_comm_backend
