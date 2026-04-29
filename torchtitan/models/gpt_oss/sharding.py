@@ -17,6 +17,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
     set_qkv_linear_sharding,
 )
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -24,31 +25,59 @@ if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
 
+# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
+# weights + biases). Mirrors ``GptossExpertTensorParallel`` /
+# ``GptossTensorParallel`` partition_fns: mlp1_weight/bias colwise,
+# mlp2_weight rowwise, mlp2_bias replicated.
+_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
+    "mlp1_weight": Shard(1),
+    "mlp1_bias": Shard(1),
+    "mlp2_weight": Shard(2),
+    "mlp2_bias": Replicate(),
+}
+
+
 def set_gpt_oss_sharding_config(
     config: "GptOssModel.Config",
     *,
     loss_parallel: bool,
     enable_sp: bool,
+    tp_enabled: bool,
+    ep_enabled: bool,
+    etp_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all GPT-OSS sub-configs.
 
-    No-op when TP is not enabled.
+    Dense sub-configs are populated unconditionally. MoE sub-configs are
+    populated when ``tp_enabled or ep_enabled``.
     """
 
     set_decoder_sharding_config(
         config, loss_parallel=loss_parallel, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
-        _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_gpt_oss_layer_sharding(
+            layer_cfg,
+            enable_sp=enable_sp,
+            tp_enabled=tp_enabled,
+            ep_enabled=ep_enabled,
+            etp_enabled=etp_enabled,
+        )
 
 
 def _set_gpt_oss_layer_sharding(
-    layer_cfg: "GptOssTransformerBlock.Config", *, enable_sp: bool
+    layer_cfg: "GptOssTransformerBlock.Config",
+    *,
+    enable_sp: bool,
+    tp_enabled: bool,
+    ep_enabled: bool,
+    etp_enabled: bool,
 ) -> None:
     """Set sharding on one GPT-OSS transformer layer.
 
-    All GPT-OSS blocks are MoE — only attention/norms are sharded here.
-    MoE FFN stays under apply_moe_ep_tp.
+    All GPT-OSS blocks are MoE; MoE FFN is now routed through
+    ``set_moe_sharding_config``, replacing the imperative
+    ``apply_moe_ep_tp`` call.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
@@ -76,3 +105,14 @@ def _set_gpt_oss_layer_sharding(
 
     # GPT-OSS flash attention always returns (output, lse).
     set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)
+
+    # MoE FFN.
+    if layer_cfg.moe is not None and (tp_enabled or ep_enabled):
+        set_moe_sharding_config(
+            layer_cfg.moe,
+            tp_enabled=tp_enabled,
+            ep_enabled=ep_enabled,
+            etp_enabled=etp_enabled,
+            enable_sp=enable_sp,
+            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
+        )
