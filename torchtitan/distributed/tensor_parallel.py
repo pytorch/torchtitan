@@ -115,7 +115,7 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
     ``local_input_grad_placements`` to ``DTensor.from_local``, giving users
     explicit control over the gradient placement during backward.  When not
     specified, defaults to ``None`` and the gradient placement follows the
-    default guarantees of ``DTensor.from_local``.
+    default guarantees of ``DTensor.from_local``.ep_mesh
     """
 
     def __init__(
