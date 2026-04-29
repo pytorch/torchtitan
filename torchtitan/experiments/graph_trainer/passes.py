@@ -825,12 +825,11 @@ def tag_with_memory_policy_pass(
     else:
         raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
 
-    if config.compile.debug_graph_passes:
-        from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
-            log_activation_memory_policy,
-        )
+    from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
+        log_activation_memory_policy,
+    )
 
-        log_activation_memory_policy(gm)
+    log_activation_memory_policy(gm)
     return gm
 
 

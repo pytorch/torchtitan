@@ -59,8 +59,7 @@ as new branches in `tag_with_memory_policy_pass`.
 prints all forward nodes consumed by backward, grouped by layer with
 identical patterns consolidated. Shows memory, dtype, policy
 (SAVE/RECOMPUTE/OFFLOAD), shape, submodule, target op, and source location.
-It runs automatically at the end of `tag_with_memory_policy_pass` when
-`--compile.debug_graph_passes` is enabled.
+It runs automatically at the end of `tag_with_memory_policy_pass`.
 
 ## Don't Modify Core for This Experiment
 
