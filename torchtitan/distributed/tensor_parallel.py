@@ -134,7 +134,6 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
         self.local_input_grad_placements = local_input_grad_placements
 
     @staticmethod
-    # pyrefly: ignore [bad-param-name-override]
     def _prepare_input_fn(
         input_layouts,
         desired_input_layouts,

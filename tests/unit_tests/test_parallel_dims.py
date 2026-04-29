@@ -89,7 +89,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 tp=2,
                 pp=1,
                 ep=1,
-                    world_size=10,  # Invalid: 2*2*1*2*1 = 8, not 10
+                world_size=10,  # Invalid: 2*2*1*2*1 = 8, not 10
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -103,7 +103,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 tp=1,
                 pp=1,
                 ep=1,
-                    world_size=1,
+                world_size=1,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -117,7 +117,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 tp=1,
                 pp=1,
                 ep=1,
-                    world_size=1,
+                world_size=1,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -413,7 +413,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 tp=2,
                 pp=1,
                 ep=1,
-                    world_size=8,
+                world_size=8,
             )
 
             # Test mesh building

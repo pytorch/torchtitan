@@ -28,10 +28,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.expert_parallel import (
-    ExpertParallel,
-    TensorParallel,
-)
+from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -74,7 +71,7 @@ def parallelize_llama(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
