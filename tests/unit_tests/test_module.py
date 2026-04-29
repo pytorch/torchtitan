@@ -337,5 +337,59 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         model.verify_module_protocol()  # should not raise
 
 
+class TestNeededAxes(unittest.TestCase):
+    """Tests for Module._needed_axes static helper."""
+
+    def test_collects_from_state_shardings(self):
+        from torch.distributed.tensor import Replicate, Shard
+
+        from torchtitan.protocols.sharding import ShardingConfig
+        from torchtitan.protocols.types import MeshAxisName
+
+        sc = ShardingConfig(
+            state_shardings={
+                "weight": {MeshAxisName.TP: Shard(0)},
+                "bias": {MeshAxisName.TP: Replicate()},
+            }
+        )
+        self.assertEqual(Module._needed_axes(sc), [MeshAxisName.TP])
+
+    def test_unions_across_all_fields(self):
+        from torch.distributed.tensor import Replicate, Shard
+
+        from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+        from torchtitan.protocols.types import MeshAxisName
+
+        sc = ShardingConfig(
+            state_shardings={"weight": {MeshAxisName.TP: Shard(0)}},
+            in_src_shardings={"x": {MeshAxisName.DP_SHARD: Shard(0)}},
+            in_dst_shardings={"x": {MeshAxisName.CP: Shard(1)}},
+            out_dst_shardings={MeshAxisName.DP_REPLICATE: Replicate()},
+            local_map=LocalMapConfig(
+                in_placements=({MeshAxisName.EP: Shard(0)},),
+                out_placements=({MeshAxisName.ETP: Replicate()},),
+                in_grad_placements=({MeshAxisName.EFSDP: Replicate()},),
+            ),
+        )
+        # Order is first-seen across the iteration order in _needed_axes.
+        self.assertEqual(
+            set(Module._needed_axes(sc)),
+            {
+                MeshAxisName.TP,
+                MeshAxisName.DP_SHARD,
+                MeshAxisName.CP,
+                MeshAxisName.DP_REPLICATE,
+                MeshAxisName.EP,
+                MeshAxisName.ETP,
+                MeshAxisName.EFSDP,
+            },
+        )
+
+    def test_empty_config_returns_empty(self):
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        self.assertEqual(Module._needed_axes(ShardingConfig()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

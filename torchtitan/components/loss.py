@@ -22,6 +22,22 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(pred, DTensor) and pred.ndim == 3:
+        # 3D DTensor: (batch, seq, vocab) -> (batch, vocab, seq) so that
+        # F.cross_entropy treats dim 1 as the class dim.  Avoids
+        # flatten(0, 1) which produces _StridedShard when batch and seq
+        # are sharded on different mesh axes (e.g. dp_shard + cp).
+        # ``labels`` stays 2D (batch, seq) as a DTensor with the same
+        # batch/seq placements as ``pred`` — F.cross_entropy supports
+        # (N, C, d_k...) vs (N, d_k...).
+        return torch.nn.functional.cross_entropy(
+            pred.permute(0, 2, 1).float(),
+            labels,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),
@@ -289,14 +305,59 @@ class ChunkedCELoss(BaseLoss):
 
         # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk().
-        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
-        # directly with Shard(1) on CP. Need local_map to operate on local tensors
-        h_detached = hidden_states.detach().requires_grad_(requires_grad)
-        h_chunks = [
-            c.contiguous().detach().requires_grad_(requires_grad)
-            for c in torch.chunk(h_detached, num_chunks, dim=1)
-        ]
-        label_chunks = torch.chunk(labels, num_chunks, dim=1)
+        #
+        # Under full_dtensor + CP, hidden_states is Shard(1) on the CP axis.
+        # Chunking the global view via torch.chunk distributes whole chunks
+        # across CP ranks (e.g. with CP=2, num_chunks=8: chunks 0-3 land on
+        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
+        # local seq=0 and breaking the GradAccumulator's slice writes. To
+        # avoid that, chunk on the local tensor first and wrap each chunk
+        # back as a DTensor with the same placements -- every rank then
+        # holds every chunk at local size S_local / num_chunks, and the
+        # global view of each chunk is S_global / num_chunks.
+        from torch.distributed.tensor import Shard
+
+        cp_sharded = (
+            isinstance(hidden_states, DTensor)
+            and hidden_states.device_mesh.mesh_dim_names is not None
+            and "cp" in hidden_states.device_mesh.mesh_dim_names
+            and any(
+                isinstance(p, Shard) and p.dim == 1 for p in hidden_states.placements
+            )
+        )
+        if cp_sharded:
+            assert isinstance(hidden_states, DTensor)
+            h_mesh = hidden_states.device_mesh
+            h_placements = hidden_states.placements
+            local_h = hidden_states.to_local()
+            h_detached = (
+                DTensor.from_local(local_h, h_mesh, h_placements)
+                .detach()
+                .requires_grad_(requires_grad)
+            )
+            h_chunks = [
+                DTensor.from_local(c.contiguous(), h_mesh, h_placements)
+                .detach()
+                .requires_grad_(requires_grad)
+                for c in torch.chunk(local_h, num_chunks, dim=1)
+            ]
+            if isinstance(labels, DTensor):
+                lbl_mesh = labels.device_mesh
+                lbl_placements = labels.placements
+                local_lbl = labels.to_local()
+                label_chunks: list = [
+                    DTensor.from_local(c.contiguous(), lbl_mesh, lbl_placements)
+                    for c in torch.chunk(local_lbl, num_chunks, dim=1)
+                ]
+            else:
+                label_chunks = list(torch.chunk(labels, num_chunks, dim=1))
+        else:
+            h_detached = hidden_states.detach().requires_grad_(requires_grad)
+            h_chunks = [
+                c.contiguous().detach().requires_grad_(requires_grad)
+                for c in torch.chunk(h_detached, num_chunks, dim=1)
+            ]
+            label_chunks = list(torch.chunk(labels, num_chunks, dim=1))
 
         grad_accumulator = GradAccumulator(
             h_detached,
