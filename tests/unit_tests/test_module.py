@@ -354,36 +354,53 @@ class TestNeededAxes(unittest.TestCase):
         )
         self.assertEqual(Module._needed_axes(sc), [MeshAxisName.TP])
 
-    def test_unions_across_all_fields(self):
-        from torch.distributed.tensor import Replicate, Shard
+    def test_collects_from_all_fields(self):
+        # _needed_axes scans every NamedPlacement-bearing field and asserts
+        # they all reference the same axes (family-purity since PR6). This
+        # fixture exercises every field with a single shared axis set.
+        from torch.distributed.tensor import Partial, Replicate, Shard
 
         from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
         from torchtitan.protocols.types import MeshAxisName
 
+        axes = {MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD, MeshAxisName.TP}
+
+        def named(tp_placement):
+            return {
+                MeshAxisName.DP_REPLICATE: Replicate(),
+                MeshAxisName.DP_SHARD: Replicate(),
+                MeshAxisName.TP: tp_placement,
+            }
+
         sc = ShardingConfig(
-            state_shardings={"weight": {MeshAxisName.TP: Shard(0)}},
-            in_src_shardings={"x": {MeshAxisName.DP_SHARD: Shard(0)}},
-            in_dst_shardings={"x": {MeshAxisName.CP: Shard(1)}},
-            out_dst_shardings={MeshAxisName.DP_REPLICATE: Replicate()},
+            state_shardings={"weight": named(Shard(0))},
+            in_src_shardings={"x": named(Replicate())},
+            in_dst_shardings={"x": named(Replicate())},
+            out_dst_shardings=named(Shard(-1)),
+            local_input_grad_placements={"x": named(Partial())},
+            local_output_grad_placements=named(Partial()),
             local_map=LocalMapConfig(
-                in_placements=({MeshAxisName.EP: Shard(0)},),
-                out_placements=({MeshAxisName.ETP: Replicate()},),
-                in_grad_placements=({MeshAxisName.EFSDP: Replicate()},),
+                in_placements=(named(Replicate()),),
+                out_placements=(named(Shard(-1)),),
+                in_grad_placements=(named(Partial()),),
             ),
         )
-        # Order is first-seen across the iteration order in _needed_axes.
-        self.assertEqual(
-            set(Module._needed_axes(sc)),
-            {
-                MeshAxisName.TP,
-                MeshAxisName.DP_SHARD,
-                MeshAxisName.CP,
-                MeshAxisName.DP_REPLICATE,
-                MeshAxisName.EP,
-                MeshAxisName.ETP,
-                MeshAxisName.EFSDP,
-            },
+        self.assertEqual(set(Module._needed_axes(sc)), axes)
+
+    def test_inconsistent_axes_across_fields_raises(self):
+        # Family-purity: a sharding_config that names different axes in
+        # different fields must raise (no implicit union).
+        from torch.distributed.tensor import Replicate, Shard
+
+        from torchtitan.protocols.sharding import ShardingConfig
+        from torchtitan.protocols.types import MeshAxisName
+
+        sc = ShardingConfig(
+            state_shardings={"weight": {MeshAxisName.TP: Shard(0)}},
+            local_output_grad_placements={MeshAxisName.EP: Replicate()},
         )
+        with self.assertRaisesRegex(ValueError, "Inconsistent axes"):
+            Module._needed_axes(sc)
 
     def test_empty_config_returns_empty(self):
         from torchtitan.protocols.sharding import ShardingConfig

@@ -24,7 +24,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
 from torchtitan.tools.logging import logger
 
 
@@ -79,21 +78,14 @@ def parallelize_qwen3(
 
     annotate_qwen3(model)
 
-    if parallel_dims.tp_enabled:
-        # Config-based sharding: ShardingConfig is populated on the model
-        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
-        model.parallelize(parallel_dims)
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
+    # Config-based sharding: ShardingConfig is populated on the model config
+    # in ``Qwen3Model.update_from_config`` (dense + MoE);
+    # ``Module.parallelize`` applies it. Replaces the imperative
+    # ``apply_moe_ep_tp`` call.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            etp_mesh=parallel_dims.get_optional_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        model.parallelize(parallel_dims)
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

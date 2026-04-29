@@ -215,6 +215,10 @@ class Module(nn.Module, Configurable):
             candidates.extend(sharding_config.in_dst_shardings.values())
         if sharding_config.out_dst_shardings is not None:
             candidates.append(sharding_config.out_dst_shardings)
+        if sharding_config.local_input_grad_placements is not None:
+            candidates.extend(sharding_config.local_input_grad_placements.values())
+        if sharding_config.local_output_grad_placements is not None:
+            candidates.append(sharding_config.local_output_grad_placements)
         if sharding_config.local_map is not None:
             candidates.extend(sharding_config.local_map.in_placements)
             candidates.extend(sharding_config.local_map.out_placements)
@@ -439,15 +443,31 @@ class Module(nn.Module, Configurable):
         mesh_axis_names = mesh.mesh_dim_names
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
+        in_grad_shardings = sharding_config.local_input_grad_placements or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
 
             # Step 1: Annotate plain tensor as DTensor using in_src_shardings.
+            # When local_input_grad_placements declares this input, pass the
+            # resolved grad placement to from_local so backward d_input is
+            # wrapped with the declared placement (e.g. Partial to skip an
+            # all-reduce that would otherwise fire on Replicate inputs).
             if not isinstance(value, DTensor) and name in in_src_shardings:
                 layout = resolve_placements(in_src_shardings[name], mesh_axis_names)
-                value = DTensor.from_local(value, mesh, layout, run_check=False)
+                grad_placements: tuple | None = None
+                if name in in_grad_shardings:
+                    grad_placements = resolve_placements(
+                        in_grad_shardings[name], mesh_axis_names
+                    )
+                value = DTensor.from_local(
+                    value,
+                    mesh,
+                    layout,
+                    run_check=False,
+                    grad_placements=grad_placements,
+                )
 
             # Step 2: Redistribute to desired placement if needed.
             if name in in_dst_shardings and isinstance(value, DTensor):
@@ -476,14 +496,32 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
-        if sharding_config.out_dst_shardings is None:
+        if (
+            sharding_config.out_dst_shardings is None
+            and sharding_config.local_output_grad_placements is None
+        ):
             return outputs
         assert mesh.mesh_dim_names is not None
-        desired = resolve_placements(
-            sharding_config.out_dst_shardings, mesh.mesh_dim_names
-        )
-        if isinstance(outputs, DTensor) and outputs.placements != desired:
-            outputs = outputs.redistribute(placements=desired, async_op=True)
+
+        if sharding_config.out_dst_shardings is not None:
+            desired = resolve_placements(
+                sharding_config.out_dst_shardings, mesh.mesh_dim_names
+            )
+            if isinstance(outputs, DTensor) and outputs.placements != desired:
+                outputs = outputs.redistribute(placements=desired, async_op=True)
+
+        # Unwrap DTensor output to local tensor with the declared backward
+        # gradient placement. Mirrors NoParallel(local_output_grad_placements
+        # =...): the module returns a local tensor; in backward, the
+        # upstream local d_output is wrapped back as a DTensor with the
+        # declared placement (e.g. Partial to skip a downstream all-reduce).
+        if sharding_config.local_output_grad_placements is not None and isinstance(
+            outputs, DTensor
+        ):
+            grad_placements = resolve_placements(
+                sharding_config.local_output_grad_placements, mesh.mesh_dim_names
+            )
+            outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs
 
     @classmethod

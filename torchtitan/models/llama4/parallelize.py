@@ -86,10 +86,6 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     # Check if using DeepEP/HybridEP for MoE communication
     comm_backend = parallelism.expert_parallel_comm_backend
     if comm_backend in ("deepep", "hybridep"):
@@ -104,16 +100,13 @@ def parallelize_llama(
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
             )
 
+    # ``model.parallelize`` walks every ``Module`` and applies its
+    # ``sharding_config`` (dense + MoE). Fires under TP or EP; the helper
+    # filters disabled axes per-Module.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            etp_mesh=parallel_dims.get_optional_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            comm_backend=comm_backend,
-            enable_sp=True,
-        )
+        model.parallelize(parallel_dims)
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -477,13 +470,10 @@ def apply_moe_ep_tp(
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None:
-                if isinstance(dispatcher, AllToAllTokenDispatcher):
-                    dispatcher.sp_size = tp_mesh.size()
-                    # Use _sym_get_coordinate so the rank is a SymInt
-                    # under CooR precompile instead of a concrete int
-                    # that gets baked into the FX graph.
-                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
+            if tp_mesh is not None and isinstance(dispatcher, AllToAllTokenDispatcher):
+                # ``sp_size``/``sp_rank`` are read-only properties off
+                # ``tp_mesh``; install via ``_wire_meshes`` (PR7-era contract).
+                dispatcher._wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
         else:
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
