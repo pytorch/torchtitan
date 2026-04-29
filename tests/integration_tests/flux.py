@@ -6,6 +6,7 @@
 
 import argparse
 import os
+import subprocess
 
 from torchtitan.tools.logging import logger
 
