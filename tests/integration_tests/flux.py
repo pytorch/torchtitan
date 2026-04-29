@@ -10,7 +10,16 @@ import os
 from torchtitan.tools.logging import logger
 
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.run_tests import _run_cmd
+
+def _run_cmd(cmd, timeout=None):
+    return subprocess.run(
+        [cmd],
+        encoding="utf-8",
+        errors="replace",
+        shell=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def build_flux_test_list() -> list[OverrideDefinitions]:
