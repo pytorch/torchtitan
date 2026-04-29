@@ -41,12 +41,6 @@ def validate_config(
         VarlenAttention,
     )
 
-    if parallel_dims.ep_enabled:
-        raise NotImplementedError(
-            "full_dtensor is not supported with Expert Parallel. "
-            "Disable EP or disable full_dtensor."
-        )
-
     if parallel_dims.cp_enabled:
         if any(
             isinstance(m, (ScaledDotProductAttention, VarlenAttention))
@@ -94,6 +88,33 @@ def _dense_spmd_axes(parallel_dims: ParallelDims) -> list[str]:
     ]
 
 
+def _sparse_spmd_axes(parallel_dims: ParallelDims) -> list[str]:
+    """Canonical sparse SPMD axis list, intersected with enabled axes.
+
+    The sparse SPMD partition is used by routed-expert weights under MoE.
+    Mirrors ``_dense_spmd_axes`` for the ``(dp_replicate, efsdp, ep, etp)``
+    family. Returns ``[]`` when EP is disabled (no sparse subtree).
+    """
+    return [
+        a
+        for a in ("dp_replicate", "efsdp", "ep", "etp")
+        if parallel_dims.get_optional_mesh(a) is not None
+    ]
+
+
+def get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
+    """Build ``DataParallelMeshDims`` for routed-expert (sparse) parameters.
+
+    Sparse FSDP storage axis is ``efsdp`` (mirrors how dense uses
+    ``dp_shard``); ``dp_replicate`` is shared with the dense path. The
+    return type still spells ``Dims`` because that's the upstream class
+    name.
+    """
+    shard: str | None = "efsdp" if parallel_dims.ep_enabled else None
+    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+    return DataParallelMeshDims(shard=shard, replicate=replicate)
+
+
 def resolve_fsdp_mesh(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -113,6 +134,36 @@ def resolve_fsdp_mesh(
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
         return parallel_dims.get_mesh(names), None
+
+
+def resolve_sparse_fsdp_mesh(
+    parallel_dims: ParallelDims,
+    full_dtensor: bool,
+) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
+    """Select the sparse FSDP mesh and optional DataParallelMeshDims.
+
+    For MoE routed-expert FSDP, mirrors ``resolve_fsdp_mesh``:
+
+    - In full DTensor mode with EP enabled, returns the sparse SPMD mesh
+      and sparse ``DataParallelMeshDims``.
+    - In non-full DTensor mode, returns the conventional ``edp`` mesh and
+      ``None`` (no DataParallelMeshDims; FSDP uses the 1D mesh directly).
+    - When EP is disabled, returns ``(None, None)`` -- the caller's MoE
+      FSDP path is a no-op.
+    """
+    if not parallel_dims.ep_enabled:
+        return None, None
+    if full_dtensor:
+        sparse_mesh = parallel_dims.get_mesh(_sparse_spmd_axes(parallel_dims))
+        sparse_dp_mesh_axes = get_sparse_dp_mesh_axes(parallel_dims)
+        return sparse_mesh, sparse_dp_mesh_axes
+    else:
+        names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        return parallel_dims.get_optional_mesh(names), None
 
 
 def parallelize_inputs(

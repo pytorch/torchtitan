@@ -158,11 +158,16 @@ def set_gqa_inner_attention_local_map(
     TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
     to local tensors before the kernel runs, then wraps outputs back.
 
+    Declares placements over the full dense SPMD axis set (DP/CP/TP) so
+    the LocalMap composes under ``full_dtensor`` (where the surrounding
+    mesh is multi-axis); under non-full_dtensor, the (tp,)-only mesh only
+    consumes the ``TP`` placement and the rest are ignored.
+
     ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
-    qkv_placements: NamedPlacement = {TP: Shard(2)}
+    qkv_placements: NamedPlacement = dense_activation_placement(tp=Shard(2))
     num_outputs = 2 if return_lse else 1
     inner_attention_cfg.sharding_config = ShardingConfig(
         local_map=LocalMapConfig(

@@ -251,20 +251,25 @@ def set_moe_sharding_config(
         expert_param_layout: ``{param_name: tp_or_etp_placement}`` for the
             routed experts' weight params.
     """
-    # MoE wrapper boundary. Set whenever TP is enabled (with or without
-    # SP) -- the wrapper still needs to convert DTensor inputs to local.
-    if tp_enabled:
-        moe_cfg.sharding_config = _moe_wrapper_sharding_config(enable_sp=enable_sp)
+    # MoE wrapper + dense submodules. Set unconditionally (not gated on
+    # ``tp_enabled``) so dense params land as DTensors on the dense SPMD
+    # mesh under ``full_dtensor`` even when TP=1 -- otherwise FSDP2's
+    # ``dp_mesh_dims`` invariant ("all params must be DTensors on the
+    # full SPMD mesh") fires. Under TP=1, the TP-axis placements get
+    # filtered out at ``resolve_placements`` time and the configs become
+    # all-Replicate on the remaining dense axes (no-op for parallelism,
+    # but the params are DTensors).
+    moe_cfg.sharding_config = _moe_wrapper_sharding_config(enable_sp=enable_sp)
 
-        # Router gate: dense-family TP plan with Partial output grad.
-        moe_cfg.router.gate.sharding_config = _router_gate_config()
+    # Router gate: dense-family TP plan with Partial output grad.
+    moe_cfg.router.gate.sharding_config = _router_gate_config()
 
-        # Shared experts: optional. Use Partial-flow variants so the
-        # Partial->sp_layout reduce only happens once at the MoE boundary.
-        if getattr(moe_cfg, "shared_experts", None) is not None:
-            moe_cfg.shared_experts.w1.sharding_config = _shared_expert_colwise_config()
-            moe_cfg.shared_experts.w2.sharding_config = _shared_expert_rowwise_config()
-            moe_cfg.shared_experts.w3.sharding_config = _shared_expert_colwise_config()
+    # Shared experts: optional. Use Partial-flow variants so the
+    # Partial->sp_layout reduce only happens once at the MoE boundary.
+    if getattr(moe_cfg, "shared_experts", None) is not None:
+        moe_cfg.shared_experts.w1.sharding_config = _shared_expert_colwise_config()
+        moe_cfg.shared_experts.w2.sharding_config = _shared_expert_rowwise_config()
+        moe_cfg.shared_experts.w3.sharding_config = _shared_expert_colwise_config()
 
     # Routed experts: branch on EP enablement to select the family.
     if ep_enabled:
