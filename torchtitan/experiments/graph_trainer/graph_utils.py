@@ -159,25 +159,6 @@ def joint_graph_builder(
         precompile=serializable,
     )
 
-    # Check if inductor_decomposition is configured and create the pass with proper context
-    if compile_config is not None:
-        joint_pass_names = getattr(compile_config, "joint_passes", [])
-        if "inductor_decomposition" in joint_pass_names:
-            from torchtitan.experiments.graph_trainer.passes import (
-                inductor_decomposition_pass,
-            )
-
-            # Create the decomposition pass with context
-            decomp_pass = functools.partial(
-                inductor_decomposition_pass,
-                joint_with_descriptors=joint_with_descriptors,
-            )
-
-            # Prepend to joint_custom_passes
-            if joint_custom_passes is None:
-                joint_custom_passes = []
-            joint_custom_passes = [decomp_pass] + joint_custom_passes
-
     # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
         for joint_custom_pass in joint_custom_passes:
@@ -418,15 +399,10 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
             "Cannot apply auto_bucketing and transformer_block_bucketing at the same time!"
         )
 
-    # full_inductor_compilation returns a CompiledFxGraph (not a GraphModule),
-    # so no subsequent pass can inspect/modify the FX graph. It must be the
-    # last pass, or second-to-last if cudagraph is last.
+    # full_inductor_compilation replaces the GraphModule's forward with
+    # compiled code, so no subsequent pass can inspect/modify the FX graph.
+    # It must be the last pass, or second-to-last if cudagraph is last.
     if "full_inductor_compilation" in pass_names:
-        if "inductor_decomposition" not in joint_pass_names:
-            raise ValueError(
-                "full_inductor_compilation pass requires inductor_decomposition to be "
-                "specified in joint_passes. Please add --compile.joint_passes inductor_decomposition"
-            )
         full_inductor_idx = pass_names.index("full_inductor_compilation")
         expected_idx = (
             len(pass_names) - 2
@@ -535,10 +511,6 @@ def get_joint_custom_passes_from_config(
     """
     Extract and validate joint custom passes from job config.
 
-    Note: The inductor_decomposition pass is handled separately in joint_graph_builder
-    because it requires context (model, joint_with_descriptors, etc.) that's only
-    available at graph capture time.
-
     Args:
         parallel_dims: Parallelism dimensions
         compile_config: Compile configuration containing joint_passes
@@ -569,7 +541,6 @@ def get_joint_custom_passes_from_config(
             )
         )
 
-    # Handle joint passes from config (excluding inductor_decomposition)
     joint_pass_names = getattr(compile_config, "joint_passes", [])
     for pass_name in joint_pass_names:
         if pass_name not in AVAILABLE_JOINT_PASSES:
@@ -577,10 +548,6 @@ def get_joint_custom_passes_from_config(
                 f"Unknown joint pass: {pass_name}. "
                 f"Available joint passes: {list(AVAILABLE_JOINT_PASSES.keys())}"
             )
-
-        # Skip inductor_decomposition - it's handled in joint_graph_builder
-        if pass_name == "inductor_decomposition":
-            continue
 
         joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
 
