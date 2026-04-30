@@ -49,30 +49,6 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
 
 
-def _collect_adapter_key_patterns(config) -> set[str]:
-    """Collect key patterns from adapter configs in the model config tree.
-
-    Adapter configs declare ``_is_adapter = True`` and ``_key_pattern`` (e.g.
-    ``"lora_"``).  Returns the set of key patterns found, or empty if no
-    adapters are configured.
-    """
-    patterns: set[str] = set()
-    if not dataclasses.is_dataclass(config):
-        return patterns
-    cls = type(config)
-    if getattr(cls, "_is_adapter", False):
-        patterns.add(cls._key_pattern)
-    for f in dataclasses.fields(config):
-        val = getattr(config, f.name)
-        if dataclasses.is_dataclass(val):
-            patterns.update(_collect_adapter_key_patterns(val))
-        elif isinstance(val, list):
-            for item in val:
-                if dataclasses.is_dataclass(item):
-                    patterns.update(_collect_adapter_key_patterns(item))
-    return patterns
-
-
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -220,7 +196,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
-        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -412,23 +387,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
-        # Freeze non-adapter parameters when adapters (e.g. LoRA) are present
-        adapter_key_patterns = _collect_adapter_key_patterns(model_config)
-        if adapter_key_patterns:
-            frozen_count = 0
-            adapter_count = 0
-            for model_part in self.model_parts:
-                for name, param in model_part.named_parameters():
-                    if any(pattern in name for pattern in adapter_key_patterns):
-                        adapter_count += 1
-                    else:
-                        param.requires_grad_(False)
-                        frozen_count += 1
-            logger.info(
-                f"Adapter training: froze {frozen_count} base parameters, "
-                f"kept {adapter_count} adapter parameters trainable."
-            )
-
         # Set lm_head reference for ChunkedCELoss after model construction.
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
@@ -488,17 +446,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if parallel_dims.pp_enabled:
             model_ref._pp_parts = self.model_parts
 
+        sd_adapter = (
+            model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+            if model_spec.state_dict_adapter
+            else None
+        )
+
+        model_ref.set_sd_transforms(sd_adapter)
+
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model=model_ref,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            sd_adapter=sd_adapter,
             base_folder=config.dump_folder,
         )
 
