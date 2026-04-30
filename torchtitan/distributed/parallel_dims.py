@@ -216,15 +216,15 @@ class ParallelDims:
         self._validate_meshes()
 
         # Under full_dtensor, ``dp_shard`` and ``cp`` are first-class single-axis
-        # meshes; under the legacy path they are pre-flattened into ``fsdp``.
-        # ``_spmd_meshes`` mirrors that so non-full_dtensor HSDP+CP runs (where
-        # the only enabled axes from this set would otherwise be
-        # ``['dp_replicate', 'cp']`` -- no global mesh contains both) don't
-        # raise during ``build_mesh``.
+        # meshes that participate in ``distribute_tensor``; under the legacy
+        # path they are folded into ``fsdp`` and handled by FSDP /
+        # ``apply_cp_to_forward`` out-of-band, so the SPMD dense mesh excludes
+        # them. (Including ``cp`` in the legacy axis list breaks HSDP+CP
+        # because no global mesh contains both ``dp_replicate`` and ``cp``.)
         dense_axes = (
             ["dp_replicate", "dp_shard", "cp", "tp"]
             if self.full_dtensor
-            else ["dp_replicate", "fsdp", "tp"]
+            else ["dp_replicate", "tp"]
         )
         dense_mesh = self.get_enabled_mesh(dense_axes)
         sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep", "etp"])
